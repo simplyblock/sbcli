@@ -605,10 +605,9 @@ def _retention_schedule_for(source_lvol):
     """
     try:
         policy = db.get_replication_policy_for_lvol(source_lvol)
-    except Exception:
+    except KeyError:
         return []
-    spec = getattr(policy, "retention_schedule", "") if policy else ""
-    if not spec:
+    if (policy is None) or (spec := getattr(policy, "retention_schedule", None)) is None:
         return []
     try:
         return snapshot_retention.parse_schedule(spec)
@@ -960,12 +959,23 @@ def process_snap_replicate_finish(task, snapshot):
     # later cleanup that waits for lvols to drain times out on it.
     remote_lv.bdev_stack = []
     remote_lv.write_to_db()
-    try:
-        lvol_controller.delete_lvol(remote_lv, force_delete=True)
-    except Exception as e:
-        logger.error(f"Landing volume {remote_lv.get_id()} teardown raised: {e}; "
-                     f"retiring its record anyway (its bdev lives on as the "
-                     f"converted snapshot)")
+    # Tear the subsystem/namespace down DIRECTLY, not via delete_lvol:
+    # delete_lvol flips the record to in_deletion and hands it to the
+    # monitor's async machinery, so an interruption anywhere before the
+    # remove() below stranded a record the monitor can never finish (empty
+    # stack -> nothing to issue -> status poll 4 forever; runs 20260824 and
+    # 20260825_125156). With the stack already emptied there is no blob work
+    # to do -- only nvmf plumbing on the volume's nodes.
+    for _node_id in remote_lv.nodes:
+        try:
+            _node = db.get_storage_node_by_id(_node_id)
+            if _node.status == StorageNode.STATUS_ONLINE:
+                lvol_controller.delete_lvol_from_node(
+                    remote_lv.get_id(), _node_id, force=True)
+        except Exception as e:
+            logger.error(f"Landing volume {remote_lv.get_id()} teardown on "
+                         f"{_node_id[:8]} raised: {e}; retiring the record "
+                         f"anyway (its bdev lives on as the converted snapshot)")
     remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
     _prune_internal_snapshots(snapshot.lvol)

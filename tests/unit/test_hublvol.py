@@ -76,12 +76,12 @@ def _make_node(ip: str, lvstore: str, jm_vuid: int = 100, port: int = 5000) -> S
     return n
 
 
-def _mock_rpc(return_bdev_create=str(uuid.uuid4()),
+def _mock_rpc(return_bdev_create=None,
               bdev_exists=False,
               subsystem_exists=False):
     """Build a MagicMock RPCClient with sensible defaults for hublvol tests."""
     rpc = MagicMock()
-    rpc.bdev_lvol_create_hublvol.return_value = return_bdev_create
+    rpc.bdev_lvol_create_hublvol.return_value = return_bdev_create or str(uuid.uuid4())
     rpc.get_bdevs.return_value = [{}] if bdev_exists else []
     rpc.subsystem_get.return_value = {} if subsystem_exists else None
     rpc.subsystem_create.return_value = True

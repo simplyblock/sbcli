@@ -279,6 +279,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_failure_domain=False,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
+                   alert_config: t.Optional[t.Dict[str, t.Any]] = None,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -415,7 +416,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
     cluster.spdk_vcpu_count = spdk_vcpu_count or 0
-    cluster.contact_point = contact_point
+    cluster.contact_point = contact_point or ""
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
     cluster.full_page_unmap = False
@@ -436,7 +437,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.backup_config = backup_config
 
     if not disable_monitoring:
-        utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
+        utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
@@ -820,10 +821,10 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                     if node.enable_ha_jm:
                         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
 
-                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
-                        n.remote_devices = rd
-                        if rjd is not None:
-                            n.remote_jm_devices = rjd
+                    def _apply(snode, devices=remote_devices, jm_devices=remote_jm_devices):
+                        snode.remote_devices = devices
+                        if jm_devices is not None:
+                            snode.remote_jm_devices = jm_devices
                     db_controller.atomic_update(node, _apply)
                 except Exception as e:
                     logger.warning(
@@ -841,10 +842,10 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(
                             node, only_node_id=owner_id)
 
-                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
-                        n.remote_devices = rd
-                        if rjd is not None:
-                            n.remote_jm_devices = rjd
+                    def _apply(snode, devices=remote_devices, jm_devices=remote_jm_devices):
+                        snode.remote_devices = devices
+                        if jm_devices is not None:
+                            snode.remote_jm_devices = jm_devices
                     db_controller.atomic_update(node, _apply)
                 except Exception as e:
                     logger.warning(
@@ -1112,14 +1113,16 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         set_cluster_status(cl_id, ols_status)
         raise
 
-    # Failure-domain coverage check (best-effort: warn, don't block). To
-    # survive losing a whole failure domain we need at least npcs+1 distinct
-    # domains; with fewer, placement falls back to host-disjoint and a domain
-    # outage may exceed the cluster's fault tolerance.
+    # Failure-domain coverage check (best-effort: warn, don't block). A 2-FD
+    # layout can never absorb a second independent failure once one domain
+    # is down, so the hard minimum below (enforced at fresh activation) is
+    # npcs+2, not npcs+1 -- this warning uses the same number so a
+    # reactivation that's short of it gets the same signal without being
+    # blocked (recovering a drifted layout must not turn into an outage).
     fd_desired_layout: t.Dict[str, t.Tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
-        min_domains = cluster.distr_npcs + 1
+        min_domains = cluster.distr_npcs + 2
         if len(distinct_domains) < min_domains:
             logger.warning(
                 "Failure-domain feature is enabled but only %d distinct failure "
@@ -1159,9 +1162,15 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                              f"a host must sit entirely in one domain")
 
             fd_host_counts = Counter(host_fd.values())
-            if len(fd_host_counts) < 2:
-                _fd_fail("failure domains are enabled but all hosts are in a "
-                         "single domain; at least two domains are required")
+            # See fd_activation_domain_count_violation's docstring: npcs+2
+            # domains, not just the bare rotation-correctness minimum, so a
+            # later single add/remove has a spare candidate instead of
+            # stranding another node's secondary/tertiary with none at all.
+            # This also subsumes the plain "at least two domains" floor.
+            domain_count_violation = fd_planner.fd_activation_domain_count_violation(
+                cluster.distr_npcs, len(fd_host_counts))
+            if domain_count_violation:
+                _fd_fail(domain_count_violation)
             if len(set(fd_host_counts.values())) != 1:
                 _fd_fail(
                     f"failure domains must hold an EQUAL number of hosts at "
@@ -1198,6 +1207,18 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     used_nodes_as_sec: t.List[str] = []
     used_nodes_as_tertiary: t.List[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    # Process primaries grouped by failure domain. get_secondary_nodes/
+    # get_secondary_nodes_2 (and their splice repairs) already sort their own
+    # candidate scan by domain, which alone is enough to keep the assignment
+    # domain-disjoint when domains are evenly sized. But once any node needs
+    # splice-repair (uneven domain sizes, some conflict unavoidable), the
+    # repair works off whatever partial assignment already exists -- so which
+    # primary gets processed first still changes the outcome. Grouping here
+    # too makes the result deterministic instead of order-dependent in that
+    # case. A no-op when FD is disabled (all nodes share one failure_domain).
+    # Fresh FD+HA activation bypasses this fallback via fd_desired_layout,
+    # but reactivation and non-HA/non-fresh paths still rely on it.
+    snodes = sorted(snodes, key=lambda n: n.failure_domain)
     if cluster.ha_type == "ha":
         for snode in snodes:
             # Do not assign secondary to removed node
@@ -1217,16 +1238,21 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     secondary_nodes = [fd_desired_layout[snode.get_id()][0]]
                 else:
                     secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
-                if not secondary_nodes:
+                if secondary_nodes:
+                    snode = db_controller.get_storage_node_by_id(snode.get_id())
+                    snode.secondary_node_id = secondary_nodes[0]
+                    snode.write_to_db()
+                    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                    sec_node.lvstore_stack_secondary = snode.get_id()
+                    sec_node.write_to_db()
+                elif not storage_node_ops.splice_stranded_secondary(snode):
+                    # get_secondary_nodes()'s greedy walk closed a cycle that
+                    # excludes this node, and there isn't even one existing
+                    # pairing left to splice it into (only possible this early
+                    # in the pass, before 2+ pairings exist).
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, No enough secondary nodes")
-
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
-                snode.secondary_node_id = secondary_nodes[0]
-                snode.write_to_db()
-                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                sec_node.lvstore_stack_secondary = snode.get_id()
-                sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
 
             # Assign second secondary when max_fault_tolerance >= 2
@@ -1245,15 +1271,19 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                         exclude_failure_domains=[sec_node.failure_domain],
                         exclude_physical_labels=[sec_node.physical_label],
                     )
-                if not secondary_nodes_2:
+                if secondary_nodes_2:
+                    snode.tertiary_node_id = secondary_nodes_2[0]
+                    snode.write_to_db()
+                    sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+                    sec_node_2.lvstore_stack_tertiary = snode.get_id()
+                    sec_node_2.write_to_db()
+                elif not storage_node_ops.splice_stranded_tertiary(snode):
+                    # get_secondary_nodes_2()'s greedy walk closed a cycle that
+                    # excludes this node, and there isn't even one existing
+                    # tertiary pairing left to splice it into.
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
-
-                snode.tertiary_node_id = secondary_nodes_2[0]
-                snode.write_to_db()
-                sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
-                sec_node_2.lvstore_stack_tertiary = snode.get_id()
-                sec_node_2.write_to_db()
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
 
     # Pass 1: bring up the primary LVS on every online primary node.

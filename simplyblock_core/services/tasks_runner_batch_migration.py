@@ -17,8 +17,11 @@ PHASE_SNAP_COPY (orchestrator: wait)
     Advance group to PHASE_INTERMEDIATE.
 
 PHASE_INTERMEDIATE (orchestrator: wait + batch-final)
-    Wait for all workers to signal intermediates_done.
-    Build the batch-final-step argument lists (one entry per member, ordered
+    Wait for all workers to signal intermediates_done for the current round.
+    If any worker's dirty delta is still above the threshold, start another
+    synchronized round (every member retakes a snapshot together) up to
+    LVOL_MIG_MAX_INTERMEDIATE_SNAPS rounds. Once no more rounds are needed,
+    build the batch-final-step argument lists (one entry per member, ordered
     by ns_id), acquire a shared hub connection via hub_manager, and call
     bdev_lvol_batch_final_step on the source node.
     Set group.batch_result = True/False.
@@ -98,13 +101,29 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
     tgt_ter, _ = _get_target_tertiary_node(tgt_node, "")
     ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
 
+    # A member's snaps_preexisting_on_target (set at create_batch_migration_continue
+    # time) conflates two very different things: snaps truly already on the
+    # target from OUTSIDE this group (a prior, unrelated migration), and
+    # "non_owned_preexisting" snaps -- ancestor snaps in this member's own
+    # chain that a DIFFERENT member of THIS SAME group owns and hasn't
+    # transferred/committed yet. Only the former may seed `committed` up
+    # front; seeding from the latter marks every ancestor snap "already
+    # committed" before its true owner ever gets a turn in the loop below,
+    # so add_clone/convert never runs for ANY snapshot in the tree.
+    owned_or_pending_uuids: set = set()
+    for m in member_migrations:
+        owned_or_pending_uuids.update(m.snap_migration_plan or [])
+        owned_or_pending_uuids.update(m.snaps_transferred_group or [])
+
     # Global set of snaps that have been committed as immutable on the target,
     # either pre-existing or reconstructed in this call.
     committed: set = set()
     all_preexisting: set = set()
     for m in member_migrations:
-        committed.update(m.snaps_preexisting_on_target)
-        all_preexisting.update(m.snaps_preexisting_on_target)
+        truly_external_preexisting = [
+            s for s in m.snaps_preexisting_on_target if s not in owned_or_pending_uuids]
+        committed.update(truly_external_preexisting)
+        all_preexisting.update(truly_external_preexisting)
         # Snaps already committed in a prior (crashed) run are in snaps_migrated.
         # Seeding committed from them prevents re-convert on re-entry (SPDK rejects
         # converting an already-immutable bdev, which would stall the group forever).
@@ -330,26 +349,142 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
     return lvol_names, lvol_ids, snapshot_names
 
 
+def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_rpc):
+    """
+    Link each member's intermediate ("shrink") snapshots into the target
+    ancestry chain and freeze them immutable, before bdev_lvol_batch_final_step
+    runs.
+
+    _handle_group_intermediate transfers each round's data to the target (and
+    registers it on secondary/tertiary via _setup_snap_transfer) but
+    deliberately skips add_clone/convert -- same as the snap_copy phase --
+    deferring tree-building to the orchestrator. _reconstruct_snap_tree is the
+    orchestrator step that normally does that linking, but it only covers the
+    snap_copy chain (via snaps_transferred_group) and only runs once, at the
+    SNAP_COPY -> INTERMEDIATE transition, before any intermediate round
+    exists -- it can never reach forward to link them. _build_batch_final_args
+    then picks only the LAST intermediate snapshot (snaps_migrated[-1]) as the
+    one boundary snapshot, and the post-final_step code below links only that
+    single snapshot to the live bdev. Nothing anywhere ever linked the
+    intermediate snapshots to each other, or round 0 to the snap_copy chain's
+    last snapshot.
+
+    With exactly one intermediate round this was invisible: the only link
+    needed (live bdev -> round 0) was the one link that existed. With two or
+    more rounds, every earlier round's target blob was left parentless --
+    reads falling outside what that specific round itself captured returned
+    zeros instead of falling through to the real predecessor data (observed
+    as fio's "bad magic header 0" checksum failures).
+
+    Called once per group, before batch_final_step, so the whole chain is
+    committed immutable ahead of the live cutover -- mirrors
+    _reconstruct_snap_tree's own add_clone-on-all-replicas-then-convert
+    ordering. Returns None on success, or an error string.
+    """
+    tgt_sec_node, _ = _get_target_secondary_node(tgt_node, "")
+    sec_rpc = _make_rpc(tgt_sec_node) if tgt_sec_node else None
+    tgt_ter_node, _ = _get_target_tertiary_node(tgt_node, "")
+    ter_rpc = _make_rpc(tgt_ter_node) if tgt_ter_node else None
+    from simplyblock_core.controllers import lvol_controller as _lc
+
+    for m in member_migrations:
+        intermediate_snaps = m.intermediate_snaps or []
+        if not intermediate_snaps:
+            continue
+
+        # Predecessor for round 0: the last snap_copy-chain snapshot already
+        # committed on target -- mirrors _reconstruct_snap_tree's own
+        # preexisting-vs-freshly-transferred predecessor lookup.
+        pred_composite = None
+        pred_uuid = (m.snaps_transferred_group or m.snaps_preexisting_on_target or [None])[-1]
+        if pred_uuid:
+            try:
+                pred_snap = db.get_snapshot_by_id(pred_uuid)
+                if pred_uuid in (m.snaps_preexisting_on_target or []):
+                    _lvstore_prefix = tgt_node.lvstore + '/'
+                    pred_short = None
+                    if pred_snap.snap_bdev and pred_snap.snap_bdev.startswith(_lvstore_prefix):
+                        pred_short = pred_snap.snap_bdev.split('/', 1)[1]
+                    else:
+                        for _inst in pred_snap.instances or []:
+                            _inst_bdev = _inst.get('snap_bdev', '')
+                            if _inst_bdev.startswith(_lvstore_prefix):
+                                pred_short = _inst_bdev.split('/', 1)[1]
+                                break
+                    pred_short = pred_short or _snap_tgt_short_name(pred_snap)
+                else:
+                    pred_short = _snap_tgt_short_name(pred_snap)
+                pred_composite = f"{tgt_node.lvstore}/{pred_short}"
+            except KeyError:
+                logger.warning(
+                    f"Group {group.uuid[:8]}: intermediate-chain predecessor "
+                    f"{pred_uuid} not found for member {m.uuid[:8]}; linking round 0 "
+                    f"without a parent")
+
+        for snap_uuid in intermediate_snaps:
+            try:
+                snap = db.get_snapshot_by_id(snap_uuid)
+            except KeyError:
+                return f"Intermediate snapshot {snap_uuid} not found while committing chain"
+            tgt_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(snap)}"
+
+            # Same known SPDK behavior _reconstruct_snap_tree already guards
+            # against: converting an already-immutable bdev is rejected, so a
+            # retry that reaches an earlier round already committed here would
+            # otherwise fail every time. bdev_lvol_get_bdevs reports
+            # is_snapshot on the primary; treat that as "already done" and
+            # just advance the predecessor pointer.
+            _existing = tgt_rpc.get_bdevs(tgt_composite)
+            if _existing and _existing[0].get('driver_specific', {}).get('lvol', {}).get('is_snapshot'):
+                pred_composite = tgt_composite
+                continue
+
+            if pred_composite:
+                if not tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
+                    return f"bdev_lvol_add_clone failed for intermediate snap {snap_uuid}"
+                if sec_rpc and not sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
+                    return f"bdev_lvol_add_clone on secondary failed for intermediate snap {snap_uuid}"
+                if ter_rpc and not ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
+                    return f"bdev_lvol_add_clone on tertiary failed for intermediate snap {snap_uuid}"
+
+            if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
+                return f"target node not LVS leader for convert of intermediate snap {snap_uuid}, retrying"
+            if not tgt_rpc.bdev_lvol_convert(tgt_composite):
+                return f"bdev_lvol_convert failed for intermediate snap {snap_uuid}"
+            if sec_rpc and not sec_rpc.bdev_lvol_convert(tgt_composite):
+                return f"bdev_lvol_convert on secondary failed for intermediate snap {snap_uuid}"
+            if ter_rpc and not ter_rpc.bdev_lvol_convert(tgt_composite):
+                return f"bdev_lvol_convert on tertiary failed for intermediate snap {snap_uuid}"
+
+            logger.info(
+                f"Group {group.uuid[:8]}: committed intermediate snap {snap_uuid[:8]} "
+                f"({tgt_composite}) parent={pred_composite}")
+            pred_composite = tgt_composite
+
+    return None
+
+
 def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc):
     """
     After a successful bdev_lvol_batch_final_step, drive clients to the new target.
 
-    Mirrors the single-lvol Done-handler ANA sequence exactly:
+    Mirrors the single-lvol Done-handler ANA sequence, minus the SRC-inaccessible
+    step: _handle_intermediate_barrier's pre-final-step freeze already drives
+    every SRC path (primary + secondary/tertiary) inaccessible before
+    batch_final_step even runs, so re-flipping them here would just repeat
+    the same RPC calls with no effect.
 
     No-overlap:
       1. TGT primary → optimized  (required; logs error on failure but continues
          since bdev_lvol_batch_final_step cannot be undone)
       2. TGT secondary/tertiary → non_optimized
-      3. All SRC paths → inaccessible
 
     Overlap:
       1. First non-overlap TGT → optimized  (live path before touching overlap)
-      2. Overlap SRC paths → inaccessible  (at SRC port)
-      3. Non-overlap SRC paths → inaccessible
-      4. Namespace swap on overlap TGT paths: SRC bdev → migrated TGT bdev
+      2. Namespace swap on overlap TGT paths: SRC bdev → migrated TGT bdev
          (uses _swap_namespace which dynamically re-queries nsid; respects crypto_bdev)
-      5. All TGT paths → correct ANA state at TGT port
-      6. Remove old SRC-port listener from overlap TGT nodes if port changed
+      3. All TGT paths → correct ANA state at TGT port
+      4. Remove old SRC-port listener from overlap TGT nodes if port changed
     """
     nqn = group.target_nqn
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
@@ -419,13 +554,10 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
         # Step 2: TGT secondary/tertiary → non_optimized
         for i, tp in enumerate(tgt_paths[1:], 1):
             _flip_all(tp['rpc'], tp['ips'], tp['port'], tp['trtype'], "non_optimized", f"TGT-rep{i}")
-
-        # Step 3: all SRC paths → inaccessible
-        for src in src_paths:
-            _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                      "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
-        # Step 1: first non-overlap TGT → optimized before making any SRC inaccessible
+        # Step 1: first non-overlap TGT → optimized. SRC paths (overlap and
+        # non-overlap alike) are already inaccessible from the pre-final-step
+        # freeze -- no need to re-flip them here.
         non_overlap_tgt = next(
             (t for t in tgt_paths if t['node_id'] not in overlap_ids), None)
         if non_overlap_tgt:
@@ -437,19 +569,7 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                     f"Group {group.uuid[:8]}: ANA flip non-overlap TGT→optimized failed; "
                     f"proceeding anyway")
 
-        # Step 2: overlap SRC paths → inaccessible at SRC port
-        for src in src_paths:
-            if src['node_id'] in overlap_ids:
-                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                          "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
-
-        # Step 3: non-overlap SRC paths → inaccessible
-        for src in src_paths:
-            if src['node_id'] not in overlap_ids:
-                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                          "inaccessible", f"SRC-{src['node_id'][:8]}")
-
-        # Step 4: namespace swap on overlap TGT paths.
+        # Step 2: namespace swap on overlap TGT paths.
         # Each member has its own namespace in the shared NQN. We look up each
         # member's nsid by matching ns['uuid'] == lvol.uuid so we never remove
         # the wrong namespace (positional removal would corrupt I/O for other members).
@@ -474,7 +594,7 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
             # events visible to initiators — each one triggering a reconnect. Batching
             # the removes into one pass and the adds into a second pass collapses this
             # into a single collective disruption, which initiators handle cleanly.
-            ns_adds = []  # (tgt_ns_bdev, uuid, guid) — collected during remove pass
+            ns_adds = []  # (tgt_ns_bdev, uuid, guid, nsid) — collected during remove pass
             for m in member_migrations:
                 try:
                     lvol = db.get_lvol_by_id(m.lvol_id)
@@ -498,15 +618,21 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                         logger.warning(
                             f"Group {group.uuid[:8]}: no namespace for uuid={lvol.uuid[:8]} "
                             f"on {tgt['node_id'][:8]}; skipping remove")
-                    ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid))
+                    # Re-add under the SAME nsid it just had here, instead of letting
+                    # SPDK auto-assign the next free one. Client-side identity across
+                    # the swap is carried by uuid/nguid regardless (Linux NVMe
+                    # multipath groups paths by NGUID, not nsid), so this isn't a
+                    # correctness fix -- it just keeps the namespace's nsid stable on
+                    # this node across the swap instead of drifting to a new value.
+                    ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid, nsid))
                 except Exception as e:
                     logger.warning(
                         f"Group {group.uuid[:8]}: namespace swap member {m.uuid[:8]} "
                         f"on {tgt['node_id'][:8]} (non-fatal): {e}")
 
-            for tgt_ns_bdev, uuid, guid in ns_adds:
+            for tgt_ns_bdev, uuid, guid, nsid in ns_adds:
                 try:
-                    ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid)
+                    ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid, nsid=nsid)
                     if not ret:
                         logger.error(
                             f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} failed "
@@ -520,18 +646,18 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                         f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
                         f"on {tgt['node_id'][:8]} (non-fatal): {e}")
 
-        # Step 5: all TGT paths → correct ANA state at TGT port
+        # Step 3: all TGT paths → correct ANA state at TGT port
         primary_tgt = tgt_paths[0]
         if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
                                    primary_tgt['trtype'], "optimized",
                                    f"TGT-{primary_tgt['node_id'][:8]}"):
             logger.error(
-                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized (step 5) failed")
+                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized (step 3) failed")
         for tgt in tgt_paths[1:]:
             _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
                       "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
-        # Step 6: remove old SRC-port listener from overlap TGT nodes if port changed
+        # Step 4: remove old SRC-port listener from overlap TGT nodes if port changed
         for tgt in tgt_paths:
             if tgt['node_id'] in overlap_ids:
                 old_port = src_port_by_id.get(tgt['node_id'])
@@ -560,6 +686,22 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         logger.debug(f"intermediates barrier: waiting for {len(waiting)} workers")
         return None, None  # None = still waiting
 
+    # Every member finished this round. If any of them still has too much
+    # dirty delta to freeze quickly at cutover, start another synchronized
+    # round -- every member retakes a snapshot together, even ones whose own
+    # delta was already low -- up to the round cap.
+    if (group.intermediate_more_needed
+            and group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS):
+        group.intermediate_round += 1
+        group.intermediates_done = []
+        group.intermediate_more_needed = []
+        group.write_to_db(db.kv_store)
+        logger.info(
+            f"Group {group.uuid[:8]}: dirty delta still high after round "
+            f"{group.intermediate_round}/{constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS}; "
+            f"starting another synchronized intermediate round")
+        return None, None  # None = still waiting -- workers will redo this round
+
     logger.info(
         f"Group {group.uuid[:8]}: all workers reached intermediates_done; "
         f"calling bdev_lvol_batch_final_step")
@@ -574,25 +716,21 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         lvol_names, lvol_ids, snapshot_names = _build_batch_final_args(
             group, member_migrations, src_node, tgt_node, tgt_rpc)
     except (ValueError, KeyError) as e:
-        try:
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        except Exception as detach_exc:
-            logger.warning(
-                f"Group {group.uuid[:8]}: hub controller detach after build-args "
-                f"failure (non-fatal): {detach_exc}")
+        # Hub controller left attached — hub_manager owns its lifecycle
+        # entirely via its own idle timeout.
         return None, str(e)
 
-    # Pre-freeze: take SRC secondary/tertiary out of the read path before the
-    # synchronous final-step transfer below. bdev_lvol_batch_transfer_final_step
-    # freezes the SRC primary internally for the duration of the transfer, but
-    # a client sitting on a SRC replica path is not covered by that freeze —
-    # without this, a write accepted by a SRC replica during the transfer (or
-    # in the gap before cutover flips SRC paths inaccessible) never reaches
-    # the copy that already ran, and is silently lost. Mirrors the single-lvol
-    # path's identical pre-freeze (tasks_runner_lvol_migration.py).
+    chain_err = _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_rpc)
+    if chain_err:
+        # Hub controller left attached — see comment above.
+        return None, chain_err
+
+    # Pre-freeze: take SRC/TGT paths out of the read/write path before the
+    # synchronous final-step transfer below (see the diagnostic block further
+    # down for the current, temporarily-widened version of this).
     nqn = group.target_nqn
-    src_paths, _, _ = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
-    src_replica_paths = src_paths[1:]  # secondary/tertiary only; primary is frozen internally by the RPC below
+    src_paths, tgt_paths, _ = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    src_replica_paths = src_paths[1:]  # secondary/tertiary only; used for the failure-path revert below
 
     def _flip(rpc, ip, port, trtype, state, label):
         try:
@@ -608,21 +746,37 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             _flip(rpc, _ip, port, trtype, state, label)
 
     def _revert_src_replicas(reason):
-        # Final step didn't complete — put SRC secondary/tertiary back into
-        # the read path (their pre-freeze state) so clients keep multipath
-        # access to the still-live source instead of being stuck on primary only.
-        if not src_replica_paths:
-            return
-        logger.warning(f"Group {group.uuid[:8]}: {reason}; reverting SRC secondary/tertiary to non_optimized")
+        # Final step didn't complete — put every SRC path back into the
+        # read/write path (their pre-freeze state) so clients keep access to
+        # the still-live source instead of being stuck with nothing reachable.
+        # Primary -> optimized (it was driven inaccessible pre-final-step by
+        # the diagnostic widened freeze above); secondary/tertiary -> non_optimized.
+        logger.warning(f"Group {group.uuid[:8]}: {reason}; reverting SRC paths "
+                       f"(primary optimized, replicas non_optimized)")
+        primary_src = src_paths[0]
+        _flip_all(primary_src['rpc'], primary_src['ips'], primary_src['port'],
+                  primary_src['trtype'], "optimized", f"SRC-{primary_src['node_id'][:8]}(revert)")
         for p in src_replica_paths:
             _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
                       "non_optimized", f"SRC-{p['node_id'][:8]}(revert)")
 
-    if src_replica_paths:
-        logger.info(f"Group {group.uuid[:8]}: setting SRC secondary/tertiary inaccessible pre-final-step")
-        for p in src_replica_paths:
-            _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
-                      "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
+    # TEMPORARILY CHANGED for a diagnostic test: instead of only freezing SRC
+    # secondary/tertiary pre-final-step (primary relied on the RPC's own
+    # internal freeze), make EVERY path -- all SRC (primary included) and all
+    # TGT -- inaccessible up front, wait 2s so any in-flight client I/O has
+    # time to fully settle/drain before the data actually moves, THEN call
+    # final_step. Re-enable the narrower pre-freeze once this test is done.
+    logger.info(f"Group {group.uuid[:8]}: setting ALL SRC and TGT paths inaccessible "
+               f"pre-final-step (diagnostic)")
+    for p in src_paths:
+        _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                  "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
+    for p in tgt_paths:
+        _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                  "inaccessible", f"TGT-{p['node_id'][:8]}(pre-freeze)")
+    logger.info(f"Group {group.uuid[:8]}: sleeping 2s after all-paths-inaccessible "
+               f"before batch_final_step (diagnostic)")
+    time.sleep(2)
 
     logger.info(
         f"Group {group.uuid[:8]}: batch_final_step "
@@ -630,10 +784,28 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     batch_ok = False
     batch_err = None
     try:
-        ret = src_rpc.bdev_lvol_batch_transfer_final_step(
-            lvol_names, lvol_ids, snapshot_names, 2, hub_bdev, "migrate")
+        # This call moves real data and can legitimately run longer than the
+        # 5s blanket timeout _make_rpc()/src_rpc uses for every other RPC in
+        # this file -- use a dedicated, longer-timeout client just for it.
+        final_step_rpc = src_node.rpc_client(timeout=15, retry=2)
+        ret = final_step_rpc.bdev_lvol_batch_transfer_final_step(
+            lvol_names, lvol_ids, snapshot_names, 16, hub_bdev, "migrate")
         logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
-        batch_ok = True
+        # The RPC can return normally (no exception) while still reporting the
+        # transfer itself failed -- transfer_state is one of "No process" |
+        # "In progress" | "Failed" | "Done" (see bdev_lvol_transfer_stat).
+        # Treating any non-exception response as success let a "Failed"
+        # transfer proceed straight to the ANA flip and source cleanup as if
+        # the data had actually moved (observed run 2026-08-22, group
+        # 911aa7af/mig-108: 'Failed' logged then treated as success, target
+        # listeners never came up, checksum corruption followed).
+        transfer_state = ret.get("transfer_state") if isinstance(ret, dict) else None
+        if transfer_state == "Done":
+            batch_ok = True
+        else:
+            batch_err = f"transfer_state={transfer_state!r} (expected 'Done'): {ret!r}"
+            logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step "
+                        f"did not report success: {batch_err}")
     except RPCRemoteError as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step RPC error code={e.code}: {e}")
         batch_err = str(e)
@@ -646,8 +818,59 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
 
     if not batch_ok:
         _revert_src_replicas("batch_final_step failed")
-    # else: left as-is — the Done handler's ANA sequence (_flip_ana_to_optimized)
-    # already drives every SRC path (including primary) to inaccessible on success.
+        # The revert above reopened SRC to live client I/O. Retrying with the
+        # snapshots taken before this reopen would silently miss whatever the
+        # client writes in the meantime -- force every member through one
+        # more synchronized intermediate round first, same mechanism as the
+        # dirty-delta trigger above, so the retry's snapshots actually cover
+        # the reopen window. Falls through to the normal suspend/retry-budget
+        # path once the round cap is hit, so a persistently failing group
+        # still eventually resolves instead of looping forever.
+        if group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS:
+            group.intermediate_round += 1
+            group.intermediates_done = []
+            group.intermediate_more_needed = []
+            group.write_to_db(db.kv_store)
+
+            # bdev_lvol_set_migration_flag drives the distrib-level special_io
+            # machinery for the target bdev (see snapshot_replication.py's
+            # comment on the same flag); it's only ever set once, at initial
+            # target-bdev creation (migration_controller.create_migration).
+            # A failed/aborted final_step attempt may clear it on the target,
+            # so re-assert it on every member's target bdev before retrying —
+            # otherwise the retry's cutover could run without the target
+            # being treated as migration-aware.
+            tgt_sec_node, _ = _get_target_secondary_node(tgt_node, src_node.get_id())
+            tgt_ter_node, _ = _get_target_tertiary_node(tgt_node, src_node.get_id())
+            tgt_sec_rpc_reflag = _make_rpc(tgt_sec_node) if tgt_sec_node else None
+            tgt_ter_rpc_reflag = _make_rpc(tgt_ter_node) if tgt_ter_node else None
+            for m in member_migrations:
+                try:
+                    m_lvol = db.get_lvol_by_id(m.lvol_id)
+                    m_tgt_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(m_lvol.lvol_bdev)}"
+                except KeyError:
+                    continue
+                if not tgt_rpc.bdev_lvol_set_migration_flag(m_tgt_composite):
+                    logger.warning(
+                        f"Group {group.uuid[:8]}: re-assert migration flag on primary "
+                        f"failed for {m_tgt_composite} (may already be flagged)")
+                for _extra_rpc in (tgt_sec_rpc_reflag, tgt_ter_rpc_reflag):
+                    if _extra_rpc:
+                        try:
+                            _extra_rpc.bdev_lvol_set_migration_flag(m_tgt_composite)
+                        except Exception as e:
+                            logger.warning(
+                                f"Group {group.uuid[:8]}: re-assert migration flag on "
+                                f"replica failed for {m_tgt_composite} (non-fatal): {e}")
+
+            logger.warning(
+                f"Group {group.uuid[:8]}: batch_final_step failed; forcing another "
+                f"synchronized intermediate round {group.intermediate_round}/"
+                f"{constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS} before retrying")
+            return None, None  # None = still waiting -- workers will redo this round
+    # else: left as-is — all SRC/TGT paths were already driven inaccessible
+    # before final_step (diagnostic, see above); only TGT primary needs to
+    # come back optimized on success, handled below.
 
     if batch_ok:
         # bdev_lvol_batch_final_step handles add_clone on the primary internally.
@@ -658,7 +881,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         if sec_node or ter_node:
             sec_rpc_extra = _make_rpc(sec_node) if sec_node else None
             ter_rpc_extra = _make_rpc(ter_node) if ter_node else None
-            snap_by_migration_id = dict(zip(group.ordered_migration_ids(), snapshot_names))
+            _reordered_ids = group.ordered_migration_ids()
+            snap_by_migration_id = dict(zip(_reordered_ids, snapshot_names))
             for m in member_migrations:
                 snap_composite = snap_by_migration_id.get(m.uuid, "")
                 if not snap_composite:
@@ -687,11 +911,10 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
 
         _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
 
-    try:
-        src_rpc.bdev_nvme_detach_controller(ctrl_name)
-    except Exception as e:
-        logger.warning(f"Group {group.uuid[:8]}: hub detach (non-fatal): {e}")
-
+    # Hub controller left attached on both success and failure — hub_manager
+    # owns its lifecycle entirely via its own idle timeout. Detaching it here
+    # unconditionally, on every group's final step, defeated the whole point
+    # of keeping it warm for the next group to reuse.
     return batch_ok, batch_err
 
 

@@ -415,7 +415,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--tls-secret-name', help='Name of the Kubernetes TLS Secret to be used by the Ingress for HTTPS termination (e.g., my-tls-secret).', type=str, dest='tls_secret')
         subcommand.add_argument('--log-del-interval', help='The logging retention policy. Default: `3d`.', type=str, default='3d', dest='log_del_interval')
         subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus). Default: `7d`.', type=str, default='7d', dest='metrics_retention_period')
-        subcommand.add_argument('--contact-point', help='The email or slack webhook url to be used for alerting.', type=str, default='', dest='contact_point')
+        subcommand.add_argument('--contact-point', help='**Deprecated since: 26.3** Do not use this parameter: The alerting notification configuration got extended and uses --alerting-config-path\n\nThe email or slack webhook url to be used for alerting.', type=str, dest='contact_point')
         subcommand.add_argument('--grafana-endpoint', help='The endpoint url for Grafana.', type=str, default='', dest='grafana_endpoint')
         subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `1`.', type=int, default=1, dest='distr_ndcs')
         subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `1`.', type=int, default=1, dest='distr_npcs')
@@ -452,6 +452,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
         subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+        subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster.')
@@ -662,7 +663,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--interval-min', help='Cadence: minutes between internal replication snapshots. 0 replicates user snapshots only. Default: `1`.', type=int, dest='interval_min')
         subcommand.add_argument('--mode', help='Replication mode. Default: `failover`.', type=str, dest='mode', choices=['failover','migration',])
         subcommand.add_argument('--keep', help='Replicated internal snapshots to retain on each side. Minimum (and default): `2`.', type=int, dest='keep_replicated')
-        subcommand.add_argument('--retention-schedule', help='Tiered retention, e.g. `15m:2h,1h:11h,1d:7d` - one snapshot every 15 minutes for the last 2 hours, then hourly for 11 hours, then daily for 7 days. Snapshots older than the total span are pruned. Empty (default) keeps the flat --keep behaviour.', type=str, dest='retention_schedule')
 
     def init_cluster__replication_policy_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-policy-list', 'Lists the replication policies of a cluster')
@@ -932,6 +932,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--ifname', help='The management interface name.', type=str, dest='ifname')
         subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10).', type=str, dest='mgmt_ip')
         subcommand.add_argument('--mode', help='The environment to deploy management services. Default: `docker`.', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
+        subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
 
     def init_control_plane__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all control plane nodes.')
@@ -1411,6 +1412,8 @@ class CLIWrapper(CLIWrapperBase):
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
                         args.disable_monitoring = False
+                    if getattr(args, 'contact_point', None) is not None:
+                        raise ValueError("Deprecated parameter '--contact-point' cannot be used: The alerting notification configuration got extended and uses --alerting-config-path")
                     ret = self.cluster__create(sub_command, args)
                 elif sub_command in ['add']:
                     if not self.developer_mode:

@@ -422,12 +422,12 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             calls = []
             write_db_calls[nid] = calls
             original_write = MagicMock()
-            def make_recorder(c, orig):
+            def make_recorder(c, orig, node):
                 def recorder(*args, **kwargs):
-                    c.append({"lvstore_status": n.lvstore_status})
+                    c.append({"lvstore_status": node.lvstore_status})
                     return orig(*args, **kwargs)
                 return recorder
-            n.write_to_db = make_recorder(calls, original_write)
+            n.write_to_db = make_recorder(calls, original_write, n)
 
         def get_node(nid):
             key = nid.split("/")[-1] if "/" in nid else nid

@@ -403,6 +403,25 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
 
             deletions_processed += 1
 
+            # RECORD-ONLY deletion: a retired landing volume's record carries
+            # an EMPTY bdev_stack on purpose -- its blob lives on as the
+            # converted, chained snapshot and must never be deleted. When the
+            # retirement sequence in snapshot_replication is interrupted
+            # between emptying the stack and removing the record, the record
+            # is left in_deletion here; the delete flow below then has nothing
+            # to issue, the status poll returns 4 ("no async delete request")
+            # forever (856x/30min, run 20260825_125156), and every cleanup
+            # that waits for lvols to drain times out behind it. Nothing on
+            # any node belongs to this record any more: retire it.
+            if not lvol.bdev_stack:
+                logger.info(
+                    f"LVol {lvol.get_id()} ({lvol.lvol_name}) is in_deletion "
+                    f"with an empty bdev stack (retired landing volume); "
+                    f"removing the record only -- its blob lives on as the "
+                    f"converted snapshot")
+                process_lvol_delete_finish(cluster, lvol)
+                continue
+
             # The FULL delete of a chain member — the async delete, its
             # completion wait, and the sync deletes that follow — is one
             # atomic sequence per LVS+chain: a delete swap-merges segments
@@ -682,7 +701,7 @@ def main():
             # on a single node stalled the whole cluster's monitoring.
             snodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
 
-            def _sweep(snode):
+            def _sweep(snode, cluster=cluster, all_lvols=all_lvols, subsys_check=subsys_check):
                 try:
                     return check_node(cluster, snode, all_lvols,
                                       subsys_check=subsys_check) or 0

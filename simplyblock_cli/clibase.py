@@ -6,8 +6,11 @@ import json
 import re
 import sys
 import time
+from pathlib import Path
+
 import argcomplete
 
+from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, utils, db_controller, constants
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
@@ -112,7 +115,7 @@ class CLIWrapperBase:
         # unable to honour a larger cluster setting.
         max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
         max_size = 0
-        number_of_devices = getattr(args, "number_of_devices") or 0
+        number_of_devices = args.number_of_devices or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
             try:
@@ -1018,7 +1021,9 @@ class CLIWrapperBase:
         ifname = args.ifname
         mgmt_ip = args.mgmt_ip
         mode = args.mode
-        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode)
+        alert_config = parse_alerting_config(
+            Path(args.alerting_config_path) if args.alerting_config_path else None)
+        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode, alert_config)
 
     def control_plane__list(self, sub_command, args):
         return _format_result(mgmt_ops.list_mgmt_nodes(), json=args.json)
@@ -1397,6 +1402,8 @@ class CLIWrapperBase:
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,
+            alert_config=parse_alerting_config(
+                Path(args.alerting_config_path) if args.alerting_config_path else None),
         )
 
     def query_yes_no(self, question, default="yes"):

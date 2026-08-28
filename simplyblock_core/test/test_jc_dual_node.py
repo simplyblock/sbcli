@@ -50,7 +50,7 @@ def _install(monkeypatch, nodes):
 
 
 def test_two_node_cluster_enables_dual_node(monkeypatch):
-    sink = []
+    sink: list[tuple[str, bool]] = []
     nodes = [_Node("A", sink), _Node("B", sink)]
     _install(monkeypatch, nodes)
     storage_node_ops.apply_jc_dual_node("CL")
@@ -58,7 +58,7 @@ def test_two_node_cluster_enables_dual_node(monkeypatch):
 
 
 def test_three_node_cluster_disables_dual_node(monkeypatch):
-    sink = []
+    sink: list[tuple[str, bool]] = []
     nodes = [_Node("A", sink), _Node("B", sink), _Node("C", sink)]
     _install(monkeypatch, nodes)
     storage_node_ops.apply_jc_dual_node("CL")
@@ -70,7 +70,7 @@ def test_flag_follows_membership_not_how_many_are_online(monkeypatch):
     the flag on the ONLINE count would switch a degraded 3-node cluster into
     dual-node mode -- weakening the journal requirement exactly when a node
     is already missing."""
-    sink = []
+    sink: list[tuple[str, bool]] = []
     nodes = [_Node("A", sink), _Node("B", sink),
              _Node("C", sink, status=StorageNode.STATUS_OFFLINE)]
     _install(monkeypatch, nodes)
@@ -80,7 +80,7 @@ def test_flag_follows_membership_not_how_many_are_online(monkeypatch):
 
 
 def test_removed_nodes_do_not_count_towards_membership(monkeypatch):
-    sink = []
+    sink: list[tuple[str, bool]] = []
     nodes = [_Node("A", sink), _Node("B", sink),
              _Node("C", sink, status=StorageNode.STATUS_REMOVED)]
     _install(monkeypatch, nodes)
@@ -89,7 +89,7 @@ def test_removed_nodes_do_not_count_towards_membership(monkeypatch):
 
 
 def test_one_unreachable_node_does_not_stop_the_others(monkeypatch):
-    sink = []
+    sink: list[tuple[str, bool]] = []
 
     class _BadNode(_Node):
         def rpc_client(self, *a, **kw):
