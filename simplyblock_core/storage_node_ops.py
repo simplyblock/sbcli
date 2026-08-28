@@ -942,7 +942,7 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
             "from the target node", name)
         return False
 
-    expected_ips = set(ip.strip() for ip in nvmf_ip.split(",") if ip.strip())
+    expected_ips = {ip.strip() for ip in nvmf_ip.split(",") if ip.strip()}
     if len(expected_ips) < 2:
         return True  # not actually multipath
 

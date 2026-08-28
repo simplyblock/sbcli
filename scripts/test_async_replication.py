@@ -2513,7 +2513,7 @@ def test_case_12(meta):
         lvols.append(resolve_lvol(mgmt_ip, key_path, "replvol%d" % i)["uuid"])
 
     # CG invariant 1: all members on one LVS.
-    nodes = set(node_of_lvol(mgmt_ip, key_path, lv)["node_id"] for lv in lvols)
+    nodes = {node_of_lvol(mgmt_ip, key_path, lv)["node_id"] for lv in lvols}
     if len(nodes) != 1:
         raise RuntimeError("FAIL: CG members scattered across %d nodes" % len(nodes))
     print("  all 3 members pinned to one node/LVS")
