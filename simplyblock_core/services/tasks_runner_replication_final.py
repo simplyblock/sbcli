@@ -39,33 +39,26 @@ db = db_controller.DBController()
 
 
 def _lvs_cutover_owner(task, lvs_name, tasks=None):
-    """Return the task that should own *lvs_name*, or None if *task* itself wins.
+    """Return the task that should own the active cutover slot, or None if *task* wins.
 
-    Deterministic: the earliest-created claimant wins (sorted by create_dt then
-    id), so concurrent threads that both wrote a claim agree on the same winner.
+    Serializes all cutovers globally: only one may run at a time across all
+    volumes and lvstores.  Deterministic: the earliest-created claimant wins
+    (sorted by create_dt then id), so two tasks that both wrote a claim agree on
+    the same winner regardless of interleaving.
 
     Callers MUST write their own ``cutover_lvs`` claim to DB **before** calling
     this function so they appear in the scan and participate in the sort.
 
     Returns None     → the caller is the rightful owner; proceed.
-    Returns <other>  → that other task is the rightful owner; the caller should
-                       remove its own claim and yield.
-
-    Note: the previous implementation excluded the calling task from the scan
-    (``if other.get_id() == task.get_id(): continue``).  When two threads both
-    raced past the guard before either wrote its claim, both ended up with
-    ``cutover_lvs`` set, and on every subsequent pass each task's candidate set
-    was exactly {the other} — so each always deferred to the other, creating a
-    permanent circular stall (e.g. 36418f5d queued behind 309d3aeb AND
-    309d3aeb queued behind 36418f5d).  Including self in the sort eliminates
-    the self-exclusion blindspot that made the cycle possible.
+    Returns <other>  → that other task owns the slot; the caller should remove
+                       its own claim and yield.
 
     ``tasks`` may be a pre-fetched list from this pass. Re-reading per task is
     O(N^2) DB reads, which the sub-second poll interval cannot afford.
     """
     if not lvs_name:
         return None
-    claimants = []
+    owners = []
     for other in (tasks if tasks is not None else db.get_job_tasks(task.cluster_id)):
         if other.function_name != JobSchedule.FN_REPLICATION_FINAL:
             continue
@@ -73,11 +66,11 @@ def _lvs_cutover_owner(task, lvs_name, tasks=None):
             continue
         if (other.function_params or {}).get("cutover_lvs") != lvs_name:
             continue
-        claimants.append(other)
-    if not claimants:
+        owners.append(other)
+    if not owners:
         return None
-    claimants.sort(key=lambda t: (str(getattr(t, "create_dt", "")), t.get_id()))
-    winner = claimants[0]
+    owners.sort(key=lambda t: (str(getattr(t, "create_dt", "")), t.get_id()))
+    winner = owners[0]
     return None if winner.get_id() == task.get_id() else winner
 
 
