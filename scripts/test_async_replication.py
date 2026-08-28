@@ -2030,14 +2030,27 @@ def test_case_7(meta):
 
     start = time.time()
     done = 0
-    while time.time() - start < CUTOVER_WAIT_TIMEOUT * 2:
-        states = replication_states(mgmt_ip, key_path, tgt_lvols)
-        done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
-        print(f"  fail-back cutovers done: {done}/{len(tgt_lvols)}")
-        if done == len(tgt_lvols):
-            break
-        time.sleep(15)
-    collect_xfer_timing(mgmt_ip, key_path, "case7_failback")
+    # The timing bundle is the whole point of the run, so collect it even when
+    # the poll itself blows up. Twice now a transient control-plane error inside
+    # this loop (`sbctl` rc=1) propagated out and skipped the collection, leaving
+    # the previous run's file in place -- which then looked like fresh data.
+    try:
+        while time.time() - start < CUTOVER_WAIT_TIMEOUT * 2:
+            try:
+                states = replication_states(mgmt_ip, key_path, tgt_lvols)
+            except Exception as e:                        # noqa: BLE001
+                # A CP hiccup must not end the case: log it, keep polling, and
+                # let the deadline decide.
+                print(f"  fail-back poll failed ({str(e)[:120]}); retrying")
+                time.sleep(15)
+                continue
+            done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
+            print(f"  fail-back cutovers done: {done}/{len(tgt_lvols)}")
+            if done == len(tgt_lvols):
+                break
+            time.sleep(15)
+    finally:
+        collect_xfer_timing(mgmt_ip, key_path, "case7_failback")
     if done != len(tgt_lvols):
         # The breakdown matters MOST here: a stalled fail-back is the case we
         # have failed to explain seven times.
