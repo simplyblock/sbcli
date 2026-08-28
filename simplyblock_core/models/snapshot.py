@@ -51,10 +51,6 @@ class SnapShot(BaseModel):
     # On Snapshot transfer or replicate this field is the same
     # This value can be used to identify the same snapshot on other nodes
     data_uuid: str = ""
-    # Bytes transferred when this snapshot was replicated. -1 = not measured
-    # (old records or in-flight), 0 = transferred but no data (zero-delta
-    # round): the cutover convergence loop uses this to stop early.
-    replication_bytes: int = -1
 
     def write_to_db(self, kv_store=None):
         super().write_to_db(kv_store)

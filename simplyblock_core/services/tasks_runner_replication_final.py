@@ -607,23 +607,6 @@ def _shrink_step(task, lvol):
             time.sleep(constants.REPL_CUTOVER_POLL_INTERVAL_SEC)
             continue
 
-        # Zero-delta early exit: if this round transferred 0 bytes the volume
-        # had no new writes since the previous snapshot.  Another round would
-        # also transfer 0 bytes, so stop immediately rather than burning the
-        # remaining rounds (and their cross-cluster add_lvol_ha cost) for nothing.
-        try:
-            snap_rec = db.get_snapshot_by_id(snap_id)
-            if snap_rec.replication_bytes == 0:
-                logger.info(
-                    "cutover convergence: lvol=%s round %d transferred 0 bytes; "
-                    "no new writes — proceeding to cutover immediately",
-                    lvol.get_id(), params.get("shrink_round", 0))
-                task.function_result = (
-                    f"zero-delta after round {params.get('shrink_round', 0)}; converged")
-                return True, None
-        except KeyError:
-            pass
-
         started_at = params.get("shrink_started_at")
         if started_at is None:
             # Unmeasurable round (an older task, or one enqueued without the
