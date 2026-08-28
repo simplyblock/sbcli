@@ -23,7 +23,7 @@ from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.backup_config import BackupConfig
+from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -299,9 +299,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
     if backup_config:
-        # Validate the backup config before doing real work, standing in for the
-        # bucket name Cluster.set_backup_config defaults below.
-        BackupConfig.model_validate({"bucket_name": "dummy", **backup_config})
+        # Reject a configuration the cluster could not act on before installing
+        # anything, rather than at the set_backup_config below. Everything but
+        # the bucket is checked here: that one is derived from a cluster id that
+        # does not exist yet, so an absent one is not a caller's mistake.
+        UnresolvedBackupConfig.model_validate(backup_config)
 
     if name and db_controller.kv_store is not None:
         existing_clusters = db_controller.get_clusters()

@@ -23,7 +23,7 @@ stays wrapped so the plaintext is produced only by ``BaseModel.write_to_db``'s
 own ``unwrap_secrets`` pass, at the last possible moment.
 """
 from enum import IntEnum
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 from pydantic import (
     BaseModel,
@@ -166,3 +166,23 @@ class BackupConfig(BackupLocation):
         return BackupLocation.model_validate(
             self.model_dump(include=set(BackupLocation.model_fields))
         )
+
+
+class UnresolvedBackupConfig(BackupConfig):
+    """A backup configuration as a caller can state it, before a cluster resolves it.
+
+    Identical to :class:`BackupConfig` except that ``bucket_name`` may be absent,
+    because the default is derived from a cluster id that does not exist yet at
+    cluster-create time (``Cluster.default_backup_bucket_name``). Hand one to
+    ``Cluster.set_backup_config``, which resolves it; nothing further down ever
+    sees a configuration without a bucket.
+
+    Which is also why an instance must be turned back into a plain dict at the
+    boundary it arrived on rather than passed along as a ``BackupConfig``: the
+    inherited :meth:`location` cannot produce a location for a bucket nobody has
+    named yet.
+    """
+
+    # Widening a base field, which mypy reads as a plain incompatible assignment
+    # -- no pydantic plugin is configured (pyproject.toml).
+    bucket_name: Annotated[Optional[str], Field(min_length=1)] = None  # type: ignore[assignment]
