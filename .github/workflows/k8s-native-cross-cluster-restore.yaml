@@ -399,6 +399,11 @@ jobs:
           else
             echo "=== External MinIO unreachable, deploying in-cluster MinIO ==="
             kubectl create namespace minio --dry-run=client -o yaml | kubectl apply -f -
+            kubectl label namespace minio \
+              pod-security.kubernetes.io/enforce=privileged \
+              pod-security.kubernetes.io/warn=privileged \
+              pod-security.kubernetes.io/audit=privileged \
+              --overwrite
 
             cat <<'MINIOYAML' | kubectl apply -f -
           apiVersion: apps/v1
