@@ -3070,7 +3070,7 @@ class TestClusterBase:
             k8s = self.sbcli_utils.k8s
             pod_name = k8s.get_spdk_pod_name(ip)
             sock = k8s._find_spdk_sock(pod_name)
-            rpc_cmd = f"python spdk/scripts/rpc.py -s {sock} {method}"
+            rpc_cmd = f"sudo python spdk/scripts/rpc.py -s {sock} {method}"
             kubectl_cmd = (
                 f"kubectl exec {pod_name} -c spdk-container "
                 f"-n {k8s.namespace} -- bash -c {shlex.quote(rpc_cmd)}"

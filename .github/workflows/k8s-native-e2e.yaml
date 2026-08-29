@@ -378,6 +378,11 @@ jobs:
 
           echo "=== Phase 9: Reset hugepages and restart kubelet on worker nodes ==="
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          IS_TALOS="false"
+          if kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.osImage}' 2>/dev/null | grep -q "Talos"; then
+            IS_TALOS="true"
+            echo "Detected Talos cluster — skipping kubectl debug node operations"
+          fi
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
             echo "Disconnecting stale NVMe-oF and resetting hugepages on $NODE..."
@@ -386,6 +391,8 @@ jobs:
                 "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
+            elif [ "$IS_TALOS" = "true" ]; then
+              echo "Skipping node debug for Talos node $NODE (immutable OS)"
             else
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
@@ -499,7 +506,7 @@ jobs:
 
       # ── Deploy MinIO for backup tests (conditional) ────────────────────────
 
-      - name: Create backup credentials for external MinIO
+      - name: Setup MinIO for backup tests
         if: >-
           ${{
             github.event.inputs.use_existing_cluster != 'true' &&
@@ -510,8 +517,81 @@ jobs:
         run: |
           set -euxo pipefail
           NAMESPACE=simplyblock
+          EXTERNAL_MINIO="http://192.168.10.164:9000"
+          MINIO_ACCESS_KEY="minioadmin"
+          MINIO_SECRET_KEY="minioadmin"
 
-          echo "=== Setting up backup credentials for external MinIO (192.168.10.164:9000) ==="
+          # Check if external MinIO is reachable
+          if curl -sf --connect-timeout 5 "${EXTERNAL_MINIO}/minio/health/live" >/dev/null 2>&1; then
+            echo "=== External MinIO at ${EXTERNAL_MINIO} is reachable ==="
+            MINIO_ENDPOINT="${EXTERNAL_MINIO}"
+            echo "MINIO_SOURCE=external" >> "$GITHUB_ENV"
+          else
+            echo "=== External MinIO unreachable, deploying in-cluster MinIO ==="
+            kubectl create namespace minio --dry-run=client -o yaml | kubectl apply -f -
+
+            cat <<'MINIOYAML' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: minio
+            template:
+              metadata:
+                labels:
+                  app: minio
+              spec:
+                containers:
+                - name: minio
+                  image: minio/minio:latest
+                  args: ["server", "/data"]
+                  ports:
+                  - containerPort: 9000
+                  env:
+                  - name: MINIO_ROOT_USER
+                    value: minioadmin
+                  - name: MINIO_ROOT_PASSWORD
+                    value: minioadmin
+                  volumeMounts:
+                  - name: data
+                    mountPath: /data
+                volumes:
+                - name: data
+                  hostPath:
+                    path: /var/lib/minio-data
+                    type: DirectoryOrCreate
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            selector:
+              app: minio
+            ports:
+            - port: 9000
+              targetPort: 9000
+          MINIOYAML
+
+            echo "Waiting for MinIO pod to be ready..."
+            kubectl wait --for=condition=ready pod -l app=minio -n minio --timeout=120s
+
+            # Port-forward to make MinIO accessible from the runner
+            kubectl port-forward -n minio svc/minio 9000:9000 &
+            echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+            sleep 3
+
+            MINIO_ENDPOINT="http://minio.minio.svc.cluster.local:9000"
+            echo "MINIO_SOURCE=in-cluster" >> "$GITHUB_ENV"
+          fi
+
+          echo "MINIO_ENDPOINT=${MINIO_ENDPOINT}" >> "$GITHUB_ENV"
 
           # Create backup-credentials K8s Secret in cluster namespace
           cat <<CREDEOF | kubectl apply -f -
@@ -522,11 +602,11 @@ jobs:
             namespace: ${NAMESPACE}
           type: Opaque
           stringData:
-            access_key_id: minioadmin
-            secret_access_key: minioadmin
+            access_key_id: ${MINIO_ACCESS_KEY}
+            secret_access_key: ${MINIO_SECRET_KEY}
           CREDEOF
 
-          echo "=== Backup credentials setup complete ==="
+          echo "=== MinIO setup complete (source=${MINIO_SOURCE:-external}, endpoint=${MINIO_ENDPOINT}) ==="
 
       - name: Start MinIO trace logging
         if: >-
@@ -544,10 +624,14 @@ jobs:
           chmod +x /tmp/mc
           export PATH="/tmp:$PATH"
 
-          # 2. Configure mc alias to external MinIO
-          mc alias set myminio http://192.168.10.164:9000 minioadmin minioadmin
+          # 2. Configure mc alias — for in-cluster MinIO use localhost (port-forward)
+          if [ "${MINIO_SOURCE:-external}" = "in-cluster" ]; then
+            mc alias set myminio http://localhost:9000 minioadmin minioadmin
+          else
+            mc alias set myminio http://192.168.10.164:9000 minioadmin minioadmin
+          fi
 
-          # 4. Start admin trace in background
+          # 3. Start admin trace in background
           MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
           echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
           nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
@@ -753,12 +837,18 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          IS_TALOS="false"
+          if kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.osImage}' 2>/dev/null | grep -q "Talos"; then
+            IS_TALOS="true"
+          fi
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
             echo "Cleaning stale CSI hostpath data on $NODE..."
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
               oc debug node/"$NODE" -- chroot /host bash -c \
                 "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+            elif [ "$IS_TALOS" = "true" ]; then
+              echo "Skipping CSI hostpath cleanup for Talos node $NODE (immutable OS)"
             else
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
@@ -841,7 +931,7 @@ jobs:
             BACKUP_SPEC="  backup:
               credentialsSecretRef:
                 name: backup-credentials
-              localEndpoint: http://192.168.10.164:9000
+              localEndpoint: ${MINIO_ENDPOINT}
               localTesting: true
               secondaryTarget: 0
               snapshotBackups: true
@@ -2045,6 +2135,31 @@ jobs:
           name: minio-trace-${{ github.run_id }}
           path: e2e/minio-trace.log
           if-no-files-found: ignore
+
+      - name: Cleanup MinIO backup bucket on success
+        if: success()
+        run: |
+          set +e
+          export PATH="/tmp:$PATH"
+          CLUSTER_ID="${CLUSTER_ID:-}"
+          if [ -z "$CLUSTER_ID" ]; then
+            echo "No CLUSTER_ID set, skipping MinIO bucket cleanup"
+            exit 0
+          fi
+          BUCKET="simplyblock-backup-${CLUSTER_ID}"
+          if [ "${MINIO_SOURCE:-external}" = "in-cluster" ]; then
+            MC_ENDPOINT="http://localhost:9000"
+          else
+            MC_ENDPOINT="http://192.168.10.164:9000"
+          fi
+          mc alias set myminio "${MC_ENDPOINT}" minioadmin minioadmin 2>/dev/null || true
+          if mc ls "myminio/${BUCKET}" >/dev/null 2>&1; then
+            echo "=== Cleaning up MinIO backup bucket: ${BUCKET} ==="
+            mc rb --force "myminio/${BUCKET}" 2>/dev/null || true
+            echo "=== Bucket cleanup complete ==="
+          else
+            echo "Bucket ${BUCKET} does not exist, nothing to clean"
+          fi
 
       - name: Cleanup MinIO namespace (if deployed)
         if: always()

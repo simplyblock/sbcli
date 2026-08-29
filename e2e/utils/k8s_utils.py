@@ -380,7 +380,7 @@ class K8sUtils:
             kexec = (
                 f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} --"
             )
-            rpc_base = f"{kexec} python spdk/scripts/rpc.py -s {sock}"
+            rpc_base = f"{kexec} sudo python spdk/scripts/rpc.py -s {sock}"
 
             # 1. Get bdevs
             bdev_out, _ = self._exec_kubectl(f"{rpc_base} bdev_get_bdevs", supress_logs=True)

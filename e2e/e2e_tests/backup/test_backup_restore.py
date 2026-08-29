@@ -1055,8 +1055,11 @@ class BackupTestBase(TestClusterBase):
         Returns the details dict for further checks if needed.
         """
         details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-        assert details, f"{label}: get_lvol_details returned empty for {lvol_id}"
+        assert details and isinstance(details, (dict, list)), (
+            f"{label}: get_lvol_details returned invalid result for {lvol_id}: {details!r}")
         d = details[0] if isinstance(details, list) else details
+        assert isinstance(d, dict), (
+            f"{label}: expected dict for lvol details but got {type(d).__name__}: {d!r}")
         crypto_val = d.get("crypto_bdev") or d.get("crypto") or d.get("encryption")
         self.logger.info(f"{label}: lvol {lvol_id} crypto_bdev={crypto_val}")
         assert crypto_val, (
