@@ -397,105 +397,33 @@ jobs:
 
       # ── Cleanup old deployment ──────────────────────────────────────────────
 
-      - name: Cleanup old CSI deployment
+      - name: Cleanup old deployment (full 12-phase cleanup)
         if: ${{ inputs.use_existing_cluster != 'true' }}
         run: |
           set +e
-          NAMESPACE=simplyblock
-          KUBECTL_TIMEOUT="--request-timeout=120s"
 
-          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          # Run the operator's own cleanup script first if available
           if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
-            bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
+            bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f simplyblock || true
           fi
 
-          # Run the shared cleanup script (handles etcd overload with
-          # --request-timeout, bulk deletes, and parallel finalizer patching)
-          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
-
-          echo "=== Phase 7: Delete Released PVs from simplyblock ==="
-          for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
-            echo "Deleting PV $pv"
-            kubectl delete pv "$pv" --ignore-not-found 2>/dev/null || true
-          done
-
-          echo "=== Phase 8: Delete CRDs ==="
-          # Clear finalizers on all remaining CR instances so CRD deletion doesn't hang
-          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
-            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
-            for cr in $(kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null); do
-              IFS=' ' read -r ns name <<< "$cr"
-              kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            done
-            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-          done
-          kubectl delete -f $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
-          # Force-delete any CRDs that survived the timeout
-          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
-            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
-            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
-          done
-
-          echo "=== Phase 9: Reset hugepages and restart kubelet on worker nodes ==="
-          CLUSTER_ENV="${{ inputs.cluster_environment || 'local' }}"
-          IS_TALOS="false"
-          if kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.osImage}' 2>/dev/null | grep -q "Talos"; then
-            IS_TALOS="true"
-            echo "Detected Talos cluster — skipping kubectl debug node operations"
-          fi
-          IFS=',' read -ra NODES <<< "${{ inputs.worker_nodes }}"
-          # Include the migration target node in cleanup
+          # Combine worker_nodes and migration target for comprehensive cleanup
+          ALL_WORKERS="${{ inputs.worker_nodes }}"
           MIGRATE_NODE="${{ inputs.migrate_to_worker }}"
           if [ -n "$MIGRATE_NODE" ]; then
-            NODES+=("$MIGRATE_NODE")
+            ALL_WORKERS="${ALL_WORKERS},${MIGRATE_NODE}"
           fi
-          for NODE in "${NODES[@]}"; do
-            echo "Resetting hugepages to 0 on $NODE..."
-            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
-              oc debug node/"$NODE" -- chroot /host bash -c \
-                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
-              echo "Cleaning stale simplyblock config on $NODE..."
-              oc debug node/"$NODE" -- chroot /host bash -c \
-                "rm -rf /etc/simplyblock" 2>/dev/null || true
-              echo "Restarting kubelet on $NODE..."
-              oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
-            elif [ "$IS_TALOS" = "true" ]; then
-              echo "Skipping node debug for Talos node $NODE (immutable OS)"
-            else
-              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
-              echo "Cleaning stale simplyblock config on $NODE..."
-              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "rm -rf /etc/simplyblock" 2>/dev/null || true
-              echo "Restarting kubelet on $NODE..."
-              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "systemctl restart kubelet" 2>/dev/null || true
-            fi
-            echo "Done with $NODE"
-          done
 
-          echo "=== Cleanup complete ==="
-
-      - name: Cleanup old cert-manager deployment
-        if: ${{ inputs.use_existing_cluster != 'true' }}
-        run: |
-          set +e
-          echo "=== Uninstalling cert-manager ==="
-          helm uninstall cert-manager -n cert-manager 2>/dev/null || true
-          kubectl delete namespace cert-manager --wait=false 2>/dev/null || true
-          echo "Waiting for cert-manager namespace to be deleted..."
-          kubectl wait --for=delete namespace/cert-manager --timeout=120s 2>/dev/null || true
-          echo "=== Deleting cert-manager CRDs (Helm does not remove CRDs on uninstall) ==="
-          kubectl delete crd \
-            certificaterequests.cert-manager.io \
-            certificates.cert-manager.io \
-            challenges.acme.cert-manager.io \
-            clusterissuers.cert-manager.io \
-            issuers.cert-manager.io \
-            orders.acme.cert-manager.io \
-            --ignore-not-found 2>/dev/null || true
-          echo "=== cert-manager cleanup complete ==="
+          # Run full 12-phase cleanup (handles Helm R25+R26, CRs, CRDs,
+          # cert-manager, kube-system, snapshots, PVCs/PVs, node cleanup,
+          # labels, CSI hostpath data, namespace finalization).
+          # Auto-detects Talos and skips node debug operations.
+          CLUSTER_ENV="${{ inputs.cluster_environment || 'local' }}"
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_upgrade_test.sh \
+            -n simplyblock \
+            -e "$CLUSTER_ENV" \
+            -w "$ALL_WORKERS" \
+            -c "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/"
 
       - name: Cleanup old KMS deployment
         if: ${{ inputs.use_existing_cluster != 'true' }}
@@ -509,25 +437,6 @@ jobs:
           echo "Waiting for vault namespace to be deleted..."
           kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
           echo "=== KMS cleanup complete ==="
-
-      # ── Remove stale labels from previous runs ──────────────────────────────
-
-      - name: Remove stale storagenodeset labels from all worker nodes
-        if: ${{ inputs.use_existing_cluster != 'true' }}
-        run: |
-          echo "Removing stale io.simplyblock.storagenodeset label from all worker nodes..."
-          # Remove from initial workers
-          IFS=',' read -ra NODES <<< "${{ inputs.worker_nodes }}"
-          # Include the migration target
-          MIGRATE_NODE="${{ inputs.migrate_to_worker }}"
-          if [ -n "$MIGRATE_NODE" ]; then
-            NODES+=("$MIGRATE_NODE")
-          fi
-          for NODE in "${NODES[@]}"; do
-            echo "Removing storagenodeset label from $NODE"
-            kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
-          done
-          echo "Stale label cleanup complete."
 
       # ── Label nodes ─────────────────────────────────────────────────────────
 
@@ -612,9 +521,11 @@ jobs:
           MINIO_ACCESS_KEY="minioadmin"
           MINIO_SECRET_KEY="minioadmin"
 
-          # Check if external MinIO is reachable
-          if curl -sf --connect-timeout 5 "${EXTERNAL_MINIO}/minio/health/live" >/dev/null 2>&1; then
-            echo "=== External MinIO at ${EXTERNAL_MINIO} is reachable ==="
+          # Check if external MinIO is reachable FROM INSIDE the cluster
+          # (runner can always reach it, but cluster nodes/pods may not)
+          if kubectl run minio-check --rm -i --restart=Never --image=busybox:latest \
+              --timeout=30s -- wget -q -O /dev/null -T 5 "${EXTERNAL_MINIO}/minio/health/live" >/dev/null 2>&1; then
+            echo "=== External MinIO at ${EXTERNAL_MINIO} is reachable from cluster ==="
             MINIO_ENDPOINT="${EXTERNAL_MINIO}"
             echo "MINIO_SOURCE=external" >> "$GITHUB_ENV"
           else
@@ -919,29 +830,6 @@ jobs:
           echo "Waiting for vault pods to be ready..."
           kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s || true
           echo "KMS setup complete."
-
-      - name: Cleanup stale CSI hostpath data on worker nodes
-        if: ${{ inputs.use_existing_cluster != 'true' }}
-        run: |
-          CLUSTER_ENV="${{ inputs.cluster_environment || 'local' }}"
-          IS_TALOS="false"
-          if kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.osImage}' 2>/dev/null | grep -q "Talos"; then
-            IS_TALOS="true"
-          fi
-          IFS=',' read -ra NODES <<< "${{ inputs.worker_nodes }}"
-          for NODE in "${NODES[@]}"; do
-            echo "Cleaning stale CSI hostpath data on $NODE..."
-            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
-              oc debug node/"$NODE" -- chroot /host bash -c \
-                "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
-            elif [ "$IS_TALOS" = "true" ]; then
-              echo "Skipping CSI hostpath cleanup for Talos node $NODE (immutable OS)"
-            else
-              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
-            fi
-          done
-          echo "CSI hostpath data cleanup complete."
 
       - name: Apply operator custom resources
         if: ${{ inputs.use_existing_cluster != 'true' }}
