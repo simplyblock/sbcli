@@ -454,6 +454,21 @@ jobs:
               targetPort: 9000
           MINIOYAML
 
+            echo "Waiting for MinIO pod to appear..."
+            for i in $(seq 1 30); do
+              if kubectl get pod -l app=minio -n minio --no-headers 2>/dev/null | grep -q .; then
+                echo "MinIO pod found"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "ERROR: MinIO pod never appeared. Deployment status:"
+                kubectl -n minio describe deployment minio
+                kubectl -n minio get events --sort-by='.lastTimestamp' | tail -20
+                exit 1
+              fi
+              echo "  Waiting for pod ($i/30)..."
+              sleep 5
+            done
             echo "Waiting for MinIO pod to be ready..."
             kubectl wait --for=condition=ready pod -l app=minio -n minio --timeout=120s
 
