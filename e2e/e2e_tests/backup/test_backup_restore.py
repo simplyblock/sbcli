@@ -1049,21 +1049,45 @@ class BackupTestBase(TestClusterBase):
 
     # ── lvol property verification ────────────────────────────────────────────
 
+    def _resolve_mgmt_lvol_id(self, lvol_id: str) -> str:
+        """Resolve a lvol identifier to its management-plane UUID.
+
+        In k8s mode, ``_get_lvol_id`` returns the PVC name which is not
+        recognised by ``sbctl lvol get``.  This helper resolves the PVC
+        name to the actual lvol UUID via PVC → PV → CSI volumeHandle.
+
+        In docker mode, *lvol_id* is already a UUID and is returned as-is.
+        """
+        if not self.k8s_test:
+            return lvol_id
+        k8s = self._ensure_k8s_utils()
+        pvc_name = self._k8s_normalize_name(lvol_id)
+        vol_handle = k8s.get_pvc_volume_handle(pvc_name)
+        if vol_handle:
+            self.logger.info(
+                f"[mgmt] Resolved PVC '{pvc_name}' → volumeHandle '{vol_handle}'")
+            return vol_handle
+        self.logger.warning(
+            f"[mgmt] Could not resolve volumeHandle for PVC '{pvc_name}', "
+            f"falling back to '{lvol_id}'")
+        return lvol_id
+
     def _verify_lvol_crypto(self, lvol_id: str, label: str = ""):
         """Assert that the lvol has crypto enabled via API details.
 
         Returns the details dict for further checks if needed.
         """
-        details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        mgmt_id = self._resolve_mgmt_lvol_id(lvol_id)
+        details = self.sbcli_utils.get_lvol_details(lvol_id=mgmt_id)
         assert details and isinstance(details, (dict, list)), (
-            f"{label}: get_lvol_details returned invalid result for {lvol_id}: {details!r}")
+            f"{label}: get_lvol_details returned invalid result for {mgmt_id}: {details!r}")
         d = details[0] if isinstance(details, list) else details
         assert isinstance(d, dict), (
             f"{label}: expected dict for lvol details but got {type(d).__name__}: {d!r}")
         crypto_val = d.get("crypto_bdev") or d.get("crypto") or d.get("encryption")
-        self.logger.info(f"{label}: lvol {lvol_id} crypto_bdev={crypto_val}")
+        self.logger.info(f"{label}: lvol {mgmt_id} crypto_bdev={crypto_val}")
         assert crypto_val, (
-            f"{label}: restored lvol {lvol_id} expected crypto_bdev to be set, "
+            f"{label}: restored lvol {mgmt_id} expected crypto_bdev to be set, "
             f"got {crypto_val!r}. Full details: {d}")
         return d
 
@@ -1073,15 +1097,16 @@ class BackupTestBase(TestClusterBase):
         This verifies the restored lvol preserves DHCHAP authentication.
         Returns the connect output for further inspection if needed.
         """
-        connect_out, _ = self._sbcli(f"volume connect {lvol_id}")
+        mgmt_id = self._resolve_mgmt_lvol_id(lvol_id)
+        connect_out, _ = self._sbcli(f"volume connect {mgmt_id}")
         self.logger.info(f"{label}: connect output: {connect_out[:300]}")
         has_dhchap = (
             "--dhchap-secret" in connect_out
             or "--dhchap-ctrl-secret" in connect_out
         )
-        self.logger.info(f"{label}: lvol {lvol_id} has_dhchap={has_dhchap}")
+        self.logger.info(f"{label}: lvol {mgmt_id} has_dhchap={has_dhchap}")
         assert has_dhchap, (
-            f"{label}: restored lvol {lvol_id} expected DHCHAP keys in "
+            f"{label}: restored lvol {mgmt_id} expected DHCHAP keys in "
             f"connect string, but none found: {connect_out}")
         return connect_out
 
@@ -4484,14 +4509,21 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
         self.logger.info("TC-BCK-118: pool and all resources deleted ✓")
 
         # TC-BCK-119: recreate pool with same name
+        # Reset pool_name to the original base name to avoid the
+        # "simplyblock-" CRD prefix being applied twice (add_storage_pool
+        # always prepends "simplyblock-" to the pool_name).
+        self.pool_name = "bck_test_pool"
         self.logger.info("TC-BCK-119: recreate storage pool")
         self._ensure_pool_and_sc()
-        self.logger.info("TC-BCK-119: pool recreated ✓")
+        self.logger.info(f"TC-BCK-119: pool recreated as '{self.pool_name}' ✓")
 
         # TC-BCK-120: restore backup into new pool
+        # Explicitly pass target pool so the BackupRestore CR includes
+        # targetPool — needed because the new pool has a different UUID
+        # than the one referenced in the backup metadata.
         self.logger.info("TC-BCK-120: restore backup into new pool")
         restored_name = f"pool_rest_{_rand_suffix()}"
-        self._restore_backup(bk_id, restored_name)
+        self._restore_backup(bk_id, restored_name, pool_name=self.pool_name)
         self._wait_for_restore(restored_name)
         self.logger.info(f"TC-BCK-120: {restored_name} restored into new pool ✓")
 
