@@ -28,6 +28,16 @@ class StatsObject(BaseModel):
     size_total: int = 0
     size_used: int = 0
     size_util: int = 0
+    # size_total/size_used/size_free above are EFFECTIVE (client-visible)
+    # bytes at every level, so they are directly comparable with size_prov
+    # (the sum of provisioned lvol sizes) and with the lvol/snapshot figures.
+    # The raw (physical, parity-inclusive) numbers the devices actually
+    # reported are kept here; see simplyblock_core.utils.capacity. Zero on
+    # records written before this split existed, and on levels whose collector
+    # does not measure raw capacity (lvol, pool).
+    size_total_raw: int = 0
+    size_used_raw: int = 0
+    size_free_raw: int = 0
     unmap_bytes: int = 0
     unmap_bytes_ps: int = 0
     unmap_io: int = 0
