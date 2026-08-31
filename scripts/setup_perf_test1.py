@@ -602,11 +602,20 @@ def main():
             t.result()
     print("Phase 2b: DONE - all SNs configured.")
 
+    # Detached, like 2a -- but for a different reason than 2a's load spike.
+    # `sn deploy` leaves the SNodeAPI container running, and a plain
+    # exec_command hands that daemon the channel's stdout, so the pipe never
+    # reaches EOF: stdout.read() blocks past the command's own exit and dies
+    # on paramiko's inactivity timeout instead. Observed 2026-08-31 -- all six
+    # nodes had SNodeAPI up and answering 200 by 19:04, and the deploy still
+    # aborted at 2c with TimeoutError, discarding a cluster that was fine.
+    # Redirecting to a file detaches the daemon from the channel.
     print("Phase 2c: Deploying storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
-        tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}"
-        ], check=True) for ip in sn_ips]
+        tasks = [executor.submit(
+            ssh_exec_detached, ip,
+            f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}",
+            label="sn deploy") for ip in sn_ips]
         for t in tasks:
             t.result()
     print("Phase 2c: DONE - all SNs deployed. Rebooting...")
