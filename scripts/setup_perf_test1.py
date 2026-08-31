@@ -45,7 +45,11 @@ SN_TYPE = "i3en.2xlarge"
 #: NOTE ultra publishes per-arch "<branch>-<sha>-amd64" tags for main, but the
 #: dbg-main branch has only the plain "<branch>-<sha>" tag -- appending -amd64
 #: gives a 404. dbg-main-84cece66 is itself a single linux/amd64 manifest.
-SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:dbg-main-84cece66"
+#: Empty on purpose: sn add-node then omits --spdk-image and the nodes take
+#: the control-plane default from simplyblock_core/env_var, which is where
+#: the dbg-main pin lives. A value here would silently override env_var and
+#: the two could drift apart.
+SPDK_IMAGE = ""
 
 
 #: Dedicated client disk for fio --write_iolog history. 300 GB holds ~3h at
