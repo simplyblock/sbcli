@@ -3473,7 +3473,7 @@ class K8sSbcliUtils:
         return self.list_storage_pools().get(pool_name)
 
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
-                         max_r_mbytes=0, max_w_mbytes=0):
+                         max_r_mbytes=0, max_w_mbytes=0, dhchap=False, allowed_nodes=None):
         """Use an existing pool if any exist; only create via kubectl if none exist.
 
         Returns the actual pool name to use (may differ from *pool_name* if an
@@ -3542,6 +3542,12 @@ class K8sSbcliUtils:
                 f"spec:\n"
                 f"  clusterName: {cluster_name}\n"
             )
+            if dhchap:
+                yaml_content += f"  dhchap: true\n"
+            if allowed_nodes:
+                yaml_content += f"  allowedNodes:\n"
+                for node_name in allowed_nodes:
+                    yaml_content += f"    - {node_name}\n"
 
             self.logger.info(
                 f"[pool] No pools found — creating '{pool_name}' "
