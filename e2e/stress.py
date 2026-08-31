@@ -5,7 +5,7 @@ import os
 import time
 import subprocess
 import shutil
-from __init__ import get_stress_tests
+from __init__ import get_stress_tests, get_backup_stress_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -50,7 +50,7 @@ def main():
                         default=False)
     args = parser.parse_args()
     
-    tests = get_stress_tests()
+    tests = get_stress_tests() + get_backup_stress_tests()
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
