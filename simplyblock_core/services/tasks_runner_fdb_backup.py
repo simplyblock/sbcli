@@ -45,21 +45,22 @@ def process_fdb_backup_task(task):
 
 
 
-logger.info("Starting Tasks runner fdb backup...")
+if __name__ == "__main__":
+    logger.info("Starting Tasks runner fdb backup...")
 
-while True:
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            if cl.status == Cluster.STATUS_IN_ACTIVATION:
-                continue
+    while True:
+        clusters = db.get_clusters()
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                if cl.status == Cluster.STATUS_IN_ACTIVATION:
+                    continue
 
-            tasks = db.get_job_tasks(cl.get_id())
-            for task in tasks:
-                if task.status != JobSchedule.STATUS_DONE:
-                    if task.function_name == JobSchedule.FN_FDB_BACKUP:
-                        process_fdb_backup_task(task)
+                tasks = db.get_job_tasks(cl.get_id())
+                for task in tasks:
+                    if task.status != JobSchedule.STATUS_DONE:
+                        if task.function_name == JobSchedule.FN_FDB_BACKUP:
+                            process_fdb_backup_task(task)
 
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
