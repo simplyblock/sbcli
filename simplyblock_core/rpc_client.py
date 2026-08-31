@@ -1952,8 +1952,8 @@ class RPCClient:
         }
         # Send the key only when opting in: the RPC parameter is optional on the
         # SPDK side, so every existing caller keeps its exact current wire form.
-        if allow_partial:
-            params["allow_partial"] = True
+        # if allow_partial:
+        #     params["allow_partial"] = True
         return self._request("bdev_lvol_transfer", params)
 
     def bdev_lvol_transfer_stat(self, name):
