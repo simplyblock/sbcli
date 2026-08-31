@@ -39,6 +39,39 @@ jobs:
         fi
 
 
+  env-var:
+    name: Deployment image pins
+    runs-on: ubuntu-latest
+    # env_var pins the images built from the branch it sits on, so its tags can
+    # only be checked on the long-lived branches. Keep in sync with the push
+    # trigger above.
+    if: contains(fromJSON('["main", "R26.2-PRE"]'), github.base_ref || github.ref_name)
+
+    steps:
+    - uses: actions/checkout@v7
+
+    # A test image pinned here ships to everyone deploying from this branch, and
+    # is regularly forgotten in a merge. Only the tag is checked: the registry
+    # has legitimately differed per branch.
+    - name: Checking env_var image pins
+      env:
+        BRANCH: ${{ github.base_ref || github.ref_name }}
+      run: |
+        docker_image="$(sed -n 's|^SIMPLY_BLOCK_DOCKER_IMAGE=||p' simplyblock_core/env_var)"
+        ultra_image="$(sed -n 's|^SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=||p' simplyblock_core/env_var)"
+
+        status=0
+        if [[ "${docker_image}" != */*:"${BRANCH}" ]]; then
+          echo "::error file=simplyblock_core/env_var::SIMPLY_BLOCK_DOCKER_IMAGE is ${docker_image:-unset}, expected an image tagged ${BRANCH}. Revert the test pin before merging."
+          status=1
+        fi
+        if [[ "${ultra_image}" != */*:"${BRANCH}" && "${ultra_image}" != */*:"${BRANCH}-latest" ]]; then
+          echo "::error file=simplyblock_core/env_var::SIMPLY_BLOCK_SPDK_ULTRA_IMAGE is ${ultra_image:-unset}, expected an image tagged ${BRANCH} or ${BRANCH}-latest. Revert the test pin before merging."
+          status=1
+        fi
+        exit "${status}"
+
+
   lint:
     name: Linter
     runs-on: ubuntu-latest
