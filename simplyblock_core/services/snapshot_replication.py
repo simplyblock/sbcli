@@ -293,6 +293,8 @@ def _await_transfer_completion(task, snapshot, snode):
             return _finish_completed_transfer(task, snapshot, ret.get("offset"))
         if state == "Failed":
             return False              # the pass-based path records the retry
+        if state == "No process":
+            return False              # transfer never started; pass-based path retries
         time.sleep(constants.REPL_XFER_POLL_INTERVAL_SEC)
     xfer_timing.stamp("inline_wait_expired", snap=snapshot.get_id(),
                       lvol=snapshot.lvol.get_id(), budget=budget)
