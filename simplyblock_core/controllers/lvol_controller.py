@@ -19,6 +19,7 @@ from simplyblock_core.controllers.host_auth import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.utils import capacity
 from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
@@ -504,20 +505,27 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     if pool.has_qos():
         host_node = db_controller.get_storage_node_by_id(pool.qos_host)
 
-    cluster_size_prov = 0
-    cluster_size_total = 0
-    cluster_size_prov += sum([lv.size for lv in all_lvols])
+    # Effective (client-visible) bytes: LVol.size is the logical size the client
+    # sees, never the raw cost of storing it.
+    cluster_size_prov = sum([lv.size for lv in all_lvols])
 
     dev_count = 0
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
     online_nodes = []
+    cluster_size_total_raw = 0
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             online_nodes.append(node)
             for dev in node.nvme_devices:
                 if dev.status == dev.STATUS_ONLINE:
                     dev_count += 1
-                    cluster_size_total += dev.size
+                    cluster_size_total_raw += dev.size
+    # NVMeDevice.size is RAW (physical, parity-inclusive); cluster_size_prov is
+    # the sum of provisioned lvol sizes, which is EFFECTIVE. Comparing them
+    # directly understated provisioned utilisation by (ndcs+npcs)/ndcs -- 1.5x on
+    # a 4+2 cluster -- so prov_cap_crit/prov_cap_warn admitted over-commits they
+    # were configured to reject.
+    cluster_size_total = capacity.to_effective(cluster_size_total_raw, cl)
 
     if len(online_nodes) == 0:
         logger.error("No online Storage nodes found")
@@ -545,6 +553,15 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             mgs = f"Online storage nodes: {len(online_nodes)} are less than the required LVol geometry: {(ndcs+npcs)}"
             logger.error(mgs)
             return False, mgs
+
+    if cluster_size_total <= 0:
+        # Every online device reported zero usable capacity: no meaningful
+        # utilisation to compute, and dividing would raise. dev_count > 0 above
+        # already proved there are online devices, so this is a real anomaly
+        # rather than an empty cluster.
+        msg = "Cluster has no effective capacity (online devices report zero size)"
+        logger.error(msg)
+        return False, msg
 
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 

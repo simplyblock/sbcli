@@ -1344,7 +1344,12 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             return False, msg
 
     records = db_controller.get_cluster_capacity(cluster, 1)
-    if records:
+    if records and records[0].size_total > 0:
+        # Both operands are EFFECTIVE (client-visible) bytes: size_prov is the
+        # sum of provisioned lvol sizes, and size_total is parity-adjusted at
+        # collection time (see simplyblock_core.utils.capacity). size_total is
+        # zero on a cluster whose collector has not yet reported any device --
+        # skip the check rather than dividing by it.
         rec = records[0]
         cluster_size_prov_util = int(((rec.size_prov+size) / rec.size_total) * 100)
 
