@@ -267,15 +267,28 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
         ret = src_rpc.bdev_lvol_transfer_final_step(
             src_lvol_composite, tgt_map_id, tgt_snap_composite,
             _FINAL_STEP_BATCH, hub_bdev, operation)
-    if ret is None:
+    # The RPC can return normally (no exception) while still reporting the
+    # transfer failed -- transfer_state is one of "No process" | "In progress" |
+    # "Failed" | "Done".  Checking only for None lets a "Failed" response slip
+    # through to the ANA flip as if the data had moved (seen 2026-08-31,
+    # lvol=1fc7911f: {"transfer_state": "Failed"} logged, then [IO-RESUME]
+    # fired unconditionally, leaving the target with missing delta data).
+    transfer_state = ret.get("transfer_state") if isinstance(ret, dict) else None
+    if transfer_state != "Done":
         # The freeze failed with the source fenced: restore the source paths so
         # the client resumes there (nothing moved; source is still authoritative)
         # rather than leaving the volume dark until a retry succeeds.
+        logger.error(
+            f"bdev_lvol_transfer_final_step: transfer_state={transfer_state!r} "
+            f"(expected 'Done'): {ret!r} lvol={lvol.uuid}")
         with xfer_timing.phase("restore_source_paths", lvol=lvol.get_id()):
             restore_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id)
         xfer_timing.gap("freeze_total", _freeze_started, lvol=lvol.get_id(),
                         aborted=1)
-        return False, "bdev_lvol_transfer_final_step failed"
+        return False, (
+            f"bdev_lvol_transfer_final_step: transfer_state={transfer_state!r}"
+            f" (expected 'Done'): {ret!r}"
+        )
     logger.info(f"[IO-RESUME] final step Done: lvol={lvol.uuid} io now live on target")
 
     # Link the final lvol to its predecessor snapshot on the target peers.
