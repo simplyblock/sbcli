@@ -429,6 +429,18 @@ NODE_ADD_MAX_PARALLEL=8
 # per-node exclusivity is enforced by the dispatch _node_inflight map.
 NODE_RESTART_MAX_PARALLEL_SUSPENDED=32
 
+# Max concurrent tasks each migration task-runner (tasks_runner_lvol_migration.py,
+# tasks_runner_batch_migration.py) processes per sweep, instead of the old
+# strictly-sequential for-loop. Under load, sweep time used to scale linearly
+# with active task count, so a worker's own completed work sat unnoticed for
+# 17-33s on average (measured; up to 113 min of dead time across one 6h run)
+# before the next sweep got back around to it. 16 matches the per-node SPDK
+# proxy's own concurrency ceiling (spdk_http_proxy_server.py MAX_CONCURRENT_SPDK) —
+# a larger pool buys nothing against any single node, only against spreading
+# tasks across many different nodes/groups at once.
+LVOL_MIGRATION_MAX_PARALLEL=16
+BATCH_MIGRATION_MAX_PARALLEL=16
+
 # Global cap on concurrently-RUNNING connect/reconnect worker threads across
 # ALL parallel node restarts. A whole-failure-domain reboot dispatches up to
 # NODE_RESTART_MAX_PARALLEL_SUSPENDED restarts, each fanning out per-peer /

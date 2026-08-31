@@ -40,6 +40,7 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from simplyblock_core import constants, db_controller as db_mod, utils
@@ -59,6 +60,7 @@ from simplyblock_core.services.tasks_runner_lvol_migration import (
     _lvol_tgt_bdev_name,
     _build_paths,
     _ensure_and_prune_target_paths,
+    _cached,
 )
 
 logger = utils.get_logger(__name__)
@@ -674,6 +676,31 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                                 f"{tgt['node_id'][:8]} (non-fatal): {e}")
 
 
+def _reset_intermediate_round(group):
+    """Atomically bump group.intermediate_round and clear the per-round
+    signal lists (intermediates_done / intermediate_more_needed).
+
+    A plain read/mutate/write here races against a group worker (running on
+    the OTHER task-runner process, tasks_runner_lvol_migration.py, possibly
+    on a different pool thread there too) concurrently appending to
+    intermediates_done -- the worker's signal could land between this read
+    and this write and get silently dropped by the reset. atomic_update
+    re-reads fresh inside the same FDB transaction, so it always sees
+    whatever the worker most recently committed.
+
+    Returns the fresh post-mutation group; callers must use this returned
+    object for anything read right after the reset (e.g. intermediate_round
+    in a log line), not the stale one passed in.
+    """
+    def _mutate(g):
+        g.intermediate_round += 1
+        g.intermediates_done = []
+        g.intermediate_more_needed = []
+        return True
+    fresh = db.atomic_update(group, _mutate)
+    return fresh if fresh is not None else group
+
+
 def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc):
     """
     Wait for all workers to reach intermediates_done, then call
@@ -692,10 +719,7 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     # delta was already low -- up to the round cap.
     if (group.intermediate_more_needed
             and group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS):
-        group.intermediate_round += 1
-        group.intermediates_done = []
-        group.intermediate_more_needed = []
-        group.write_to_db(db.kv_store)
+        group = _reset_intermediate_round(group)
         logger.info(
             f"Group {group.uuid[:8]}: dirty delta still high after round "
             f"{group.intermediate_round}/{constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS}; "
@@ -827,10 +851,7 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         # path once the round cap is hit, so a persistently failing group
         # still eventually resolves instead of looping forever.
         if group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS:
-            group.intermediate_round += 1
-            group.intermediates_done = []
-            group.intermediate_more_needed = []
-            group.write_to_db(db.kv_store)
+            group = _reset_intermediate_round(group)
 
             # bdev_lvol_set_migration_flag drives the distrib-level special_io
             # machinery for the target bdev (see snapshot_replication.py's
@@ -1070,9 +1091,13 @@ def _batch_budget_suspend(task, group, group_id, error_msg):
 # Main task runner
 # ---------------------------------------------------------------------------
 
-def task_runner(task):
+def task_runner(task, node_cache=None, cluster_cache=None):
     """
     Process one iteration of a FN_LVOL_BATCH_MIG task.
+
+    node_cache/cluster_cache are optional per-sweep dicts (built once by
+    main() per cluster pass) so multiple groups sharing the same handful of
+    nodes/cluster in one sweep don't each re-fetch them from FDB.
 
     Returns True if the task reached a terminal state (done/failed/cancelled),
     False if it should be retried on the next runner loop iteration.
@@ -1103,13 +1128,13 @@ def task_runner(task):
         return True
 
     try:
-        src_node = db.get_storage_node_by_id(group.source_node_id)
+        src_node = _cached(node_cache, db.get_storage_node_by_id, group.source_node_id)
     except KeyError:
         return _batch_budget_suspend(
             task, group, group_id, f"source node {group.source_node_id} not found")
 
     try:
-        tgt_node = db.get_storage_node_by_id(group.target_node_id)
+        tgt_node = _cached(node_cache, db.get_storage_node_by_id, group.target_node_id)
     except KeyError:
         return _batch_budget_suspend(
             task, group, group_id, f"target node {group.target_node_id} not found")
@@ -1120,7 +1145,7 @@ def task_runner(task):
         LVolMigrationGroup.PHASE_CLEANUP_SOURCE,
     )
 
-    cluster = db.get_cluster_by_id(group.cluster_id)
+    cluster = _cached(cluster_cache, db.get_cluster_by_id, group.cluster_id)
     if cluster.status not in Cluster.MUTABLE_STATUSES:
         if not _is_cleanup_phase:
             task.function_result = f"cluster not active (status={cluster.status})"
@@ -1303,6 +1328,37 @@ def task_runner(task):
 # Runner main loop
 # ---------------------------------------------------------------------------
 
+# Bounded pool for per-group work, mirroring tasks_runner_restart.py's
+# _restart_pool and tasks_runner_lvol_migration.py's own _pool. _inflight
+# guards against the next sweep (3s later) re-submitting a task whose
+# previous invocation is still running -- claim_task's lease only protects
+# against a DIFFERENT HOST driving the same task concurrently, not this same
+# process dispatching it twice. No per-group hazard beyond that: each task
+# here drives exactly one distinct group, never two tasks sharing a group.
+_pool = ThreadPoolExecutor(max_workers=constants.BATCH_MIGRATION_MAX_PARALLEL,
+                           thread_name_prefix="batch-migration")
+_inflight: dict = {}  # task uuid -> Future
+
+
+def _process_task(task_uuid, node_cache, cluster_cache):
+    """Claim and drive one task. Never raises: a crash in one task must not
+    kill the pool or delay processing of every other group."""
+    try:
+        task = db.get_task_by_id(task_uuid)
+        if task.status == JobSchedule.STATUS_DONE:
+            return
+        # Lease gate: skip a task another live runner host owns, so two
+        # replicas can't both drive the same batch migration's multi-phase
+        # data-plane state-machine concurrently.
+        if not tasks_controller.claim_task(task):
+            logger.info(f"Batch-migration task {task_uuid} owned by another runner host; skipping")
+            return
+        with tasks_controller.task_lease_heartbeat(task):
+            task_runner(task, node_cache=node_cache, cluster_cache=cluster_cache)
+    except Exception:
+        logger.exception(f"Unhandled error processing task {task_uuid}")
+
+
 def main():
     logger.info("Starting Batch Migration orchestrator task runner...")
 
@@ -1318,15 +1374,16 @@ def main():
             logger.error("No clusters found!")
         else:
             for cl in clusters:
+                # Fresh per-cluster-per-sweep cache: many groups in the same
+                # sweep typically share the same handful of nodes/cluster.
+                node_cache: dict = {}
+                cluster_cache: dict = {}
                 for task in db.get_active_batch_migration_tasks(cl.get_id()):
-                    # Lease gate: skip a task another live runner host owns, so
-                    # two replicas can't both drive the same batch migration's
-                    # multi-phase data-plane state-machine concurrently.
-                    if not tasks_controller.claim_task(task):
-                        logger.info(f"Batch-migration task {task.uuid} owned by another runner host; skipping")
+                    inflight = _inflight.get(task.uuid)
+                    if inflight is not None and not inflight.done():
                         continue
-                    with tasks_controller.task_lease_heartbeat(task):
-                        task_runner(task)
+                    _inflight[task.uuid] = _pool.submit(
+                        _process_task, task.uuid, node_cache, cluster_cache)
 
         time.sleep(3)
 

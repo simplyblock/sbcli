@@ -482,6 +482,11 @@ def _spec_batch_migration(runner, monkeypatch):
     monkeypatch.setattr(runner, "_delete_target_subsystem", MagicMock())
     monkeypatch.setattr(runner, "migration_events", MagicMock())
     monkeypatch.setattr(runner, "tasks_events", MagicMock())
+    # main() fans each sweep's tasks out onto _pool; run them in-process so
+    # retry accrues deterministically within this test's own loop iterations
+    # instead of racing a background thread.
+    monkeypatch.setattr(runner, "_pool", _InlineExecutor())
+    monkeypatch.setattr(runner, "_inflight", {})
     return task
 
 
