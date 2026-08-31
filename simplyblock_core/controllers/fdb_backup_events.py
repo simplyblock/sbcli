@@ -17,7 +17,7 @@ def _backup_event(cluster_id, backup_name, message, caused_by, event):
 
 
 def fdb_backup_created(cluster_id, caused_by=ec.CAUSED_BY_CLI):
-    _backup_event(cluster_id, "",f"FDB Backup created", caused_by, ec.EVENT_OBJ_CREATED)
+    _backup_event(cluster_id, "","FDB Backup created", caused_by, ec.EVENT_OBJ_CREATED)
 
 
 def fdb_backup_restored(cluster_id, backup_name, caused_by=ec.CAUSED_BY_CLI):
