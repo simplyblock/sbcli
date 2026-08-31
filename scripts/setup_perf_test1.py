@@ -567,7 +567,7 @@ def main():
         "sudo dnf install git python3-pip nvme-cli -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        "sudo pip install git+https://github.com/simplyblock-io/sbcli@main --upgrade --force --ignore-installed requests",
+        f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH} --upgrade --force --ignore-installed requests",
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc"
     ]
 
