@@ -22,7 +22,8 @@
 # --iolog-keep-hours (default 1) via iolog_trimmer.sh, because unbounded it is
 # gigabytes per volume per hour. Set WRITE_IOLOG=0 to turn it off.
 #
-# Env: ITERATIONS, RUNTIME, START_ITERATION, RESTART_TIMEOUT, PLACEMENT_DUMPS,
+# Env: ITERATIONS, RUNTIME, START_ITERATION, RESTART_TIMEOUT, AUTO_RECOVER_WAIT,
+#      PLACEMENT_DUMPS,
 #      DATA_NIC, WRITE_IOLOG (default 1), IOLOG_KEEP_HOURS (default 1).
 set -u
 cd "$HOME"
@@ -46,6 +47,7 @@ setsid nohup python3 "$HOME/aws_dual_node_outage_soak_multipath.py" \
     --start-iteration "${START_ITERATION:-1}" \
     ${PLACEMENT_DUMPS:+--placement-dumps} \
     ${RESTART_TIMEOUT:+--restart-timeout $RESTART_TIMEOUT} \
+    ${AUTO_RECOVER_WAIT:+--auto-recover-wait $AUTO_RECOVER_WAIT} \
     ${IOLOG_ARGS} \
     --runtime "${RUNTIME:-52000}" \
     --log-file "$LOG" \
