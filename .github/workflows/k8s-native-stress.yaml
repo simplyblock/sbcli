@@ -114,6 +114,14 @@ on:
         required: false
         default: true
         type: boolean
+      cluster_security:
+        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled when testname contains 'backup'."
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - backup
 
 jobs:
   stress-test:
@@ -452,6 +460,165 @@ jobs:
             pod-security.kubernetes.io/audit=privileged \
             --overwrite
 
+      # ── Deploy MinIO for backup tests (conditional) ────────────────────────
+
+      - name: Setup MinIO for backup tests
+        if: >-
+          ${{
+            github.event.inputs.use_existing_cluster != 'true' &&
+            (github.event.inputs.cluster_security == 'backup' ||
+             contains(github.event.inputs.testname, 'Backup') ||
+             contains(github.event.inputs.testname, 'backup'))
+          }}
+        run: |
+          set -euxo pipefail
+          NAMESPACE=simplyblock
+          EXTERNAL_MINIO="http://192.168.10.164:9000"
+          MINIO_ACCESS_KEY="minioadmin"
+          MINIO_SECRET_KEY="minioadmin"
+
+          # Check if external MinIO is reachable FROM INSIDE the cluster
+          if kubectl run minio-check --rm -i --restart=Never --image=busybox:latest \
+              --timeout=30s -- wget -q -O /dev/null -T 5 "${EXTERNAL_MINIO}/minio/health/live" >/dev/null 2>&1; then
+            echo "=== External MinIO at ${EXTERNAL_MINIO} is reachable from cluster ==="
+            MINIO_ENDPOINT="${EXTERNAL_MINIO}"
+            echo "MINIO_SOURCE=external" >> "$GITHUB_ENV"
+          else
+            echo "=== External MinIO unreachable, deploying in-cluster MinIO ==="
+            kubectl create namespace minio --dry-run=client -o yaml | kubectl apply -f -
+            kubectl label namespace minio \
+              pod-security.kubernetes.io/enforce=privileged \
+              pod-security.kubernetes.io/warn=privileged \
+              pod-security.kubernetes.io/audit=privileged \
+              --overwrite
+
+            # On OpenShift, grant the default SA the anyuid SCC so MinIO can run
+            if kubectl api-resources | grep -q securitycontextconstraints; then
+              oc adm policy add-scc-to-user anyuid -z default -n minio 2>/dev/null || true
+            fi
+
+            cat <<'MINIOYAML' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: minio
+            template:
+              metadata:
+                labels:
+                  app: minio
+              spec:
+                containers:
+                - name: minio
+                  image: minio/minio:latest
+                  args: ["server", "/data"]
+                  ports:
+                  - containerPort: 9000
+                  env:
+                  - name: MINIO_ROOT_USER
+                    value: minioadmin
+                  - name: MINIO_ROOT_PASSWORD
+                    value: minioadmin
+                  volumeMounts:
+                  - name: data
+                    mountPath: /data
+                volumes:
+                - name: data
+                  emptyDir: {}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            selector:
+              app: minio
+            ports:
+            - port: 9000
+              targetPort: 9000
+          MINIOYAML
+
+            echo "Waiting for MinIO pod to appear..."
+            for i in $(seq 1 30); do
+              if kubectl get pod -l app=minio -n minio --no-headers 2>/dev/null | grep -q .; then
+                echo "MinIO pod found"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "ERROR: MinIO pod never appeared. Deployment status:"
+                kubectl -n minio describe deployment minio
+                kubectl -n minio get events --sort-by='.lastTimestamp' | tail -20
+                exit 1
+              fi
+              echo "  Waiting for pod ($i/30)..."
+              sleep 5
+            done
+            echo "Waiting for MinIO pod to be ready..."
+            kubectl wait --for=condition=ready pod -l app=minio -n minio --timeout=120s
+
+            # Port-forward to make MinIO accessible from the runner
+            kubectl port-forward -n minio svc/minio 9000:9000 &
+            echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+            sleep 3
+
+            MINIO_ENDPOINT="http://minio.minio.svc.cluster.local:9000"
+            echo "MINIO_SOURCE=in-cluster" >> "$GITHUB_ENV"
+          fi
+
+          echo "MINIO_ENDPOINT=${MINIO_ENDPOINT}" >> "$GITHUB_ENV"
+
+          # Create backup-credentials K8s Secret in cluster namespace
+          cat <<CREDEOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: backup-credentials
+            namespace: ${NAMESPACE}
+          type: Opaque
+          stringData:
+            access_key_id: ${MINIO_ACCESS_KEY}
+            secret_access_key: ${MINIO_SECRET_KEY}
+          CREDEOF
+
+          echo "=== MinIO setup complete (source=${MINIO_SOURCE:-external}, endpoint=${MINIO_ENDPOINT}) ==="
+
+      - name: Start MinIO trace logging
+        if: >-
+          ${{
+            github.event.inputs.use_existing_cluster != 'true' &&
+            (github.event.inputs.cluster_security == 'backup' ||
+             contains(github.event.inputs.testname, 'Backup') ||
+             contains(github.event.inputs.testname, 'backup'))
+          }}
+        run: |
+          set -euxo pipefail
+
+          # 1. Install mc (MinIO Client)
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          export PATH="/tmp:$PATH"
+
+          # 2. Configure mc alias — for in-cluster MinIO use localhost (port-forward)
+          if [ "${MINIO_SOURCE:-external}" = "in-cluster" ]; then
+            mc alias set myminio http://localhost:9000 minioadmin minioadmin
+          else
+            mc alias set myminio http://192.168.10.164:9000 minioadmin minioadmin
+          fi
+
+          # 3. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
       - name: Create Docker registry secret
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
@@ -750,6 +917,22 @@ jobs:
             WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
           done
 
+          # Conditionally build backup spec block
+          BACKUP_SPEC=""
+          CLUSTER_SEC="${{ github.event.inputs.cluster_security || 'none' }}"
+          TESTNAME_INPUT="${{ github.event.inputs.testname || '' }}"
+          TESTNAME_LOWER="$(echo "$TESTNAME_INPUT" | tr '[:upper:]' '[:lower:]')"
+          if [ "$CLUSTER_SEC" = "backup" ] || echo "$TESTNAME_LOWER" | grep -q "backup"; then
+            BACKUP_SPEC="  backup:
+              credentialsSecretRef:
+                name: backup-credentials
+              localEndpoint: ${MINIO_ENDPOINT}
+              localTesting: true
+              secondaryTarget: 0
+              snapshotBackups: true
+              withCompression: false"
+          fi
+
           # Build vault settings and encryption pool blocks (conditional on TLS)
           VAULT_SETTINGS=""
           ENCRYPTION_POOL_YAML=""
@@ -787,6 +970,7 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
+          ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
             maxSubsystemCount: ${MAX_SUBSYS}
             vcpuCount: ${VCPU_COUNT}
@@ -849,6 +1033,7 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
+          ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
             maxSubsystemCount: ${MAX_SUBSYS}
             vcpuCount: ${VCPU_COUNT}
