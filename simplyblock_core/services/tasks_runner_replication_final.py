@@ -422,14 +422,19 @@ def task_runner(task: JobSchedule, tasks=None):
         # still catching up -- exactly when it can least afford it.
         if not params.get("cutover_lvs"):
             lag = _replication_lag_sec(lvol)
-            if lag is None or lag > constants.REPL_CUTOVER_ENDGAME_LAG_SEC:
+            # lag is None when the volume has no internal snapshot replicated in
+            # the current source→target direction yet (e.g. a freshly set-up
+            # failback pair that has not completed even one reverse-direction
+            # cycle).  Treat it as "no measurement" and proceed: the first
+            # shrink round captures all outstanding delta, and _prepare_cutover
+            # will surface a proper error if there is truly no base to chain
+            # onto.  Only block when lag is a real number that exceeds the gate.
+            if lag is not None and lag > constants.REPL_CUTOVER_ENDGAME_LAG_SEC:
                 task.function_result = (
                     "waiting for replication to catch up before the endgame "
-                    "(lag %s > %ds)"
-                    % ("unknown" if lag is None else "%.0fs" % lag,
-                       constants.REPL_CUTOVER_ENDGAME_LAG_SEC))
+                    "(lag %.0fs > %ds)" % (lag, constants.REPL_CUTOVER_ENDGAME_LAG_SEC))
                 xfer_timing.stamp("await_catchup", lvol=lvol_id,
-                                  ms=(lag or 0) * 1000.0)
+                                  ms=lag * 1000.0)
                 # Not a failure: no retry burned, and the deadline is pushed out
                 # because catching up is legitimate progress, not a stall.
                 params["shrink_deadline"] = (
@@ -438,11 +443,11 @@ def task_runner(task: JobSchedule, tasks=None):
                 task.write_to_db(db.kv_store)
                 return False
 
-            # Caught up: take the lvstore for the endgame. Queueing here is
-            # cheap -- nothing is held and no snapshot is ageing.
+            # Caught up (or no measurement): take the lvstore for the endgame.
+            # Queueing here is cheap -- nothing is held and no snapshot is ageing.
             if not _acquire_lvs_claim(task, lvol, tasks):
                 return False
-            xfer_timing.stamp("endgame_entered", lvol=lvol_id, ms=lag * 1000.0)
+            xfer_timing.stamp("endgame_entered", lvol=lvol_id, ms=(lag or 0) * 1000.0)
 
         # The first iterative snapshot belongs to the endgame, not to task
         # creation: taken here, its delta covers only the catch-up residual.
@@ -532,13 +537,16 @@ def task_runner(task: JobSchedule, tasks=None):
 def _replication_lag_sec(lvol):
     """How far the target is behind: age of the newest REPLICATED snapshot.
 
-    None when the volume has no replicated snapshot yet, which counts as "not
-    caught up" -- there is nothing for the endgame's first delta to chain onto.
+    Returns None when no internal snapshot with target_replicated_snap_uuid
+    exists for this volume in the current source→target direction.  The caller
+    treats None as "no measurement available" and proceeds rather than blocking:
+    this happens legitimately on failback pairs that have not yet completed
+    their first reverse-direction replication cycle.
 
-    This is the entry gate for the endgame. Measuring it from ordinary cadence
-    replication costs nothing: the alternative (taking rounds to find out how
-    fast a round is) adds snapshot and transfer load to a cluster that is still
-    catching up, which is precisely when it can least afford it.
+    Measuring lag from ordinary cadence replication costs nothing: the
+    alternative (taking rounds to find out how fast a round is) adds snapshot
+    and transfer load to a cluster that is still catching up, which is
+    precisely when it can least afford it.
     """
     newest = None
     try:
