@@ -76,7 +76,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 
 
 app: FastAPI = FastAPI()
-Instrumentator().instrument(app).expose(app, endpoint="/fastapi-metrics")
+Instrumentator().instrument(app).expose(app, endpoint="/_meta/metrics")
 
 @app.exception_handler(PreconditionError)
 async def precondition_handler(request: Request, exc: PreconditionError):

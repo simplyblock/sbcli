@@ -31,7 +31,7 @@ scrape_configs:
       port: 9444
 
   - job_name: 'fastapi-app'
-    metrics_path: '/fastapi-metrics'
+    metrics_path: '/_meta/metrics'
     static_configs:
       - targets: ['HAProxy:80']
     scrape_interval: 30s
