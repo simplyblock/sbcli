@@ -299,8 +299,8 @@ from stress_test.continuous_backup_stress import (
     BackupStressMarathon,
     BackupStressLargeScale,
     BackupStressFilesystemSecurityMix,
-    # DISABLED: backup delete not supported (SFAM-2792)
-    # BackupStressRetentionMergeCycles,
+    BackupStressRetentionMergeCycles,
+    BackupStressComprehensive,
 )
 
 
@@ -895,8 +895,8 @@ def get_backup_stress_tests():
         BackupStressMarathon,
         BackupStressLargeScale,
         BackupStressFilesystemSecurityMix,
-        # DISABLED: backup delete not supported (SFAM-2792)
-        # BackupStressRetentionMergeCycles,
+        BackupStressRetentionMergeCycles,
+        BackupStressComprehensive,
     ]
 
 
