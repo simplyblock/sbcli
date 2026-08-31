@@ -66,7 +66,7 @@ class TestCrossResourceNegative(TestClusterBase):
         # ── Pool: disable non-existent ─────────────────────────────
         if not self._expect_failure(
             "disable_nonexistent_pool",
-            self.sbcli_utils.disable_storage_pool,
+            self._disable_pool_dual,
             "pool-does-not-exist-99999",
         ):
             self.logger.warning("disable_nonexistent_pool: did not fail")

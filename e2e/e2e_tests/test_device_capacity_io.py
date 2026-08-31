@@ -33,10 +33,12 @@ class TestDeviceCapacityIO(TestClusterBase):
         self.logger.info("=== TC-DEV-001: Device Capacity ===")
 
         nodes = self.sbcli_utils.get_storage_nodes()
-        assert nodes, "No storage nodes found"
+        sn_results = nodes.get("results", nodes) if isinstance(nodes, dict) else nodes
+        assert sn_results, "No storage nodes found"
+        node_ids = [n.get("uuid") or n.get("id") for n in sn_results]
 
         all_devices = []
-        for node_id in nodes:
+        for node_id in node_ids:
             devices = self.sbcli_utils.get_device_details(node_id)
             if not devices:
                 continue
@@ -155,9 +157,6 @@ class TestDeviceCapacityIO(TestClusterBase):
         # -- Cleanup ----------------------------------------------------
         if not self.k8s_test:
             self._disconnect_and_cleanup_dual(lvol_name)
-        try:
-            self.sbcli_utils.delete_lvol(lvol_name)
-        except Exception as exc:
-            self.logger.warning(f"Cleanup delete {lvol_name}: {exc}")
+        self._delete_lvol_dual(lvol_name)
 
         self.logger.info("=== TestDeviceCapacityIO: ALL PASSED ===")
