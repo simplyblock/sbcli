@@ -921,3 +921,67 @@ def get_load_tests():
 def get_parity_tests():
     """API parity audit — CLI vs v1 vs v2 three-way comparison."""
     return [TestAPIParityAudit]
+
+
+def get_e2e_all_tests():
+    """Comprehensive Docker-safe functional E2E suite (~40 tests).
+
+    Includes all Phase 1-3 functional tests, core outage/failure tests,
+    and resize tests.  Excludes: K8s-only, RDMA, topology-modifying,
+    stress/load, backup (use 'backup' keyword), security (use 'security'
+    keyword), upgrade, QoS (SPDK crash), tests requiring special cluster
+    flags, and tests with uncertain API support.
+
+    Usage: TEST_CLASS=e2e-all
+    """
+    return [
+        # ── Phase 1: API / CRUD / Negative tests ────────────────────────
+        TestLvolBasicCRUD,
+        TestLvolCapacityIOStats,
+        TestLvolNegativeCases,
+        TestSnapshotNegativeCases,
+        TestSnapshotLifecycle,
+        TestPoolEnableDisable,
+        TestPoolNegativeCases,
+        TestPoolDisableIO,
+        TestPoolStats,
+        TestPoolDhchap,
+        TestPoolCapacityLimits,
+        TestPoolHostManagement,
+        TestCrossResourceNegative,
+        TestVolumeCloneLvol,
+        # ── Phase 2: Cluster / Node / Namespace tests ───────────────────
+        TestLvolInflate,
+        TestLvolMigrationLoad,
+        TestLvolConnectLifecycle,
+        TestLvolPlacement,
+        TestStorageNodeStats,
+        TestStorageNodePorts,
+        TestStorageNodeListing,
+        TestClusterStats,
+        TestClusterTasks,
+        TestClusterSecret,
+        TestClusterOperations,
+        TestClusterGracefulShutdown,
+        TestMultiClientConnect,
+        TestCapacityThresholds,
+        TestHealthChecks,
+        TestMigrationLifecycle,
+        TestConcurrentOperations,
+        TestNamespacePlacement,
+        TestNamespaceFio,
+        TestNamespaceLimits,
+        TestNamespaceNegative,
+        TestNamespaceE2E,
+        # ── Phase 3: Device / Outage / Failure tests ────────────────────
+        TestDeviceRestart,
+        TestDeviceCapacityIO,
+        TestSingleNodeOutage,
+        TestHASingleNodeOutage,
+        TestSingleNodeFailure,
+        TestHASingleNodeFailure,
+        TestSingleNodeReboot,
+        TestHASingleNodeReboot,
+        TestSingleNodeResizeLvolCone,
+        TestNodeShutdownRestart,
+    ]
