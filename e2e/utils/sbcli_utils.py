@@ -452,8 +452,12 @@ class SbcliUtils:
 
         return data
 
-    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
-        """Adds the storage with given name
+    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0,
+                         max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
+                         dhchap=False):
+        """Adds the storage with given name.
+
+        dhchap: bool — if True, enables DH-HMAC-CHAP authentication for the pool.
         """
         pools = self.list_storage_pools()
         for name in list(pools.keys()):
@@ -471,6 +475,8 @@ class SbcliUtils:
         }
         if cluster_id:
             body["cluster_id"] = cluster_id
+        if dhchap:
+            body["dhchap"] = True
 
         self.post_request(api_url="/pool", body=body)
         # TODO: Add assertions

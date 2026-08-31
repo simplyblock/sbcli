@@ -157,7 +157,8 @@ class BackupTestBase(TestClusterBase):
             raise RuntimeError("K8sUtils not available -- was k8s_run=True passed?")
         return k8s
 
-    def _ensure_pool_and_sc(self, pool_name=None, retries=3):
+    def _ensure_pool_and_sc(self, pool_name=None, retries=3,
+                            dhchap=False, allowed_nodes=None):
         """Create (or reuse) a storage pool and set up the StorageClass.
 
         In K8s mode, ``add_storage_pool`` may return a pre-existing pool with
@@ -168,26 +169,39 @@ class BackupTestBase(TestClusterBase):
 
         Retries up to *retries* times with backoff if pool creation times out
         (e.g. operator still reconciling after a previous pool deletion).
+
+        dhchap: bool — if True, enables DHCHAP authentication on the pool.
+        allowed_nodes: list[str] — K8s worker node names for StoragePool CRD
+            ``spec.allowedNodes``; only used in K8s mode.
         """
         target = pool_name or self.pool_name
         last_err = None
-        for attempt in range(1, retries + 1):
-            try:
-                actual = self.sbcli_utils.add_storage_pool(pool_name=target)
-                break
-            except (TimeoutError, Exception) as e:
-                last_err = e
-                self.logger.warning(
-                    f"[pool] add_storage_pool attempt {attempt}/{retries} "
-                    f"failed: {e}")
-                if attempt < retries:
-                    from time import sleep
-                    sleep(30 * attempt)  # 30s, 60s backoff
+
+        if self.k8s_test and (dhchap or allowed_nodes):
+            # K8s mode with DHCHAP/allowedNodes: use StoragePool CRD
+            k8s = self._ensure_k8s_utils()
+            actual = k8s.add_storage_pool(
+                pool_name=target, dhchap=dhchap,
+                allowed_nodes=allowed_nodes)
         else:
-            raise RuntimeError(
-                f"[pool] Failed to create/find pool '{target}' "
-                f"after {retries} attempts"
-            ) from last_err
+            for attempt in range(1, retries + 1):
+                try:
+                    actual = self.sbcli_utils.add_storage_pool(
+                        pool_name=target, dhchap=dhchap)
+                    break
+                except (TimeoutError, Exception) as e:
+                    last_err = e
+                    self.logger.warning(
+                        f"[pool] add_storage_pool attempt {attempt}/{retries} "
+                        f"failed: {e}")
+                    if attempt < retries:
+                        from time import sleep
+                        sleep(30 * attempt)  # 30s, 60s backoff
+            else:
+                raise RuntimeError(
+                    f"[pool] Failed to create/find pool '{target}' "
+                    f"after {retries} attempts"
+                ) from last_err
 
         if actual and actual != target:
             self.logger.info(
@@ -2080,13 +2094,23 @@ class TestBackupPolicy(BackupTestBase):
         # correctly rejected by the product with "Incomplete backups in chain").
         self.logger.info("TC-BCK-025b: waiting for retention merges to complete …")
         for _poll in range(18):  # up to 3 minutes
-            out, _ = self._sbcli(f"cluster list-tasks {self.cluster_id} --limit 0")
-            merging = [
-                line for line in (out or "").splitlines()
-                if "s3_backup_merge" in line
-                and "done" not in line.lower()
-                and "---" not in line
-            ]
+            if self.k8s_test:
+                # K8s: check StorageBackup CRD status.phase for active merges
+                backups = self._list_backups()
+                merging = [
+                    b for b in backups
+                    if str(b.get("status") or b.get("Status") or "").lower()
+                    in ("merging",)
+                ]
+            else:
+                out, _ = self._sbcli(
+                    f"cluster list-tasks {self.cluster_id} --limit 0")
+                merging = [
+                    line for line in (out or "").splitlines()
+                    if "s3_backup_merge" in line
+                    and "done" not in line.lower()
+                    and "---" not in line
+                ]
             if not merging:
                 break
             self.logger.info(
@@ -2094,11 +2118,11 @@ class TestBackupPolicy(BackupTestBase):
             sleep_n_sec(10)
 
         retained = self._list_backups()
-        # Pick a backup with 'completed' status for restore
+        # Pick a backup with completed/done status for restore
         rst_bk_id = ""
         for b in reversed(retained):
             status = (b.get("status") or b.get("Status") or "").lower()
-            if status == "completed":
+            if status in ("completed", "done", "complete"):
                 rst_bk_id = (b.get("id") or b.get("ID")
                              or b.get("uuid") or "")
                 if rst_bk_id:
@@ -5041,28 +5065,129 @@ def get_backup_extra_tests():
 class TestBackupSecurityLvol(BackupTestBase):
     """
     Verifies that a DHCHAP+crypto lvol can be backed up and that the
-    restored lvol is accessible.
+    restored lvol is accessible with DHCHAP authentication.
 
-    TC-BCK-150  Create DHCHAP+crypto lvol; write FIO data
+    TC-BCK-150  Create DHCHAP pool, register host, create crypto lvol; write FIO data
     TC-BCK-151  Take snapshot with --backup flag
     TC-BCK-152  Wait for backup to complete
     TC-BCK-153  Restore backup to a new lvol name
-    TC-BCK-154  Connect restored lvol (unauthenticated path) and verify data
+    TC-BCK-154  Connect restored lvol and verify data
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "backup_security_lvol"
+        self._host_nqn = None
+        self._worker_node_name = None
+
+    # ── DHCHAP host NQN helpers ──────────────────────────────────────────
+
+    def _get_host_nqn(self):
+        """Get the host NQN for DHCHAP pool registration.
+
+        Docker: reads /etc/nvme/hostnqn from the fio node.
+        K8s:    derives NQN from the worker node UID.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            out, _ = k8s.k8s._exec_kubectl(
+                "kubectl get nodes "
+                "-l node-role.kubernetes.io/control-plane!= "
+                "--no-headers "
+                "-o custom-columns=NAME:.metadata.name,UID:.metadata.uid"
+            )
+            lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
+            assert lines, "No worker nodes found"
+            parts = lines[0].split()
+            self._worker_node_name = parts[0]
+            node_uid = parts[1] if len(parts) > 1 else None
+            if not node_uid:
+                uid_out, _ = k8s.k8s._exec_kubectl(
+                    f"kubectl get node {self._worker_node_name} "
+                    f"-o jsonpath='{{.metadata.uid}}'")
+                node_uid = uid_out.strip()
+            return f"nqn.2014-08.io.simplyblock:uuid:{node_uid}"
+
+        out, _ = self.ssh_obj.exec_command(
+            self.fio_node, "cat /etc/nvme/hostnqn")
+        nqn = out.strip()
+        assert nqn, "Could not read host NQN from fio_node"
+        return nqn
+
+    def _connect_and_mount_dhchap(self, lvol_name, lvol_id,
+                                   mount=None, format_disk=True):
+        """Connect lvol with DHCHAP host_nqn and mount.
+
+        Docker: uses CLI ``volume connect --host-nqn`` to get connect
+                strings with DHCHAP keys, then executes NVMe connect.
+        K8s:    delegates to parent (CSI handles DHCHAP transparently).
+        """
+        if self.k8s_test:
+            return super()._connect_and_mount(
+                lvol_name, lvol_id, mount=mount, format_disk=format_disk)
+
+        mount = mount or f"{self.mount_path}/{lvol_name}"
+        initial = self.ssh_obj.get_devices(node=self.fio_node)
+
+        connect_ls, err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
+            self.mgmt_nodes[0], lvol_id, self._host_nqn)
+        assert connect_ls, (
+            f"No DHCHAP connect strings for {lvol_name}: {err}")
+
+        for cmd in connect_ls:
+            self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+        sleep_n_sec(3)
+
+        final = self.ssh_obj.get_devices(node=self.fio_node)
+        new_devs = [d for d in final if d not in initial]
+        assert new_devs, f"No new block device after connecting {lvol_name}"
+        device = f"/dev/{new_devs[0]}"
+        if format_disk:
+            self.ssh_obj.format_disk(
+                node=self.fio_node, device=device, fs_type="ext4")
+        self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=device, mount_path=mount)
+        self.mounted.append((self.fio_node, mount))
+        self.connected.append(lvol_id)
+        return device, mount
+
+    # ── test body ────────────────────────────────────────────────────────
 
     def run(self):
         self.logger.info("=== TestBackupSecurityLvol START ===")
-        self.fio_node = self.fio_node[0]
-        self._ensure_pool_and_sc()
+        self.fio_node = (self.fio_node[0]
+                         if isinstance(self.fio_node, list)
+                         else self.fio_node)
+
+        # Resolve host NQN (K8s sets _worker_node_name as a side-effect)
+        self._host_nqn = self._get_host_nqn()
+        self.logger.info(f"Host NQN for DHCHAP: {self._host_nqn}")
+
+        # Create DHCHAP-enabled pool
+        if self.k8s_test:
+            allowed = ([self._worker_node_name]
+                       if self._worker_node_name else None)
+            self._ensure_pool_and_sc(dhchap=True, allowed_nodes=allowed)
+        else:
+            self._ensure_pool_and_sc(dhchap=True)
+
+        # Register host NQN at pool level (required for DHCHAP)
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        assert pool_id, f"Could not find pool ID for {self.pool_name}"
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            k8s.add_host_to_pool(pool_id, self._host_nqn)
+        else:
+            self.ssh_obj.add_host_to_pool(
+                self.mgmt_nodes[0], pool_id, self._host_nqn)
+        self.logger.info(
+            f"Registered host {self._host_nqn} to pool {pool_id}")
 
         # TC-BCK-150: create DHCHAP+crypto lvol and write data
         self.logger.info("TC-BCK-150: Creating DHCHAP+crypto lvol …")
         lvol_name, lvol_id = self._create_lvol(crypto=True)
-        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        device, mount = self._connect_and_mount_dhchap(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
 
@@ -5096,20 +5221,24 @@ class TestBackupSecurityLvol(BackupTestBase):
         # TC-BCK-153b: verify restored lvol preserves crypto property
         restored_id = self._get_lvol_id(restored_name)
         assert restored_id, f"Could not find ID for {restored_name}"
-        self.logger.info("TC-BCK-153b: verify restored lvol has crypto property")
+        self.logger.info(
+            "TC-BCK-153b: verify restored lvol has crypto property")
         self._verify_lvol_crypto(restored_id, label="TC-BCK-153b")
-        self.logger.info("TC-BCK-153b: crypto property preserved ✓")
+        self.logger.info("TC-BCK-153b: crypto property preserved")
 
         # TC-BCK-153c: verify restored lvol has DHCHAP authentication
-        self.logger.info("TC-BCK-153c: verify restored lvol has DHCHAP keys in connect string")
+        self.logger.info(
+            "TC-BCK-153c: verify restored lvol has DHCHAP keys "
+            "in connect string")
         self._verify_lvol_dhchap(restored_id, label="TC-BCK-153c")
-        self.logger.info("TC-BCK-153c: DHCHAP property preserved ✓")
+        self.logger.info("TC-BCK-153c: DHCHAP property preserved")
 
         # TC-BCK-154: connect and verify data
         self.logger.info("TC-BCK-154: Verifying restored lvol data …")
-        _, r_mount = self._connect_and_mount(restored_name, restored_id,
-                                              mount=f"{self.mount_path}/r{restored_name[-8:]}",
-                                              format_disk=False)
+        _, r_mount = self._connect_and_mount_dhchap(
+            restored_name, restored_id,
+            mount=f"{self.mount_path}/r{restored_name[-8:]}",
+            format_disk=False)
         self._verify_checksums(self.fio_node, r_mount, checksums)
         self.logger.info("TC-BCK-154: Data integrity PASSED")
 
@@ -5170,14 +5299,11 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
         # TC-BCK-157: verify only 1 backup retained
         # Phase 1: wait until we see at least one 'merging' or 'merged' entry
         #          (confirms the retention pruner has started working).
-        #          In K8s mode the StorageBackup CRD phase never becomes
-        #          "merging"/"merged" — merges happen via internal tasks and
-        #          the CRD is deleted once done.  So we also detect pruning
-        #          activity by watching the backup count decrease.
+        #          In K8s mode, the StorageBackup CRD status.phase reflects
+        #          merge status — check it the same way as Docker.
         # Phase 2: wait until no 'merging'/'merged' entries remain for this
         #          lvol, then assert ≤ 1 active backup.
         _MERGING_STATUSES = {"merging", "merged"}
-        initial_count = None
         self.logger.info("TC-BCK-157: Phase 1 — waiting for merging to start …")
         phase1_deadline = time.time() + 300  # up to 5 min for pruner to kick in
         saw_merging = False
@@ -5187,18 +5313,14 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
                 b for b in backups
                 if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
             ]
-            if initial_count is None:
-                initial_count = len(lvol_all)
             merging_entries = [
                 b for b in lvol_all
                 if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
             ]
-            # Detect merging by status field (Docker) or count decrease (K8s)
-            if merging_entries or len(lvol_all) < initial_count:
+            if merging_entries:
                 self.logger.info(
-                    f"TC-BCK-157: Detected pruning activity — "
-                    f"{len(merging_entries)} merging/merged, "
-                    f"count {len(lvol_all)}/{initial_count}")
+                    f"TC-BCK-157: Detected {len(merging_entries)} "
+                    f"merging/merged entries")
                 saw_merging = True
                 break
             self.logger.info(f"TC-BCK-157: No merging yet, {len(lvol_all)} backups total")
