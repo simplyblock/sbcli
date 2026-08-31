@@ -40,7 +40,7 @@ class TestLvolMigrationLoad(TestClusterBase):
                 pool_name=self.pool_name,
                 size="2G",
             )
-            lid = self.sbcli_utils.get_lvol_id(name)
+            lid = self._get_lvol_id_dual(name)
             assert lid, f"Could not get lvol_id for {name}"
             lvol_names.append(name)
             lvol_ids.append(lid)
@@ -138,7 +138,7 @@ class TestLvolMigrationLoad(TestClusterBase):
                 except Exception as exc:
                     self.logger.warning(f"Cleanup disconnect {name}: {exc}")
             try:
-                self.sbcli_utils.delete_lvol(name)
+                self._delete_lvol_dual(name)
             except Exception as exc:
                 self.logger.warning(f"Cleanup delete {name}: {exc}")
 

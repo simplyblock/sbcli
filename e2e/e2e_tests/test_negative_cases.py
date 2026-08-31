@@ -54,7 +54,7 @@ class TestCrossResourceNegative(TestClusterBase):
             retry=3,
         )
         sleep_n_sec(5)
-        lvol_id = self.sbcli_utils.get_lvol_id(resize_lvol)
+        lvol_id = self._get_lvol_id_dual(resize_lvol)
         if lvol_id:
             if not self._expect_failure(
                 "resize_to_zero",
@@ -80,8 +80,8 @@ class TestCrossResourceNegative(TestClusterBase):
             retry=3,
         )
         sleep_n_sec(5)
-        del_lvol_id = self.sbcli_utils.get_lvol_id(deleted_lvol)
-        self.sbcli_utils.delete_lvol(deleted_lvol)
+        del_lvol_id = self._get_lvol_id_dual(deleted_lvol)
+        self._delete_lvol_dual(deleted_lvol, skip_error=False)
         sleep_n_sec(10)
 
         if del_lvol_id:
@@ -102,20 +102,18 @@ class TestCrossResourceNegative(TestClusterBase):
                     break
             if online_node:
                 # restart requires OFFLINE state — this should fail
+                online_node_id = online_node.get("uuid") or online_node.get("id")
                 if not self._expect_failure(
                     "restart_online_node",
                     self.sbcli_utils.restart_node,
-                    online_node["id"],
+                    online_node_id,
                 ):
                     self.logger.warning(
                         "restart_online_node: did not fail — may auto-cycle"
                     )
 
         # ── Cleanup ────────────────────────────────────────────────
-        try:
-            self.sbcli_utils.delete_lvol(resize_lvol)
-        except Exception:
-            pass
+        self._delete_lvol_dual(resize_lvol)
 
         if failures:
             raise AssertionError(

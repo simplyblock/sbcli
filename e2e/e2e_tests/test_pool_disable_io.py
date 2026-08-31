@@ -54,13 +54,13 @@ class TestPoolDisableIO(TestClusterBase):
 
         # ── Disable pool ───────────────────────────────────────────
         self.logger.info("Disabling pool while FIO is running...")
-        self.sbcli_utils.disable_storage_pool(self.pool_name)
+        self._disable_pool_dual(self.pool_name)
         sleep_n_sec(10)
         self.logger.info("Pool disabled")
 
         # ── Re-enable pool ─────────────────────────────────────────
         self.logger.info("Re-enabling pool...")
-        self.sbcli_utils.enable_storage_pool(self.pool_name)
+        self._enable_pool_dual(self.pool_name)
         sleep_n_sec(10)
         self.logger.info("Pool re-enabled")
 
@@ -91,9 +91,6 @@ class TestPoolDisableIO(TestClusterBase):
                     self._disconnect_and_cleanup_dual(name)
                 except Exception:
                     pass
-            try:
-                self.sbcli_utils.delete_lvol(name)
-            except Exception:
-                pass
+            self._delete_lvol_dual(name)
 
         self.logger.info("=== Scenario 4.3: Pool Disable During I/O — PASS ===")
