@@ -384,6 +384,15 @@ REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
 # Safety bound: a volume written faster than it replicates never converges, so
 # stop and freeze rather than looping forever.
 REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# When to stop converging in the open and take the lvstore for the endgame.
+# A round completing within this multiple of the target means the delta is
+# nearly converged, so the exclusive window that follows will be short. Claiming
+# earlier serialises the bulk catch-up, which is what produced 0/20 cutovers in
+# run 20260828_124859 (round 1 growing 340s -> 2584s purely from queueing).
+# The endgame starts once ordinary replication has the target within this many
+# seconds. Before that the cutover waits and takes NO snapshots of its own --
+# the iterative snapshots ARE the endgame.
+REPL_CUTOVER_ENDGAME_LAG_SEC = 50
 # Rounds must follow each other within MILLISECONDS. Returning to the task
 # scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
 # each time, which puts a floor under the delta no number of rounds can beat.
@@ -421,16 +430,16 @@ REPL_XFER_INLINE_WAIT_SEC = 5.0
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
 REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
-# Pass interval for the cutover runner while any cutover is mid-round. The
-# freeze pays for every millisecond between a transfer completing and the next
-# snapshot starting, so this must stay well under a second.
-REPL_CUTOVER_ACTIVE_POLL_SEC = 0.2
 # Cooldown between hub-attach retry attempts when the target node is down or
 # recovering (covers control-plane lag before the DB reflects the down state).
 REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
 # Max consecutive hub-attach failures with the node still appearing online
 # before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
 REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# Pass interval while a cutover is mid-round. NOT sub-second: this loop reads
+# the task table per pass, and polling a database at 5Hz to detect an event is
+# the wrong shape. Sub-second reaction lives in the RPC-based inline wait.
+REPL_CUTOVER_ACTIVE_POLL_SEC = 1.0
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5

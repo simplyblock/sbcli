@@ -133,15 +133,16 @@ def patched(monkeypatch):
 
 
 def test_commit_enqueues_final_task(patched):
-    """Commit takes shrink snapshot #1 and enqueues the task; the clone/base
-    selection moved into the runner (after the shrink rounds), so the enqueued
-    params carry the shrink state instead of tgt_* composites."""
+    """Commit only enqueues the task.
+
+    It takes NO snapshot: the iterative snapshots are the endgame, which does
+    not start until ordinary replication has caught up. Taking one here left
+    every volume holding an ageing snapshot while it waited its turn, and the
+    round that followed measured the wait rather than the transfer."""
     result = lvol_controller.replication_commit("LV1")
 
     assert result["cutover_task_queued"] is True
-
-    # Shrink snapshot #1 taken at commit time.
-    assert patched["snap_add"] and patched["snap_add"][0][1] == SnapShot.TYPE_INTERNAL
+    assert patched["snap_add"] == [], "the endgame takes the first snapshot"
     # The clone is NOT built at commit time any more: the base must be the
     # LAST replicated shrink snapshot, which only exists after the runner's
     # shrink rounds complete.
@@ -154,15 +155,20 @@ def test_commit_enqueues_final_task(patched):
     assert p["tgt_node_id"] == "N_tgt"
     assert p["operation"] == "replicate"
     assert p["final_state"] == LVolReplication.STATE_CUTOVER_DONE
-    assert p["shrink_round"] == 1
-    assert p["shrink_snap_id"] == "snap"
+    assert p["shrink_round"] == 0, "no round is in flight yet"
+    assert "shrink_snap_id" not in p, "the endgame takes the first snapshot"
     assert p["shrink_deadline"] > 0
     assert "tgt_lvol_composite" not in p, "clone base chosen before shrink completed"
     assert p["_cluster"] == "CL_src" and p["_node"] == "N_src"
 
 
-def test_commit_fails_when_shrink_snapshot_fails(patched, monkeypatch):
+def test_commit_does_not_depend_on_taking_a_snapshot(patched, monkeypatch):
+    """Commit is now pure bookkeeping.
+
+    It used to take shrink snapshot #1 and fail if that failed. The snapshot
+    moved into the endgame, so a full lvstore no longer blocks the enqueue --
+    the runner reports it when it actually gets there."""
     monkeypatch.setattr(lvol_controller.snapshot_controller, "add",
                         lambda lid, name, snap_type="user": (None, "no space"))
     result = lvol_controller.replication_commit("LV1")
-    assert result[0] is False
+    assert result["cutover_task_queued"] is True

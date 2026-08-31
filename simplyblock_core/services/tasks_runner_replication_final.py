@@ -311,6 +311,41 @@ def _swap_failback_lvol_uuid(rep, failback_source_id):
         stale_uuid, failback_source_id)
 
 
+def _acquire_lvs_claim(task, lvol, tasks=None):
+    """Take the lvstore for this cutover's endgame. False means queued.
+
+    Queueing here is cheap: it happens with a nearly-converged delta and NO
+    snapshot in hand. The previous design claimed on the task's first pass and
+    held the lvstore through the entire catch-up, so queued volumes sat on an
+    ageing round-1 snapshot and their "round" measured the queue rather than
+    the transfer.
+    """
+    params = task.function_params
+    lvs_name = getattr(lvol, "lvs_name", "")
+    own_group = _group_id_for_lvol(lvol)
+    owner = _lvs_cutover_owner(task, lvs_name, tasks)
+    if owner is not None:
+        owner_group = (owner.function_params or {}).get("cutover_group") or ""
+        owner_lvol = str((owner.function_params or {}).get("lvol_id"))
+        # A consistency group cuts over AS A GROUP, so a sibling member joins
+        # the owner rather than queueing behind it.
+        if not (own_group and own_group == owner_group):
+            params["shrink_deadline"] = (
+                int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+            task.function_result = (
+                f"queued for lvstore {lvs_name} behind {owner_lvol[:8]} "
+                f"(delta already converged)")
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+    params["cutover_lvs"] = lvs_name
+    params["cutover_group"] = own_group
+    xfer_timing.stamp("lvs_claim_acquired", lvol=lvol.get_id(), lvs=lvs_name,
+                      round=params.get("shrink_round"))
+    task.write_to_db(db.kv_store)
+    return True
+
+
 def task_runner(task: JobSchedule, tasks=None):
     params = task.function_params
     lvol_id = params.get("lvol_id")
@@ -379,55 +414,43 @@ def task_runner(task: JobSchedule, tasks=None):
                           result=str(task.function_result)[:40].replace(" ", "_"))
         task.status = JobSchedule.STATUS_RUNNING
         task.function_params.setdefault("start_time", int(time.time()))
-        # Claim the source LVS for the whole cutover -- the convergence rounds
-        # AND the freeze. Other volumes' snapshot transfers on this LVS queue
-        # behind it (see snapshot_replication._lvs_locked_by_cutover): they
-        # compete for the same lvstore and hub bandwidth, and every second they
-        # steal from a convergence round is a second of writes that lands in
-        # the freeze.
-        lvs_name = getattr(lvol, "lvs_name", "")
-        own_group = _group_id_for_lvol(lvol)
 
-        # Write our claim BEFORE arbitrating.  The scheduler starts one thread
-        # per active task, so two tasks for the same lvstore run concurrently.
-        # If we check first and write second, both threads can read "no owner"
-        # before either writes, then both write the claim, and on every
-        # subsequent pass each sees only the other as the claimant — a circular
-        # stall (e.g. 36418f5d queued behind 309d3aeb AND 309d3aeb queued
-        # behind 36418f5d) that never resolves.  Writing first means both
-        # claims are visible to the sort, which then elects a single deterministic
-        # winner regardless of interleaving.
-        task.function_params["cutover_lvs"] = lvs_name
-        # Recording the group is what lets the replication side tell a sibling
-        # member from an unrelated volume.
-        task.function_params["cutover_group"] = own_group
-        task.write_to_db(db.kv_store)
-
-        owner = _lvs_cutover_owner(task, lvs_name, tasks)
-        if owner is not None:
-            owner_group = (owner.function_params or {}).get("cutover_group") or ""
-            owner_lvol = str((owner.function_params or {}).get("lvol_id"))
-            # A consistency group cuts over AS A GROUP, so a sibling member
-            # joins the owner rather than queueing behind it.
-            if not (own_group and own_group == owner_group):
-                # WAIT, do not start. Beginning the shrink phase here would
-                # take snapshots that cannot replicate (the owner holds the
-                # lvstore), and their deadline would run down until the task
-                # died of max retries -- which is exactly what happened to 17
-                # tasks in run 20260827_185009.
-                #
-                # Remove our (losing) claim so the winner's _lvs_cutover_owner
-                # scan does not keep finding two claimants on subsequent passes.
-                task.function_params.pop("cutover_lvs", None)
-                task.function_params.pop("cutover_group", None)
-                task.function_params["shrink_deadline"] = (
-                    int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+        # ---- WAIT FOR THE VOLUME TO CATCH UP ---------------------------- #
+        # The iterative snapshots ARE the endgame. Until then the volume just
+        # replicates on its ordinary cadence: the cutover takes no snapshots of
+        # its own and holds nothing, so it adds no load to a cluster that is
+        # still catching up -- exactly when it can least afford it.
+        if not params.get("cutover_lvs"):
+            lag = _replication_lag_sec(lvol)
+            if lag is None or lag > constants.REPL_CUTOVER_ENDGAME_LAG_SEC:
                 task.function_result = (
-                    f"queued for lvstore {lvs_name} behind {owner_lvol[:8]}")
+                    "waiting for replication to catch up before the endgame "
+                    "(lag %s > %ds)"
+                    % ("unknown" if lag is None else "%.0fs" % lag,
+                       constants.REPL_CUTOVER_ENDGAME_LAG_SEC))
+                xfer_timing.stamp("await_catchup", lvol=lvol_id,
+                                  ms=(lag or 0) * 1000.0)
+                # Not a failure: no retry burned, and the deadline is pushed out
+                # because catching up is legitimate progress, not a stall.
+                params["shrink_deadline"] = (
+                    int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
                 task.status = JobSchedule.STATUS_SUSPENDED
                 task.write_to_db(db.kv_store)
-                return False            # no retry burned: this is a queue, not a failure
-        # We are the rightful owner — claim already written above; proceed.
+                return False
+
+            # Caught up: take the lvstore for the endgame. Queueing here is
+            # cheap -- nothing is held and no snapshot is ageing.
+            if not _acquire_lvs_claim(task, lvol, tasks):
+                return False
+            xfer_timing.stamp("endgame_entered", lvol=lvol_id, ms=lag * 1000.0)
+
+        # The first iterative snapshot belongs to the endgame, not to task
+        # creation: taken here, its delta covers only the catch-up residual.
+        if not params.get("shrink_snap_id"):
+            _, snap_err = _take_shrink_snapshot(task, lvol)
+            if snap_err:
+                return _finalize(task, False, snap_err)
+        task.write_to_db(db.kv_store)
 
         # ---- SHRINK PHASE ----------------------------------------------- #
         # Skip shrink entirely once the cutover clone is prepared: tgt_lvol_composite
@@ -447,6 +470,11 @@ def task_runner(task: JobSchedule, tasks=None):
                     return False
 
         # ---- CUTOVER PHASE (immediately after the last shrink round) ---- #
+        # The freeze runs under the claim. A volume whose very first round was
+        # already fast enough reaches here without having taken it.
+        if not params.get("cutover_lvs"):
+            if not _acquire_lvs_claim(task, lvol, tasks):
+                return False
         if "tgt_lvol_composite" not in params:
             with xfer_timing.phase("prepare_cutover", lvol=lvol_id):
                 err = _prepare_cutover(task, lvol, src_node, tgt_node)
@@ -499,6 +527,35 @@ def task_runner(task: JobSchedule, tasks=None):
     return True
 
 
+
+
+def _replication_lag_sec(lvol):
+    """How far the target is behind: age of the newest REPLICATED snapshot.
+
+    None when the volume has no replicated snapshot yet, which counts as "not
+    caught up" -- there is nothing for the endgame's first delta to chain onto.
+
+    This is the entry gate for the endgame. Measuring it from ordinary cadence
+    replication costs nothing: the alternative (taking rounds to find out how
+    fast a round is) adds snapshot and transfer load to a cluster that is still
+    catching up, which is precisely when it can least afford it.
+    """
+    newest = None
+    try:
+        snaps = db.get_snapshots_by_node_id(lvol.node_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Cannot read snapshots of %s to measure replication lag: %s",
+                       lvol.get_id(), e)
+        return None
+    for s in snaps:
+        if (s.lvol.get_id() == lvol.get_id()
+                and s.snap_type == SnapShot.TYPE_INTERNAL
+                and getattr(s, "target_replicated_snap_uuid", "")
+                and (newest is None or s.created_at > newest.created_at)):
+            newest = s
+    if newest is None:
+        return None
+    return max(0.0, time.time() - float(newest.created_at))
 
 
 def _take_shrink_snapshot(task, lvol):
@@ -633,9 +690,8 @@ def _shrink_step(task, lvol):
                               ms=elapsed * 1000.0)
             params["shrink_round_done_at"] = time.time()
 
-        # Converged: this round's delta -- the writes made during the previous
-        # round -- moved in low seconds, so the freeze that copies the next
-        # such window will be about as short.
+        # Every round is an endgame round now -- the lvstore is held before the
+        # first iterative snapshot is taken.
         if elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC:
             task.function_result = (f"converged in {params['shrink_round']} rounds "
                                     f"(last {elapsed:.2f}s)")
@@ -795,7 +851,13 @@ def main():
                 # for a task that is queued or mid-round, and sleeping 3s per
                 # such task cost ~70s per pass with 20 volumes -- which landed
                 # directly in the client's IO freeze.
-        # Poll fast only while it matters; an idle cluster keeps the old cadence.
+        # Deliberately NOT a sub-second poll: this loop reads the task table
+        # (and each task) per pass, so polling it at 5Hz burns transactions
+        # proportional to clusters x tasks to learn nothing almost every time.
+        # The latency that mattered is gone from the hot path instead -- a
+        # transfer is now awaited and finished in the pass that submitted it
+        # (snapshot_replication._await_transfer_completion, an RPC poll), and a
+        # converging round stays inside its own inline loop.
         time.sleep(constants.REPL_CUTOVER_ACTIVE_POLL_SEC if active
                    else constants.TASK_EXEC_INTERVAL_SEC)
 

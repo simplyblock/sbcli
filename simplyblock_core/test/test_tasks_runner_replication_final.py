@@ -25,6 +25,12 @@ def _task(**params):
         "operation": "replicate",
         "replication_id": "REP1",
         "final_state": LVolReplication.STATE_CUTOVER_DONE,
+        # These tests cover the FREEZE, so the task starts past the endgame
+        # entry: the lvstore is already claimed and the convergence rounds are
+        # behind it (round 0 = no round in flight).
+        "cutover_lvs": "lvs_src",
+        "shrink_snap_id": "S_endgame",
+        "shrink_round": 0,
     }
     t.function_params.update(params)
     return t
@@ -208,6 +214,9 @@ def test_a_fast_round_converges_instead_of_taking_another(monkeypatch):
     runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=True)},
                        {"shrink_round": 1, "shrink_snap_id": "S1",
                         "shrink_deadline": 2**60,
+                        # holding the lvstore == the endgame; converging in the
+                        # open asks for it instead of freezing
+                        "cutover_lvs": "LVS_1",
                         "shrink_started_at": __import__("time").time()})
     taken = []
 
@@ -264,6 +273,7 @@ def test_shrink_hands_over_when_it_cannot_converge(monkeypatch):
     runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=True)},
                        {"shrink_round": 3, "shrink_snap_id": "S1",
                         "shrink_deadline": 2**60,
+                        "cutover_lvs": "LVS_1",
                         "shrink_started_at": _time.time() - 60})
     done, err = runner._shrink_step(task, _ShrinkLvol())
     assert (done, err) == (True, None), \
