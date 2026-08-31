@@ -122,7 +122,8 @@ def _lvstore_lock_heartbeat(db_controller, cluster_id, lvs_name, owner, stop_eve
 
 
 @contextlib.contextmanager
-def lvstore_op_lock(cluster_id, lvs_name, *, node_id=None, enabled=True):
+def lvstore_op_lock(cluster_id, lvs_name, *, node_id=None, enabled=True,
+                    best_effort=False, timeout=None):
     """INNER lock — serialize a SINGLE single-node data-plane operation per
     lvstore (one RPC to one node).
 
@@ -150,7 +151,21 @@ def lvstore_op_lock(cluster_id, lvs_name, *, node_id=None, enabled=True):
         return
     lock_key = f"{lvs_name}@{node_id[:8]}" if node_id else lvs_name
     owner = _new_lvstore_lock_owner()
-    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, lock_key, owner):
+    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, lock_key,
+                                          owner, timeout=timeout):
+        if best_effort:
+            # Recovery/cleanup (force delete): the holder may be a process
+            # that died mid-section on a node that is now gone, so blocking
+            # forever is not an option -- but neither is the old behaviour
+            # of skipping the lock entirely, which let a forced delete
+            # interleave with any create/delete/resize on the same lvstore.
+            # Wait the bounded time, then proceed and say so loudly.
+            logger.warning(
+                "Proceeding WITHOUT the lvstore lock on %s (force/recovery "
+                "path); a concurrent object operation on this node is "
+                "possible", lock_key)
+            yield
+            return
         raise PreconditionError(
             f"Timed out acquiring lvstore lock on {lock_key}")
     stop = threading.Event()
@@ -373,7 +388,8 @@ def resolve_chain_root(object_uuid):
 
 
 @contextlib.contextmanager
-def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
+def object_mutation_lock(cluster_id, object_uuid, *, enabled=True,
+                         best_effort=False, timeout=None):
     """OUTER lock — serialize the WHOLE multi-node sequence of one operation on
     a CHAIN (a volume, its snapshots, their clones, recursively) and exclude
     any other operation (create / delete / resize / clone) on that same chain
@@ -398,7 +414,15 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
     chain_root, chain_lvs = resolve_chain_root(object_uuid)
     key = f"{_OBJECT_LOCK_PREFIX}/{chain_lvs}:{chain_root}"
     owner = _new_lvstore_lock_owner()
-    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, key, owner):
+    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, key, owner,
+                                          timeout=timeout):
+        if best_effort:
+            logger.warning(
+                "Proceeding WITHOUT the chain lock on %s (force/recovery "
+                "path); a concurrent operation on this chain is possible",
+                chain_root)
+            yield
+            return
         raise PreconditionError(
             f"Timed out acquiring chain lock on {chain_root} "
             f"(for {object_uuid})")

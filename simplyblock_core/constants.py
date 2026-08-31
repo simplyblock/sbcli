@@ -343,8 +343,8 @@ MAX_SNAP_COUNT = 100
 # abort -- which is an order of magnitude above this cap, so the headroom
 # below it is real.
 #
-# Raised 6000 -> 12000 on 2026-08-20.
-MAX_OBJECTS_PER_LVSTORE = 12000
+# Raised 6000 -> 12000 on 2026-08-20, lowered back to 6000 on 2026-08-28.
+MAX_OBJECTS_PER_LVSTORE = 6000
 
 # Hard cap on namespaces (lvols) sharing one nvmf subsystem. The DEFAULT for
 # namespaced creates stays LVO_MAX_NAMESPACES_PER_SUBSYS; this is the ceiling
@@ -594,6 +594,41 @@ LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
+
+#: How long a deferred lvol register task tolerates a missing lvol record
+#: before treating it as obsolete. add_lvol_ha queues the task in its
+#: pre-check but writes the lvol record only at the end of the create, so
+#: a task picked up inside that window must wait for the record rather
+#: than conclude the volume was deleted and drop the registration.
+LVOL_SYNC_OP_RECORD_GRACE_SEC = 600
+
+#: How long a force/recovery delete waits for the chain and lvstore locks
+#: before proceeding without them. It used to skip them outright, so a
+#: forced delete could interleave with any create/delete/resize on the same
+#: chain; it must still not block forever behind a holder that died on a
+#: node that is now gone.
+FORCE_DELETE_LOCK_WAIT_SEC = 30
+
+#: Consecutive genuine failures of a single deferred lvol sync-delete or
+#: registration before it is escalated to the cluster event log. Repeated
+#: failure of one object on one node is not a transient condition -- these
+#: tasks retry forever by design, so without an alert a permanently stuck
+#: leg is invisible except as a volume that never leaves in_deletion, or a
+#: replica that is silently missing. Deferrals for a node that is simply
+#: not ONLINE yet, or an LVS owned by a restart, are NOT failures and do
+#: not count.
+TASK_FAILURE_ALERT_THRESHOLD = 3
+
+#: How long an operation holding the chain lock waits for a peer to leave
+#: its restart phase before giving up and deferring the leg durably.
+#: A restart is a bounded, self-clearing condition, so waiting keeps the
+#: whole [create + registers] / [async delete + sync deletes] sequence
+#: under one lock instead of fragmenting it across processes. The cap
+#: matters: RESTART_TASK_EXEC_INTERVAL_MAX_SEC is 3600 and a wedged
+#: restart really can sit for an hour (2026-08-27, a node stuck offline
+#: while three restart tasks reported success), and holding a chain lock
+#: that long would stall every create and delete on that chain.
+DEFERRED_LEG_RESTART_WAIT_SEC = 120
 
 # NVMe-oF TLS / DH-HMAC-CHAP security
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
