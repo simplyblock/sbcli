@@ -8983,7 +8983,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                         caused_by="restart_cleanup")
         if leader_port_blocked:
             try:
-                port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=5, retry=2)
+                port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=0.5, retry=2)
                 _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                 _mark_leader_unblocked()
             except Exception as ue:
@@ -9504,7 +9504,7 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
             peer = db_controller.get_storage_node_by_id(pid)
             if not peer or peer.status != StorageNode.STATUS_ONLINE:
                 continue
-            port_block.set_port(peer, port, block=False, timeout=5, retry=2)
+            port_block.set_port(peer, port, block=False, timeout=0.5, retry=2)
             tcp_ports_events.port_allowed(peer, port)
             logger.info("Defensive unblock: allowed LVS port %s on peer %s after "
                         "failed recreate of %s", port, pid, lvs_node.lvstore)
@@ -9925,7 +9925,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         blocked (no-op). Tolerates RPC failure — logs and continues so
         other peers can still be unblocked."""
         try:
-            port_block.set_port(peer, snode_lvs_port, block=False, timeout=5, retry=2)
+            port_block.set_port(peer, snode_lvs_port, block=False, timeout=0.5, retry=2)
             _deferred_port_events.append(("allow", peer, snode_lvs_port))
             _t0 = _block_started.pop(peer.get_id(), None)
             if _t0 is not None:
@@ -10026,11 +10026,19 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         """Abort: kill SPDK, set offline, unblock every blocked peer, raise."""
         logger.error("Aborting recreate_lvstore on %s for %s: %s",
                      snode.get_id(), lvs_name, reason)
+        # Release the fences FIRST. Every fenced peer has its client
+        # listener blocked and cannot answer keep-alives, so each extra
+        # second risks clients (KATO 4s) dropping that path. _kill_app()
+        # used to run first and cost ~1.2s of spdk_process_kill +
+        # spdk_process_is_up polling before any peer was released
+        # (2026-08-31: unblock landed at 13:33:29.13, one second after the
+        # client had already failed IO at 13:33:28). Killing our own SPDK
+        # can wait; a fenced healthy peer cannot.
+        for peer in list(blocked_peers):
+            _unblock_peer_port(peer)
         _persist_deferred_node_fields()
         _release_hub_locks()
         _kill_app()
-        for peer in list(blocked_peers):
-            _unblock_peer_port(peer)
         _release_block_gate()
         _flush_port_events()
         raise Exception(f"Abort restart: {reason}")
@@ -10202,7 +10210,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         db_controller.atomic_update(
                             current_leader,
                             lambda x: setattr(x, "lvstore_status", "in_creation"))
-                        port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
+                        port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=0.5, retry=1)
                         _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                         blocked_peers.append(current_leader)
                         _block_started[current_leader.get_id()] = time.monotonic()
@@ -10270,7 +10278,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 if sec_node in blocked_peers:
                     continue
                 try:
-                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=5, retry=2)
+                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
                     _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
                     blocked_peers.append(sec_node)
                     _block_started[sec_node.get_id()] = time.monotonic()
