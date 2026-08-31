@@ -53,6 +53,7 @@ def check_api_metrics(cluster):
         logger.debug(f"avg_api_req_duration: {avg_api_req_duration}")
         if avg_api_req_duration > 15:
             logger.warning(f"API request duration is too high: {avg_api_req_duration}s")
+            mgmt_events.api_latency_warning(cluster.get_id(), avg_api_req_duration)
 
 
 def main():

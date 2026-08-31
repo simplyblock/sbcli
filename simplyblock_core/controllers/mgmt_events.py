@@ -52,13 +52,12 @@ def dist_usage_warning(node, dist_usage, caused_by=ec.CAUSED_BY_MONITOR):
         node_id=node.get_id())
 
 
-def api_latency_warning(node, dist_usage, caused_by=ec.CAUSED_BY_MONITOR):
+def api_latency_warning(cluster_id, avg_api_req_duration, caused_by=ec.CAUSED_BY_MONITOR):
     ec.log_event_cluster(
-        cluster_id=node.cluster_id,
+        cluster_id=cluster_id,
         domain=ec.DOMAIN_CLUSTER,
         event=ec.EVENT_CAPACITY,
-        db_object=node,
         caused_by=caused_by,
+        db_object={},
         event_level=ec.EventObj.LEVEL_WARN,
-        message=f"API endpoint has high latency",
-        node_id=node.get_id())
+        message=f"API endpoint has high latency {avg_api_req_duration}s")
