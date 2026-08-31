@@ -4,9 +4,10 @@ import time
 from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, constants, cluster_ops, utils
-from simplyblock_core.controllers import cluster_events, fdb_backup_controller
+from simplyblock_core.controllers import cluster_events, fdb_backup_controller, mgmt_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.prom_client import PromClient
 
 logger = utils.get_logger(__name__)
 
@@ -24,6 +25,35 @@ def create_fdb_backup_if_needed(cluster):
     if last_backup_task and last_backup_task.status == JobSchedule.STATUS_DONE:
         if last_backup_task.date + cluster.backup_frequency_seconds < time.time():
             fdb_backup_controller.add_backup_task(cluster.get_id())
+
+def check_mgmt_disk_util_docker(cluster):
+    prom_client = PromClient(cluster.get_id())
+    nodes_stats = prom_client.get_node_filesystem_metrics(history="5m")
+    if nodes_stats:
+        for node_name in nodes_stats:
+            avail_bytes = nodes_stats[node_name].get("avail_bytes")[0]
+            size_bytes = nodes_stats[node_name].get("size_bytes")[0]
+            dist_util = int( 100 - ((avail_bytes * 100) / size_bytes))
+            if dist_util > 90:
+                logger.warning(f"Node {node_name} disk util: {dist_util}%")
+                mgmt_events.dist_usage_warning(node_name, dist_util)
+
+def check_api_metrics(cluster):
+    prom_client = PromClient(cluster.get_id())
+    api_stats = prom_client.get_api_metrics(history="5m")
+    data = []
+    if api_stats:
+        for api_stat in api_stats:
+            for i in range(len(api_stat.get("seconds_count"))):
+                http_request_duration_seconds_count = api_stat.get("seconds_count")[i]
+                http_request_duration_seconds_sum = api_stats.get("seconds_sum")[i]
+                data.append(http_request_duration_seconds_sum/http_request_duration_seconds_count)
+
+        avg_api_req_duration = sum(data)/len(data)
+        logger.debug(f"avg_api_req_duration: {avg_api_req_duration}")
+        if avg_api_req_duration > 15:
+            logger.warning(f"API request duration is too high: {avg_api_req_duration}s")
+            mgmt_events.api_latency_warning(cluster.get_id(), avg_api_req_duration)
 
 
 def main():
@@ -81,6 +111,11 @@ def main():
                 if cl.prov_cap_warn < size_prov < cl.prov_cap_crit:
                     logger.warning(f"Cluster provisioned cap warning, util: {size_prov}% of cluster util: {cl.prov_cap_warn}")
                     cluster_events.cluster_prov_cap_warn(cl, size_prov)
+
+            if cl.mode == "docker":
+                check_mgmt_disk_util_docker(cl)
+
+            check_api_metrics(cl)
 
         time.sleep(constants.CAP_MONITOR_INTERVAL_SEC)
 

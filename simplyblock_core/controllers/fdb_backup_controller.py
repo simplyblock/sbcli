@@ -8,6 +8,7 @@ import uuid
 import docker
 
 from simplyblock_core import utils, constants
+from simplyblock_core.controllers import fdb_backup_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 
@@ -38,6 +39,9 @@ def create_backup(cluster_id):
         res = container.exec_run(cmd=f"fdbbackup start -d {backup_path} -w")
         cont = res.output.decode("utf-8")
         logger.info(cont)
+        # backup created
+        fdb_backup_events.fdb_backup_created(cluster_id)
+
         return True
     return False
 
@@ -113,6 +117,9 @@ def backup_restore(backup_name, cluster_id):
         res = container.exec_run(cmd=f"fdbrestore start -r \"{backup_path}\" --dest-cluster-file {constants.KVD_DB_FILE_PATH}")
         cont = res.output.decode("utf-8")
         logger.info(cont.strip())
+        # backup restored
+        fdb_backup_events.fdb_backup_restored(cluster_id, backup_name)
+
         return True
 
 

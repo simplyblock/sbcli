@@ -71,6 +71,7 @@ class PromClient:
         history_in_hours = history_in_hours % 24
         return history_in_days, history_in_hours, history_in_minutes
 
+
     def get_metrics(self, key_prefix, metrics_lst, params, history=None):
         start_time = datetime.now() - timedelta(minutes=10)
         if history:
@@ -131,3 +132,65 @@ class PromClient:
             "pool": pool_uuid
         }
         return self.get_metrics("pool", metrics_lst, params, history)
+
+
+    def get_raw_metric(self, metric_key, params, history=None):
+        start_time = datetime.now() - timedelta(minutes=10)
+        if history:
+            try:
+                days,hours,minutes = self.parse_history_param(history)
+                start_time = datetime.now() - timedelta(days=days, hours=hours, minutes=minutes)
+            except Exception:
+                raise PromClientException(f"Error parsing history string: {history}")
+        end_time = datetime.now()
+        data_out: list[tuple] = []
+        metrics = self.client.get_metric_range_data(
+            metric_key, label_config=params, start_time=start_time, end_time=end_time)
+        for m in metrics:
+            print(m)
+            mt_name = metric_key
+            mt_info = m["metric"]
+            mt_values = m["values"]
+            mt_values_list = [v for i, v in enumerate(mt_values)]
+            data_out.append((mt_name, mt_info, mt_values_list))
+        return data_out
+
+    def get_node_filesystem_metrics(self, history=None):
+        params = {
+            "mountpoint": "/",
+             "job": "node",
+             "fstype!": "rootfs",
+        }
+        metrics_lst = ["avail_bytes", "size_bytes"]
+        node_stats = {}
+        try:
+            for metric in metrics_lst:
+                params[metric] = ""
+                response_list= self.get_raw_metric(f"node_filesystem_{metric}", params, history)
+                for m, v in response_list:
+                    node_name = m["instance"]
+                    node_stats[node_name] = {metric: v}
+        except Exception as e:
+            logger.error(f"Error getting node filesystem metrics: {e}")
+            return []
+        return node_stats
+
+    def get_api_metrics(self, history=None):
+        params = {
+             "handler!": "none",
+        }
+        metrics_lst = ["seconds_sum", "seconds_count"]
+        api_stats = {}
+        try:
+            for metric in metrics_lst:
+                params[metric] = ""
+                response_list= self.get_raw_metric(f"http_request_duration_{metric}", params, history)
+                for m, v in response_list:
+                    node_name = m["instance"]
+                    api_stats[node_name] = {metric: v}
+        except Exception as e:
+            logger.error(f"Error getting API metrics: {e}")
+            return []
+        return api_stats
+
+
