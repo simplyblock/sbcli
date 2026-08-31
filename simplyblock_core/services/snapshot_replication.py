@@ -145,6 +145,69 @@ def _group_id_for_lvol(lvol):
     return group.get_id() if group else ""
 
 
+class _Held(int):
+    """Falsy like a failure, but tellable apart from one.
+
+    main() backs off 3s after a task returns False, which is right for an RPC
+    that failed and wrong for a transfer that was deliberately postponed. With
+    17 volumes held behind one cutover, that backoff cost ~51s per pass -- and
+    the cutover's OWN round-1 transfer was the last task in the pass, so rounds
+    that move 150ms of data were taking over a minute (run 20260829_010159).
+    """
+    def __new__(cls):
+        return super().__new__(cls, 0)
+
+
+HELD = _Held()
+
+
+def _cutover_in_flight(tasks):
+    """True while some volume holds a lvstore for its endgame."""
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        if (t.function_params or {}).get("cutover_lvs"):
+            return True
+    return False
+
+
+def _replication_order(tasks):
+    """Cutover owners first; everything else on their lvstore waits on them.
+
+    The runner walks tasks oldest-first. A volume enters its endgame LATE by
+    construction (it waits until it has caught up), so its round snapshots are
+    the NEWEST tasks -- last in the pass, behind every task it had itself put
+    on hold.
+    """
+    owners = set()
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        params = t.function_params or {}
+        if params.get("cutover_lvs") and params.get("lvol_id"):
+            owners.add(params["lvol_id"])
+    if not owners:
+        return tasks
+
+    def _rank(t):
+        if t.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+            return 1
+        snap_id = (t.function_params or {}).get("snapshot_id")
+        if not snap_id:
+            return 1
+        try:
+            lvol = db.get_snapshot_by_id(snap_id).lvol
+        except Exception:
+            return 1
+        return 0 if lvol and lvol.get_id() in owners else 1
+
+    return sorted(tasks, key=_rank)      # stable: order within a rank is kept
+
+
 def _lvs_transfer_hold(task, snapshot):
     """Why this transfer must wait, or "" when it may start now.
 
@@ -310,7 +373,7 @@ def process_snap_replicate_start(task, snapshot):
         task.function_result = f"held: {hold}"
         task.write_to_db()
         logger.info("Holding replication of %s: %s", snapshot.get_id(), hold)
-        return False
+        return HELD
     # Drive the transfer from whichever member of the SOURCE lvstore leads it
     # now — the snapshot exists on every member, so an outage of the recorded
     # primary must not stop replication (see _source_leader_node).
@@ -1504,12 +1567,14 @@ def main():
             time.sleep(3)
             continue
         clusters = db.get_clusters()
+        cutover_in_flight = False
         if not clusters:
             logger.error("No clusters found!")
         else:
             for cl in clusters:
                 tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-                for task in tasks:
+                cutover_in_flight = cutover_in_flight or _cutover_in_flight(tasks)
+                for task in _replication_order(tasks):
                     if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
                         if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                             active_task = False
@@ -1535,10 +1600,19 @@ def main():
                                 logger.error("Replication task %s failed: %s",
                                              task.get_id(), e)
                                 res = False
-                            if not res:
+                            if not res and res is not HELD:
+                                # A hold is a decision, not a failure: sleeping
+                                # on it delays the very transfer it is waiting
+                                # for.
                                 time.sleep(3)
 
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        # A cutover round is a snapshot this loop has to move before the volume
+        # can take the next one, so the pass interval lands directly in the
+        # convergence time -- and at 10s it IS the convergence time, for a
+        # transfer that takes 150ms. Tighten the loop only while a cutover is
+        # actually in flight; the idle cadence is unchanged.
+        time.sleep(constants.REPL_CUTOVER_ACTIVE_POLL_SEC if cutover_in_flight
+                   else constants.TASK_EXEC_INTERVAL_SEC)
 
 
 if __name__ == "__main__":
