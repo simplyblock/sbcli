@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import select
+import shlex
 import time
 from concurrent.futures import ThreadPoolExecutor
 import sys
@@ -31,7 +32,13 @@ KEY_NAME = "mtes01"
 KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ = "us-east-1a"
 SG_NAME = "default"
-BRANCH = "main"
+#: Must be the branch that carries the env_var ultra pin: env_var ships
+#: INSIDE the pip package, so installing "main" here would give the nodes
+#: main's env_var (ultra:main-latest) and the dbg-main pin would silently
+#: have no effect -- verified: a cluster deployed with BRANCH="main"
+#: reported SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=ultra:main-latest.
+#: This branch is main plus that one pin, so data migration stays enabled.
+BRANCH = "ultra-dbg-main"
 MAX_LVOL = "75"  # capped by constants.MAX_SUBSYSTEMS_PER_NODE (75): above it, values were silently clamped at placement time, so a node reserved huge pages for subsystems it could never serve. cluster create rejects it since 8bcedce79.
 # --- Manual Network Config ---
 # Replace this with your actual Subnet ID (e.g., "subnet-0593459d6b931ee4c")
@@ -157,6 +164,53 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=600):
     ssh.close()
     return results
 
+
+def ssh_exec_detached(ip, cmd, timeout=2400, poll=15, label=None):
+    """Run one long command detached and poll a short connection for its rc.
+
+    `cluster create` deploys the swarm stack: ~50 images pulled at once,
+    which drives an 8-vCPU mgmt node to load ~38 for several minutes. The
+    SSH channel does not survive that, paramiko reports rc=-1, and the
+    deploy fails a step that is merely slow -- observed 4 times out of 4,
+    always at this step, while the stack went on to converge fully
+    (52/52 services, 9 FDB containers) minutes later.
+
+    Retrying is not an option: cluster create is not idempotent. Detaching
+    decouples the command from the connection, so a dead channel costs one
+    poll. The subshell matters -- a command that calls `exit` would
+    otherwise terminate the shell before the rc is captured.
+    """
+    label = label or cmd[:60]
+    tag = f"deploy_{int(time.time())}_{abs(hash(cmd)) % 100000}"
+    out_file, rc_file = f"/tmp/{tag}.out", f"/tmp/{tag}.rc"
+    inner = f"( {cmd} ); echo $? > {rc_file}"
+    print(f"  [{ip}] $ (detached) {label}")
+    ssh_exec(ip, [f"nohup setsid bash -lc {shlex.quote(inner)} "
+                  f"> {out_file} 2>&1 < /dev/null &"], check=False, timeout=120)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(poll)
+        try:
+            got = ssh_exec(ip, [f"cat {rc_file} 2>/dev/null || true"],
+                           get_output=True, check=False, timeout=120)
+        except Exception as exc:  # noqa: BLE001 - a failed poll is not a failure
+            print(f"  [{ip}] poll failed ({type(exc).__name__}); retrying")
+            continue
+        text = "".join(got).strip()
+        if not text:
+            continue
+        try:
+            rc = int(text.splitlines()[-1].strip())
+        except ValueError:
+            continue
+        tail = ssh_exec(ip, [f"tail -25 {out_file}"], get_output=True,
+                        check=False, timeout=120)
+        for line in "".join(tail).splitlines()[-10:]:
+            print(f"    {line}")
+        if rc != 0:
+            raise RuntimeError(f"Detached command failed on {ip} (rc={rc}): {label}")
+        return rc
+    raise RuntimeError(f"Detached command timed out after {timeout}s on {ip}: {label}")
 
 def ssh_exec_stream(ip, cmd, check=False):
     ssh = paramiko.SSHClient()
@@ -527,7 +581,7 @@ def main():
     # --- 5. Cluster Configuration (Phase 2) ---
     # Step 5a: Create cluster on mgmt (sequential, must complete first)
     print("Phase 2a: Creating cluster on management node...")
-    ssh_exec(mgmt_ip, [
+    ssh_exec_detached(mgmt_ip, (
         # --dev enables developer-mode-only (private) args like --enable-hang-device.
         f"sudo /usr/local/bin/sbctl -d --dev cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
         " --enable-hang-device"
@@ -535,7 +589,7 @@ def main():
         # Swarm stack deploy inside cluster create pulls the full CP image set;
         # observed >10 min on cold registry pulls (2026-07-10, two deploys died
         # on the default 600 s channel timeout at "Deploying swarm stack").
-    ], check=True, timeout=2400)
+    ), timeout=2400, label="sbctl cluster create")
     print("Phase 2a: DONE - cluster created.")
 
     # Step 5b: Configure and deploy storage nodes in parallel
