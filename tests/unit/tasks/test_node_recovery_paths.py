@@ -20,7 +20,6 @@ These test the extracted policy/helper directly rather than mocking the whole
 restart path, so they assert behaviour (what kwargs are used, what is called,
 what happens when the agent is unreachable) instead of source shape.
 """
-import pytest
 
 from simplyblock_core.storage_node_ops import (
     ensure_spdk_stopped,
