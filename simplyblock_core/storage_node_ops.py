@@ -10229,12 +10229,22 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     repl_disabled = False
                     # c. suspend journal replication while the port is blocked
                     try:
-                        repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
+                        # Bounded: this runs with the leader's port already
+                        # fenced, and a bare rpc_client() inherits
+                        # RPCClient(timeout=180, retry=3) -> ~726s worst case
+                        # with backoff. The leader answers this in ~11ms; if
+                        # it has just died, the fence must not be held for
+                        # minutes (client KATO is 4s). Failure here is
+                        # already handled: repl_disabled stays False, the
+                        # port is unblocked and the suspend loop retries.
+                        repl_disabled = current_leader.rpc_client(
+                            timeout=0.5, retry=1).jc_disable_replication(lvs_jm_vuid)
                     except RPCRemoteError as e:
                         if e.code == RPCErrorCode.method_not_found:
                             try:
                                 logger.warning("Failed to disable replication on leader, trying other method")
-                                ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
+                                ret = current_leader.rpc_client(
+                                    timeout=0.5, retry=1).jc_get_jm_status(lvs_jm_vuid)
                                 repl_disabled = True
                                 for jm in ret:
                                     if ret[jm] is False:  # jm is not ready (has active replication task)
