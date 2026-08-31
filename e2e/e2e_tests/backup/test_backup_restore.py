@@ -1064,9 +1064,13 @@ class BackupTestBase(TestClusterBase):
         pvc_name = self._k8s_normalize_name(lvol_id)
         vol_handle = k8s.get_pvc_volume_handle(pvc_name)
         if vol_handle:
+            # volumeHandle format is "clusterID:nodeID:lvolUUID" — extract
+            # the last segment which is the actual lvol UUID.
+            lvol_uuid = vol_handle.rsplit(":", 1)[-1] if ":" in vol_handle else vol_handle
             self.logger.info(
-                f"[mgmt] Resolved PVC '{pvc_name}' → volumeHandle '{vol_handle}'")
-            return vol_handle
+                f"[mgmt] Resolved PVC '{pvc_name}' → volumeHandle '{vol_handle}' "
+                f"→ lvol UUID '{lvol_uuid}'")
+            return lvol_uuid
         self.logger.warning(
             f"[mgmt] Could not resolve volumeHandle for PVC '{pvc_name}', "
             f"falling back to '{lvol_id}'")
