@@ -10335,8 +10335,33 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
                     # b. block the leader's LVS port
                     try:
-                        current_leader.lvstore_status = "in_creation"
-                        current_leader.write_to_db()
+                        # Field-scoped and transactional. A plain
+                        # `leader.lvstore_status = X; leader.write_to_db()`
+                        # serialises the WHOLE record from a copy read at
+                        # the top of this function -- before the peer went
+                        # down -- so it silently restores status=online over
+                        # the monitor's offline write, and emits no
+                        # STATUS_CHANGE event because it never goes through
+                        # the status path.
+                        #
+                        # 2026-08-31: that resurrected "online" for a node
+                        # whose SPDK was dead (it started at 12:02:31, the
+                        # record read online from 11:52 to 12:02). So
+                        # _check_peer_disconnected could never observe
+                        # offline, the port-block below was issued to a dead
+                        # node, and the restart aborted -- and every retry
+                        # re-resurrected it: 5 aborts over 15 minutes, with
+                        # the peer reported online in sn list throughout.
+                        # Deliberately does NOT rebind current_leader: the
+                        # rest of this flow keeps the object it was called
+                        # with, so behaviour is unchanged. Not clobbering the
+                        # record is enough to break the retry loop --
+                        # _check_peer_disconnected re-reads from FDB on the
+                        # next attempt, so it now sees offline and skips the
+                        # port-block instead of failing on it forever.
+                        db_controller.atomic_update(
+                            current_leader,
+                            lambda x: setattr(x, "lvstore_status", "in_creation"))
                         port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
                         _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                         blocked_peers.append(current_leader)
