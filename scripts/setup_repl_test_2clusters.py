@@ -40,7 +40,10 @@ STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 # tasks_runner_replication_final, replication_final_step, cluster
 # add-replication), so main is what we test; the default
 # SIMPLY_BLOCK_DOCKER_IMAGE (simplyblock/simplyblock:main) matches it.
-BRANCH = "main"
+# Overridable for the repl_soak.py one-liner: SBCLI_BRANCH selects the sbcli
+# checkout installed on every node (and the hotfix source), SPDK_IMAGE the
+# pinned ultra image, SIMPLYBLOCK_DOCKER_IMAGE the control-plane image.
+BRANCH = os.environ.get("SBCLI_BRANCH", "main")
 
 SN_TYPE = "i3en.2xlarge"
 MGMT_TYPE = "m6i.2xlarge"
@@ -107,12 +110,17 @@ REPLICATION = {"source": "src", "target": "tgt", "timeout": 3600}
 # parallel reads, spdk R26.3 bdd97c1d8/ce876a169) exist only from the
 # 2026-08-22 build onward, and ultra:main-latest's manifest list has a live
 # race that leaves its amd64 entry pointing at the PREVIOUS build (observed
-# 2026-08-17, -21 and -22). This digest = main-2a03661a-amd64, 2026-08-24 --
+# 2026-08-17, -21 and -22). This digest = main-d91ff03a-amd64, 2026-08-25:
+# the first ultra build FROM spdk-core:master-latest (spdk master = R26.3
+# merged + the ANA-transition change reverted). NOTE the digest printed in
+# the CI push log is docker.io's; ECR's differs -- resolve it against
+# public.ecr.aws (docker manifest inspect -v <tag>). Previous pin --
 # the first build carrying the promotion-window ANA-transition fix
 # (spdk R26.3 554c80f11), verified built FROM spdk-core:R26.3-latest
 # whose manifest was created 18:41:57, before this ultra build started.
-SPDK_IMAGE = ("public.ecr.aws/simply-block/ultra@"
-              "sha256:961410aefddaa615d4d1dfe1b8cc7ce27922d9a06ff924296f669c953e742bef")
+SPDK_IMAGE = os.environ.get(
+    "SPDK_IMAGE",
+    "public.ecr.aws/simply-block/ultra@sha256:0d631068e3add220d9198f212cf78d1e732ad9f0f92061dbebc413a9a6550e3b")
 
 SN_COUNT = sum(c["nodes"] for c in CLUSTERS)
 SBCTL = "sudo /usr/local/bin/sbctl"
@@ -198,7 +206,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
         # Printing each line as it lands is what makes a hang locatable.
         pending = {"out": "", "err": ""}
 
-        def _emit(stream, text):
+        def _emit(stream, text, pending=pending):
             pending[stream] += text
             while "\n" in pending[stream]:
                 line, pending[stream] = pending[stream].split("\n", 1)
@@ -213,7 +221,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
                     except UnicodeEncodeError:
                         print(out.encode("ascii", "replace").decode("ascii"), flush=True)
 
-        def _drain():
+        def _drain(chan=chan, out_parts=out_parts, err_parts=err_parts):
             while chan.recv_ready():
                 chunk = chan.recv(65536).decode("utf-8", "replace")
                 out_parts.append(chunk)

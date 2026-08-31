@@ -374,6 +374,8 @@ class BaseNodeObject(BaseModel):
     STATUS_UNREACHABLE = 'unreachable'
     STATUS_SCHEDULABLE = 'schedulable'
     STATUS_DOWN = 'down'
+    STATUS_IN_REMOVAL = 'in_removal'
+    STATUS_PENDING_REMOVAL = 'pending_removal'
 
     _STATUS_CODE_MAP = {
         STATUS_ONLINE: 0,
@@ -386,4 +388,6 @@ class BaseNodeObject(BaseModel):
         STATUS_UNREACHABLE: 20,
         STATUS_SCHEDULABLE: 30,
         STATUS_DOWN: 40,
+        STATUS_IN_REMOVAL: 41,
+        STATUS_PENDING_REMOVAL: 42,
     }

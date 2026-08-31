@@ -130,21 +130,23 @@ Requires FoundationDB 7.3.3 client library installed on the host for the Python 
 
 ## Agent Instructions Layout
 
-`AGENTS.md` is the source of truth at every level. Tool-specific files are symlinks:
+`AGENTS.md` is the source of truth at every level. Each `CLAUDE.md` is a one-line stub
+whose only content is the `@AGENTS.md` import directive, which makes Claude Code inline the
+sibling `AGENTS.md`. Stubs are used rather than symlinks so the checkout works on Windows.
 
 ```
 AGENTS.md                          ← root instructions (this file)
-CLAUDE.md → AGENTS.md              ← Claude Code
-.github/copilot-instructions.md → ../AGENTS.md  ← GitHub Copilot
+CLAUDE.md                          ← Claude Code stub: `@AGENTS.md`
+.github/copilot-instructions.md → ../AGENTS.md  ← GitHub Copilot (symlink)
 
 simplyblock_cli/AGENTS.md         ← CLI-specific instructions
-simplyblock_cli/CLAUDE.md → AGENTS.md
+simplyblock_cli/CLAUDE.md          ← `@AGENTS.md`
 simplyblock_core/AGENTS.md        ← Core-specific instructions
-simplyblock_core/CLAUDE.md → AGENTS.md
+simplyblock_core/CLAUDE.md         ← `@AGENTS.md`
 simplyblock_web/AGENTS.md         ← Web API-specific instructions
-simplyblock_web/CLAUDE.md → AGENTS.md
+simplyblock_web/CLAUDE.md          ← `@AGENTS.md`
 tests/AGENTS.md                   ← Test-suite layout, tiers, fixtures
-tests/CLAUDE.md → AGENTS.md
+tests/CLAUDE.md                    ← `@AGENTS.md`
 
 .agents/skills/                    ← shared skills (source of truth)
   tox-verify.md                    ← tox verification workflow
@@ -155,7 +157,8 @@ tests/CLAUDE.md → AGENTS.md
 .claude/settings.json              ← Claude Code wiring: references the .agents/hooks/ scripts
 ```
 
-Edit only `AGENTS.md` files and `.agents/skills/` contents. Never edit the symlink targets directly.
+Edit only `AGENTS.md` files and `.agents/skills/` contents. Never edit a `CLAUDE.md` stub or a
+symlink target directly.
 
 ### Guard hooks
 

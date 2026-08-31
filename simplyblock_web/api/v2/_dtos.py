@@ -51,6 +51,8 @@ StorageNodeStatus = Literal[
     "unreachable",
     "schedulable",
     "down",
+    "in_removal",
+    "pending_removal",
 ]
 
 TaskStatus = Literal["new", "running", "suspended", "done"]

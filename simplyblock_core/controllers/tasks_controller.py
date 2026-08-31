@@ -8,7 +8,8 @@ import time
 import uuid
 
 from simplyblock_core import db_controller, constants, utils
-from simplyblock_core.controllers import tasks_events, device_controller
+from simplyblock_core.controllers import (
+    tasks_events, device_controller, events_controller)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -947,9 +948,39 @@ def add_batch_mig_task(group):
     )
 
 
+def _is_already_gone(err):
+    """True when an RPC error means "the thing is not there" (-19/ENODEV).
+
+    For a delete that is success; for a register it is still a failure, but
+    it is not an actionable one to alert on repeatedly -- the object the
+    caller wanted registered has gone away underneath it.
+    """
+    if err is None:
+        return False
+    if isinstance(err, dict):
+        return err.get("code") == -19
+    return "-19" in str(err)
+
 def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):
+    """Deferred per-node sync delete. Retried until it succeeds.
+
+    max_retry=-1 is deliberate, and matches add_lvol_sync_op_task: by the
+    time this task exists the leader's async delete has already succeeded,
+    so the data is gone and the volume is pinned in_deletion until every
+    peer drops its replica bdev. Giving up would leak the volume in
+    in_deletion permanently, which is strictly worse than retrying.
+
+    It previously declared max_retry=10 while the runner never incremented
+    task.retry nor compared it -- the bound was documented in the record and
+    absent from the code. The behaviour here is unchanged; it is now
+    honest about being unbounded. Failures are surfaced through the
+    SYNC_DELETE_FAILED cluster event (emitted when the error CHANGES, not
+    every 3s), and the task completes on obsolescence: -19 from the node,
+    or the node record disappearing.
+    """
     return _add_task(JobSchedule.FN_LVOL_SYNC_DEL, cluster_id, node_id, "",
-                     function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node}, max_retry=10)
+                     function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node},
+                     max_retry=-1)
 
 
 def get_lvol_sync_op_task(cluster_id, node_id, lvol_id, op):
@@ -999,6 +1030,46 @@ def run_lvol_sync_op_task(task):
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
 
+    def _defer_failure(result, err=None):
+        """Defer after a GENUINE failure, and escalate a persistent one.
+
+        Distinct from _defer, which also covers benign waiting (node not
+        ONLINE yet, LVS owned by a restart, lvol not yet settled) -- those
+        are not failures and must not raise an alert. These tasks retry
+        forever by design, so without this a permanently failing
+        registration is invisible except as a replica that is silently
+        missing and every later snapshot on that node failing.
+        """
+        previous = task.function_result
+        if _is_already_gone(err):
+            # -19 / ENODEV: nothing to act on, do not count it.
+            _defer(result)
+            return
+        task.retry = (task.retry or 0) + 1
+        threshold = constants.TASK_FAILURE_ALERT_THRESHOLD
+        should_alert = task.retry > threshold and (
+            task.retry == threshold + 1 or previous != result)
+        _defer(result)
+        if not should_alert:
+            return
+        try:
+            events_controller.log_event_cluster(
+                cluster_id=task.cluster_id,
+                domain=events_controller.DOMAIN_STORAGE,
+                event="LVOL_TASK_FAILING_REPEATEDLY",
+                db_object=task,
+                caused_by=events_controller.CAUSED_BY_MONITOR,
+                message=(f"Deferred lvol {task.function_params.get('op')} "
+                         f"for {task.function_params.get('lvol_id')} has "
+                         f"failed {task.retry} times on node {task.node_id}; "
+                         f"it will keep retrying, but this is not a "
+                         f"transient condition and needs attention. "
+                         f"Last error: {result}"),
+                node_id=task.node_id,
+                event_level="Critical")
+        except Exception as event_error:
+            logger.warning("Could not log repeated-failure event: %s", event_error)
+
     try:
         if task.canceled:
             _finish("canceled")
@@ -1009,7 +1080,25 @@ def run_lvol_sync_op_task(task):
         try:
             lvol = db.get_lvol_by_id(lvol_id)
         except KeyError:
-            _finish("lvol no longer exists")
+            # A missing record is normally obsolescence (the lvol was
+            # deleted) and completes the task. But add_lvol_ha queues these
+            # register tasks in its pre-check, BEFORE it writes the lvol
+            # record at the end of the create -- so this runner (3s poll)
+            # can see the task while the create is still running and
+            # permanently DROP the registration, leaving the replica
+            # missing and every later snapshot on that node failing
+            # (the LVOL_109 class). Inside the grace window, defer instead:
+            # once the record appears, the status check below takes over.
+            try:
+                age = time.time() - float(task.date or 0)
+            except (TypeError, ValueError):
+                # Unknown age: fall back to the previous behaviour and treat
+                # the record as genuinely gone, rather than deferring forever.
+                age = float("inf")
+            if age < constants.LVOL_SYNC_OP_RECORD_GRACE_SEC:
+                _defer("lvol record not written yet, retrying")
+            else:
+                _finish("lvol no longer exists")
             return
         if lvol.status == LVol.STATUS_IN_DELETION:
             _finish("lvol is being deleted")
@@ -1045,7 +1134,7 @@ def run_lvol_sync_op_task(task):
             if ok:
                 _finish(f"registered lvol {lvol_id} on {task.node_id}")
             else:
-                _defer(f"registration failed: {err}")
+                _defer_failure(f"registration failed: {err}", err)
         elif op == "resize":
             # Converge to the CURRENT DB size — resize_lvol persists the new
             # size after the fan-out, so this always applies the latest

@@ -2960,7 +2960,7 @@ class TestClusterBase:
         """
         if self.k8s_test:
             return
-        if hasattr(self, "_root_monitor_thread") and getattr(self, "_root_monitor_thread").is_alive():
+        if hasattr(self, "_root_monitor_thread") and self._root_monitor_thread.is_alive():
             self.logger.info("Root monitor already running; skipping start.")
             return
 

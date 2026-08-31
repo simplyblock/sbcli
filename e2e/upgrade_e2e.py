@@ -89,15 +89,15 @@ def main():
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
-        finally:
-            if stop_after_teardown:
-                logger.info("Previous test failed. "
-                            "Cannot execute more upgrade tests as cluster state is unknown. Exiting")
-                break
-            if check_for_dumps():
-                logger.info("Found a core dump during test execution. "
-                            "Cannot execute more tests as cluster is not stable. Exiting")
-                break
+
+        if stop_after_teardown:
+            logger.info("Previous test failed. "
+                        "Cannot execute more upgrade tests as cluster state is unknown. Exiting")
+            break
+        if check_for_dumps():
+            logger.info("Found a core dump during test execution. "
+                        "Cannot execute more tests as cluster is not stable. Exiting")
+            break
 
     failed_cases = list(errors.keys())
     skipped_cases = len(test_class_run) - (len(passed_cases) + len(failed_cases))

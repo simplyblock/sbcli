@@ -74,6 +74,7 @@ data-plane-isolated storage nodes and client):
         --metadata cluster_metadata_mp.json
 """
 import argparse
+import base64
 import json
 import os
 import posixpath
@@ -130,6 +131,18 @@ FIO_HARD_ERROR_MARKERS = (
     "fio: pid=",
     "Killed",
     "Terminated",
+    # fio prints verify failures WITHOUT the "fio: " prefix -- the line reads
+    # "verify: bad magic header a8a4, wanted acca at file ...". Neither
+    # "fio: verify" nor "verify failed" matches that, so run 20260825_155730
+    # corrupted vol6 at 18:53 and vol2 at 19:43 and the soak kept applying
+    # outages for another two hours, reporting PASS each time, until vol4's
+    # fio *process* died at 20:49 and the rc-file branch finally caught it.
+    # A data verification failure is the single most important thing this
+    # harness can find; it must never again depend on fio also crashing.
+    "verify: bad",
+    "bad magic header",
+    "bad header offset",
+    "verify: got",
 )
 #: fio stderr markers for a --max_latency violation. Fatal in phase 1 (a
 #: single-NIC outage must be transparent), counted in phase 2 (promotion
@@ -193,6 +206,25 @@ def parse_args():
                      help="--max_latency in seconds; 0 omits the flag (default 20).")
     fio.add_argument("--fio-verify", default="crc32c",
                      help="fio verify algorithm; empty string disables verification.")
+    fio.add_argument("--write-iolog", action="store_true",
+                     help="Record every IO (type, offset, length) per volume via "
+                          "fio --write_iolog, so a verify failure can be traced back "
+                          "to the writes that touched that offset. Bounded by "
+                          "--iolog-keep-hours; unbounded is gigabytes per volume "
+                          "per hour at this workload.")
+    fio.add_argument("--iolog-volumes", default="all",
+                     help="Which volumes record write history: 'all' (default), or "
+                          "a comma-separated list of indexes such as '1' or '1,4'. "
+                          "One volume cuts the rate six-fold; ~16 GB/h per volume.")
+    fio.add_argument("--iolog-dir", default="/iolog",
+                     help="Where write history goes (default /iolog, the dedicated "
+                          "client disk). Falls back to the run directory if that is "
+                          "not a mountpoint -- that is the root filesystem, which "
+                          "filled in four minutes on 2026-08-26.")
+    fio.add_argument("--iolog-keep-hours", type=float, default=1.0,
+                     help="Hours of iolog history to keep (default 1). A trimmer "
+                          "hole-punches the head of each log, freeing those blocks "
+                          "without disturbing fio write offsets.")
     fio.add_argument("--fio-completion-grace", type=int, default=180,
                      help="Seconds before the projected fio end time at which a clean "
                           "rc=0 exit counts as completion rather than a mid-run fault.")
@@ -206,6 +238,14 @@ def parse_args():
                      help="Seconds the NIC stays down on all nodes (default 30).")
     nic.add_argument("--nic-phase-settle", type=int, default=30,
                      help="Seconds to wait after NIC restore before verifying (default 30).")
+    nic.add_argument("--no-nic-phase", action="store_true",
+                     help="Disable phase 1 (the all-nodes single-NIC outage) "
+                          "entirely. REQUIRED on a single-data-NIC, non-multipath "
+                          "cluster: with one data NIC per node, phase 1 takes that "
+                          "NIC down on every node at once and isolates the whole "
+                          "cluster instead of exercising path redundancy. Note that "
+                          "--nic-phase-every 0 does NOT disable phase 1 -- it means "
+                          "'once, on iteration 1'.")
     nic.add_argument("--nic-phase-every", type=int, default=1,
                      help="Run the NIC phase every N iterations. 0 = once, before the "
                           "first pair only (default 1).")
@@ -314,8 +354,20 @@ def parse_args():
     args.methods = methods
 
     args.data_nics = [n.strip() for n in args.data_nics.split(",") if n.strip()]
+    if not args.data_nics:
+        parser.error("At least one data NIC is required")
     if len(args.data_nics) < 2:
-        parser.error("At least 2 data NICs are required for a multipath soak")
+        # Single-path (non-multipath) cluster. Everything that depended on
+        # two NICs now derives from this list -- path counts, listener
+        # counts, and the active_active policy assertions, which are
+        # skipped below two. Only phase 1 is genuinely unsafe here, since
+        # taking the single data NIC down on every node isolates the whole
+        # cluster, so it must be disabled explicitly rather than silently.
+        if not args.no_nic_phase:
+            parser.error(
+                "a single data NIC requires --no-nic-phase: phase 1 takes one "
+                "data NIC down on every node at once, which with one NIC per "
+                "node isolates the cluster instead of testing path redundancy")
     if args.pair_delay_min < 0 or args.pair_delay_max < args.pair_delay_min:
         parser.error("--pair-delay-min/--pair-delay-max must satisfy 0 <= min <= max")
 
@@ -1205,6 +1257,8 @@ class SoakRunner:
             f"size={args.fio_size_per_job}/job "
             f"({args.fio_total_size} total) runtime={args.runtime}s "
             f"ioengine={args.fio_ioengine}")
+        self.iolog_dir = (self._resolve_iolog_dir()
+                          if args.write_iolog else "")
         fio_jobs = []
         for volume in volumes:
             fio_name = f"soak_mp_{volume['index']}"
@@ -1220,8 +1274,22 @@ class SoakRunner:
             if args.fio_max_latency > 0:
                 fio_cmd += f"--max_latency={args.fio_max_latency}s "
             if args.fio_verify:
+                # verify_dump writes <file>.<offset>.received / .expected on a
+                # mismatch. Without it a verify failure gives only fio's one
+                # line, and every corruption so far has died with the returned
+                # bytes unidentified -- we could not tell stale data from
+                # parity noise from a neighbouring block, and the volumes are
+                # on instance store so they vanish when the fleet is stopped.
+                # The dumps are 4 KiB each and only appear on failure.
                 fio_cmd += (f"--verify={args.fio_verify} --verify_fatal=1 "
-                            f"--verify_backlog=1024 ")
+                            f"--verify_backlog=1024 --verify_dump=1 ")
+            if args.write_iolog and self._iolog_wanted(volume["index"]):
+                # On a dedicated client disk, never inside the volume under
+                # test: the iolog must not become part of the data verified,
+                # and on the root filesystem it fills the client in minutes.
+                iolog = posixpath.join(
+                    self.iolog_dir, f"iolog_vol{volume['index']}.log")
+                fio_cmd += f"--write_iolog={shlex.quote(iolog)} "
             fio_cmd += f"--output={shlex.quote(volume['fio_log'])}"
 
             start_script = (
@@ -1247,6 +1315,8 @@ class SoakRunner:
                 pid=pid,
             ))
             self.logger.log(f"Started fio for {volume['volume_name']} pid {pid}")
+        if args.write_iolog:
+            self.start_iolog_trimmer()
         self.fio_jobs = fio_jobs
         self.fio_started_at = time.time()
         time.sleep(10)
@@ -1289,6 +1359,69 @@ class SoakRunner:
             f"bash -lc {shlex.quote(cmd)}", timeout=30, check=False,
             label=f"grep {job.volume_name}")
         return (stdout_text or "").strip()
+
+    def _iolog_wanted(self, index):
+        """Whether volume ``index`` records write history (--iolog-volumes)."""
+        sel = (self.args.iolog_volumes or "all").strip().lower()
+        if sel in ("all", "*"):
+            return True
+        wanted = {p.strip() for p in sel.split(",") if p.strip()}
+        return str(index) in wanted
+
+    def _resolve_iolog_dir(self):
+        """Use --iolog-dir when it is a real mountpoint, else fall back loudly.
+
+        Falling back means writing to the root filesystem, which on 2026-08-26
+        took 6.3 GiB in four minutes and filled an 8.8G disk while fio was
+        running -- and a full root under fio manufactures I/O errors that look
+        like storage faults. So the fallback is a warning, not a silent detour.
+        """
+        d = self.args.iolog_dir
+        rc, _, _ = self.client.run(f"mountpoint -q {shlex.quote(d)}",
+                                   timeout=60, check=False,
+                                   label="check iolog mount")
+        if rc == 0:
+            self.client.run(f"mkdir -p {shlex.quote(d)}/{self.run_id}",
+                            timeout=60, check=False, label="mkdir iolog")
+            return posixpath.join(d, self.run_id)
+        fallback = posixpath.join("/home", self.user, f"soak_mp_{self.run_id}")
+        self.logger.log(
+            f"WARNING: {d} is not a mountpoint; writing write-history to "
+            f"{fallback} on the ROOT filesystem. Expect ~16 GB/h per volume; "
+            f"consider --iolog-volumes to narrow it or disable --write-iolog.")
+        return fallback
+
+    def start_iolog_trimmer(self):
+        """Stage and launch the iolog trimmer on the client.
+
+        The script is pushed base64-encoded rather than heredoc'd: the trimmer
+        is full of quotes and ${} that do not survive nesting through
+        ssh -> bash -> bash, and a mangled trimmer would silently fail to bound
+        the logs. base64 has no characters any shell layer will touch.
+        """
+        local = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "iolog_trimmer.sh")
+        if not os.path.isfile(local):
+            self.logger.log(
+                f"WARNING: {local} not found; iologs will grow UNBOUNDED "
+                f"(no trimmer staged)")
+            return
+        with open(local, "rb") as fh:
+            payload = base64.b64encode(fh.read()).decode()
+        run_dir = self.iolog_dir
+        keep = int(max(60.0, self.args.iolog_keep_hours * 3600.0))
+        stage = (f"echo {payload} | base64 -d > ~/iolog_trimmer.sh && "
+                 f"chmod +x ~/iolog_trimmer.sh")
+        self.client.run("bash -lc " + shlex.quote(stage), timeout=120,
+                        check=True, label="stage iolog trimmer")
+        launch = (f"setsid nohup ~/iolog_trimmer.sh {shlex.quote(run_dir)} {keep} 300 "
+                  f"> {shlex.quote(run_dir)}/iolog_trimmer.log 2>&1 < /dev/null & echo $!")
+        self.client.run("bash -lc " + shlex.quote(launch), timeout=60,
+                        check=False, label="start iolog trimmer")
+        self.logger.log(
+            f"iolog trimmer started: keeping ~{self.args.iolog_keep_hours}h of write "
+            f"history per volume in {run_dir}")
+
 
     def _dump_fio_streams(self, job, context):
         for label, path, lines in [
@@ -1602,6 +1735,12 @@ class SoakRunner:
         # node passive. active_passive means one NIC carries all hub IO.
         to_check = [(b, "hublvol") for b in hublvol_bdevs]
         to_check += [(b, "remote") for b in remote_bdevs[:max(0, self.args.policy_sample)]]
+        # Only meaningful with more than one path: on a single-data-NIC
+        # (non-multipath) cluster a bdev legitimately reports active_passive,
+        # and asserting active_active there would make every bdev a "problem",
+        # so the heal gate could never converge.
+        if len(self.args.data_nics) < 2:
+            to_check = []
         for bdev_name, kind in to_check:
             try:
                 bdevs = _rpc_json(f"bdev_get_bdevs -b {shlex.quote(bdev_name)}",
@@ -2081,10 +2220,20 @@ print(json.dumps(out))
             f"fio: {args.fio_rw} bs={args.fio_bs} numjobs={args.fio_numjobs} "
             f"iodepth={args.fio_iodepth} total={args.fio_total_size} "
             f"runtime={args.runtime}s ({args.runtime / 3600:.1f}h)")
-        self.logger.log(
-            f"phase 1: {args.data_nics} single-NIC on all nodes, "
-            f"{args.nic_phase_hold}s down + {args.nic_phase_settle}s settle, "
-            f"every {args.nic_phase_every or 'once'} iteration(s)")
+        if args.no_nic_phase:
+            self.logger.log(
+                "phase 1: DISABLED (--no-nic-phase); no NIC outages will be "
+                "applied. Only phase 2 pair outages run.")
+        else:
+            self.logger.log(
+                f"phase 1: {args.data_nics} single-NIC on all nodes, "
+                f"{args.nic_phase_hold}s down + {args.nic_phase_settle}s settle, "
+                f"every {args.nic_phase_every or 'once'} iteration(s)")
+        if len(args.data_nics) < 2:
+            self.logger.log(
+                f"single-path mode: one data NIC ({args.data_nics}); path and "
+                f"listener expectations follow that, and the active_active "
+                f"policy assertions are skipped as meaningless with one path")
         self.logger.log(
             f"phase 2: methods={args.methods}, hold={args.outage_hold}s, "
             f"offset {args.pair_delay_min}-{args.pair_delay_max}s"
@@ -2152,8 +2301,13 @@ print(json.dumps(out))
                     + ", ".join(f"{n['uuid'][:12]}:{n['status']}" for n in current))
             uuids = [n["uuid"] for n in current]
 
-            nic_due = (iteration == 1 if args.nic_phase_every == 0
-                       else (iteration - 1) % args.nic_phase_every == 0)
+            # --nic-phase-every 0 means "once, on iteration 1"; only
+            # --no-nic-phase disables phase 1 outright, which is required on a
+            # single-data-NIC cluster where taking "one" NIC down on every node
+            # isolates the whole cluster instead of testing path redundancy.
+            nic_due = ((not args.no_nic_phase)
+                       and (iteration == 1 if args.nic_phase_every == 0
+                            else (iteration - 1) % args.nic_phase_every == 0))
             if nic_due:
                 nic = args.data_nics[(iteration - 1) % len(args.data_nics)]
                 if self.run_nic_phase(iteration, nic, uuids):

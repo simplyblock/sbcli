@@ -32,6 +32,21 @@ Pure-logic tests. Pick this tier when the test:
 
 `tests/unit/conftest.py` stubs out `fdb` (returning `None` from `fdb.open`), so unit tests never touch a real database. Run with `tox run -e unit` — no Docker, no infra.
 
+**Never stand in for the database in a unit test.** The tier split is *about* the database, and there are only two positions:
+
+- the test does not interact with the database API **at all** → `tests/unit/`;
+- the test interacts with the **real** database API → `tests/integration/`.
+
+A `_FakeDB`, a patched `DBController`, a module's `db` / `db_controller` singleton swapped for a mock, an assigned `kv_store` — each of these invents a third position that does not exist. It neither avoids the database nor exercises it: it asserts against a second, undeclared copy of the `DBController` interface that nothing keeps in sync with the real one. Such a test stays green until production code calls an accessor the fake never implemented, and then fails on an `AttributeError` that says nothing about the behaviour under test.
+
+That is not hypothetical. The snapshot-replication retention suite had a `_FakeDB` implementing the four accessors retention used when it was written; the moment retention began consulting `get_replication_policy_for_lvol`, twelve tests failed on a missing attribute rather than on anything about retention. They are now `tests/integration/test_snapshot_replication_retention.py`, seeding real models and reading them back through a live `DBController`.
+
+So, when a unit test seems to need a fake DB: **the need is the signal that it is not a unit test.** Move it to `tests/integration/`, seed real models with `write_to_db(db.kv_store)`, and mock only what sits above the database. If the code under test does not actually need the database, delete the stand-in rather than feeding it a fake.
+
+`.agents/hooks/guard-fake-db-tests.py` enforces this (see the root `AGENTS.md` § Guard hooks). It is a **ratchet**: the suite carries ~400 pre-existing stand-ins, so the guard compares each file before and after an edit and refuses only what that edit *introduces*. Editing or cleaning up a grandfathered file is unaffected. `python3 .agents/hooks/guard-fake-db-tests.py --scan` lists what is left.
+
+> **Migration in progress, here too.** `simplyblock_core/test/` is a second unit-tier directory (also collected by `tox run -e unit`, with its own `fdb` stub) and holds the densest concentration of these fakes. Treat it as legacy: don't add files there, and convert what you touch.
+
 ### `tests/integration/`
 
 Controller-flow tests, **all of which run against a real FoundationDB**. `tests/integration/conftest.py` provisions FDB once for the whole tier from `pytest_configure` — *before* test collection — reusing `$FDB_CLUSTER_FILE` if set, otherwise starting a `testcontainers` container and binding its cluster file into `simplyblock_core.constants`. Provisioning at `pytest_configure` (rather than in a session fixture) means the real `fdb` client and a live `DBController()` are available at **collection / module-import time**, so test modules may touch the DB at import scope. A separate autouse fixture wipes the user keyspace before every test for isolation. The FDB-backed subdirs (`ftt2/`, `migration/`, `expansion_sim/`) add their own per-suite topology/bootstrap fixtures on top of that same cluster.
@@ -178,7 +193,7 @@ tox run -e integration -- tests/integration/migration/test_migration_flow.py -v
 2. Place test files under `tests/unit/` or `tests/integration/` (mirroring the source layout is fine but not required). **Never drop a `test_*.py` directly in `tests/`** — it belongs to no tier, is selected by neither tox env, and gets no tier-specific conftest. `tests/conftest.py`'s `pytest_configure` enforces this: any top-level `tests/test_*.py` aborts collection (both `unit` and `integration`) with a `UsageError` telling you to move it.
 3. Reuse `from tests._mocks import make_mock_cluster` for mock `Cluster` objects rather than rebuilding the same fixture.
 4. For new FDB-backed scenarios, prefer extending `ftt2/`, `migration/`, or `expansion_sim/` over inventing another conftest — they already provide topology/cluster bootstrap on top of the tier-wide keyspace wipe. Persist real models to FDB; never mock the DB layer (see the integration-tier rules above).
-5. Never edit symlink targets — `tests/CLAUDE.md` is a symlink to this file.
+5. Never edit `tests/CLAUDE.md` — it is a stub that imports this file via `@AGENTS.md`.
 
 ## Secret-handling tests
 

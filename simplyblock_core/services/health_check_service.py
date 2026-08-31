@@ -57,7 +57,9 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     # FDB tx and mutate only this device's health_check, so a
                     # concurrent node.status / lvstore_ports change is preserved
                     # (a full write_to_db would clobber it — incident 2026-06-18).
-                    def _mut(n, did=device.get_id()):
+                    did = device.get_id()
+
+                    def _mut(n, did=did):
                         for fresh_dev in n.nvme_devices:
                             if fresh_dev.get_id() == did:
                                 fresh_dev.health_check = health_check_status

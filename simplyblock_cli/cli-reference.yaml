@@ -856,6 +856,9 @@ commands:
             type: str
             default: 7d
           - name: "--contact-point"
+            deprecated:
+              since: "26.3"
+              reason: "The alerting notification configuration got extended and uses --alerting-config-path"
             help: "The email or slack webhook url to be used for alerting."
             dest: contact_point
             type: str
@@ -1054,6 +1057,17 @@ commands:
           - name: "--hashicorp-vault-url"
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
+            type: str
+          - name: "--alerting-config-path"
+            help: "Path to the YAML alerting configuration file. Takes precedence over --contact-point."
+            description: >
+              Configures the Grafana contact points from a file, so that a cluster can
+              notify Slack, Microsoft Teams, PagerDuty, Opsgenie and a generic webhook
+              at once. The file has the same shape as the
+              controlplane.observability.grafana.notifications block of the
+              simplyblock-operator Helm chart values. When given, --contact-point
+              is ignored.
+            dest: alerting_config_path
             type: str
       - name: add
         help: "Adds a new cluster."
@@ -2330,6 +2344,17 @@ commands:
               - docker
               - kubernetes
             default: docker
+          - name: "--alerting-config-path"
+            help: "Path to the YAML alerting configuration file. Takes precedence over --contact-point."
+            description: >
+              Configures the Grafana contact points from a file, so that a cluster can
+              notify Slack, Microsoft Teams, PagerDuty, Opsgenie and a generic webhook
+              at once. The file has the same shape as the
+              controlplane.observability.grafana.notifications block of the
+              simplyblock-operator Helm chart values. When given, --contact-point
+              is ignored.
+            dest: alerting_config_path
+            type: str
       - name: list
         help: "Lists all control plane nodes."
         arguments:

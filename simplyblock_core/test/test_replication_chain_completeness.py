@@ -374,14 +374,13 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     cutover back: 0/5. The clone path must evict per node."""
     from simplyblock_core.controllers import lvol_controller as lc
 
-    evicted, added = [], []
-    monkeypatch.setattr(lc, "_evict_stale_namespace",
-                        lambda lvol, node: evicted.append(node.get_id()))
-
     def _fake_add_lvol_on_node(lvol, node, is_primary=True):
         added.append((node.get_id(), is_primary))
         return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
 
+    evicted, added = [], []
+    monkeypatch.setattr(lc, "_evict_stale_namespace",
+                        lambda lvol, node: evicted.append(node.get_id()))
     monkeypatch.setattr(lc, "add_lvol_on_node", _fake_add_lvol_on_node)
 
     class _N:
@@ -488,3 +487,51 @@ def test_clone_register_confirms_the_bdev_before_add_ns():
         "clone_register must be followed by a bdev confirmation poll"
     poll = src.index("not appear within 20s", reg)
     assert "get_bdevs" in src[reg:poll], "the poll must probe get_bdevs"
+
+
+def test_retired_landing_records_are_record_only_deletions():
+    """A retired landing volume's record deliberately carries an EMPTY
+    bdev_stack: its blob lives on as the converted, chained snapshot. The
+    monitor must retire such a record without issuing ANY bdev delete (runs
+    20260824/20260825: interrupted retirements left records in_deletion that
+    the delete flow could never finish -- status poll 4, forever -- and a
+    naive top_bdev fallback delete would have destroyed the replicated
+    snapshot's data)."""
+    import inspect
+    from simplyblock_core.services import lvol_monitor as lm
+    src = inspect.getsource(lm.check_node)
+    guard = src.index("if not lvol.bdev_stack:")
+    flow = src.index("delete_lvol_from_node", guard)
+    finish = src.index("process_lvol_delete_finish", guard)
+    assert finish < flow, "empty-stack records must retire BEFORE the delete flow"
+
+
+def test_retirement_tears_down_plumbing_without_delete_lvol():
+    """The retirement path must not route through delete_lvol: that flips the
+    record to in_deletion for the monitor's async machinery, so any
+    interruption before remove() strands the record."""
+    import inspect
+    from simplyblock_core.services import snapshot_replication as sr
+    src = inspect.getsource(sr)
+    empty = src.index("remote_lv.bdev_stack = []")
+    remove = src.index("remote_lv.remove(db.kv_store)", empty)
+    seg = src[empty:remove]
+    assert "delete_lvol_from_node" in seg, "teardown must be the direct per-node call"
+    assert "delete_lvol(remote_lv" not in seg, "must not route through delete_lvol"
+
+
+def test_shared_subsystem_survives_one_members_teardown():
+    """Run 20260825_224221: a stuck in_deletion member's teardown loop saw the
+    SHARED subsystem transiently empty on the HA peer (between one member's
+    teardown and the next member's add) and deleted it -- every following
+    namespaced fail-over then died in add_ns on a missing subsystem (8/20
+    landed). Delete-on-empty must first prove no other live volume claims
+    the NQN."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc._remove_lvol_subsys_from_node)
+    guard = src.index("other")
+    delete = src.index("subsystem_delete")
+    assert guard < delete, "the other-claimants check must precede subsystem_delete"
+    assert "x.nqn == lvol.nqn" in src, "claimants are identified by shared NQN"
+    assert "Leaving subsystem" in src

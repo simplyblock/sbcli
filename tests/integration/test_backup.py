@@ -32,6 +32,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.rpc_client import RPCConnectionError
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +310,7 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_no_lvstore(self, MockRPC, _mock_boto3_client):
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node(lvstore="")
-        with pytest.raises(Exception):
+        with pytest.raises(PreconditionError):
             create_s3_bdev(node, {})
 
         MockRPC.assert_not_called()
@@ -321,7 +322,7 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             create_s3_bdev(node, {})
         mock_rpc.bdev_s3_add_bucket_name.assert_not_called()
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
@@ -338,7 +339,7 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             create_s3_bdev(node, {})
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
@@ -355,7 +356,7 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             create_s3_bdev(node, {})
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
@@ -394,11 +395,11 @@ class TestCreateS3Bdev(unittest.TestCase):
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_exception_handled(self, MockRPC):
         mock_rpc = MockRPC.return_value
-        mock_rpc.bdev_s3_create.side_effect = Exception("connection refused")
+        mock_rpc.bdev_s3_create.side_effect = RPCConnectionError("connection refused")
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             create_s3_bdev(node, {})
 
 

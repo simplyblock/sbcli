@@ -444,6 +444,22 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
                         expected_ips |= _data_ips(_sec1)
                 except KeyError:
                     pass
+            # A duplicated address is invisible to the set comparison below --
+            # (96.179, 97.9, 97.9) reads as 2-of-2 -- so it must be checked
+            # separately or the node is reported healthy while carrying a
+            # surplus path. That is exactly what happened on 2026-08-25: the
+            # control plane saw nothing wrong for hours while the soak's path
+            # verifier counted 3-of-2 and eventually gave up. Two controllers
+            # on one address also give the bdev two unordered qpairs to the
+            # same target, so this is a fault to surface, not cosmetics.
+            duplicate_ips = storage_node_ops.duplicate_attached_paths(ret)
+            if duplicate_ips:
+                logger.error(
+                    "Hublvol %s on %s has duplicate path(s) %s -- node is NOT "
+                    "healthy; repair_multipath_controller will prune them",
+                    primary_node.hublvol.bdev_name, node.get_id(), duplicate_ips)
+                passed = False
+
             missing_ips = expected_ips - attached_ips
             if missing_ips:
                 logger.info(
@@ -611,10 +627,12 @@ def _check_node_lvstore(
                                                     # Atomic: rebuild remote_devices on the freshly-read node
                                                     # inside the FDB tx so a concurrent node.status change is
                                                     # not clobbered (incident 2026-06-18).
-                                                    def _mut(nn, did=dev.get_id(), rd=remote_device):
+                                                    did = dev.get_id()
+
+                                                    def _mut(nn, did=did, remote_device=remote_device):
                                                         nn.remote_devices = [
                                                             r for r in nn.remote_devices if r.get_id() != did]
-                                                        nn.remote_devices.append(rd)
+                                                        nn.remote_devices.append(remote_device)
                                                         return True
 
                                                     db_controller.atomic_update(
