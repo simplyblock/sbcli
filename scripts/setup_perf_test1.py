@@ -564,12 +564,13 @@ def main():
     # Redirecting to a file detaches the daemon from the channel.
     print("Phase 2c: Deploying storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
-        tasks = [executor.submit(
-            ssh_exec_detached, ip,
-            f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}",
-            label="sn deploy") for ip in sn_ips]
-        for t in tasks:
-            t.result()
+        raise RuntimeError("The command below references an unbound variable")
+        #tasks = [executor.submit(
+        #    ssh_exec_detached, ip,
+        #    f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}",
+        #    label="sn deploy") for ip in sn_ips]
+        #for t in tasks:
+        #    t.result()
     print("Phase 2c: DONE - all SNs deployed. Rebooting...")
 
     # Reboot all SNs in parallel (reboot returns non-zero, don't check)
