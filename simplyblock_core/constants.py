@@ -494,10 +494,10 @@ NON_LEADER_BLOCK_QUIESCE_SEC = 0.2
 # restart; the task runner re-queues it. A retried restart is cheap, a
 # quiesced client path is not.
 FENCE_RPC_TIMEOUT_SEC = 0.5
-# One attempt, no retry. A retry inside the fence spends the very budget the
-# fence is racing: if a call timed out, trying it again can only push the block
-# closer to the reject threshold. Timing out and releasing is strictly better.
-FENCE_RPC_RETRY = 0
+# One retry. Two attempts of 0.5s still fit comfortably under the deadline, and
+# the deadline clamp below is what actually bounds the total -- a single
+# transient refusal should not abort a restart on its own.
+FENCE_RPC_RETRY = 1
 # Hard ceiling on how long any peer's client port may stay fenced, measured
 # from the first block. Sits just under the reject threshold (ack_timeout * 4 =
 # 8s) so the fence is always released by us, never converted to reject by SPDK
