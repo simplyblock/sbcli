@@ -27,6 +27,23 @@ if sys.platform == "win32":
 
 from tests.conftest_proxy import import_proxy_module
 
+
+def _wait_until(predicate, timeout=5, interval=0.02):
+    """Poll ``predicate`` instead of a fixed sleep-then-assert.
+
+    A single fixed sleep assumes the process gets scheduled promptly; under
+    CI load (or another test's global time.sleep patch stealing this
+    process's CPU -- see print_stats in spdk_http_proxy_server.py) cleanup
+    that normally finishes in microseconds can take longer than that budget
+    without ever actually failing to happen.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
 # ---------------------------------------------------------------------------
 # Mock SPDK unix socket server
 # ---------------------------------------------------------------------------
@@ -223,7 +240,7 @@ class TestProxyE2E(unittest.TestCase):
         """After several requests complete, no unix sockets should be leaked."""
         for _ in range(5):
             self._post("spdk_get_version")
-        time.sleep(0.2)
+        _wait_until(lambda: len(self._mod.unix_sockets) == 0)
         self.assertEqual(len(self._mod.unix_sockets), 0)
 
     def test_concurrent_requests(self):
@@ -261,7 +278,7 @@ class TestProxyE2E(unittest.TestCase):
         """After requests complete, server_session should be empty."""
         for _ in range(3):
             self._post("spdk_get_version")
-        time.sleep(0.2)
+        _wait_until(lambda: len(self._mod.ServerHandler.server_session) == 0)
         self.assertEqual(len(self._mod.ServerHandler.server_session), 0)
 
     def test_keep_alive_reuses_one_connection_for_several_requests(self):
