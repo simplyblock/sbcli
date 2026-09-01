@@ -25,9 +25,20 @@ logger.setLevel(logging.INFO)
 read_line_time_diff: dict = {}
 recv_from_spdk_time_diff: dict = {}
 def print_stats():
+    # Paced by monotonic elapsed time, not just the sleep call: several
+    # integration tests patch a bare-imported `time.sleep` on some other
+    # module (e.g. storage_node_ops), which mutates the same shared stdlib
+    # `time` module and turns THIS sleep into a no-op for the duration of
+    # that patch. Without this guard the loop degenerates into a hot spin
+    # that floods stdout with duplicate stats and burns CPU other threads
+    # need — see tests/AGENTS.md's note on deadline loops paced by sleep().
+    last_log = time.monotonic()
     while True:
         try:
             time.sleep(3)
+            if time.monotonic() - last_log < 2.5:
+                continue
+            last_log = time.monotonic()
             t = time.time_ns()
             if len(read_line_time_diff) > 0:
                 read_line_time_diff_max = max(list(read_line_time_diff.values()))
