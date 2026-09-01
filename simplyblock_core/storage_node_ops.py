@@ -9964,14 +9964,6 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         return False
 
     rpc_client = snode.rpc_client()
-    # Clients for calls made while a peer's client port is fenced. See
-    # constants.FENCE_RPC_TIMEOUT_SEC for why the 180s default cannot be used
-    # inside that window.
-    fenced_rpc = snode.rpc_client(timeout=constants.FENCE_RPC_TIMEOUT_SEC,
-                                  retry=constants.FENCE_RPC_RETRY)
-    wait_examine_rpc = snode.rpc_client(
-        timeout=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC,
-        retry=constants.FENCE_RPC_RETRY)
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(lvs_node.get_id()):
@@ -10180,19 +10172,55 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         _flush_port_events()
         raise Exception(f"Abort restart: {reason}")
 
-    def _fenced(what, fn, *args, **kwargs):
-        """Run an RPC issued while a peer's client port is fenced.
+    def _fence_elapsed():
+        """Seconds since the first peer port was fenced (0.0 if none is)."""
+        if not _block_started:
+            return 0.0
+        return time.monotonic() - min(_block_started.values())
 
-        Any failure -- a timeout above all -- releases the fence and aborts the
-        restart. Letting a call run on would push the block past the reject
-        threshold, and that does not just delay IO: SPDK quiesces every qpair
-        on the port, so the client loses the path instead of waiting for it.
+    def _check_fence_deadline(where):
+        """Release and abort if the fence has run to FENCE_DEADLINE_SEC.
+
+        Called between steps and inside the in-window wait loops. The fence
+        must be lifted by us before SPDK converts the block to reject at
+        ack_timeout * 4 (8s): the conversion quiesces every qpair on the port,
+        so the client loses the path rather than merely waiting for it.
         """
+        if not _block_started:
+            return
+        elapsed = _fence_elapsed()
+        if elapsed >= constants.FENCE_DEADLINE_SEC:
+            _abort_restart_and_unblock(
+                f"port fence held {elapsed:.3f}s at {where}, over the "
+                f"{constants.FENCE_DEADLINE_SEC}s deadline (reject threshold 8s)")
+
+    def _fenced(method, *args, budget=None, **kwargs):
+        """Run one RPC while a peer's client port is fenced.
+
+        ``method`` is the RPCClient method name. The client is built per call
+        so its timeout can be clamped to the time left on the fence -- a fixed
+        per-call timeout is not enough on its own, since a 6s call started late
+        in the window would still overrun the deadline.
+
+        Any failure, a timeout above all, releases the fence and aborts the
+        restart. The task runner re-queues an aborted restart; a quiesced
+        client path is not recoverable.
+        """
+        budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
+        timeout = budget
+        if _block_started:
+            remaining = constants.FENCE_DEADLINE_SEC - _fence_elapsed()
+            if remaining <= 0:
+                _check_fence_deadline(method)
+            timeout = min(budget, remaining)
         try:
-            return fn(*args, **kwargs)
+            client = snode.rpc_client(timeout=timeout,
+                                      retry=constants.FENCE_RPC_RETRY)
+            return getattr(client, method)(*args, **kwargs)
         except Exception as e:
             _abort_restart_and_unblock(
-                f"{what} failed inside the port-fence window: {e}")
+                f"{method} failed inside the port-fence window "
+                f"(budget {timeout:.2f}s, fence {_fence_elapsed():.3f}s): {e}")
 
     # #4: compute the examine-idempotency probes BEFORE the block window —
     # they only read snode's own fresh SPDK (raid built at ###1 pre-block),
@@ -10493,6 +10521,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 deadline = time.time() + _DRAIN_BOUND_SEC
                 drained = False
                 while time.time() < deadline:
+                    _check_fence_deadline("inflight drain")
                     try:
                         still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
                     except Exception as e:
@@ -10531,15 +10560,13 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
             if disconnected_peers:
                 logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
-                _fenced("jc_explicit_synchronization",
-                        fenced_rpc.jc_explicit_synchronization, lvs_jm_vuid)
+                _fenced("jc_explicit_synchronization", lvs_jm_vuid)
 
         ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
         # #4: raid/lvstore probes were computed pre-block (see above the block
         # section) — they read snode's own fresh SPDK only, and
         # force_to_non_leader does not affect bdev/lvstore presence.
-        _fenced("bdev_distrib_force_to_non_leader",
-                fenced_rpc.bdev_distrib_force_to_non_leader, lvs_jm_vuid)
+        _fenced("bdev_distrib_force_to_non_leader", lvs_jm_vuid)
         if raid_already and lvstore_already:
             logger.info(
                 "Raid %s and lvstore %s already present on %s; skipping examine",
@@ -10565,7 +10592,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     "dropping raid for clean re-examine",
                     lvs_raid, lvs_name, snode.get_id())
                 try:
-                    fenced_rpc.bdev_raid_delete(lvs_raid)
+                    _fenced("bdev_raid_delete", lvs_raid)
                 except Exception as e:
                     logger.warning(
                         "bdev_raid_delete(%s) raised: %s — proceeding to "
@@ -10597,15 +10624,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # restart path: _create_bdev_stack leaves the raid in place but does
             # not examine it, so the lvstore never surfaces and the subsequent
             # bdev_lvol_get_lvstores validation fails every time.
-            _fenced("bdev_examine", fenced_rpc.bdev_examine, lvs_raid)
+            _fenced("bdev_examine", lvs_raid)
 
             ### 6- wait for examine
             _fenced("bdev_wait_for_examine",
-                    wait_examine_rpc.bdev_wait_for_examine)
+                    budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC)
 
         # Validate lvstore recovery
-        ret = _fenced("bdev_lvol_get_lvstores",
-                      fenced_rpc.bdev_lvol_get_lvstores, lvs_name)
+        ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
         if not ret:
             logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
             if activation_mode:
@@ -10657,19 +10683,20 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
         ret = _fenced(
             "bdev_lvol_set_lvs_opts",
-            fenced_rpc.bdev_lvol_set_lvs_opts,
             lvs_name,
             groupid=lvs_jm_vuid,
             subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
             hublvol_port=lvs_node.get_hublvol_port(lvs_name),
             role=snode_lvs_role,
         )
-        ret = _fenced("bdev_lvol_set_leader",
-                      fenced_rpc.bdev_lvol_set_leader, lvs_name, leader=True)
+        ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True)
         leader_restored = False
         for _ in range(10):
+            # 10 x 0.2s of sleep plus 10 RPCs is a large slice of the fence
+            # budget on its own; give up the fence rather than the deadline.
+            _check_fence_deadline("leader-restore poll")
             try:
-                ret = fenced_rpc.bdev_lvol_get_lvstores(lvs_name)
+                ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
                 if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
                     leader_restored = True
                     break
