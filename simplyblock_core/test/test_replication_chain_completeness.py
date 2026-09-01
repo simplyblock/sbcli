@@ -402,15 +402,21 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             pass
 
     class _Lvol:
-        uuid = "ORIG"; nqn = "nqn.test:lvol:ORIG"; ns_id = 7
-        lvol_bdev = "LVOL_C"; crypto_bdev = ""
+        uuid = "ORIG"
+        nqn = "nqn.test:lvol:ORIG"
+        ns_id = 7
+        lvol_bdev = "LVOL_C"
+        crypto_bdev = ""
         def __deepcopy__(self, memo):
-            c = _Lvol(); c.__dict__.update(self.__dict__); return c
+            c = _Lvol()
+            c.__dict__.update(self.__dict__)
+            return c
         def write_to_db(self, kv=None):
             pass
 
     class _Snap:
-        cluster_id = "C1"; snap_bdev = "LVS_1/SNAP_1"
+        cluster_id = "C1"
+        snap_bdev = "LVS_1/SNAP_1"
         def get_id(self):
             return "SNAP1"
 
