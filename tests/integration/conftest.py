@@ -75,6 +75,7 @@ def _free_port() -> int:
 
 
 def _start_fdb_container():
+    from docker.errors import APIError
     from testcontainers.core.container import DockerContainer
 
     port = _free_port()
@@ -93,22 +94,36 @@ def _start_fdb_container():
     configured = False
     last_rc, last_out = -1, b""
     while time.monotonic() < deadline:
-        last_rc, last_out = _exec(
-            container, "fdbcli", "--exec", "status minimal", "--timeout", "3"
-        )
+        try:
+            last_rc, last_out = _exec(
+                container, "fdbcli", "--exec", "status minimal", "--timeout", "3"
+            )
+        except APIError as e:
+            # The docker/podman engine can report the container as started
+            # before it accepts exec sessions — "container state improper".
+            # Under concurrent container creation (parallel testcontainers)
+            # this loses far more often than in a single-container run, so
+            # treat it as "not ready yet" and keep polling instead of
+            # letting it abort startup.
+            last_rc, last_out = -1, str(e).encode()
+            time.sleep(1)
+            continue
         text = last_out.lower() if isinstance(last_out, (bytes, bytearray)) else str(last_out).encode().lower()
         if last_rc == 0 and b"available" in text and b"unavailable" not in text:
             return container, cluster_contents
         if not configured:
-            _exec(
-                container,
-                "fdbcli",
-                "--exec",
-                "configure new single ssd",
-                "--timeout",
-                "10",
-            )
-            configured = True
+            try:
+                _exec(
+                    container,
+                    "fdbcli",
+                    "--exec",
+                    "configure new single ssd",
+                    "--timeout",
+                    "10",
+                )
+                configured = True
+            except APIError:
+                pass
         time.sleep(1)
 
     container.stop()
