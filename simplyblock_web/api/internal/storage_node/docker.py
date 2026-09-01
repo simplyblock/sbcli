@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 import docker
 import psutil
@@ -356,7 +356,7 @@ def _spdk_thread_sample(pid):
     try:
         for tid in os.listdir(f"/proc/{pid}/task"):
             t = f"/proc/{pid}/task/{tid}"
-            entry = {"tid": tid}
+            entry: Dict[str, Any] = {"tid": tid}
             for field, path in (("comm", "comm"), ("wchan", "wchan")):
                 try:
                     with open(f"{t}/{path}") as fh:
@@ -424,15 +424,15 @@ def spdk_thread_state(query: utils.RPCPortParams):
     time.sleep(1)
     second = _spdk_thread_sample(pid)
 
-    by_tid = {e["tid"]: e for e in first}
+    by_tid = {sample["tid"]: sample for sample in first}
     threads = []
-    for e in second:
-        prev = by_tid.get(e["tid"], {})
+    for sample in second:
+        prev = by_tid.get(sample["tid"], {})
         threads.append({
-            "tid": e["tid"], "comm": e["comm"], "state": e["state"],
-            "wchan": e["wchan"],
-            "utime_delta": e["utime"] - prev.get("utime", e["utime"]),
-            "stime_delta": e["stime"] - prev.get("stime", e["stime"]),
+            "tid": sample["tid"], "comm": sample["comm"], "state": sample["state"],
+            "wchan": sample["wchan"],
+            "utime_delta": sample["utime"] - prev.get("utime", sample["utime"]),
+            "stime_delta": sample["stime"] - prev.get("stime", sample["stime"]),
         })
     return utils.get_response({"pid": pid, "threads": threads})
 

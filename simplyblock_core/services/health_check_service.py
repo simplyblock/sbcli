@@ -129,7 +129,7 @@ REPAIR_FANOUT = 8
 #: stuck in "deleting" -- until the node was restarted 20 minutes later.
 #:
 #: Keyed by owner, because the owner's status is what unblocks the repair.
-_deferred_repairs = {}
+_deferred_repairs: dict[str, set[tuple[str, str, str, str]]] = {}
 _deferred_repairs_lock = threading.Lock()
 
 
