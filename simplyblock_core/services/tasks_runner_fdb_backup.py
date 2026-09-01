@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import fdb_backup_controller
+from simplyblock_core.controllers import fdb_backup_controller, fdb_backup_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.services.task_runner_base import RunnerSpec, TaskRetry, serve
@@ -43,10 +43,22 @@ def process_fdb_backup_task(task):
     prune_old_backups(task.cluster_id)
 
 
+def report_exhausted(task):
+    """Announce a backup that gave up, in the cluster event log.
+
+    on_finish rather than on_failure: what an operator has to see is the task
+    running out of retries, not each attempt, and the driver finishes a task on
+    its ceiling without ever entering the handler.
+    """
+    if 0 <= task.max_retry <= task.retry:
+        fdb_backup_events.fdb_backup_failed(task.cluster_id, task)
+
+
 SPEC = RunnerSpec(
     name="tasks-runner-fdb-backup",
     function_names=[JobSchedule.FN_FDB_BACKUP],
     handler=process_fdb_backup_task,
+    on_finish=report_exhausted,
     is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
 )
 
