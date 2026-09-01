@@ -2184,6 +2184,31 @@ class RPCClient:
                 return None
             raise
 
+    def bdev_s3_register_recovery_bucket(self, name, bucket_name, s3_ids) -> None:
+        """Point recovery reads for the given backups at an external bucket.
+
+        The mapping is per-s3_id and additive: backups not listed here keep
+        reading from — and all backup writes keep going to — the bucket
+        registered via bdev_s3_add_bucket_name. It lives in the S3 bdev's
+        memory only, so it must be re-registered after an SPDK restart.
+
+        Args:
+            name: S3 bdev name (e.g. 's3_LVS_1234')
+            bucket_name: bucket the backup objects actually live in
+            s3_ids: list of S3 backup IDs (uint32) stored in that bucket
+
+        The data plane answers with a bare `true` acknowledging that the
+        mapping was stored — it says nothing about the bucket existing or
+        holding those backups, so there is nothing for a caller to inspect.
+        A rejected registration raises RPCRemoteError instead.
+        """
+        self._request3(
+            "bdev_s3_register_recovery_bucket",
+            name=name,
+            bucket_name=bucket_name,
+            s3_ids=s3_ids,
+        )
+
     def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
         """Start an async backup of snapshots to S3.
         Args:

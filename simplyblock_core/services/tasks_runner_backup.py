@@ -10,7 +10,7 @@ Handles three task types:
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import backup_events
+from simplyblock_core.controllers import backup_controller, backup_events
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -221,6 +221,19 @@ def _run_restore(task):
 
     if not recovery_started:
         try:
+            cluster = db.get_cluster_by_id(task.cluster_id)
+        except KeyError:
+            task.function_result = f"Cluster {task.cluster_id} not found"
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db.kv_store)
+            return
+
+        # The bucket mapping only lives in the S3 bdev's memory, so it is
+        # re-registered on every recovery attempt rather than once per restore.
+        chain = [b for b in db.get_backup_chain(backup_id) if b.s3_id in chain_ids]
+
+        try:
+            backup_controller.register_recovery_buckets(rpc_client, snode, cluster, chain)
             ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=16)
             if not ret:
                 task.function_result = "bdev_lvol_s3_recovery RPC failed"
