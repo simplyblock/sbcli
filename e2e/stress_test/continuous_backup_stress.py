@@ -1653,7 +1653,7 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Stress 11 – Comprehensive mega-stress: 30 lvols, dual policy, namespace,
+#  Stress 11 – Comprehensive mega-stress: 30 parent lvols + NS children, dual policy,
 #              FS mix, concurrent backup/restore, delete+verify
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -1668,8 +1668,9 @@ class BackupStressComprehensive(BackupStressBase):
 
     Setup:
       - 30 lvols (30G each, ~900GB total, capacity-checked)
-        - 8x ext4+plain, 6x ext4+crypto, 3x xfs+plain, 3x xfs+crypto
-        - 10x namespace lvols (5 parents with 2 children each)
+        - 10x ext4+plain, 10x ext4+crypto, 5x xfs+plain, 5x xfs+crypto
+        - 4 of the 30 lvols are created with max_namespace_per_subsys=10,
+          then 3 namespace children are created on each (12 NS children total)
       - 2 retention policies: tight (versions=2) on odd lvols,
         wide (versions=3) on even lvols
 
@@ -1681,7 +1682,7 @@ class BackupStressComprehensive(BackupStressBase):
       5. Final restore from every lvol: verify all data
 
     Validates:
-      - 520+ backups, 120+ restores across 30 lvols with no data corruption
+      - 520+ backups, 120+ restores across 30+ lvols with no data corruption
       - Alternating retention merge under concurrent load
       - Chain integrity after backup deletion
       - Namespace lvols backup/restore correctly
@@ -1696,15 +1697,17 @@ class BackupStressComprehensive(BackupStressBase):
         self.fio_size = "10G"
         self.num_rounds = 60
         self.parallel_batch = 8
-        self.num_namespace_parents = 5
-        self.num_namespace_children = 2
         self._regular_configs = [
             # (prefix, count, fs_type, crypto)
-            ("ext4_plain",  8, "ext4", False),
-            ("ext4_crypto", 6, "ext4", True),
-            ("xfs_plain",   3,  "xfs",  False),
-            ("xfs_crypto",  3,  "xfs",  True),
+            ("ext4_plain",  10, "ext4", False),
+            ("ext4_crypto", 10, "ext4", True),
+            ("xfs_plain",   5,  "xfs",  False),
+            ("xfs_crypto",  5,  "xfs",  True),
         ]
+        # Namespace config: first 4 regular lvols become namespace parents,
+        # each getting 3 namespace children (12 NS children total)
+        self.num_namespace_parents = 4
+        self.num_namespace_children = 3
 
     def _check_and_adjust_capacity(self):
         """Check cluster capacity and adjust lvol count/size if needed."""
@@ -1746,15 +1749,32 @@ class BackupStressComprehensive(BackupStressBase):
                 f"continuing with defaults")
 
     def _create_lvols_batch(self, configs_batch, lvol_state):
-        """Create a batch of lvols in parallel threads."""
+        """Create a batch of lvols in parallel threads.
+
+        Each item in configs_batch is (label, fs_type, crypto) or
+        (label, fs_type, crypto, ns_parent) where ns_parent=True means
+        the lvol should be created with max_namespace_per_subsys=10.
+        """
         threads = []
         errors = []
 
-        def _create_one(label, fs_type, crypto):
+        def _create_one(label, fs_type, crypto, ns_parent=False):
             try:
-                name, lvol_id = self._create_lvol(
-                    name=f"comp_{label}_{_rand_suffix()}",
-                    size=self.lvol_size, crypto=crypto)
+                name = f"comp_{label}_{_rand_suffix()}"
+                if ns_parent and not self.k8s_test:
+                    # Create with namespace support via sbcli directly
+                    self.sbcli_utils.add_lvol(
+                        lvol_name=name,
+                        pool_name=self.pool_name,
+                        size=self.lvol_size,
+                        crypto=crypto,
+                        max_namespace_per_subsys=10)
+                    lvol_id = self._get_lvol_id(name)
+                    self.created_lvols.append(name)
+                else:
+                    name, lvol_id = self._create_lvol(
+                        name=name,
+                        size=self.lvol_size, crypto=crypto)
                 _, mount = self._connect_format_mount(
                     name, lvol_id, fs_type=fs_type)
                 self._run_fio(mount, runtime=30)
@@ -1763,18 +1783,24 @@ class BackupStressComprehensive(BackupStressBase):
                 lvol_state[label] = {
                     "name": name, "id": lvol_id, "mount": mount,
                     "fs_type": fs_type, "crypto": crypto,
-                    "is_namespace": False, "parent_id": None,
+                    "is_namespace": ns_parent, "parent_id": None,
                     "checksums": checksums, "backup_ids": [],
                 }
-                self.logger.info(f"  {label} ({name}) ready")
+                self.logger.info(f"  {label} ({name}) ready"
+                                 f"{' [NS parent]' if ns_parent else ''}")
             except Exception as e:
                 self.logger.error(f"  {label} creation failed: {e}")
                 errors.append((label, e))
 
         for item in configs_batch:
-            label, fs_type, crypto = item
+            if len(item) == 4:
+                label, fs_type, crypto, ns_parent = item
+            else:
+                label, fs_type, crypto = item
+                ns_parent = False
             t = threading.Thread(
-                target=_create_one, args=(label, fs_type, crypto))
+                target=_create_one,
+                args=(label, fs_type, crypto, ns_parent))
             threads.append(t)
             t.start()
 
@@ -1865,12 +1891,18 @@ class BackupStressComprehensive(BackupStressBase):
         self.logger.info("TC-BCK-STR-101: creating lvols...")
         lvol_state: dict[str, dict] = {}
 
-        # Build flat list of (label, fs_type, crypto) for regular lvols
+        # Build flat list of (label, fs_type, crypto, ns_parent) for lvols.
+        # The first num_namespace_parents lvols are created with
+        # max_namespace_per_subsys=10 so namespace children can be added.
         all_items = []
+        ns_parents_remaining = self.num_namespace_parents if not self.k8s_test else 0
         for prefix, count, fs_type, crypto in self._regular_configs:
             for i in range(count):
                 label = f"{prefix}_{i}"
-                all_items.append((label, fs_type, crypto))
+                ns_parent = ns_parents_remaining > 0
+                all_items.append((label, fs_type, crypto, ns_parent))
+                if ns_parent:
+                    ns_parents_remaining -= 1
 
         # Create in batches of parallel_batch
         for batch_start in range(0, len(all_items), self.parallel_batch):
@@ -1885,40 +1917,24 @@ class BackupStressComprehensive(BackupStressBase):
                     f"TC-BCK-STR-101: {len(errors)} lvol creation failures "
                     f"in batch")
 
-        # Create namespace lvols (Docker only — K8s CSI handles NS internally)
+        # Create namespace children on the lvols marked as NS parents
+        # (Docker only — K8s CSI handles NS internally)
         if not self.k8s_test:
+            parent_labels = [
+                lbl for lbl, info in lvol_state.items()
+                if info.get("is_namespace") and info.get("parent_id") is None
+            ]
             self.logger.info(
-                f"TC-BCK-STR-101: creating {self.num_namespace_parents} "
-                f"namespace parents with {self.num_namespace_children} "
-                f"children each")
-            for pi in range(self.num_namespace_parents):
-                parent_label = f"ns_parent_{pi}"
+                f"TC-BCK-STR-101: creating {self.num_namespace_children} "
+                f"namespace children on each of {len(parent_labels)} "
+                f"parent lvols: {parent_labels}")
+            for parent_label in parent_labels:
+                parent_info = lvol_state[parent_label]
+                parent_id = parent_info["id"]
                 try:
-                    parent_name = f"comp_nsp_{pi}_{_rand_suffix()}"
-                    self.sbcli_utils.add_lvol(
-                        lvol_name=parent_name,
-                        pool_name=self.pool_name,
-                        size=self.lvol_size,
-                        max_namespace_per_subsys=10)
-                    parent_id = self.sbcli_utils.get_lvol_id(
-                        lvol_name=parent_name)
-                    assert parent_id, f"Parent {parent_name} not found"
-                    _, parent_mount = self._connect_format_mount(
-                        parent_name, parent_id, fs_type="ext4")
-                    self._run_fio(parent_mount, runtime=30)
-                    checksums = self._get_checksums(
-                        self.fio_node, parent_mount)
-                    lvol_state[parent_label] = {
-                        "name": parent_name, "id": parent_id,
-                        "mount": parent_mount,
-                        "fs_type": "ext4", "crypto": False,
-                        "is_namespace": True, "parent_id": None,
-                        "checksums": checksums, "backup_ids": [],
-                    }
-                    # Create children
                     for ci in range(self.num_namespace_children):
-                        child_label = f"ns_child_{pi}_{ci}"
-                        child_name = f"comp_nsc_{pi}_{ci}_{_rand_suffix()}"
+                        child_label = f"ns_child_{parent_label}_{ci}"
+                        child_name = f"comp_nsc_{parent_label}_{ci}_{_rand_suffix()}"
                         self.sbcli_utils.add_lvol(
                             lvol_name=child_name,
                             pool_name=self.pool_name,
@@ -1928,14 +1944,16 @@ class BackupStressComprehensive(BackupStressBase):
                             lvol_name=child_name)
                         assert child_id, f"Child {child_name} not found"
                         _, child_mount = self._connect_format_mount(
-                            child_name, child_id, fs_type="ext4")
+                            child_name, child_id,
+                            fs_type=parent_info["fs_type"])
                         self._run_fio(child_mount, runtime=30)
                         child_checksums = self._get_checksums(
                             self.fio_node, child_mount)
                         lvol_state[child_label] = {
                             "name": child_name, "id": child_id,
                             "mount": child_mount,
-                            "fs_type": "ext4", "crypto": False,
+                            "fs_type": parent_info["fs_type"],
+                            "crypto": parent_info["crypto"],
                             "is_namespace": True,
                             "parent_id": parent_id,
                             "checksums": child_checksums,
@@ -1943,7 +1961,8 @@ class BackupStressComprehensive(BackupStressBase):
                         }
                 except Exception as e:
                     self.logger.error(
-                        f"TC-BCK-STR-101: namespace parent {pi} failed: {e}")
+                        f"TC-BCK-STR-101: namespace children on "
+                        f"{parent_label} failed: {e}")
 
         total_lvols = len(lvol_state)
         self.logger.info(
