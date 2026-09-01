@@ -4510,6 +4510,16 @@ def node_removal_orchestrate(node_id, force_remove=False):
             if not _relocate_replicas_hosted_on(snode):
                 return False
 
+            # Phase 3c — prove the relocations actually landed. Every pointer
+            # phase 3b writes is bookkeeping; this is the only step that asks
+            # the devices. Reported, not fatal: by here the removal is
+            # physically done and the node is on its way out, so failing would
+            # only spin the retry loop against a state it cannot re-drive --
+            # but a missing replica must never leave this function silently.
+            logger.info(f"[REMOVAL] {node_id}: phase 3c — verify replica stacks")
+            _verify_replica_stacks(snode.cluster_id, db_controller,
+                                   context=f" after removing {node_id}")
+
             # Phase 4 — finalize (swarm leave, gpt cleanup) and flip to removed.
             logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
             _finalize_node_removal(snode)
@@ -4529,6 +4539,86 @@ def node_removal_orchestrate(node_id, force_remove=False):
     finally:
         cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
     return True
+
+
+def replica_stack_violations(nodes, stack_present):
+    """Nodes whose PHYSICAL replica stacks disagree with their bookkeeping.
+
+    ``nodes`` is the set of ONLINE nodes; ``stack_present(node, lvstore)``
+    reports whether ``lvstore`` is actually surfaced on that node's SPDK.
+
+    The invariant: a node physically holds one lvstore per primary its
+    back-references claim it hosts. Every forward pointer
+    (``secondary_node_id`` / ``tertiary_node_id``), back-reference
+    (``lvstore_stack_secondary`` / ``_tertiary``) and ``lvstore_ports`` entry
+    can agree perfectly and still describe a replica that is not there --
+    they are all bookkeeping, written by the same code path, and none of them
+    is evidence that ``raid0_<vuid>`` + ``LVS_<vuid>`` exist on the host.
+
+    This is the check that was missing. Its absence is why a relocation could
+    delete a just-installed replica (see _relocate_replica_between's
+    same-primary/other-role guard) and have the removal report success:
+    nothing ever compared the claim against the device. Found live
+    2026-09-01, and only by dumping bdev_lvol_get_lvstores on all ten
+    survivors by hand -- two of them were down to a single real replica for
+    an FTT2 lvstore, with no error logged anywhere in the removal.
+
+    Scoped deliberately to HOSTED replicas (what the back-references claim),
+    not a node's own primary lvstore: a primary can be legitimately in flux
+    mid-flow, and a false alarm there would train the reader to ignore this.
+
+    Returns a list of ``(node_id, lvstore, owner_primary_id, role)`` for each
+    claimed-but-absent stack; empty means the invariant holds.
+    """
+    by_id = {n.get_id(): n for n in nodes}
+    missing = []
+    for node in nodes:
+        for backref, role in (("lvstore_stack_secondary", "secondary"),
+                              ("lvstore_stack_tertiary", "tertiary")):
+            owner_id = getattr(node, backref, "")
+            if not owner_id:
+                continue
+            owner = by_id.get(owner_id)
+            if owner is None or not owner.lvstore:
+                # Owner gone or has no lvstore -- a bookkeeping problem of a
+                # different kind, and not something a stack probe can settle.
+                continue
+            if not stack_present(node, owner.lvstore):
+                missing.append((node.get_id(), owner.lvstore, owner_id, role))
+    return missing
+
+
+def _verify_replica_stacks(cluster_id, db_controller, context=""):
+    """Probe every online node's hosted replica stacks and log any that are
+    missing. Returns the violation list (empty when the invariant holds).
+
+    An unreachable node is NOT reported as a violation: absence of proof is
+    not proof of absence, and a probe that cries wolf on a transient RPC
+    error is a check people learn to skip.
+    """
+    nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+             if n.status == StorageNode.STATUS_ONLINE]
+
+    def stack_present(node, lvstore):
+        try:
+            return bool(node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore))
+        except Exception as e:
+            logger.warning(
+                f"[REMOVAL] could not probe {lvstore} on {node.get_id()} "
+                f"({e}); not counting it as missing")
+            return True
+
+    violations = replica_stack_violations(nodes, stack_present)
+    for node_id, lvstore, owner_id, role in violations:
+        logger.error(
+            f"[REMOVAL] REPLICA STACK MISSING{context}: {node_id} is recorded as "
+            f"{role} of {owner_id} but {lvstore} is not present on it -- "
+            f"{owner_id} is running with one fewer replica than its bookkeeping claims")
+    if not violations:
+        logger.info(
+            f"[REMOVAL] replica-stack invariant holds{context}: every hosted "
+            f"replica claimed by a back-reference is physically present")
+    return violations
 
 
 def _teardown_replicas_of_primary(removed_node: StorageNode):
@@ -5172,7 +5262,36 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
     old_host = db_controller.get_storage_node_by_id(old_host_id)
     if getattr(old_host, backref) == occupant_primary_id:
         cluster = db_controller.get_cluster_by_id(occupant_primary.cluster_id)
-        if old_host.status == StorageNode.STATUS_ONLINE:
+        # A node's secondary replica and its tertiary replica OF THE SAME
+        # PRIMARY are not two resources -- they are ONE physical stack
+        # (raid0_<vuid> + LVS_<vuid>, keyed by the primary's lvstore, not by
+        # the role). Vacating one role therefore must not tear that stack
+        # down while the other role still needs it: _delete_replica_on_peer
+        # ends in _remove_bdev_stack(remove_distr_only=True) ->
+        # bdev_raid_delete(raid0_<vuid>), which hot-removes the lvstore from
+        # this node outright.
+        #
+        # The planner (controllers/replica_placement.py) routinely emits both
+        # roles of one primary in a single removal -- that is the whole point
+        # of solving the layout globally, and order_moves proves each move
+        # lands on a free SLOT. Slots are the wrong granularity here: for a
+        # given primary, this node's secondary slot and tertiary slot map to
+        # the same stack. Found live 2026-09-01 on the 12-node/4-domain FTT2
+        # cluster, on the FIRST two removals and in the identical shape both
+        # times -- "secondary: <removed> -> X" promoted X (already holding
+        # that primary as tertiary), then "tertiary: X -> Y" deleted X's
+        # raid ~1s after Y's was built:
+        #   14:50:26 nq2mm bdev_raid_create raid0_45
+        #   14:50:27 fvgtl bdev_raid_delete raid0_45   <- the new secondary
+        # leaving pq8h9/LVS_45 and 9s25f/LVS_1 recorded as FTT2 while
+        # physically down to a single replica (their tertiary), with the
+        # recorded secondary holding nothing but a stranded hublvol
+        # controller. Silent: every forward pointer, back-reference and
+        # lvstore_ports entry still said the replica was there.
+        other_backref = ("lvstore_stack_tertiary" if backref == "lvstore_stack_secondary"
+                         else "lvstore_stack_secondary")
+        still_hosts_other_role = getattr(old_host, other_backref) == occupant_primary_id
+        if old_host.status == StorageNode.STATUS_ONLINE and not still_hosts_other_role:
             # occupant_primary survives this relocation (only its host is
             # moving) -- must NOT destroy the shared lvstore, only vacate
             # old_host's local examine copy. See _delete_replica_on_peer's
@@ -5181,6 +5300,15 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
                                     destroy_lvstore=False)
             _teardown_lvol_subsystems_on_vacated_peer(old_host, occupant_primary, db_controller)
             _prune_stale_lvstore_ports(old_host_id, occupant_primary.lvstore, db_controller)
+        elif still_hosts_other_role:
+            # Drop only the back-reference below. The stack, its subsystems
+            # and its lvstore_ports entry all stay -- they belong to the role
+            # old_host still holds for this same primary.
+            logger.info(
+                f"[REMOVAL] {old_host_id} keeps {occupant_primary_id}'s "
+                f"{occupant_primary.lvstore} stack: it still hosts that primary as "
+                f"{'tertiary' if role == 'secondary' else 'secondary'}; "
+                f"clearing the {role} back-reference only")
         old_host = db_controller.get_storage_node_by_id(old_host_id)
         setattr(old_host, backref, "")
         old_host.write_to_db()

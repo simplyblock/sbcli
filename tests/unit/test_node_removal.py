@@ -2842,5 +2842,196 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
             "the gate must still hold for genuinely non-serving clusters")
 
 
+# ---------------------------------------------------------------------------
+# _relocate_replica_between — vacating one role must not tear down the stack
+# when the SAME node still holds the OTHER role for the SAME primary.
+#
+# Live regression (2026-09-01, 12-node/4-domain FTT2). The global planner
+# emits both of a primary's roles in one removal; for pq8h9/LVS_45 it emitted
+#   1. secondary: 94dht -> fvgtl   (fvgtl already held LVS_45 as tertiary)
+#   2. tertiary:  fvgtl -> nq2mm
+# Step 2's teardown fired on fvgtl because it only consulted
+# lvstore_stack_tertiary, and bdev_raid_delete(raid0_45) removed the very
+# replica step 1 had just promoted -- 1s after nq2mm's copy was built:
+#   14:50:26 nq2mm bdev_raid_create raid0_45
+#   14:50:27 fvgtl bdev_raid_delete raid0_45
+# pq8h9 was left recorded as FTT2 with a single physical replica. Secondary
+# and tertiary of one primary are ONE stack (raid0_<vuid> + LVS_<vuid>), so
+# the guard has to be per-primary, not per-role.
+# ---------------------------------------------------------------------------
+class TestRelocateReplicaBetweenSamePrimaryOtherRole(unittest.TestCase):
+
+    def _run(self, x_stack_secondary, x_stack_tertiary, role="tertiary"):
+        cl = _cluster()
+        primary = _node("P", lvstore="LVS_P", secondary_id="X", tertiary_id="X")
+        x = _node("X", stack_secondary=x_stack_secondary, stack_tertiary=x_stack_tertiary)
+        y = _node("Y")
+        db = FakeDB(cl, [primary, x, y])
+        with patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp, \
+             patch.object(storage_node_ops,
+                          "_teardown_lvol_subsystems_on_vacated_peer") as tls, \
+             patch.object(storage_node_ops, "_prune_stale_lvstore_ports") as psp, \
+             patch.object(storage_node_ops, "_update_lvol_nodes_for_replica_move"):
+            ret = storage_node_ops._relocate_replica_between("P", "X", "Y", role, db)
+        return ret, x, primary, drp, tls, psp
+
+    def test_keeps_stack_when_node_still_holds_other_role_for_same_primary(self):
+        # Moving P's TERTIARY off X while X is still P's SECONDARY.
+        ret, x, primary, drp, tls, psp = self._run(
+            x_stack_secondary="P", x_stack_tertiary="P", role="tertiary")
+
+        self.assertTrue(ret)
+        drp.assert_not_called()
+        tls.assert_not_called()
+        psp.assert_not_called()
+        # Only the role being vacated is cleared; the other stays.
+        self.assertEqual(x.lvstore_stack_tertiary, "")
+        self.assertEqual(x.lvstore_stack_secondary, "P")
+        self.assertEqual(primary.tertiary_node_id, "Y")
+
+    def test_keeps_stack_in_the_mirror_case_moving_secondary_away(self):
+        # Same shape with the roles swapped: moving P's SECONDARY off X while
+        # X remains P's TERTIARY.
+        ret, x, primary, drp, tls, psp = self._run(
+            x_stack_secondary="P", x_stack_tertiary="P", role="secondary")
+
+        self.assertTrue(ret)
+        drp.assert_not_called()
+        tls.assert_not_called()
+        psp.assert_not_called()
+        self.assertEqual(x.lvstore_stack_secondary, "")
+        self.assertEqual(x.lvstore_stack_tertiary, "P")
+        self.assertEqual(primary.secondary_node_id, "Y")
+
+    def test_still_tears_down_when_node_holds_no_other_role(self):
+        # Control: the ordinary case must be unchanged.
+        ret, x, _p, drp, tls, psp = self._run(
+            x_stack_secondary="", x_stack_tertiary="P", role="tertiary")
+
+        self.assertTrue(ret)
+        drp.assert_called_once()
+        tls.assert_called_once()
+        psp.assert_called_once()
+        self.assertEqual(x.lvstore_stack_tertiary, "")
+
+    def test_still_tears_down_when_other_role_belongs_to_a_different_primary(self):
+        # The guard must compare the PRIMARY, not merely "other backref set".
+        # X hosting some unrelated primary's secondary shares no stack with P,
+        # so P's tertiary copy on X must still be torn down.
+        ret, x, _p, drp, tls, psp = self._run(
+            x_stack_secondary="OTHER", x_stack_tertiary="P", role="tertiary")
+
+        self.assertTrue(ret)
+        drp.assert_called_once()
+        tls.assert_called_once()
+        psp.assert_called_once()
+        self.assertEqual(x.lvstore_stack_tertiary, "")
+        self.assertEqual(x.lvstore_stack_secondary, "OTHER")
+
+
+# ---------------------------------------------------------------------------
+# replica_stack_violations / _verify_replica_stacks — the invariant whose
+# absence let the bug above ship silently. Bookkeeping agreed with itself at
+# every layer; only the device knew.
+# ---------------------------------------------------------------------------
+class TestReplicaStackViolations(unittest.TestCase):
+
+    def _cluster_nodes(self):
+        # P1 hosted by A (secondary) and B (tertiary); P2 hosted by A (tertiary).
+        p1 = _node("P1", lvstore="LVS_1", secondary_id="A", tertiary_id="B")
+        p2 = _node("P2", lvstore="LVS_2", tertiary_id="A")
+        a = _node("A", lvstore="LVS_A", stack_secondary="P1", stack_tertiary="P2")
+        b = _node("B", lvstore="LVS_B", stack_tertiary="P1")
+        return [p1, p2, a, b]
+
+    def test_no_violations_when_every_claimed_stack_is_present(self):
+        nodes = self._cluster_nodes()
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations(nodes, lambda n, lvs: True), [])
+
+    def test_flags_a_claimed_but_absent_stack(self):
+        nodes = self._cluster_nodes()
+
+        def present(node, lvstore):
+            # Exactly the live failure: A is recorded as P1's secondary but
+            # LVS_1 is not on it.
+            return not (node.get_id() == "A" and lvstore == "LVS_1")
+
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations(nodes, present),
+            [("A", "LVS_1", "P1", "secondary")])
+
+    def test_reports_every_missing_stack_not_just_the_first(self):
+        nodes = self._cluster_nodes()
+        found = storage_node_ops.replica_stack_violations(nodes, lambda n, lvs: False)
+        self.assertEqual(
+            sorted(found),
+            sorted([("A", "LVS_1", "P1", "secondary"),
+                    ("A", "LVS_2", "P2", "tertiary"),
+                    ("B", "LVS_1", "P1", "tertiary")]))
+
+    def test_ignores_nodes_that_claim_nothing(self):
+        idle = _node("idle", lvstore="LVS_idle")
+        calls = []
+
+        def present(node, lvstore):
+            calls.append((node.get_id(), lvstore))
+            return True
+
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations([idle], present), [])
+        self.assertEqual(calls, [], "a node with no back-references must not be probed")
+
+    def test_ignores_a_backref_whose_owner_has_no_lvstore(self):
+        # Nothing to probe for -- a different kind of bookkeeping problem, and
+        # reporting it here would be a false positive on the stack invariant.
+        owner = _node("P", lvstore="")
+        host = _node("H", stack_secondary="P")
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations([owner, host],
+                                                      lambda n, lvs: False), [])
+
+    def test_ignores_a_backref_to_a_node_not_in_the_online_set(self):
+        host = _node("H", stack_secondary="gone")
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations([host], lambda n, lvs: False), [])
+
+
+class TestVerifyReplicaStacks(unittest.TestCase):
+
+    def _db(self, probe_result):
+        cl = _cluster()
+        p = _node("P", lvstore="LVS_P", secondary_id="A")
+        a = _node("A", lvstore="LVS_A", stack_secondary="P")
+        a.rpc_client.return_value.bdev_lvol_get_lvstores = MagicMock(**probe_result)
+        return FakeDB(cl, [p, a]), a
+
+    def test_reports_a_missing_stack(self):
+        db, _a = self._db({"return_value": []})
+        self.assertEqual(
+            storage_node_ops._verify_replica_stacks("cluster-1", db),
+            [("A", "LVS_P", "P", "secondary")])
+
+    def test_clean_when_the_probe_finds_the_stack(self):
+        db, _a = self._db({"return_value": [{"name": "LVS_P"}]})
+        self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
+
+    def test_an_unreachable_node_is_not_reported_as_a_violation(self):
+        # Absence of proof is not proof of absence. A probe that cries wolf on
+        # a transient RPC error is a check people learn to ignore.
+        db, _a = self._db({"side_effect": RPCConnectionError("node unreachable")})
+        self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
+
+    def test_offline_nodes_are_not_probed(self):
+        cl = _cluster()
+        p = _node("P", lvstore="LVS_P", secondary_id="A")
+        a = _node("A", status=StorageNode.STATUS_OFFLINE, stack_secondary="P")
+        a.rpc_client.return_value.bdev_lvol_get_lvstores = MagicMock(return_value=[])
+        db = FakeDB(cl, [p, a])
+        self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
+
+
 if __name__ == "__main__":
     unittest.main()
