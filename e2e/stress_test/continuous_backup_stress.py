@@ -1804,8 +1804,33 @@ class BackupStressComprehensive(BackupStressBase):
         def _create_one(label, fs_type, crypto, ns_parent=False):
             try:
                 name = f"comp_{label}_{_rand_suffix()}"
-                if ns_parent and not self.k8s_test:
-                    # Create with namespace support via sbcli directly
+                sc_name = None
+                if ns_parent and self.k8s_test:
+                    # K8s: create PVC with a namespace-enabled StorageClass
+                    k8s = self._ensure_k8s_utils()
+                    pvc_name = self._k8s_normalize_name(name)
+                    sc_name = f"sc-ns-{pvc_name}"
+                    k8s.create_storage_class(
+                        name=sc_name,
+                        cluster_id=self.cluster_id,
+                        pool_name=self.pool_name,
+                        ndcs=getattr(self, "ndcs", 1),
+                        npcs=getattr(self, "npcs", 0),
+                        encryption=crypto,
+                        fs_type=fs_type,
+                        max_namespace_per_subsys=10,
+                    )
+                    pvc_size = self.lvol_size.replace("G", "Gi")
+                    k8s.create_pvc(
+                        name=pvc_name, size=pvc_size,
+                        storage_class=sc_name)
+                    k8s.wait_pvc_bound(pvc_name)
+                    lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+                    self.created_pvcs.append(pvc_name)
+                    self.created_lvols.append(pvc_name)
+                    name = pvc_name
+                elif ns_parent:
+                    # Docker: create with namespace support via sbcli
                     self.sbcli_utils.add_lvol(
                         lvol_name=name,
                         pool_name=self.pool_name,
@@ -1828,6 +1853,7 @@ class BackupStressComprehensive(BackupStressBase):
                     "device": device,
                     "fs_type": fs_type, "crypto": crypto,
                     "is_namespace": ns_parent, "parent_id": None,
+                    "ns_sc_name": sc_name if (ns_parent and self.k8s_test) else None,
                     "checksums": checksums, "backup_ids": [],
                 }
                 self.logger.info(f"  {label} ({name}) ready"
@@ -1853,8 +1879,13 @@ class BackupStressComprehensive(BackupStressBase):
 
         return errors
 
-    def _backup_batch(self, lvol_keys, lvol_state):
-        """Backup a batch of lvols in parallel. Returns {label: bk_id}."""
+    def _backup_batch(self, lvol_keys, lvol_state, verify_before=False):
+        """Backup a batch of lvols in parallel. Returns {label: bk_id}.
+
+        If verify_before=True, verify checksums on the source lvol
+        BEFORE taking the backup. If checksums don't match, the backup
+        is skipped and logged as a pre-backup corruption detection.
+        """
         threads = []
         results: dict[str, str] = {}
 
@@ -1862,6 +1893,21 @@ class BackupStressComprehensive(BackupStressBase):
             info = lvol_state.get(label)
             if not info:
                 return
+            if verify_before and info.get("checksums"):
+                try:
+                    current = self._get_checksums(
+                        self.fio_node if not self.k8s_test
+                        else info["mount"],
+                        info["mount"])
+                    if current != info["checksums"]:
+                        self.logger.error(
+                            f"  PRE-BACKUP CORRUPTION on {label}: "
+                            f"checksums mismatch before backup")
+                        results[label] = ""
+                        return
+                except Exception as e:
+                    self.logger.warning(
+                        f"  pre-backup verify {label} failed: {e}")
             bk_id = self._snap_and_backup(
                 info["id"], f"comp_{label}")
             results[label] = bk_id or ""
@@ -1939,7 +1985,7 @@ class BackupStressComprehensive(BackupStressBase):
         # The first num_namespace_parents lvols are created with
         # max_namespace_per_subsys=10 so namespace children can be added.
         all_items = []
-        ns_parents_remaining = self.num_namespace_parents if not self.k8s_test else 0
+        ns_parents_remaining = self.num_namespace_parents
         for prefix, count, fs_type, crypto in self._regular_configs:
             for i in range(count):
                 label = f"{prefix}_{i}"
@@ -1962,35 +2008,73 @@ class BackupStressComprehensive(BackupStressBase):
                     f"in batch")
 
         # Create namespace children on the lvols marked as NS parents.
-        # Children share the parent's NVMe subsystem — no separate connect
-        # is needed.  New namespace devices appear automatically on the
-        # same controller (e.g. /dev/nvmeXn2, /dev/nvmeXn3).
-        # (Docker only — K8s CSI handles NS internally)
-        if not self.k8s_test:
-            parent_labels = [
-                lbl for lbl, info in lvol_state.items()
-                if info.get("is_namespace") and info.get("parent_id") is None
-            ]
-            self.logger.info(
-                f"TC-BCK-STR-101: creating {self.num_namespace_children} "
-                f"namespace children on each of {len(parent_labels)} "
-                f"parent lvols: {parent_labels}")
-            for parent_label in parent_labels:
-                parent_info = lvol_state[parent_label]
-                parent_id = parent_info["id"]
-                parent_device = parent_info.get("device", "")
-                ctrl_dev = get_parent_device(parent_device)
-                self.logger.info(
-                    f"TC-BCK-STR-101: parent {parent_label} "
-                    f"device={parent_device} ctrl={ctrl_dev}")
-                # Snapshot existing namespace devices before adding children
-                before_set = set(
-                    self._list_nvme_ns_devices(ctrl_dev))
-                try:
+        parent_labels = [
+            lbl for lbl, info in lvol_state.items()
+            if info.get("is_namespace") and info.get("parent_id") is None
+        ]
+        self.logger.info(
+            f"TC-BCK-STR-101: creating {self.num_namespace_children} "
+            f"namespace children on each of {len(parent_labels)} "
+            f"parent lvols: {parent_labels}")
+        for parent_label in parent_labels:
+            parent_info = lvol_state[parent_label]
+            parent_id = parent_info["id"]
+            try:
+                if self.k8s_test:
+                    # K8s: create PVCs using the parent's namespace-enabled
+                    # StorageClass.  CSI driver auto-groups them into the
+                    # same subsystem as the parent.
+                    k8s = self._ensure_k8s_utils()
+                    ns_sc = parent_info.get("ns_sc_name")
+                    assert ns_sc, (
+                        f"No ns_sc_name for K8s parent {parent_label}")
                     for ci in range(self.num_namespace_children):
                         child_label = f"ns_child_{parent_label}_{ci}"
                         child_name = (
-                            f"comp_nsc_{parent_label}_{ci}_{_rand_suffix()}")
+                            f"comp_nsc_{parent_label}_{ci}_"
+                            f"{_rand_suffix()}")
+                        pvc_name = self._k8s_normalize_name(child_name)
+                        pvc_size = self.lvol_size.replace("G", "Gi")
+                        k8s.create_pvc(
+                            name=pvc_name, size=pvc_size,
+                            storage_class=ns_sc)
+                        k8s.wait_pvc_bound(pvc_name)
+                        child_id = k8s.get_pvc_volume_handle(pvc_name)
+                        self.created_pvcs.append(pvc_name)
+                        self.created_lvols.append(pvc_name)
+                        # Run FIO + capture checksums via K8s Job
+                        self._run_fio(pvc_name, runtime=30)
+                        child_checksums = self._get_checksums(
+                            pvc_name, pvc_name)
+                        lvol_state[child_label] = {
+                            "name": pvc_name, "id": child_id,
+                            "mount": pvc_name, "device": pvc_name,
+                            "fs_type": parent_info["fs_type"],
+                            "crypto": parent_info["crypto"],
+                            "is_namespace": True,
+                            "parent_id": parent_id,
+                            "ns_sc_name": None,
+                            "checksums": child_checksums,
+                            "backup_ids": [],
+                        }
+                        self.logger.info(
+                            f"  {child_label} ({pvc_name}) ready [K8s NS]")
+                else:
+                    # Docker: children share the parent's NVMe subsystem.
+                    # No separate connect — new namespace devices appear
+                    # automatically on the same controller.
+                    parent_device = parent_info.get("device", "")
+                    ctrl_dev = get_parent_device(parent_device)
+                    self.logger.info(
+                        f"TC-BCK-STR-101: parent {parent_label} "
+                        f"device={parent_device} ctrl={ctrl_dev}")
+                    before_set = set(
+                        self._list_nvme_ns_devices(ctrl_dev))
+                    for ci in range(self.num_namespace_children):
+                        child_label = f"ns_child_{parent_label}_{ci}"
+                        child_name = (
+                            f"comp_nsc_{parent_label}_{ci}_"
+                            f"{_rand_suffix()}")
                         self.sbcli_utils.add_lvol(
                             lvol_name=child_name,
                             pool_name=self.pool_name,
@@ -2006,7 +2090,6 @@ class BackupStressComprehensive(BackupStressBase):
                         assert new_dev, (
                             f"Namespace device did not appear for "
                             f"{child_name} on {ctrl_dev}")
-                        # Update before_set for the next child
                         before_set = set(
                             self._list_nvme_ns_devices(ctrl_dev))
                         # Format + mount (no connect needed)
@@ -2016,7 +2099,8 @@ class BackupStressComprehensive(BackupStressBase):
                             node=self.fio_node, device=new_dev,
                             fs_type=parent_info["fs_type"])
                         self.ssh_obj.exec_command(
-                            self.fio_node, f"mkdir -p {child_mount}")
+                            self.fio_node,
+                            f"mkdir -p {child_mount}")
                         self.ssh_obj.mount_path(
                             node=self.fio_node, device=new_dev,
                             mount_path=child_mount)
@@ -2027,22 +2111,22 @@ class BackupStressComprehensive(BackupStressBase):
                             self.fio_node, child_mount)
                         lvol_state[child_label] = {
                             "name": child_name, "id": child_id,
-                            "mount": child_mount,
-                            "device": new_dev,
+                            "mount": child_mount, "device": new_dev,
                             "fs_type": parent_info["fs_type"],
                             "crypto": parent_info["crypto"],
                             "is_namespace": True,
                             "parent_id": parent_id,
+                            "ns_sc_name": None,
                             "checksums": child_checksums,
                             "backup_ids": [],
                         }
                         self.logger.info(
                             f"  {child_label} ({child_name}) "
                             f"device={new_dev} ready")
-                except Exception as e:
-                    self.logger.error(
-                        f"TC-BCK-STR-101: namespace children on "
-                        f"{parent_label} failed: {e}")
+            except Exception as e:
+                self.logger.error(
+                    f"TC-BCK-STR-101: namespace children on "
+                    f"{parent_label} failed: {e}")
 
         total_lvols = len(lvol_state)
         self.logger.info(
@@ -2086,7 +2170,8 @@ class BackupStressComprehensive(BackupStressBase):
         initial_fail = 0
         for batch_start in range(0, len(all_labels), self.parallel_batch):
             batch = all_labels[batch_start:batch_start + self.parallel_batch]
-            results = self._backup_batch(batch, lvol_state)
+            results = self._backup_batch(
+                batch, lvol_state, verify_before=True)
             ok = sum(1 for v in results.values() if v)
             fail = len(results) - ok
             initial_ok += ok
@@ -2116,7 +2201,9 @@ class BackupStressComprehensive(BackupStressBase):
             backup_labels = random.sample(
                 all_labels,
                 min(self.parallel_batch, len(all_labels)))
-            bk_results = self._backup_batch(backup_labels, lvol_state)
+            bk_results = self._backup_batch(
+                backup_labels, lvol_state,
+                verify_before=(round_num % 5 == 0))
             round_bk_ok = sum(1 for v in bk_results.values() if v)
             marathon_backups += round_bk_ok
 
