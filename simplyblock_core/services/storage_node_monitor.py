@@ -1416,6 +1416,90 @@ def decrement():
 def value():
     return State.counter
 
+#: How long a node's RPC interface may stay unreachable -- while SNodeAPI
+#: answers and the SPDK process is still running -- before the monitor aborts
+#: SPDK so auto-restart can rebuild it.
+#:
+#: This exists because a hung RPC channel is invisible to every other recovery
+#: path. On 2026-09-01 13:22 node 22f365ef handled its last RPC
+#: (bdev_distrib_status_events_update -> api_bdev_distrib_status_events_notify)
+#: and never completed it: the target JM lived on 172.31.98.212, which the
+#: soak had just shut down, and the notify blocked on that peer with no
+#: timeout. SPDK's JSON-RPC server reads one request at a time per connection,
+#: so the whole channel wedged -- 0 successful RPCs for 15 minutes while every
+#: poller kept running normally. Nothing escalated until 13:37, when the socket
+#: finally went from hanging to refusing and HealthCheck saw a connection
+#: error. A restart fixed it in ~70s.
+#:
+#: 60s is comfortably longer than a legitimately slow RPC (the proxy's own
+#: socket timeout is ~2s) and far shorter than the 900s a test waits for paths
+#: to heal.
+RPC_HANG_ABORT_SEC = 60
+
+#: node_id -> monotonic time of the first consecutive RPC failure. Per node on
+#: purpose: the older `State.counter` guard below is a single process-global
+#: int shared by every node's monitor thread, so a healthy node's decrement()
+#: clears a broken node's increment() and the ":FAILED" escalation is never
+#: reached (32 x ":TIMEOUT", 0 x ":FAILED" in the incident above).
+_rpc_hang_since: dict[str, float] = {}
+_rpc_hang_lock = threading.Lock()
+
+
+def _note_rpc_ok(node_id):
+    """Forget any recorded hang -- the node answered."""
+    with _rpc_hang_lock:
+        _rpc_hang_since.pop(node_id, None)
+
+
+def _rpc_hang_seconds(node_id):
+    """Seconds this node's RPC has been failing without interruption."""
+    with _rpc_hang_lock:
+        now = time.monotonic()
+        return now - _rpc_hang_since.setdefault(node_id, now)
+
+
+def _abort_hung_spdk(snode, hung_for):
+    """Kill SPDK on a node whose RPC hung while the process is still alive.
+
+    Deliberately a kill rather than a graceful shutdown: a graceful stop is
+    itself driven over the RPC channel that is wedged, so it would hang too.
+    The node is flipped OFFLINE afterwards, which is what arms the existing
+    auto-restart.
+    """
+    node_id = snode.get_id()
+    logger.error(
+        "Node %s RPC unreachable for %.0fs while SNodeAPI answers and SPDK is "
+        "running -- aborting SPDK so auto-restart can rebuild it",
+        node_id, hung_for)
+    # Capture WHY before destroying the evidence. A wedged RPC channel on a
+    # live process leaves nothing in the logs -- the pollers keep printing
+    # normally -- so without this the kill recovers the node and the cause is
+    # lost, which is exactly what happened on 2026-09-01. utime frozen across
+    # the samples means the thread is blocked; utime advancing means it is
+    # running but never returns to the RPC poller. Best-effort: a failed
+    # capture must never delay the abort.
+    try:
+        state = snode.client(timeout=20, retry=1).spdk_thread_state(snode.rpc_port)
+        logger.error("Hung SPDK thread state for %s: %s", node_id, state)
+    except Exception as e:
+        logger.warning("Could not capture thread state for %s before abort: %s",
+                       node_id, e)
+
+    try:
+        snode_api = snode.client(timeout=20, retry=1)
+        snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+    except Exception as e:
+        logger.error("Failed to abort hung SPDK on %s: %s", node_id, e)
+        return False
+    _note_rpc_ok(node_id)   # the hang is resolved; do not abort again next tick
+    try:
+        set_node_offline(snode)
+    except Exception as e:
+        logger.error("Aborted SPDK on %s but could not flip it OFFLINE: %s",
+                     node_id, e)
+    return True
+
+
 def _spdk_is_dead(snode):
     """True if the node's SPDK is confirmed NOT running (or the node API can't
     be reached, which for our purposes means it isn't serving)."""
@@ -1636,9 +1720,18 @@ def check_node(snode):
     #so we try it twice. If all other checks pass again, but only this one fails: it's the spdk process
     if not node_rpc_check:
         logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:TIMEOUT")
+        # A hung RPC channel on a live SPDK recovers by nothing else: the
+        # process is up, SNodeAPI answers, ping passes, so every other check
+        # says healthy. Abort it once the hang outlives RPC_HANG_ABORT_SEC.
+        hung_for = _rpc_hang_seconds(snode.get_id())
+        if hung_for >= RPC_HANG_ABORT_SEC and not _spdk_is_dead(snode):
+            _abort_hung_spdk(snode, hung_for)
+            return False
         if value()==0:
            increment()
            return False
+    else:
+        _note_rpc_ok(snode.get_id())
 
     decrement()
     if not node_rpc_check or not node_rpc_check_1:
