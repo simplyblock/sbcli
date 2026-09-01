@@ -4063,7 +4063,35 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller):
     """Pre-flight Case-B check: a secondary/tertiary replica hosted on
     ``removed_node`` for some OTHER primary must have a valid relocation target.
-    Returns (feasible: bool, reason: str)."""
+    Returns (feasible: bool, reason: str).
+
+    When the global placement planner applies (see
+    ``_relocation_planner_inputs``) this asks the same planner phase 3b will
+    use, so admission and execution can never disagree: the removal is
+    refused only when no host-disjoint layout exists at all, and a layout
+    that is merely not fully domain-diverse is admitted with a warning naming
+    every LVS that will end up degraded. The per-role probe below stays as
+    the fallback for clusters the planner declines."""
+    from simplyblock_core.controllers import replica_placement
+
+    inputs = _relocation_planner_inputs(removed_node, db_controller)
+    if inputs is not None:
+        surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt = inputs
+        try:
+            plan = replica_placement.plan_diverse_layout(
+                surviving_ids, fd_by_node, current_layout, ftt,
+                host_by_node=host_by_node, label_by_node=label_by_node)
+        except replica_placement.InfeasiblePlacement as e:
+            return False, str(e)
+        if not plan.full_diversity:
+            logger.warning(
+                f"[REMOVAL] {removed_node.get_id()}: the post-removal layout "
+                f"cannot be made fully domain-diverse: "
+                f"{'; '.join(plan.notes) or 'no reason recorded'}")
+            for violation in plan.violations:
+                logger.warning(f"[REMOVAL] {removed_node.get_id()}: {violation}")
+        return True, ""
+
     for backref, picker in (
             ("lvstore_stack_secondary", "secondary"),
             ("lvstore_stack_tertiary", "tertiary")):
@@ -4692,8 +4720,19 @@ def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db
 def _relocate_replicas_hosted_on(removed_node: StorageNode):
     """Case B: ``removed_node`` holds a secondary and/or tertiary replica for
     other primaries. Re-host each on a fresh, anti-affinity-valid node so the
-    owning primary keeps its fault tolerance after this node leaves."""
+    owning primary keeps its fault tolerance after this node leaves.
+
+    With failure domains enabled this goes through the global planner
+    (``replica_placement``), which solves the whole post-removal layout at
+    once instead of re-homing each stranded replica in isolation -- see
+    ``_plan_driven_relocation``. The per-replica greedy path below is the
+    fallback for the cases the planner deliberately does not take
+    (FD disabled, dedicated secondary nodes, a peer that is not ONLINE)."""
     db_controller = DBController()
+
+    handled = _plan_driven_relocation(removed_node, db_controller)
+    if handled is not None:
+        return handled
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     if removed_node.lvstore_stack_secondary:
@@ -4705,6 +4744,144 @@ def _relocate_replicas_hosted_on(removed_node: StorageNode):
         if not _relocate_one_replica(removed_node, removed_node.lvstore_stack_tertiary, "tertiary"):
             return False
 
+    return True
+
+
+def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
+    """Gather the pure inputs the global placement planner needs, or ``None``
+    when this cluster is not a case the planner handles.
+
+    Returns ``(surviving_ids, fd_by_node, host_by_node, label_by_node,
+    current_layout, ftt)``. ``current_layout`` is read straight off the
+    primaries' ``secondary_node_id``/``tertiary_node_id`` pointers, including
+    the ones that still name ``removed_node`` -- the planner treats a holder
+    outside the surviving set as "no host", and the diff then carries
+    ``removed_node`` as the move's origin so the existing mover can tear the
+    old copy down and clear its back-reference exactly as before.
+
+    Declines (returns ``None``) when:
+
+    * failure domains are off -- there is no diversity invariant to solve
+      for, and the long-standing greedy path already handles host-disjoint
+      re-homing;
+    * any surviving node has no failure domain set -- a partial domain map
+      cannot be reasoned about, only guessed at;
+    * the cluster has dedicated secondary nodes (``is_secondary_node``),
+      which may host more than one replica each and so break the
+      one-slot-per-node permutation model the planner is built on;
+    * any surviving node is not ONLINE -- the planner would happily place a
+      replica on a node that cannot build it.
+    """
+    from simplyblock_core.controllers import replica_placement
+
+    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
+    if not getattr(cluster, "enable_failure_domain", False):
+        return None
+
+    ftt = cluster.max_fault_tolerance if cluster.max_fault_tolerance in (1, 2) else 1
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+    survivors = [
+        n for n in all_nodes
+        if n.get_id() != removed_node.get_id() and n.status != StorageNode.STATUS_REMOVED
+    ]
+    if not survivors:
+        return None
+    if any(n.is_secondary_node for n in survivors):
+        return None
+    if any(n.status != StorageNode.STATUS_ONLINE for n in survivors):
+        return None
+    if any(n.failure_domain < 0 for n in survivors):
+        return None
+
+    surviving_ids = [n.get_id() for n in survivors]
+    fd_by_node = {n.get_id(): n.failure_domain for n in survivors}
+    host_by_node = {n.get_id(): n.mgmt_ip for n in survivors}
+    label_by_node = {n.get_id(): n.physical_label for n in survivors}
+    current_layout = {
+        n.get_id(): replica_placement.Placement(
+            n.secondary_node_id, n.tertiary_node_id if ftt >= 2 else "")
+        for n in survivors
+    }
+    return surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt
+
+
+def _plan_driven_relocation(removed_node: StorageNode, db_controller):
+    """Phase 3b via the global placement planner.
+
+    Returns True when the planned relocations were applied, False when one of
+    them failed (the caller retries the whole phase), or ``None`` when the
+    planner does not apply to this cluster and the caller should fall back to
+    the per-replica greedy path.
+
+    Why this replaces the per-replica path under failure domains: the greedy
+    path answers "where does THIS stranded replica go" and can only ever move
+    the replica in front of it, so the one repair that a shrinking cluster
+    most often needs -- swapping two replicas that are both already placed --
+    is not expressible in it at all. It compensates with splices into third
+    parties' pairings and, when even that fails, by relaxing the invariant to
+    the weaker ">=1 cross-domain role" floor with a warning. Repeated over
+    several removals (the reported 4-domain x 3-host case, one host removed
+    per domain) those relaxations accumulate into a layout with secondaries
+    and tertiaries sharing domains, even though a fully diverse layout
+    existed at every step. ``replica_placement`` computes that layout
+    directly, as a min-cost perfect matching, and returns the provably
+    smallest set of rebuilds that reaches it -- so no splice heuristic, no
+    collateral-damage repair hop, and no silent relaxation is needed.
+
+    The move ORDER matters and is part of the plan: every move lands on a
+    slot the planner has already proved is free at that point, so
+    ``_relocate_replica_between``'s recursive vacate never has to run here.
+    A rotation cycle -- which that recursion cannot resolve at all, it hits
+    its own cycle backstop -- is broken up front by the planner into an extra
+    hop through the one slot the removal frees.
+    """
+    from simplyblock_core.controllers import replica_placement
+
+    inputs = _relocation_planner_inputs(removed_node, db_controller)
+    if inputs is None:
+        return None
+    surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt = inputs
+
+    try:
+        plan = replica_placement.plan_diverse_layout(
+            surviving_ids, fd_by_node, current_layout, ftt,
+            host_by_node=host_by_node, label_by_node=label_by_node)
+        moves = replica_placement.plan_moves(
+            current_layout, plan.layout, surviving_ids, ftt)
+    except replica_placement.InfeasiblePlacement as e:
+        logger.warning(
+            f"[REMOVAL] {removed_node.get_id()}: global replica placement is "
+            f"unusable ({e}); falling back to per-replica relocation")
+        return None
+
+    logger.info(
+        f"[REMOVAL] {removed_node.get_id()}: replica placement plan -- "
+        f"{replica_placement.describe_plan(plan, moves)}")
+    for violation in plan.violations:
+        logger.warning(f"[REMOVAL] {removed_node.get_id()}: {violation}")
+
+    for move in moves:
+        # A role with no current host was hosted on the node being removed:
+        # name it as the origin so the mover re-points the LVols and clears
+        # its back-reference, exactly as _relocate_one_replica used to.
+        old_host_id = move.from_node_id or removed_node.get_id()
+        if old_host_id == move.to_node_id:
+            continue
+        logger.info(
+            f"[REMOVAL] {removed_node.get_id()}: move {move.role} of "
+            f"{move.lvs_primary_node_id}: {old_host_id} -> {move.to_node_id}"
+            f"{' (scratch hop)' if move.scratch else ''}")
+        if not _relocate_replica_between(
+                move.lvs_primary_node_id, old_host_id, move.to_node_id,
+                move.role, db_controller):
+            logger.error(
+                f"[REMOVAL] {removed_node.get_id()}: planned move of "
+                f"{move.lvs_primary_node_id}'s {move.role} from {old_host_id} "
+                f"to {move.to_node_id} failed; will retry the phase")
+            return False
+
+    _clear_replica_backref(removed_node, "lvstore_stack_secondary")
+    _clear_replica_backref(removed_node, "lvstore_stack_tertiary")
     return True
 
 
