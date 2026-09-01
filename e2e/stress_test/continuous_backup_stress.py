@@ -177,10 +177,22 @@ class BackupStressBase(BackupTestBase):
         Thread-safe: resolves the backup ID by matching the snapshot name
         or lvol ID in the backup list, instead of blindly taking the last
         entry (which races when multiple threads create backups).
+
+        K8s mode: _create_snapshot(backup=True) creates a StorageBackup CRD
+        and stores its name in _last_backup_id.  The CRD name IS the backup
+        identifier — no need to search the backup list.
         """
         snap_name = f"str_{label}_{_rand_suffix()}"
         try:
             snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+
+            # K8s: _create_snapshot(backup=True) creates a StorageBackup
+            # CRD and returns its name — that IS the backup identifier.
+            # No need to poll the backup list (status fields may not be
+            # populated yet).
+            if self.k8s_test:
+                return snap_id
+
             sleep_n_sec(5)
             backups = self._list_backups()
             # Search for a backup whose Snapshot field matches our snap_id
@@ -188,8 +200,10 @@ class BackupStressBase(BackupTestBase):
             # this specific _create_snapshot call.
             for bk in reversed(backups):
                 bk_snap = bk.get("Snapshot") or bk.get("snapshot") or ""
-                if (snap_id and snap_id in bk_snap) \
-                        or snap_name in bk_snap:
+                bk_name = bk.get("name") or ""
+                if (snap_id and (snap_id in bk_snap or snap_id in bk_name)) \
+                        or snap_name in bk_snap \
+                        or snap_name in bk_name:
                     bk_id = (
                         bk.get("id") or bk.get("ID")
                         or bk.get("uuid") or None
