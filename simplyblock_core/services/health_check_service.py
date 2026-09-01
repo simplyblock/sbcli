@@ -118,6 +118,72 @@ def _remote_sweep_due(snode, cluster_nodes):
 REPAIR_FANOUT = 8
 
 
+#: owner_node_id -> {(kind, ctrl_name, device_id, target_node_id)}
+#:
+#: A repair skipped because its owner cannot answer must be *deferred*, not
+#: dropped. On 2026-09-01 node 22f365ef logged "Multipath repair skipped ...
+#: owner is in_restart" 15 times while its peers restarted, then never retried
+#: once they came back: re-detection depends on the remote bdev still looking
+#: present and the device still reading ONLINE, and with the controller half
+#: torn down it did not. The controller stayed single-pathed -- its sibling
+#: stuck in "deleting" -- until the node was restarted 20 minutes later.
+#:
+#: Keyed by owner, because the owner's status is what unblocks the repair.
+_deferred_repairs = {}
+_deferred_repairs_lock = threading.Lock()
+
+
+def _defer_repair(owner_id, kind, ctrl_name, device_id, target_node_id):
+    """Remember a repair that could not run because its owner was mid-transition."""
+    if not (owner_id and kind and ctrl_name and device_id and target_node_id):
+        return
+    entry = (kind, ctrl_name, device_id, target_node_id)
+    with _deferred_repairs_lock:
+        owed = _deferred_repairs.setdefault(owner_id, set())
+        if entry in owed:
+            return
+        owed.add(entry)
+    logger.info("Deferred %s repair of %s on %s until owner %s can answer",
+                kind, ctrl_name, target_node_id[:8], owner_id[:8])
+
+
+def _drain_deferred_repairs(target_node_id):
+    """Pop repairs owed on ``target_node_id`` whose owner can now be dialled.
+
+    Returns ``(kind, ctrl_name, device_id)`` tuples. Device objects are
+    deliberately NOT cached here and are re-resolved by the caller: a record
+    held across a peer restart is exactly the stale copy that reconnects to a
+    port the peer no longer listens on.
+    """
+    ready = []
+    with _deferred_repairs_lock:
+        for owner_id in list(_deferred_repairs):
+            try:
+                owner = db.get_storage_node_by_id(owner_id)
+            except Exception:  # noqa: BLE001 - owner gone; drop what was owed
+                _deferred_repairs.pop(owner_id, None)
+                continue
+            if owner is None:
+                _deferred_repairs.pop(owner_id, None)
+                continue
+            if not health_controller.repairs_allowed(owner):
+                continue
+            remaining = set()
+            for kind, ctrl_name, device_id, tgt in _deferred_repairs[owner_id]:
+                if tgt == target_node_id:
+                    ready.append((kind, ctrl_name, device_id))
+                else:
+                    remaining.add((kind, ctrl_name, device_id, tgt))
+            if remaining:
+                _deferred_repairs[owner_id] = remaining
+            else:
+                _deferred_repairs.pop(owner_id, None)
+    if ready:
+        logger.info("Re-driving %d deferred repair(s) on %s: owner(s) reachable again",
+                    len(ready), target_node_id[:8])
+    return ready
+
+
 def _run_repairs_in_parallel(jobs, what):
     """Run ``(ctrl_name, device, node)`` multipath repairs concurrently."""
     if not jobs:
@@ -289,10 +355,13 @@ def check_node(snode):
                         # connect. _peer_connections_relevant also admits
                         # UNREACHABLE, which is fine for judging whether a missing
                         # connection is a fault and wrong for deciding to dial out.
-                        if org_dev.nvmf_multipath and health_controller.repairs_allowed(org_node):
+                        if org_dev.nvmf_multipath:
                             ctrl_name = f"remote_{org_dev.alceml_bdev}" if org_dev.alceml_bdev else None
-                            if ctrl_name:
+                            if ctrl_name and health_controller.repairs_allowed(org_node):
                                 device_repair_jobs.append((ctrl_name, org_dev, snode))
+                            elif ctrl_name:
+                                _defer_repair(remote_device.node_id, "device", ctrl_name,
+                                              org_dev.get_id(), snode.get_id())
                         connected_devices.append(remote_device.get_id())
                         continue
 
@@ -350,6 +419,8 @@ def check_node(snode):
                                             "Multipath repair skipped for JM %s: owner %s is %s",
                                             ctrl_name, remote_device.node_id,
                                             getattr(src_node, "status", "unknown"))
+                                        _defer_repair(remote_device.node_id, "JM", ctrl_name,
+                                                      remote_device.get_id(), snode.get_id())
                                     elif src_jm and getattr(src_jm, 'nvmf_ip', None):
                                         jm_repair_jobs.append((ctrl_name, src_jm, snode))
                                     else:
@@ -412,6 +483,30 @@ def check_node(snode):
                     snode = db.atomic_update(
                         db.get_storage_node_by_id(snode.get_id()),
                         lambda n, rd=remote_jm_devices: setattr(n, "remote_jm_devices", rd))
+
+            # Re-drive whatever was skipped while its owner was mid-transition
+            # and is now reachable. Everything is re-resolved from the DB.
+            for kind, ctrl_name, device_id in _drain_deferred_repairs(snode.get_id()):
+                try:
+                    if kind == "JM":
+                        # RemoteJMDevice strips nvmf_ip/nqn/port, so resolve the
+                        # source JMDevice on the owning node -- same rule as the
+                        # inline path above.
+                        for rjm in snode.remote_jm_devices:
+                            if rjm.get_id() != device_id:
+                                continue
+                            src = db.get_storage_node_by_id(rjm.node_id)
+                            src_jm = src.jm_device if src else None
+                            if src_jm and getattr(src_jm, "nvmf_ip", None):
+                                jm_repair_jobs.append((ctrl_name, src_jm, snode))
+                            break
+                    else:
+                        dev = db.get_storage_device_by_id(device_id)
+                        if dev is not None:
+                            device_repair_jobs.append((ctrl_name, dev, snode))
+                except Exception as e:  # noqa: BLE001 - one bad entry must not stall the cycle
+                    logger.warning("Could not re-drive deferred repair of %s: %s",
+                                   ctrl_name, e)
 
             _run_repairs_in_parallel(device_repair_jobs, "device")
             _run_repairs_in_parallel(jm_repair_jobs, "JM")
