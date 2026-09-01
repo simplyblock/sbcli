@@ -40,6 +40,7 @@ def _cluster(status=Cluster.STATUS_ACTIVE):
 def fdb_backup(monkeypatch):
     import simplyblock_core.services.tasks_runner_fdb_backup as runner
     monkeypatch.setattr(runner, "fdb_backup_controller", MagicMock())
+    monkeypatch.setattr(runner, "fdb_backup_events", MagicMock())
     return runner
 
 
@@ -57,6 +58,27 @@ def test_fdb_backup_failure_is_retryable(fdb_backup):
 
     with pytest.raises(trb.TaskRetry):
         fdb_backup.SPEC.handler(_task())
+
+
+def test_fdb_backup_reports_a_task_that_ran_out_of_retries(fdb_backup):
+    """The driver finishes the task on the ceiling without calling the handler,
+    so nothing but on_finish can see that the backup gave up."""
+    task = _task()
+    task.retry = task.max_retry = 10
+
+    fdb_backup.SPEC.on_finish(task)
+
+    fdb_backup.fdb_backup_events.fdb_backup_failed.assert_called_once_with(
+        "cl-1", "task-1")
+
+
+def test_fdb_backup_does_not_report_a_task_that_succeeded(fdb_backup):
+    task = _task()
+    task.retry, task.max_retry = 0, 10
+
+    fdb_backup.SPEC.on_finish(task)
+
+    fdb_backup.fdb_backup_events.fdb_backup_failed.assert_not_called()
 
 
 def test_fdb_backup_skips_clusters_in_activation(fdb_backup):
