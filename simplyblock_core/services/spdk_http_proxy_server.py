@@ -249,6 +249,17 @@ class ServerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         req_time = time.time_ns()
         self.server_session.append(req_time)
+        try:
+            self._do_POST_inner(req_time)
+        finally:
+            # Cleanup must run for ANY exception the body below can raise
+            # (e.g. ConnectionResetError / socket timeout writing the
+            # response under load), not only the two kinds it explicitly
+            # handles — otherwise the entry is orphaned in server_session
+            # for the rest of the process.
+            self.server_session.remove(req_time)
+
+    def _do_POST_inner(self, req_time):
         logger.info(f"incoming request at: {req_time}")
         logger.info(f"active server session: {len(self.server_session)}")
         # Body must be drained before branching on auth, not only on the
@@ -298,7 +309,6 @@ class ServerHandler(BaseHTTPRequestHandler):
                 logger.warning(f"BrokenPipeError: client disconnected before response could be sent (request {req_time})")
             except ValueError:
                 self.do_INTERNALERROR()
-        self.server_session.remove(req_time)
 
 
 def _bound_connection_concurrency(httpd, max_connections):
