@@ -97,6 +97,9 @@ def create_restore_s3_bdev(node: StorageNode, config: BackupConfig, name: str) -
                 bdb_lcpu_mask=bdb_lcpu_mask,
                 s3_lcpu_mask=s3_lcpu_mask,
                 s3_thread_pool_size=config.s3_thread_pool_size,
+                s3_request_timeout_ms=4000,
+                s3_request_hard_abort_ms=6000,
+                s3_retry_burst=16,
             )
         rpc_client.bdev_lvol_s3_bdev(node.lvstore, name)
     except RPCException as e:
@@ -186,6 +189,9 @@ def create_s3_bdev(node: StorageNode, config: BackupConfig) -> None:
             bdb_lcpu_mask=bdb_lcpu_mask,
             s3_lcpu_mask=s3_lcpu_mask,
             s3_thread_pool_size=config.s3_thread_pool_size,
+            s3_request_timeout_ms=4000,
+            s3_request_hard_abort_ms=6000,
+            s3_retry_burst=16,
         )
 
         rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
