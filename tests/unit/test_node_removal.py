@@ -48,9 +48,15 @@ def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, mode="docker",
 def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
           secondary_id="", tertiary_id="",
           stack_secondary="", stack_tertiary="", n_devices=0, with_jm=False,
-          failure_domain=-1, mgmt_ip=None, jm_vuid=0):
+          failure_domain=-1, mgmt_ip=None, jm_vuid=0,
+          is_secondary_node=False, physical_label=0):
     n = MagicMock(spec=StorageNode)
     n.uuid = node_id
+    # Defaults matching the real model: without them these come back as
+    # truthy child mocks, which silently steers placement code down the
+    # dedicated-secondary-node / physical-label branches.
+    n.is_secondary_node = is_secondary_node
+    n.physical_label = physical_label
     n.get_id = MagicMock(return_value=node_id)
     n.status = status
     n.cluster_id = "cluster-1"
@@ -1473,6 +1479,266 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         rec.assert_called_once()
         self.assertEqual(primary.secondary_node_id, "n3")
         self.assertEqual(free_node.lvstore_stack_secondary, "p1")
+
+
+# ---------------------------------------------------------------------------
+# Plan-driven phase 3b — with failure domains on, relocation goes through the
+# global planner (simplyblock_core.controllers.replica_placement) instead of
+# the per-replica greedy picker. The planner is unit-tested on its own in
+# tests/unit/test_replica_placement.py; what matters here is the wiring:
+# which clusters it takes, which it declines, and that the moves it plans are
+# actually executed against the DB bookkeeping.
+# ---------------------------------------------------------------------------
+
+def _fd_cluster_nodes(domains=4, per_domain=3, ftt=2):
+    """A cluster laid out the way cluster_activate leaves it: nodes
+    round-robined across domains, secondary/tertiary one and two steps along
+    that order, so every LVS starts fully domain-diverse."""
+    order = [f"d{d}n{i}" for i in range(per_domain) for d in range(domains)]
+    nodes = {}
+    for node_id in order:
+        nodes[node_id] = _node(
+            node_id, lvstore=f"LVS_{node_id}",
+            failure_domain=int(node_id[1]),
+            mgmt_ip=f"10.0.{node_id[1]}.{node_id[-1]}")
+    size = len(order)
+    for k, node_id in enumerate(order):
+        sec = order[(k + 1) % size]
+        tert = order[(k + 2) % size] if ftt >= 2 else ""
+        nodes[node_id].secondary_node_id = sec
+        nodes[node_id].tertiary_node_id = tert
+        nodes[sec].lvstore_stack_secondary = node_id
+        if tert:
+            nodes[tert].lvstore_stack_tertiary = node_id
+    return nodes
+
+
+def _layout_of(db, ftt=2):
+    return {
+        n.get_id(): (n.secondary_node_id, n.tertiary_node_id if ftt >= 2 else "")
+        for n in db.nodes.values()
+        if n.status != StorageNode.STATUS_REMOVED
+    }
+
+
+class TestRelocationPlannerApplicability(unittest.TestCase):
+
+    def _db(self, **cluster_kwargs):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True, **cluster_kwargs)
+        nodes = _fd_cluster_nodes()
+        return cl, FakeDB(cl, list(nodes.values())), nodes
+
+    def test_takes_an_fd_enabled_cluster(self):
+        cl, db, nodes = self._db()
+        got = storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db)
+        self.assertIsNotNone(got)
+        surviving_ids, fd_by_node, host_by_node, _, current_layout, ftt = got
+        self.assertNotIn("d0n0", surviving_ids)
+        self.assertEqual(len(surviving_ids), 11)
+        self.assertEqual(ftt, 2)
+        self.assertEqual(fd_by_node["d1n0"], 1)
+        self.assertEqual(host_by_node["d1n0"], nodes["d1n0"].mgmt_ip)
+        # the layout is read raw, still naming the node being removed
+        self.assertIn("d0n0", [pl.secondary for pl in current_layout.values()])
+
+    def test_declines_when_failure_domains_are_off(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=False)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        self.assertIsNone(
+            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+
+    def test_declines_on_a_node_without_a_domain(self):
+        cl, db, nodes = self._db()
+        nodes["d2n1"].failure_domain = -1
+        self.assertIsNone(
+            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+
+    def test_declines_when_a_dedicated_secondary_node_exists(self):
+        # Such a node may host more than one replica, breaking the
+        # one-slot-per-node permutation the planner is built on.
+        cl, db, nodes = self._db()
+        nodes["d2n1"].is_secondary_node = True
+        self.assertIsNone(
+            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+
+    def test_declines_when_a_peer_is_not_online(self):
+        cl, db, nodes = self._db()
+        nodes["d2n1"].status = StorageNode.STATUS_OFFLINE
+        self.assertIsNone(
+            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+
+    def test_already_removed_nodes_are_not_survivors(self):
+        cl, db, nodes = self._db()
+        nodes["d3n2"].status = StorageNode.STATUS_REMOVED
+        got = storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db)
+        self.assertIsNotNone(got)
+        self.assertNotIn("d3n2", got[0])
+
+    def test_ftt1_cluster_ignores_the_tertiary(self):
+        cl = _cluster(npcs=1, ft=1, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes(ftt=1)
+        db = FakeDB(cl, list(nodes.values()))
+        got = storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db)
+        self.assertEqual(got[5], 1)
+        self.assertTrue(all(pl.tertiary == "" for pl in got[4].values()))
+
+
+class TestPlanDrivenRelocation(unittest.TestCase):
+    """The reported case end to end against the DB bookkeeping: 4 domains x 3
+    hosts, FTT2 ("2+2"), removing one host per domain. Every surviving LVS
+    must keep primary/secondary/tertiary in three distinct domains -- the
+    guarantee the per-replica picker could not hold, because the repair it
+    needs (swapping two replicas that are both already placed) is not
+    expressible one stranded role at a time."""
+
+    def _run_removal(self, db, nodes, victim_id, ftt=2):
+        victim = nodes[victim_id]
+        # phase 3a: the victim's own LVS replicas come down.
+        for field, backref in (("secondary_node_id", "lvstore_stack_secondary"),
+                               ("tertiary_node_id", "lvstore_stack_tertiary")):
+            peer_id = getattr(victim, field)
+            if peer_id and getattr(nodes[peer_id], backref) == victim_id:
+                setattr(nodes[peer_id], backref, "")
+            setattr(victim, field, "")
+        victim.status = StorageNode.STATUS_IN_REMOVAL
+
+        moved = []
+
+        def _fake_move(primary_id, old_host_id, new_host_id, role, _db, _seen=None):
+            field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
+            backref = ("lvstore_stack_secondary" if role == "secondary"
+                       else "lvstore_stack_tertiary")
+            self.assertEqual(getattr(nodes[new_host_id], backref), "",
+                             f"planned move onto an occupied {role} slot on {new_host_id}")
+            moved.append((primary_id, role, old_host_id, new_host_id))
+            setattr(nodes[primary_id], field, new_host_id)
+            setattr(nodes[new_host_id], backref, primary_id)
+            if getattr(nodes[old_host_id], backref) == primary_id:
+                setattr(nodes[old_host_id], backref, "")
+            return True
+
+        with patch.object(storage_node_ops, "_relocate_replica_between",
+                          side_effect=_fake_move):
+            ret = storage_node_ops._relocate_replicas_hosted_on(victim)
+        self.assertTrue(ret)
+
+        victim.status = StorageNode.STATUS_REMOVED
+        del db.nodes[victim_id]
+        del nodes[victim_id]
+        return moved
+
+    def _assert_fully_diverse(self, nodes, ftt=2):
+        for node_id, node in nodes.items():
+            domains = [node.failure_domain, nodes[node.secondary_node_id].failure_domain]
+            if ftt >= 2:
+                domains.append(nodes[node.tertiary_node_id].failure_domain)
+            self.assertEqual(
+                len(set(domains)), len(domains),
+                f"{node_id} roles share a domain: sec={node.secondary_node_id} "
+                f"tert={node.tertiary_node_id} domains={domains}")
+        for field, backref in (("secondary_node_id", "lvstore_stack_secondary"),
+                               ("tertiary_node_id", "lvstore_stack_tertiary")):
+            if ftt < 2 and field == "tertiary_node_id":
+                continue
+            holders = [getattr(n, field) for n in nodes.values()]
+            self.assertCountEqual(holders, list(nodes), f"{field} is not a permutation")
+            for node_id, node in nodes.items():
+                self.assertEqual(getattr(nodes[getattr(node, field)], backref), node_id)
+
+    def test_one_removal_per_domain_keeps_full_diversity(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            for domain in range(4):
+                self._run_removal(db, nodes, f"d{domain}n0")
+                self._assert_fully_diverse(nodes)
+        self.assertEqual(len(nodes), 8)
+
+    def test_the_removed_nodes_backrefs_are_cleared(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        victim = nodes["d0n0"]
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            self._run_removal(db, nodes, "d0n0")
+        self.assertEqual(victim.lvstore_stack_secondary, "")
+        self.assertEqual(victim.lvstore_stack_tertiary, "")
+
+    def test_a_failed_move_fails_the_phase_for_retry(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        victim = nodes["d0n0"]
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_relocate_replica_between",
+                          return_value=False):
+            ret = storage_node_ops._relocate_replicas_hosted_on(victim)
+        self.assertFalse(ret)
+        # nothing cleared -> the retry re-plans from the same state
+        self.assertNotEqual(victim.lvstore_stack_secondary, "")
+
+    def test_an_already_correct_cluster_plans_no_moves(self):
+        # Removing a node whose slots are already free and whose own replicas
+        # are already torn down must not churn the rest of the cluster.
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            moved = self._run_removal(db, nodes, "d0n0")
+        # exactly the two roles the victim hosted, plus whatever re-shuffle
+        # full diversity needs -- never the whole cluster.
+        self.assertLess(len(moved), 8, moved)
+        self.assertGreaterEqual(len(moved), 2, moved)
+
+    def test_falls_back_to_the_greedy_path_when_the_planner_declines(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=False)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        victim = nodes["d0n0"]
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_relocate_one_replica",
+                          return_value=True) as one:
+            ret = storage_node_ops._relocate_replicas_hosted_on(victim)
+        self.assertTrue(ret)
+        self.assertEqual(one.call_count, 2)
+
+
+class TestFeasibilityUsesThePlanner(unittest.TestCase):
+
+    def test_admits_a_removal_the_planner_can_satisfy(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node") as pick:
+            ok, reason = storage_node_ops._check_replica_relocation_feasible(
+                nodes["d0n0"], db)
+        self.assertTrue(ok, reason)
+        pick.assert_not_called()
+
+    def test_admits_but_warns_when_full_diversity_is_unreachable(self):
+        # 2 domains at FTT2: a tertiary can never avoid both the primary's
+        # and the secondary's domain. Admitted (host-disjointness still
+        # holds) but every degraded LVS is named in the log.
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes(domains=2, per_domain=3)
+        db = FakeDB(cl, list(nodes.values()))
+        with self.assertLogs(storage_node_ops.logger, level="WARNING") as logs:
+            ok, _ = storage_node_ops._check_replica_relocation_feasible(
+                nodes["d0n0"], db)
+        self.assertTrue(ok)
+        self.assertTrue(any("cannot be made fully domain-diverse" in line
+                            for line in logs.output))
+
+    def test_refuses_when_no_host_disjoint_layout_exists(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes(domains=3, per_domain=1)
+        db = FakeDB(cl, list(nodes.values()))
+        ok, reason = storage_node_ops._check_replica_relocation_feasible(
+            nodes["d0n0"], db)
+        self.assertFalse(ok)
+        self.assertTrue(reason)
 
 
 # ---------------------------------------------------------------------------
