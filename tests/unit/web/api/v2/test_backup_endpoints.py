@@ -1,6 +1,8 @@
 # coding=utf-8
 """Unit tests for /api/v2/clusters/{id}/backups endpoints (backup_controller mocked)."""
 
+from typing import Any, ClassVar
+
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
     BACKUP_ID,
@@ -124,7 +126,7 @@ class TestRestoreBackup:
 class TestImportBackups:
     """The body is a union of two shapes, not one model with everything optional."""
 
-    _MANIFEST = {
+    _MANIFEST: ClassVar[dict[str, Any]] = {
         'schema_version': 1,
         'backup_id': BACKUP_ID,
         's3_id': 7,
@@ -138,9 +140,9 @@ class TestImportBackups:
         'dataplane': {},
     }
 
-    _BUCKET = {'bucket_name': 'backups', 'region': 'eu-central-1'}
+    _BUCKET: ClassVar[dict[str, str]] = {'bucket_name': 'backups', 'region': 'eu-central-1'}
 
-    _LOCATION = {'bucket_name': 'backups', 'region': 'eu-central-1'}
+    _LOCATION: ClassVar[dict[str, str]] = {'bucket_name': 'backups', 'region': 'eu-central-1'}
 
     def test_inline_manifests_are_validated_by_the_body_type(
             self, client, db, cluster, backup_controller):
