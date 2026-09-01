@@ -2340,7 +2340,13 @@ class RPCClient:
                        secret_access_key: SecretStr | None = None,
                        bdb_lcpu_mask: int | None = None,
                        s3_lcpu_mask: int | None = None,
-                       s3_thread_pool_size: int | None = None):
+                       s3_thread_pool_size: int | None = None,
+                       s3_request_timeout_ms: int | None = None,
+                       s3_request_hard_abort_ms: int | None = None,
+                       s3_request_max_attempts: int | None = None,
+                       s3_retry_burst: int | None = None,
+                       s3_retry_refill_ms: int | None = None,
+    ):
         """Create an S3 bdev for one bucket.
 
         A device serves exactly one bucket with one set of credentials, so
