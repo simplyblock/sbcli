@@ -175,6 +175,7 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityResize,
     TestLvolSecurityWithBackup,
     TestLvolSecurityMultiClientConcurrent,
+    TestDhchapPodScheduling,
 )
 
 from e2e_tests.upgrade_tests.major_upgrade import (
@@ -518,6 +519,7 @@ ALL_TESTS = [
     TestClusterGracefulShutdown,
     TestMultiClientConnect,
     TestPoolDhchap,
+    TestDhchapPodScheduling,
     TestPoolCapacityLimits,
     TestNamespaceE2E,
     TestDeviceRestart,
@@ -666,6 +668,7 @@ def get_security_tests():
         TestLvolSecurityResize,
         TestLvolSecurityWithBackup,
         TestLvolSecurityMultiClientConcurrent,
+        TestDhchapPodScheduling,
         # Security outage tests — run last (involves node shutdown/restart)
         TestLvolSecurityStorageNodeOutage,
         TestLvolSecurityMgmtNodeReboot,
@@ -946,6 +949,7 @@ def get_e2e_all_tests():
         TestPoolDisableIO,
         TestPoolStats,
         TestPoolDhchap,
+        TestDhchapPodScheduling,
         TestPoolCapacityLimits,
         TestPoolHostManagement,
         TestCrossResourceNegative,

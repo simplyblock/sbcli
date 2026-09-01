@@ -4610,3 +4610,118 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
         self.logger.info("TC-SEC-163: FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityMultiClientConcurrent PASSED ===")
+
+
+class TestDhchapPodScheduling(SecurityTestBase):
+    """
+    K8s-only: verifies that pods consuming PVCs from a DHCHAP pool with
+    ``allowedNodes`` are scheduled exclusively on the allowed nodes.
+
+    TC-DHCHAP-SCHED-001  Create DHCHAP pool with allowedNodes, register hosts
+    TC-DHCHAP-SCHED-002  Create PVC from DHCHAP pool StorageClass
+    TC-DHCHAP-SCHED-003  Create Pod #1 → verify it runs on an allowed node
+    TC-DHCHAP-SCHED-004  Delete Pod #1, create Pod #2 on same PVC → verify
+    TC-DHCHAP-SCHED-005  Cleanup
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "dhchap_pod_scheduling"
+
+    def run(self):
+        self.logger.info("=== TestDhchapPodScheduling START ===")
+
+        if not self.k8s_test:
+            self.logger.info(
+                "TestDhchapPodScheduling: skipping — pod scheduling "
+                "verification is a K8s-only concept")
+            self.logger.info("=== TestDhchapPodScheduling SKIPPED (Docker) ===")
+            return
+
+        self.fio_node = (
+            self.fio_node[0] if isinstance(self.fio_node, list)
+            else self.fio_node)
+        k8s = self._ensure_k8s_utils()
+
+        # ── TC-DHCHAP-SCHED-001: pool + allowedNodes ─────────────────────
+        self.logger.info(
+            "TC-DHCHAP-SCHED-001: Creating DHCHAP pool with allowedNodes …")
+        workers = self._get_k8s_worker_nqns()  # [(node_name, nqn), …]
+        all_worker_names = [w[0] for w in workers]
+
+        # If >1 worker, use a strict subset so we can prove the constraint.
+        # If only 1, we still verify it lands on that node.
+        if len(workers) > 1:
+            allowed_workers = workers[:-1]
+        else:
+            allowed_workers = list(workers)
+
+        allowed_node_names = [w[0] for w in allowed_workers]
+        self.logger.info(
+            f"  All workers: {all_worker_names}")
+        self.logger.info(
+            f"  Allowed nodes: {allowed_node_names}")
+
+        self._ensure_pool_and_sc(
+            dhchap=True, allowed_nodes=allowed_node_names)
+        pool_id = self._get_pool_id()
+        assert pool_id, f"Pool {self.pool_name} not found"
+
+        for _, nqn in allowed_workers:
+            self._register_host_to_pool(pool_id, nqn)
+        self.logger.info("TC-DHCHAP-SCHED-001: Pool + hosts PASSED")
+
+        # ── TC-DHCHAP-SCHED-002: create PVC ──────────────────────────────
+        self.logger.info("TC-DHCHAP-SCHED-002: Creating PVC …")
+        raw_name = f"dhsched{_rand_suffix()}"
+        pvc_name, lvol_id = self._create_lvol_dual(raw_name, size="5G")
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-002: PVC {pvc_name} bound (lvol={lvol_id})")
+
+        # ── TC-DHCHAP-SCHED-003: Pod #1 — schedule + verify ─────────────
+        pod_name_1 = f"dhsched-pod1-{_rand_suffix().lower()}"
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-003: Creating pod {pod_name_1} …")
+        k8s.create_utility_pod(pod_name_1, pvc_name)
+        running = k8s.wait_pod_running(pod_name_1, timeout=300)
+        assert running, (
+            f"TC-DHCHAP-SCHED-003: Pod {pod_name_1} did not reach Running")
+
+        node_1 = k8s.get_pod_node_name(pod_name_1)
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-003: Pod {pod_name_1} scheduled on {node_1}")
+        assert node_1 in allowed_node_names, (
+            f"TC-DHCHAP-SCHED-003: Pod scheduled on {node_1} which is NOT "
+            f"in allowedNodes {allowed_node_names}")
+        self.logger.info("TC-DHCHAP-SCHED-003: Pod #1 on allowed node PASSED")
+
+        # ── TC-DHCHAP-SCHED-004: Delete Pod #1, re-create Pod #2 ────────
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-004: Deleting pod {pod_name_1} …")
+        k8s.delete_pod(pod_name_1, wait=True)
+
+        pod_name_2 = f"dhsched-pod2-{_rand_suffix().lower()}"
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-004: Creating pod {pod_name_2} on same PVC …")
+        k8s.create_utility_pod(pod_name_2, pvc_name)
+        running = k8s.wait_pod_running(pod_name_2, timeout=300)
+        assert running, (
+            f"TC-DHCHAP-SCHED-004: Pod {pod_name_2} did not reach Running")
+
+        node_2 = k8s.get_pod_node_name(pod_name_2)
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-004: Pod {pod_name_2} scheduled on {node_2}")
+        assert node_2 in allowed_node_names, (
+            f"TC-DHCHAP-SCHED-004: Re-attached pod scheduled on {node_2} "
+            f"which is NOT in allowedNodes {allowed_node_names}")
+        self.logger.info(
+            "TC-DHCHAP-SCHED-004: Pod #2 on allowed node PASSED")
+
+        # ── TC-DHCHAP-SCHED-005: Cleanup ─────────────────────────────────
+        self.logger.info("TC-DHCHAP-SCHED-005: Cleanup …")
+        try:
+            k8s.delete_pod(pod_name_2, wait=True)
+        except Exception as e:
+            self.logger.warning(f"  pod2 cleanup: {e}")
+
+        self.logger.info("=== TestDhchapPodScheduling PASSED ===")
