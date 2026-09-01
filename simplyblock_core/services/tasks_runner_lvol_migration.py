@@ -85,7 +85,6 @@ the 3-second service-loop gap between phases.
 import datetime
 import random
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from simplyblock_core import db_controller as db_mod, utils, constants
@@ -2916,28 +2915,9 @@ def _budget_suspend(task, migration, migration_id, error_msg):
 # Main task runner entry point
 # ---------------------------------------------------------------------------
 
-def _cached(cache, fetch, key):
-    """Look up key in cache (a plain dict), fetching+storing on miss. cache=None
-    bypasses caching entirely (default behavior for any caller that doesn't
-    pass one, e.g. tests). Safe under concurrent callers: a same-key miss
-    racing on two threads just fetches twice and last-write-wins with an
-    equivalent value -- no lock needed."""
-    if cache is None:
-        return fetch(key)
-    val = cache.get(key)
-    if val is None:
-        val = fetch(key)
-        cache[key] = val
-    return val
-
-
-def task_runner(task, node_cache=None, cluster_cache=None):
+def task_runner(task):
     """
     Process one iteration of a FN_LVOL_MIG task.
-
-    node_cache/cluster_cache are optional per-sweep dicts (built once by
-    main() per cluster pass) so multiple tasks sharing the same handful of
-    nodes/cluster in one sweep don't each re-fetch them from FDB.
 
     Returns True if the task reached a terminal state (done/failed/cancelled),
     False if it should be retried on the next runner loop iteration.
@@ -2985,12 +2965,12 @@ def task_runner(task, node_cache=None, cluster_cache=None):
 
     # --- Load nodes ---
     try:
-        src_node = _cached(node_cache, db.get_storage_node_by_id, migration.source_node_id)
+        src_node = db.get_storage_node_by_id(migration.source_node_id)
     except KeyError:
         return _budget_suspend(task, migration, migration_id, "source node not found")
 
     try:
-        tgt_node = _cached(node_cache, db.get_storage_node_by_id, migration.target_node_id)
+        tgt_node = db.get_storage_node_by_id(migration.target_node_id)
     except KeyError:
         return _budget_suspend(task, migration, migration_id, "target node not found")
 
@@ -3036,7 +3016,7 @@ def task_runner(task, node_cache=None, cluster_cache=None):
     # needs no node RPC at all.  Suspending cleanup on cluster health means a
     # completed migration stays stuck if the source node goes through a brief
     # STATUS_UNREADY / STATUS_IN_ACTIVATION window during recovery.
-    cluster = _cached(cluster_cache, db.get_cluster_by_id, migration.cluster_id)
+    cluster = db.get_cluster_by_id(migration.cluster_id)
     if cluster.status not in Cluster.MUTABLE_STATUSES:
         if not _is_cleanup_phase:
             return _suspend_task(
@@ -3528,37 +3508,6 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc, 
     return True, False, None
 
 
-def _signal_group_list(group_id, list_attr, migration_id):
-    """Atomically append migration_id to group.<list_attr> if not already
-    present, via db.atomic_update -- a true compare-and-set. Multiple members
-    of the same group can now signal concurrently (parallel sweep in
-    main()) without one silently clobbering another's plain
-    read/append/write, which would understate the barrier count and stall
-    the group forever.
-
-    Returns the fresh post-mutation group if this call actually added the
-    id, or None if the group is gone or the id was already present (caller
-    should skip its own follow-up logging in that case, matching the old
-    `if migration_id not in group.X:` guard's behavior).
-    """
-    group = db.get_migration_group_by_id(group_id)
-    if group is None:
-        return None
-    added = {"value": False}
-
-    def _mutate(g):
-        lst = getattr(g, list_attr)
-        if migration_id in lst:
-            added["value"] = False
-            return False
-        lst.append(migration_id)
-        added["value"] = True
-        return True
-
-    fresh = db.atomic_update(group, _mutate)
-    return fresh if (fresh is not None and added["value"]) else None
-
-
 def _group_worker_budget_suspend(task, migration, group_id, error_msg):
     """Charge retry budget for a group worker; fail the WHOLE GROUP when this
     worker's own budget is exhausted.
@@ -3654,16 +3603,14 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             if suspend:
                 return _suspend_task(task, migration, migration.error_message or "waiting")
             if done:
-                # Signal snap_copy_done to group. Atomic: other members of
-                # this group may be signalling concurrently on a different
-                # runner thread (see the parallel sweep in main()) -- a plain
-                # read/append/write here would silently lose a sibling's
-                # concurrent signal.
-                fresh = _signal_group_list(group_id, 'snap_copy_done', migration_id)
-                if fresh is not None:
+                # Signal snap_copy_done to group.
+                group = db.get_migration_group_by_id(group_id)
+                if migration_id not in group.snap_copy_done:
+                    group.snap_copy_done.append(migration_id)
+                    group.write_to_db(db.kv_store)
                     logger.info(
                         f"Group worker {migration_id[:8]}: signalled snap_copy_done "
-                        f"({len(fresh.snap_copy_done)}/{fresh.member_count()})")
+                        f"({len(group.snap_copy_done)}/{group.member_count()})")
             # Wait for orchestrator to advance group to INTERMEDIATE.
             migration.write_to_db(db.kv_store)
             task.write_to_db(db.kv_store)
@@ -3723,10 +3670,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
                     # delta is still too large to freeze quickly at cutover --
                     # if so, flag it so the orchestrator starts another
                     # synchronized round for every member (see
-                    # LVolMigrationGroup's INTERMEDIATE docstring). This RPC
-                    # must stay outside the atomic_update below -- its
-                    # mutate_fn may be replayed on conflict and must be free
-                    # of side effects.
+                    # LVolMigrationGroup's INTERMEDIATE docstring).
                     needs_more = False
                     if group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS:
                         try:
@@ -3741,29 +3685,14 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
                                 f"Group worker {migration_id[:8]}: delta check failed "
                                 f"(assuming another round is needed): {e}")
                             needs_more = True
-
-                    # Atomic: siblings may be signalling concurrently on a
-                    # different runner thread -- see _signal_group_list's
-                    # docstring for why a plain read/append/write is unsafe
-                    # here.
-                    signalled = {"value": False}
-
-                    def _mutate(g, needs_more=needs_more):
-                        if migration_id in g.intermediates_done:
-                            signalled["value"] = False
-                            return False
-                        if needs_more and migration_id not in g.intermediate_more_needed:
-                            g.intermediate_more_needed.append(migration_id)
-                        g.intermediates_done.append(migration_id)
-                        signalled["value"] = True
-                        return True
-
-                    fresh = db.atomic_update(group, _mutate)
-                    if fresh is not None and signalled["value"]:
-                        logger.info(
-                            f"Group worker {migration_id[:8]}: signalled intermediates_done "
-                            f"({len(fresh.intermediates_done)}/{fresh.member_count()})"
-                            + (" [delta still high, requesting another round]" if needs_more else ""))
+                    if needs_more and migration_id not in group.intermediate_more_needed:
+                        group.intermediate_more_needed.append(migration_id)
+                    group.intermediates_done.append(migration_id)
+                    group.write_to_db(db.kv_store)
+                    logger.info(
+                        f"Group worker {migration_id[:8]}: signalled intermediates_done "
+                        f"({len(group.intermediates_done)}/{group.member_count()})"
+                        + (" [delta still high, requesting another round]" if needs_more else ""))
             migration.write_to_db(db.kv_store)
             task.write_to_db(db.kv_store)
             return False
@@ -3806,9 +3735,11 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
         if suspend:
             return _suspend_task(task, migration, migration.error_message or "waiting")
         if done:
-            # Signal cleanup_source_done to group (atomic -- see
-            # _signal_group_list's docstring).
-            _signal_group_list(group_id, 'cleanup_source_done', migration_id)
+            # Signal cleanup_source_done to group.
+            group = db.get_migration_group_by_id(group_id)
+            if migration_id not in group.cleanup_source_done:
+                group.cleanup_source_done.append(migration_id)
+                group.write_to_db(db.kv_store)
             migration.phase = LVolMigration.PHASE_COMPLETED
             migration.status = LVolMigration.STATUS_DONE
             migration.completed_at = int(time.time())
@@ -3939,40 +3870,6 @@ def _cancel_stale_new_migrations(cluster_id):
 # Runner main loop
 # ---------------------------------------------------------------------------
 
-# Bounded pool for per-task work (I/O-bound: RPCs + FDB round-trips), mirroring
-# tasks_runner_restart.py's _restart_pool. _inflight guards against the next
-# sweep (3s later) re-submitting a task whose previous invocation is still
-# running -- claim_task's lease only protects against a DIFFERENT HOST driving
-# the same task concurrently, not this same process dispatching it twice.
-# No per-group in-flight guard is needed here (unlike _restart_pool's
-# per-node one): every group-state mutation two same-group workers could race
-# on is now a true atomic_update compare-and-set (see _signal_group_list and
-# the intermediates_done/cleanup_source_done sites above), so running several
-# members of the same group concurrently is safe by construction.
-_pool = ThreadPoolExecutor(max_workers=constants.LVOL_MIGRATION_MAX_PARALLEL,
-                           thread_name_prefix="lvol-migration")
-_inflight: dict = {}  # task uuid -> Future
-
-
-def _process_task(task_uuid, node_cache, cluster_cache):
-    """Claim and drive one task. Never raises: a crash in one task must not
-    kill the pool or delay processing of every other task."""
-    try:
-        task = db.get_task_by_id(task_uuid)
-        if task.status == JobSchedule.STATUS_DONE:
-            return
-        # Lease gate: skip a task another live runner host owns, so two
-        # replicas can't both drive the same migration's multi-phase
-        # data-plane state-machine concurrently.
-        if not tasks_controller.claim_task(task):
-            logger.info(f"LVol-migration task {task_uuid} owned by another runner host; skipping")
-            return
-        with tasks_controller.task_lease_heartbeat(task):
-            task_runner(task, node_cache=node_cache, cluster_cache=cluster_cache)
-    except Exception:
-        logger.exception(f"Unhandled error processing task {task_uuid}")
-
-
 if __name__ == "__main__":
     logger.info("Starting LVol Migration task runner...")
 
@@ -3989,16 +3886,15 @@ if __name__ == "__main__":
         else:
             for cl in clusters:
                 _cancel_stale_new_migrations(cl.get_id())
-                # Fresh per-cluster-per-sweep cache: many tasks in the same
-                # sweep typically share the same handful of nodes/cluster.
-                node_cache: dict = {}
-                cluster_cache: dict = {}
                 for task in db.get_active_migration_tasks(cl.get_id()):
-                    inflight = _inflight.get(task.uuid)
-                    if inflight is not None and not inflight.done():
+                    # Lease gate: skip a task another live runner host owns, so
+                    # two replicas can't both drive the same migration's
+                    # multi-phase data-plane state-machine concurrently.
+                    if not tasks_controller.claim_task(task):
+                        logger.info(f"LVol-migration task {task.uuid} owned by another runner host; skipping")
                         continue
-                    _inflight[task.uuid] = _pool.submit(
-                        _process_task, task.uuid, node_cache, cluster_cache)
+                    with tasks_controller.task_lease_heartbeat(task):
+                        task_runner(task)
 
         time.sleep(3)
 
