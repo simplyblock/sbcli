@@ -99,6 +99,10 @@ class _FakeTr(dict):
     def __setitem__(self, key, value):
         dict.__setitem__(self, key, value)
 
+    def add(self, key, value):
+        """Atomic-increment op for the watch-index counters; a no-op here
+        since these tests assert on claim logic, not watch delivery."""
+
 
 def _run_tx(monkeypatch, nodes, node_id="node-1", cluster_id="cl-1",
             allow_concurrent_peers=False, claim_owner="tok-new"):

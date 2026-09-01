@@ -29,6 +29,7 @@ dependencies = [
     "flask-openapi3",
     "jsonschema",
     "fastapi",
+    "sse-starlette",
     "uvicorn",
     "prometheus_api_client",
     "paramiko",

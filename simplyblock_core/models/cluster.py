@@ -17,6 +17,8 @@ class HashicorpVaultSettings(BaseModel):
 
 class Cluster(BaseModel):
 
+    _WATCHED = True
+
     STATUS_ACTIVE = "active"
     STATUS_READONLY = 'read_only'
     STATUS_INACTIVE = "inactive"
