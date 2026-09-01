@@ -3815,6 +3815,17 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     new_lvol = copy.deepcopy(lvol)
     new_lvol.uuid = str(uuid.uuid4())
+    if not constants.REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER:
+        # The superseded original is left alive (see the constant) and — on a
+        # fail-back — still owns this deep-copied bdev name on the target
+        # lvstore. Creating the clone under the same name would not fail: the
+        # idempotency probe in _create_bdev_stack finds the original's bdev,
+        # skips the create, and add_lvol_on_node returns the ORIGINAL's
+        # uuid/blobid as the clone's — aiming the cutover delta at the
+        # original's stale data. Give the clone its own name; client identity
+        # is carried by NQN/nsid/namespace-UUID, never the bdev name.
+        new_lvol.vuid = utils.get_random_vuid()
+        new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
     new_lvol.create_dt = str(datetime.now())
     new_lvol.node_id = target_node.get_id()
     new_lvol.nodes = [target_node.get_id()]
