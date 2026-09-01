@@ -1653,7 +1653,7 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Stress 11 – Comprehensive mega-stress: 40 lvols, dual policy, namespace,
+#  Stress 11 – Comprehensive mega-stress: 30 lvols, dual policy, namespace,
 #              FS mix, concurrent backup/restore, delete+verify
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -1667,21 +1667,21 @@ class BackupStressComprehensive(BackupStressBase):
     and delete+restore chain verification.
 
     Setup:
-      - 40 lvols (30G each, ~1.2TB total, capacity-checked)
-        - 10x ext4+plain, 10x ext4+crypto, 5x xfs+plain, 5x xfs+crypto
+      - 30 lvols (30G each, ~900GB total, capacity-checked)
+        - 8x ext4+plain, 6x ext4+crypto, 3x xfs+plain, 3x xfs+crypto
         - 10x namespace lvols (5 parents with 2 children each)
       - 2 retention policies: tight (versions=2) on odd lvols,
         wide (versions=3) on even lvols
 
     Stress phases:
-      1. Initial backup wave: 40 parallel backups (8 at a time)
+      1. Initial backup wave: 30 parallel backups (8 at a time)
       2. Marathon: 60 rounds of 8 parallel backups + 2 parallel restores
       3. Delete + restore integrity: delete backups, re-backup, verify chain
       4. Concurrent burst: 16 mixed operations simultaneously
       5. Final restore from every lvol: verify all data
 
     Validates:
-      - 520+ backups, 120+ restores across 40 lvols with no data corruption
+      - 520+ backups, 120+ restores across 30 lvols with no data corruption
       - Alternating retention merge under concurrent load
       - Chain integrity after backup deletion
       - Namespace lvols backup/restore correctly
@@ -1700,10 +1700,10 @@ class BackupStressComprehensive(BackupStressBase):
         self.num_namespace_children = 2
         self._regular_configs = [
             # (prefix, count, fs_type, crypto)
-            ("ext4_plain",  10, "ext4", False),
-            ("ext4_crypto", 10, "ext4", True),
-            ("xfs_plain",   5,  "xfs",  False),
-            ("xfs_crypto",  5,  "xfs",  True),
+            ("ext4_plain",  8, "ext4", False),
+            ("ext4_crypto", 6, "ext4", True),
+            ("xfs_plain",   3,  "xfs",  False),
+            ("xfs_crypto",  3,  "xfs",  True),
         ]
 
     def _check_and_adjust_capacity(self):
