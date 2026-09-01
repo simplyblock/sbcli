@@ -1,0 +1,23 @@
+# Findings ignored here are not fixable from our side: they are CPython
+# stdlib issues that upstream has explicitly declined to backport to the 3.14
+# branch the image's interpreter comes from, so no 3.14.x release will ever
+# clear them and `only-fixed` does not filter them out — Grype sees a fix
+# version (an alpha of the *next* minor) and reports the match.
+#
+# Each entry is scoped to the interpreter binary alone, so the same CVE in any
+# other package still fails the build.
+#
+# Re-check when the image moves to a Python minor that carries the fix (the
+# `PYTHON_VERSION` arg in docker/Dockerfile), or if upstream reverses the
+# will-not-fix decision, and drop the entry then.
+ignore:
+  # poplib command injection via newlines in user-controlled commands.
+  # Fixed in 3.15.0a6 only; upstream held off backporting to 3.14 because the
+  # change breaks existing behaviour and the main-branch commit still needs
+  # review against the relevant RFCs (python/cpython#143923).
+  # The control plane never imports poplib — it speaks JSON-RPC and HTTP, not
+  # POP3 — so nothing in the image reaches the affected code.
+  - vulnerability: CVE-2025-15367
+    package:
+      name: python
+      type: binary
