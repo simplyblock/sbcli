@@ -138,7 +138,7 @@ def _keepalive(client, interval=30):
         transport.set_keepalive(interval)
 
 
-def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
+def _ssh_connect_once(ip, jump_ip=None, timeout=None, banner_timeout=None):
     """Open a paramiko SSHClient to ``ip``. When ``jump_ip`` is given,
     tunnel through it via ``direct-tcpip`` (ProxyJump): the jump host
     only needs a standard sshd — it acts as a TCP forwarder while the
@@ -188,6 +188,37 @@ def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
     # Stash the jump client on the target client so we can close both.
     ssh._jump_client = jump
     return ssh
+
+
+def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None,
+                 attempts=5, backoff=4):
+    """Connect, retrying the handshake itself.
+
+    Opening a connection is side-effect free, so unlike a command it is always
+    safe to retry -- and three deploys in a row died on a transient local SSH
+    fault while the remote side was perfectly healthy. This one was an
+    EOFError out of paramiko's handshake on the client during phase 2
+    (2026-09-01 10:0x): sshd closed the connection mid-handshake, which is
+    what MaxStartups does when several hops arrive through the jump host at
+    once -- and every SN had just been dialled in parallel through mgmt.
+
+    Only the connect is retried. Command execution stays exactly as strict as
+    it was, because re-running a command is not safe in general.
+    """
+    last = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return _ssh_connect_once(ip, jump_ip=jump_ip, timeout=timeout,
+                                     banner_timeout=banner_timeout)
+        except Exception as e:  # noqa: BLE001 - any handshake failure is retryable
+            last = e
+            if attempt == attempts:
+                break
+            delay = backoff * attempt
+            print(f"  [{ip}] SSH connect failed ({type(e).__name__}); "
+                  f"retry {attempt + 1}/{attempts} in {delay}s")
+            time.sleep(delay)
+    raise last
 
 
 def _ssh_close(ssh):
@@ -669,9 +700,15 @@ def main():
         " --upgrade --force --ignore-installed requests",
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc",
     ]
+    # Detached for the same reason as cluster create: seven concurrent pip
+    # installs, six of them hopping through mgmt, is enough load that the
+    # channels die near the end -- rc=-1 on all six SNs at once on 2026-09-01
+    # 10:1x, while every node in fact finished and reported sbcli 19.2.34.
+    install_script = " && ".join(install_cmds)
     install_targets = [(mgmt_ip, None)] + [(ip, mgmt_ip) for ip in sn_priv_ips]
     with ThreadPoolExecutor(max_workers=len(install_targets)) as pool:
-        futures = [pool.submit(ssh_exec, ip, install_cmds, check=True, jump_ip=jump)
+        futures = [pool.submit(ssh_exec_detached, ip, install_script,
+                               jump_ip=jump, label="install sbcli")
                    for ip, jump in install_targets]
         for f in futures:
             f.result()
