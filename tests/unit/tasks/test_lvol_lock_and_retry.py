@@ -31,6 +31,20 @@ from simplyblock_core.controllers import snapshot_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.services import tasks_runner_sync_lvol_del as runner
+from simplyblock_core.services.task_runner_base import (
+    TaskAbort,
+    TaskDefer,
+    TaskRetry,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_failure_memo():
+    """The runner remembers the last reported message per task in-process."""
+    runner._last_alerted_failure.clear()
+    yield
+    runner._last_alerted_failure.clear()
 
 
 # --- 1. sync delete is explicitly unbounded -----------------------------
@@ -58,6 +72,8 @@ def test_sync_delete_matches_register_retry_semantics():
 
 def _task(age_seconds):
     t = mock.MagicMock()
+    t.uuid = "task-1"
+    t.function_name = JobSchedule.FN_LVOL_SYNC_OP
     t.canceled = False
     t.date = int(time.time()) - age_seconds
     t.function_params = {"lvol_id": "lvol-1", "op": "register",
@@ -68,20 +84,18 @@ def _task(age_seconds):
 
 def test_register_defers_while_the_create_is_still_writing_the_record():
     task = _task(age_seconds=5)
-    with mock.patch.object(tasks_controller.db, "get_lvol_by_id",
+    with mock.patch.object(runner.db, "get_lvol_by_id",
                            side_effect=KeyError("not yet")):
-        tasks_controller.run_lvol_sync_op_task(task)
-    assert task.status == JobSchedule.STATUS_SUSPENDED, (
-        "inside the grace window a missing record means the create has not "
-        "committed yet, not that the volume was deleted")
+        with pytest.raises(TaskDefer):
+            runner.SPEC.handler(task)
 
 
 def test_register_completes_once_the_record_is_genuinely_gone():
     task = _task(age_seconds=constants.LVOL_SYNC_OP_RECORD_GRACE_SEC + 60)
-    with mock.patch.object(tasks_controller.db, "get_lvol_by_id",
+    with mock.patch.object(runner.db, "get_lvol_by_id",
                            side_effect=KeyError("deleted")):
-        tasks_controller.run_lvol_sync_op_task(task)
-    assert task.status == JobSchedule.STATUS_DONE
+        with pytest.raises(TaskAbort):
+            runner.SPEC.handler(task)
 
 
 # --- 3. force delete takes the locks best-effort, never bypasses them ---
@@ -120,6 +134,8 @@ def test_force_delete_wait_is_bounded():
 
 def _register_task(retry=0):
     t = mock.MagicMock()
+    t.uuid = "task-1"
+    t.function_name = JobSchedule.FN_LVOL_SYNC_OP
     t.canceled = False
     t.date = int(time.time())
     t.retry = retry
@@ -132,8 +148,12 @@ def _register_task(retry=0):
     return t
 
 
-def _run_register_failing(task, err="boom"):
-    """Drive run_lvol_sync_op_task to its genuine-failure branch."""
+def _run_register_failing(task, err="boom", expect=TaskRetry):
+    """Drive the register handler to its genuine-failure branch.
+
+    The driver owns the status transition and the retry increment, so the
+    handler is asserted on the signal it raises, not on task state.
+    """
     lvol = mock.MagicMock()
     lvol.status = "online"
     lvol.nodes = ["node-1", "node-2"]
@@ -143,9 +163,9 @@ def _run_register_failing(task, err="boom"):
     node.status = "online"
     with contextlib.ExitStack() as stack:
         stack.enter_context(mock.patch.object(
-            tasks_controller.db, "get_lvol_by_id", return_value=lvol))
+            runner.db, "get_lvol_by_id", return_value=lvol))
         stack.enter_context(mock.patch.object(
-            tasks_controller.db, "get_storage_node_by_id", return_value=node))
+            runner.db, "get_storage_node_by_id", return_value=node))
         stack.enter_context(mock.patch(
             "simplyblock_core.storage_node_ops.get_restart_phase",
             return_value=None))
@@ -154,18 +174,19 @@ def _run_register_failing(task, err="boom"):
             "repair_lvol_registration_on_non_leader",
             return_value=(False, err)))
         event = stack.enter_context(mock.patch.object(
-            tasks_controller.events_controller, "log_event_cluster"))
-        tasks_controller.run_lvol_sync_op_task(task)
+            runner.events_controller, "log_event_cluster"))
+        with pytest.raises(expect):
+            runner.SPEC.handler(task)
     return event
 
 
 def test_first_failures_do_not_alert():
     """Transient failures are normal; only persistence is abnormal."""
     for retry in range(constants.TASK_FAILURE_ALERT_THRESHOLD):
+        runner._last_alerted_failure.clear()
         task = _register_task(retry=retry)
         event = _run_register_failing(task)
         assert event.call_count == 0, f"alerted at retry={retry + 1}"
-        assert task.status == JobSchedule.STATUS_SUSPENDED
 
 
 def test_alert_once_past_the_threshold():
@@ -173,20 +194,21 @@ def test_alert_once_past_the_threshold():
     event = _run_register_failing(task)
     assert event.call_count == 1
     assert event.call_args.kwargs["event_level"] == "Critical"
-    assert task.retry == constants.TASK_FAILURE_ALERT_THRESHOLD + 1
+    assert (f"{constants.TASK_FAILURE_ALERT_THRESHOLD + 1} times"
+            in event.call_args.kwargs["message"])
 
 
 def test_same_error_does_not_alert_every_cycle():
     """A node that stays broken must not write an event every 3 seconds."""
     task = _register_task(retry=constants.TASK_FAILURE_ALERT_THRESHOLD + 5)
-    task.function_result = "registration failed: boom"
+    runner._last_alerted_failure[task.uuid] = "registration failed: boom"
     event = _run_register_failing(task, err="boom")
     assert event.call_count == 0
 
 
 def test_changed_error_alerts_again():
     task = _register_task(retry=constants.TASK_FAILURE_ALERT_THRESHOLD + 5)
-    task.function_result = "registration failed: something else"
+    runner._last_alerted_failure[task.uuid] = "registration failed: something else"
     event = _run_register_failing(task, err="boom")
     assert event.call_count == 1
 
@@ -194,10 +216,8 @@ def test_changed_error_alerts_again():
 def test_enodev_is_never_counted_or_alerted():
     """-19 means the object is already gone; not an actionable alert."""
     task = _register_task(retry=constants.TASK_FAILURE_ALERT_THRESHOLD + 5)
-    event = _run_register_failing(task, err={"code": -19})
+    event = _run_register_failing(task, err={"code": -19}, expect=TaskDefer)
     assert event.call_count == 0
-    assert task.retry == constants.TASK_FAILURE_ALERT_THRESHOLD + 5, (
-        "-19 must not advance the failure counter")
 
 
 # --- 5. a peer restart is waited out under the lock, but not forever ----

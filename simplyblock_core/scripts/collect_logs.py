@@ -113,7 +113,7 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerJCCompResume",
     "TasksRunnerLVolSyncDelete",
     "TasksRunnerBackup",
-    "TasksRunnerBackupMerge",
+    "BackupMergeService",
     "HAProxy",
 ]
 

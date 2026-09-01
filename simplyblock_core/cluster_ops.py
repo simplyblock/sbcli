@@ -2495,28 +2495,28 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_SnapshotMonitor",
-                service_file="python3 simplyblock_core/services/snapshot_monitor.py",
+                command=["python3", "simplyblock_core/services/snapshot_monitor.py"],
                 service_image=service_image)
 
         if "app_TasksRunnerLVolSyncDelete" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerLVolSyncDelete",
-                service_file="python3 simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
                 service_image=service_image)
 
         if "app_TasksRunnerJCCompResume" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerJCCompResume",
-                service_file="python3 simplyblock_core/services/tasks_runner_jc_comp.py",
+                command=["simplyblock-task-runner", "tasks-runner-jc-comp"],
                 service_image=service_image)
 
         if "app_BackupService" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_BackupService",
-                service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
+                command=["simplyblock-task-runner", "tasks-runner-fdb-backup"],
                 service_image=service_image)
 
         logger.info("Done updating mgmt cluster")
@@ -2554,7 +2554,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 namespace=namespace,
                 deployment_name="simplyblock-tasks-runner-sync-lvol-del",
                 container_name="tasks-runner-sync-lvol-del",
-                service_file="simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
                 container_image=service_image)
 
         if "simplyblock-snapshot-monitor" not in deployment_names:
@@ -2562,7 +2562,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 namespace=namespace,
                 deployment_name="simplyblock-snapshot-monitor",
                 container_name="snapshot-monitor",
-                service_file="simplyblock_core/services/snapshot_monitor.py",
+                command=["python", "simplyblock_core/services/snapshot_monitor.py"],
                 container_image=service_image)
 
         # Update DaemonSets

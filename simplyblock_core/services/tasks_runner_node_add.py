@@ -1,14 +1,17 @@
 # coding=utf-8
 import socket
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 
 from simplyblock_core import db_controller, storage_node_ops, utils, constants
-from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.services.task_runner_base import (
+    RunnerSpec,
+    TaskDefer,
+    TaskRetry,
+    serve,
+)
 
 
 logger = utils.get_logger(__name__)
@@ -24,67 +27,6 @@ db = db_controller.DBController()
 # cluster-create / expansion fan-out can't exhaust the runner host.
 MAX_CONCURRENT_NODE_ADDS = constants.NODE_ADD_MAX_PARALLEL
 
-# uuids of node-add tasks a worker on THIS host is currently driving, so the
-# dispatch loop never hands the same task to two workers. (Cross-host
-# duplicate execution is separately prevented by the per-task lease in
-# tasks_controller.claim_task.)
-_inflight = set()
-_inflight_lock = threading.Lock()
-
-# target node_addr values currently being driven by a worker, guarded by the
-# same lock. The concurrency model above ("different tasks target different
-# nodes, no shared state") breaks if TWO task records ever target the SAME
-# host — e.g. a caller's retried HTTP request creating a second FN_NODE_ADD
-# task before tasks_controller._validate_new_task_node_add existed to block
-# it, or any task created before that dedup shipped. Without this, both
-# tasks' add_node() calls race the same host's config-slot classify-then-
-# create logic milliseconds apart (2026-07-23: two threads, 4ms apart,
-# produced 6 node records for a 4-slot host). This is belt-and-suspenders
-# for the task-creation-time dedup — it protects against any duplicate task
-# that already exists, regardless of how it got created.
-_inflight_addrs = set()
-
-
-def process_task(task, cl):
-    if task.canceled:
-        task.function_result = "canceled"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return False
-
-    if task.retry >= task.max_retry:
-        task.function_result = "max retry reached"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
-
-    if db.get_cluster_by_id(cl.get_id()).status == Cluster.STATUS_IN_ACTIVATION:
-        task.function_result = "Cluster is in_activation, waiting"
-        task.status = JobSchedule.STATUS_NEW
-        task.write_to_db(db.kv_store)
-        return False
-
-    if task.status != JobSchedule.STATUS_RUNNING:
-        task.status = JobSchedule.STATUS_RUNNING
-        task.write_to_db(db.kv_store)
-
-    try:
-        res = storage_node_ops.add_node(**task.function_params)
-        msg = f"Node add result: {res}"
-        logger.info(msg)
-        task.function_result = msg
-        if res:
-            task.status = JobSchedule.STATUS_DONE
-        else:
-            task.retry += 1
-            task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return True
-    except Exception as e:
-        logger.error(e)
-        return False
-
-
 # Applying the CPU topology during add_node makes the node reboot
 # (kubeletconfig / MCP update). The in-flight attempt then fails, but the
 # right reaction is neither a quick blind retry (the node is down for
@@ -96,11 +38,23 @@ NODE_REBOOT_WAIT_MAX_SEC = 900
 NODE_REBOOT_POLL_SEC = 15
 
 
+def _node_addr(task):
+    """The target host of an add. Two task records must never drive the same
+    one concurrently: the concurrency model above ("different tasks target
+    different nodes, no shared state") breaks if they do — two add_node() calls
+    race the same host's config-slot classify-then-create logic milliseconds
+    apart (2026-07-23: two threads, 4ms apart, produced 6 node records for a
+    4-slot host). tasks_controller._validate_new_task_node_add should stop such
+    a task from being created at all; this is the backstop for any that already
+    exists, however it got there."""
+    return (task.function_params or {}).get("node_addr")
+
+
 def _node_api_reachable(task, timeout=5):
     """TCP-level reachability of the node agent (host:port from the task's
     node_addr). During add the StorageNode record may not exist yet, so this
     intentionally checks the address, not the DB object."""
-    addr = (task.function_params or {}).get("node_addr", "")
+    addr = _node_addr(task) or ""
     if ":" not in addr:
         return True  # can't tell — let the normal retry path decide
     host, _, port = addr.rpartition(":")
@@ -111,7 +65,7 @@ def _node_api_reachable(task, timeout=5):
         return False
 
 
-def _wait_node_reachable(task, task_uuid):
+def _wait_node_reachable(task):
     """After a failed attempt, if the node is unreachable (rebooting for the
     CPU-topology change), wait for it to answer again — up to
     NODE_REBOOT_WAIT_MAX_SEC — instead of consuming retries against a node
@@ -119,133 +73,56 @@ def _wait_node_reachable(task, task_uuid):
     if _node_api_reachable(task):
         return False
     logger.info(
-        f"Node-add task {task_uuid}: node agent unreachable (rebooting for "
+        f"Node-add task {task.uuid}: node agent unreachable (rebooting for "
         f"CPU topology?); waiting up to {NODE_REBOOT_WAIT_MAX_SEC}s for it to return")
     deadline = time.time() + NODE_REBOOT_WAIT_MAX_SEC
     while time.time() < deadline:
         time.sleep(NODE_REBOOT_POLL_SEC)
         if _node_api_reachable(task):
-            logger.info(f"Node-add task {task_uuid}: node agent reachable again; retrying add")
+            logger.info(f"Node-add task {task.uuid}: node agent reachable again; retrying add")
             return True
     logger.warning(
-        f"Node-add task {task_uuid}: node agent still unreachable after "
+        f"Node-add task {task.uuid}: node agent still unreachable after "
         f"{NODE_REBOOT_WAIT_MAX_SEC}s; resuming normal retry schedule")
     return True
 
 
-def _run_task(task_uuid, cluster_id, node_addr):
-    """Worker thread: drive one node-add task to completion (or suspension),
-    then drop it from the in-flight set so a later cycle can retry it.
-
-    Guarded against BaseException — add_node -> write_to_db calls exit(1) on a
-    DB write failure, which surfaces here as SystemExit; it must be logged and
-    contained to this worker, never allowed to kill the service loop or leave
-    the task stuck in the in-flight set.
-    """
-    delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
+def process_task(task):
     try:
-        while True:
-            # Re-fetch for fresh FDB state (the task may have been canceled).
-            task = db.get_task_by_id(task_uuid)
-            if task is None or task.status == JobSchedule.STATUS_DONE:
-                break
-            cl = db.get_cluster_by_id(cluster_id)
-            # Lease gate: skip a task another live runner host owns.
-            if not tasks_controller.claim_task(task):
-                logger.info(f"Node-add task {task_uuid} owned by another runner host; skipping")
-                break
-            # add_node blocks for many minutes with no task writes; heartbeat
-            # the lease so another runner host never sees it stale mid-add.
-            retry_before = task.retry
-            with tasks_controller.task_lease_heartbeat(task):
-                res = process_task(task, cl)
-            if res:
-                if task.status == JobSchedule.STATUS_DONE:
-                    break
-            # Reboot-aware handling: an attempt that failed because the node
-            # went down (CPU-topology reboot) is expected, not a real failure.
-            # add_node catches the interrupted spdk_process_start and RETURNS
-            # False, so process_task already consumed a retry — roll it back so
-            # the one guaranteed topology reboot per node doesn't eat the
-            # retry budget. Then wait for the agent to answer and retry
-            # promptly on a fresh schedule (no blind fast-retry, no runaway
-            # backoff). The re-run is idempotent: add_node cleans up its own
-            # stale IN_CREATION record on re-entry.
-            if _wait_node_reachable(task, task_uuid):
-                if task.retry > retry_before:
-                    task.retry = retry_before
-                    if task.status != JobSchedule.STATUS_DONE:
-                        task.status = JobSchedule.STATUS_SUSPENDED
-                    task.write_to_db(db.kv_store)
-                delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
-                continue
-            if not res:
-                # Cap the exponential backoff so a permanently failing node-add
-                # can't grow the sleep without bound.
-                delay_seconds = min(
-                    delay_seconds * 2,
-                    constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
-                )
-            time.sleep(delay_seconds)
-    except BaseException as e:
-        logger.error(f"Node-add task {task_uuid} processing crashed: {e}")
-        logger.exception(e)
-    finally:
-        with _inflight_lock:
-            _inflight.discard(task_uuid)
-            if node_addr:
-                _inflight_addrs.discard(node_addr)
+        res = storage_node_ops.add_node(**task.function_params)
+        msg = f"Node add result: {res}"
+        logger.info(msg)
+    except Exception as e:
+        logger.error(e)
+        res, msg = False, f"Node add raised: {e}"
+
+    if res:
+        task.function_result = msg
+        return
+
+    # The one guaranteed topology reboot per node must not eat the retry
+    # budget: add_node catches the interrupted spdk_process_start and reports
+    # failure, so wait for the agent to answer and re-attempt on a fresh
+    # schedule instead. The re-run is idempotent — add_node cleans up its own
+    # stale IN_CREATION record on re-entry.
+    if _wait_node_reachable(task):
+        raise TaskDefer(f"{msg} (node agent was rebooting)")
+
+    raise TaskRetry(msg)
+
+
+SPEC = RunnerSpec(
+    name="tasks-runner-node-add",
+    function_names=[JobSchedule.FN_NODE_ADD],
+    handler=process_task,
+    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+    concurrency=MAX_CONCURRENT_NODE_ADDS,
+    exclusion_key=_node_addr,
+)
 
 
 def main():
-    logger.info("Starting Tasks runner node add...")
-
-    executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_NODE_ADDS)
-
-    while True:
-        try:
-            clusters = db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
-        if not clusters:
-            logger.error("No clusters found!")
-        else:
-            for cl in clusters:
-                # An unhandled FDBError here (1031 transaction timeout) killed
-                # this runner at cluster start on 2026-07-16 — no auto-restart
-                # ran for the rest of the run. Log and retry next tick instead.
-                try:
-                    tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-                except Exception as e:
-                    logger.error(f"Failed to read tasks for cluster {cl.get_id()}: {e}")
-                    continue
-                for task in tasks:
-                    if task.function_name != JobSchedule.FN_NODE_ADD:
-                        continue
-                    if task.status == JobSchedule.STATUS_DONE:
-                        continue
-                    node_addr = (task.function_params or {}).get("node_addr")
-                    # Dispatch to a worker once; skip if a worker on this host is
-                    # already driving it. Excess tasks queue in the executor and
-                    # run as workers free up. Also skip if a DIFFERENT task
-                    # already targets the SAME node_addr: tasks_controller's
-                    # creation-time dedup should prevent that task from ever
-                    # existing, but this is the backstop — two tasks racing the
-                    # same host's config-slot classify-then-create logic
-                    # produced duplicate storage-node records (2026-07-23).
-                    with _inflight_lock:
-                        if task.uuid in _inflight:
-                            continue
-                        if node_addr and node_addr in _inflight_addrs:
-                            continue
-                        _inflight.add(task.uuid)
-                        if node_addr:
-                            _inflight_addrs.add(node_addr)
-                    executor.submit(_run_task, task.uuid, cl.get_id(), node_addr)
-
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+    serve(SPEC)
 
 
 if __name__ == "__main__":
