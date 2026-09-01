@@ -200,7 +200,7 @@ class TestDetachRemoteControllersFromPeers(unittest.TestCase):
 
             fake = _FakeRPC(pid)
             rpc_clients[pid] = fake
-            p.rpc_client = lambda timeout=None, retry=None, _r=fake: _r
+            p.rpc_client = lambda _r=fake, **kwargs: _r
             peers.append(p)
 
         all_nodes = [dying] + peers
@@ -263,13 +263,13 @@ class TestDetachRemoteControllersFromPeers(unittest.TestCase):
         p_good.remote_devices = [_make_remote_dev("dying", 0)]
         p_good.remote_jm_devices = []
         good_rpc = _GoodRPC()
-        p_good.rpc_client = lambda timeout=None, retry=None: good_rpc
+        p_good.rpc_client = lambda **kwargs: good_rpc
 
         p_bad = _make_node("p_bad", status=StorageNode.STATUS_ONLINE)
         p_bad.remote_devices = [_make_remote_dev("dying", 0)]
         p_bad.remote_jm_devices = []
         bad_rpc = _BadRPC()
-        p_bad.rpc_client = lambda timeout=None, retry=None: bad_rpc
+        p_bad.rpc_client = lambda **kwargs: bad_rpc
 
         db = MagicMock()
         db.get_storage_nodes_by_cluster_id.return_value = [dying, p_good, p_bad]
@@ -298,7 +298,7 @@ class TestDetachRemoteControllersFromPeers(unittest.TestCase):
             def bdev_nvme_detach_controller(self, name):
                 called.append(name)
 
-        p.rpc_client = lambda timeout=None, retry=None: _RPC()
+        p.rpc_client = lambda **kwargs: _RPC()
 
         db = MagicMock()
         db.get_storage_nodes_by_cluster_id.return_value = [dying, p]
@@ -340,7 +340,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
             def bdev_nvme_detach_controller(self, name):
                 detach_calls.append(name)
                 return True
-        peer.rpc_client = lambda timeout=None, retry=None: _PeerRPC()
+        peer.rpc_client = lambda **kwargs: _PeerRPC()
 
         # dying-node SPDK kill + bind sink
         kill_calls = []
@@ -350,7 +350,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
                 return True
             def bind_device_to_nvme(self, pci):
                 return True
-        snode.client = lambda timeout=None, retry=None: _DyingClient()
+        snode.client = lambda **kwargs: _DyingClient()
 
         db = MagicMock()
 
