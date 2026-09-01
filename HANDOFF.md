@@ -70,6 +70,22 @@ Beyond what the plan describes, `task_runner_base` gained:
 - **`RunnerSpec.backoff(retry)`** — override the default curve where a runner
   has a tuned one (restart's 1-minute lead-in).
 
+## Deployment entry point
+
+`simplyblock-task-runner <name>` (`simplyblock_core/services/task_runners.py`,
+declared in `pyproject.toml`) starts a runner by its `RunnerSpec.name` instead of
+by a source path inside the image. It resolves the name to a module, checks the
+spec's own name matches, and calls `serve(spec)`; `lvol_migration` and
+`batch_migration`, which still own their loops, fall back to their module's
+`main()` and are listed in `_NOT_ON_DRIVER` until they migrate.
+
+Switched over: every task runner in `docker-compose-swarm.yml`, and the runner
+services `cluster_ops.update_cluster_mgmt` creates on upgrade (which meant
+`utils.create_docker_service` / `create_k8s_service` now take a `command` list
+rather than a source path). Not switched: the non-runner services, the Helm
+charts and the operator, which live outside this repository — so the path form
+keeps working and `tests/unit/test_service_entrypoints.py` still pins it.
+
 ## Gotchas
 
 - **`tests/unit/tasks/test_retry_ceiling.py` no longer hangs** — upstream fixed

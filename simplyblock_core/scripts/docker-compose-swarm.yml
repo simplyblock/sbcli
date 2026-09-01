@@ -313,7 +313,7 @@ services:
   TasksRunnerRestart:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_restart.py"
+    command: "simplyblock-task-runner tasks-runner-restart"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -327,7 +327,7 @@ services:
   TasksRunnerMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_migration.py"
+    command: "simplyblock-task-runner tasks-runner-migration"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -341,7 +341,7 @@ services:
   TasksRunnerLVolMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_lvol_migration.py"
+    command: "simplyblock-task-runner tasks-runner-lvol-migration"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -355,7 +355,7 @@ services:
   TasksRunnerBatchMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_batch_migration.py"
+    command: "simplyblock-task-runner tasks-runner-batch-migration"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -369,7 +369,7 @@ services:
   TasksRunnerFailedMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_failed_migration.py"
+    command: "simplyblock-task-runner tasks-runner-failed-migration"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -397,7 +397,7 @@ services:
   TasksRunnerNewDeviceMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_new_dev_migration.py"
+    command: "simplyblock-task-runner tasks-runner-new-dev-migration"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -411,7 +411,7 @@ services:
   TasksNodeAddRunner:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_node_add.py"
+    command: "simplyblock-task-runner tasks-runner-node-add"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -425,7 +425,7 @@ services:
   TasksNodeRemovalRunner:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_node_removal.py"
+    command: "simplyblock-task-runner tasks-runner-node-removal"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -439,7 +439,7 @@ services:
   TasksRunnerClusterExpand:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_cluster_expand.py"
+    command: "simplyblock-task-runner tasks-runner-cluster-expand"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -453,7 +453,7 @@ services:
   TasksRunnerPortAllow:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_port_allow.py"
+    command: "simplyblock-task-runner tasks-runner-port-allow"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -467,7 +467,7 @@ services:
   TasksRunnerJCCompResume:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_jc_comp.py"
+    command: "simplyblock-task-runner tasks-runner-jc-comp"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -481,7 +481,7 @@ services:
   TasksRunnerLVolSyncDelete:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_sync_lvol_del.py"
+    command: "simplyblock-task-runner tasks-runner-sync-lvol-del"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -495,7 +495,7 @@ services:
   TasksRunnerBackup:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_backup.py"
+    command: "simplyblock-task-runner tasks-runner-backup"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -537,7 +537,7 @@ services:
   TasksRunnerReplicationFinal:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_replication_final.py"
+    command: "simplyblock-task-runner tasks-runner-replication-final"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -551,7 +551,7 @@ services:
   BackupService:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_fdb_backup.py"
+    command: "simplyblock-task-runner tasks-runner-fdb-backup"
     deploy:
       placement:
         constraints: [node.role == manager]
