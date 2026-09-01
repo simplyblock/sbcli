@@ -54,6 +54,7 @@ from datetime import datetime
 from e2e_tests.backup.test_backup_restore import BackupTestBase, _rand_suffix
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import get_parent_device
 
 # ── constants ────────────────────────────────────────────────────────────────
 
@@ -1761,6 +1762,35 @@ class BackupStressComprehensive(BackupStressBase):
                 f"TC-BCK-STR-100: capacity check failed: {e} — "
                 f"continuing with defaults")
 
+    def _list_nvme_ns_devices(self, ctrl_dev: str) -> list[str]:
+        """List namespace devices on an NVMe controller.
+
+        ctrl_dev: /dev/nvmeX (controller) or /dev/nvmeXnY (namespace —
+                  will be stripped to controller).
+        Returns: ['/dev/nvmeXn1', '/dev/nvmeXn2', ...]
+        """
+        ctrl = get_parent_device(ctrl_dev)
+        cmd = f"bash -lc \"ls -1 {ctrl}n* 2>/dev/null | sort -V || true\""
+        out, _ = self.ssh_obj.exec_command(
+            node=self.fio_node, command=cmd, supress_logs=True)
+        return [x.strip() for x in (out or "").splitlines() if x.strip()]
+
+    def _wait_for_new_ns_device(self, ctrl_dev: str,
+                                 before_set: set,
+                                 timeout: int = 120) -> str | None:
+        """Wait for a new namespace device to appear on the controller.
+
+        Returns the new device path (e.g. /dev/nvmeXn2) or None on timeout.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cur = set(self._list_nvme_ns_devices(ctrl_dev))
+            diff = sorted(cur - before_set)
+            if diff:
+                return diff[-1]
+            sleep_n_sec(2)
+        return None
+
     def _create_lvols_batch(self, configs_batch, lvol_state):
         """Create a batch of lvols in parallel threads.
 
@@ -1795,6 +1825,7 @@ class BackupStressComprehensive(BackupStressBase):
                 assert checksums, f"No checksums for {label}"
                 lvol_state[label] = {
                     "name": name, "id": lvol_id, "mount": mount,
+                    "device": device,
                     "fs_type": fs_type, "crypto": crypto,
                     "is_namespace": ns_parent, "parent_id": None,
                     "checksums": checksums, "backup_ids": [],
@@ -1930,7 +1961,10 @@ class BackupStressComprehensive(BackupStressBase):
                     f"TC-BCK-STR-101: {len(errors)} lvol creation failures "
                     f"in batch")
 
-        # Create namespace children on the lvols marked as NS parents
+        # Create namespace children on the lvols marked as NS parents.
+        # Children share the parent's NVMe subsystem — no separate connect
+        # is needed.  New namespace devices appear automatically on the
+        # same controller (e.g. /dev/nvmeXn2, /dev/nvmeXn3).
         # (Docker only — K8s CSI handles NS internally)
         if not self.k8s_test:
             parent_labels = [
@@ -1944,10 +1978,19 @@ class BackupStressComprehensive(BackupStressBase):
             for parent_label in parent_labels:
                 parent_info = lvol_state[parent_label]
                 parent_id = parent_info["id"]
+                parent_device = parent_info.get("device", "")
+                ctrl_dev = get_parent_device(parent_device)
+                self.logger.info(
+                    f"TC-BCK-STR-101: parent {parent_label} "
+                    f"device={parent_device} ctrl={ctrl_dev}")
+                # Snapshot existing namespace devices before adding children
+                before_set = set(
+                    self._list_nvme_ns_devices(ctrl_dev))
                 try:
                     for ci in range(self.num_namespace_children):
                         child_label = f"ns_child_{parent_label}_{ci}"
-                        child_name = f"comp_nsc_{parent_label}_{ci}_{_rand_suffix()}"
+                        child_name = (
+                            f"comp_nsc_{parent_label}_{ci}_{_rand_suffix()}")
                         self.sbcli_utils.add_lvol(
                             lvol_name=child_name,
                             pool_name=self.pool_name,
@@ -1956,15 +1999,36 @@ class BackupStressComprehensive(BackupStressBase):
                         child_id = self.sbcli_utils.get_lvol_id(
                             lvol_name=child_name)
                         assert child_id, f"Child {child_name} not found"
-                        _, child_mount = self._connect_format_mount(
-                            child_name, child_id,
+                        self.created_lvols.append(child_name)
+                        # Wait for new namespace device on the controller
+                        new_dev = self._wait_for_new_ns_device(
+                            ctrl_dev, before_set, timeout=120)
+                        assert new_dev, (
+                            f"Namespace device did not appear for "
+                            f"{child_name} on {ctrl_dev}")
+                        # Update before_set for the next child
+                        before_set = set(
+                            self._list_nvme_ns_devices(ctrl_dev))
+                        # Format + mount (no connect needed)
+                        child_mount = (
+                            f"{self.mount_path}/{child_name}")
+                        self.ssh_obj.format_disk(
+                            node=self.fio_node, device=new_dev,
                             fs_type=parent_info["fs_type"])
+                        self.ssh_obj.exec_command(
+                            self.fio_node, f"mkdir -p {child_mount}")
+                        self.ssh_obj.mount_path(
+                            node=self.fio_node, device=new_dev,
+                            mount_path=child_mount)
+                        self.mounted.append(
+                            (self.fio_node, child_mount))
                         self._run_fio(child_mount, runtime=30)
                         child_checksums = self._get_checksums(
                             self.fio_node, child_mount)
                         lvol_state[child_label] = {
                             "name": child_name, "id": child_id,
                             "mount": child_mount,
+                            "device": new_dev,
                             "fs_type": parent_info["fs_type"],
                             "crypto": parent_info["crypto"],
                             "is_namespace": True,
@@ -1972,6 +2036,9 @@ class BackupStressComprehensive(BackupStressBase):
                             "checksums": child_checksums,
                             "backup_ids": [],
                         }
+                        self.logger.info(
+                            f"  {child_label} ({child_name}) "
+                            f"device={new_dev} ready")
                 except Exception as e:
                     self.logger.error(
                         f"TC-BCK-STR-101: namespace children on "
