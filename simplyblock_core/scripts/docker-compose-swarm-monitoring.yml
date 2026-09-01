@@ -87,6 +87,14 @@ services:
       - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
       - "--storage.tsdb.min-block-duration=2h"
       - "--storage.tsdb.max-block-duration=2h"
+      # Expands ${REPLICA} in prometheus.yml's external_labels from the env
+      # below. Required because prometheus.yml is bind-mounted: every replica
+      # reads identical bytes and cannot self-identify from file content.
+      - "--enable-feature=expand-external-labels"
+    environment:
+      # Swarm service template, evaluated per task, so each replica gets a
+      # distinct value -- this is what makes Thanos deduplication possible.
+      - "REPLICA={{.Node.Hostname}}"
     restart: "always"
     deploy:
       mode: global
@@ -165,6 +173,10 @@ services:
       # keep the diff to what actually fixes the fault.
       - --store=dns+tasks.thanos-store:10901
       - --store=dns+tasks.thanos-sidecar:10901
+      # Drop the `replica` external label when merging series from the three
+      # Prometheus replicas, so a query yields one series instead of three
+      # same-identity ones with interleaved samples.
+      - --query.replica-label=replica
     deploy:
       mode: global
       placement:
@@ -182,6 +194,10 @@ services:
       - --retention.resolution-5m=60d
       - --retention.resolution-1h=90d
       - --compact.concurrency=1
+      # Vertically compact the replicas' overlapping blocks instead of halting
+      # on them, which is what a bucket fed by identically-labelled sidecars
+      # produces.
+      - --deduplication.replica-label=replica
       - --wait
     volumes:
       - ./objstore.yml:/etc/thanos/objstore.yml
