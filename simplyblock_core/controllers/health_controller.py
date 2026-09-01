@@ -454,10 +454,50 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             # same target, so this is a fault to surface, not cosmetics.
             duplicate_ips = storage_node_ops.duplicate_attached_paths(ret)
             if duplicate_ips:
-                logger.error(
-                    "Hublvol %s on %s has duplicate path(s) %s -- node is NOT "
-                    "healthy; repair_multipath_controller will prune them",
-                    primary_node.hublvol.bdev_name, node.get_id(), duplicate_ips)
+                # Detecting this without acting on it is what made the
+                # 2026-09-01 multipath soak unrunnable: LVS_4/hublvol carried
+                # peer 98.248 three times (97.36 twice, cntlid 1002 and 1003),
+                # the check logged "repair_multipath_controller will prune
+                # them" every cycle for 20 minutes, and nothing ever pruned --
+                # hublvol is in neither device_repair_jobs nor jm_repair_jobs,
+                # so repair_multipath_controller is never called for it. The
+                # soak's path gate wants a multiple of len(data_nics), saw 5,
+                # and gave up with "repair is stuck, not merely slow".
+                #
+                # Prune here, and deliberately do NOT re-attach: the detach
+                # removes every copy of the address, and the missing-path
+                # branch below reconciles it back through
+                # HublvolReconnectCoordinator, whose cooldown is what closes
+                # the "cntlid N are duplicated" race. Re-attaching inline
+                # would bypass that and could recreate the duplicate.
+                tr_type = "RDMA" if primary_node.active_rdma else "TCP"
+                pruned = False
+                try:
+                    pruned = storage_node_ops.prune_duplicate_paths(
+                        rpc_client, primary_node.hublvol.bdev_name, ret,
+                        primary_node.hublvol.nvmf_port, tr_type)
+                except Exception:
+                    logger.exception(
+                        "Failed to prune duplicate hublvol path(s) %s on %s",
+                        duplicate_ips, node.get_id())
+                if pruned:
+                    # Re-read so missing_ips below sees the pruned addresses
+                    # as missing and reconciles each back exactly once.
+                    ret = rpc_client.bdev_nvme_controller_list(
+                        primary_node.hublvol.bdev_name) or []
+                    attached_ips = storage_node_ops._collect_attached_ips(ret)
+                    logger.info(
+                        "Pruned duplicate hublvol path(s) %s on %s; %d path(s) "
+                        "remain, reconcile will restore them",
+                        duplicate_ips, node.get_id(), len(attached_ips))
+                else:
+                    logger.error(
+                        "Hublvol %s on %s has duplicate path(s) %s that could "
+                        "not be pruned -- node is NOT healthy",
+                        primary_node.hublvol.bdev_name, node.get_id(),
+                        duplicate_ips)
+                # Unhealthy for this cycle either way: the surplus path was
+                # real, and the reconcile has not completed yet.
                 passed = False
 
             missing_ips = expected_ips - attached_ips
