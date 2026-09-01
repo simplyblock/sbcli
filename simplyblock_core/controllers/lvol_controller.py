@@ -3773,10 +3773,19 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # A fail-back returns into the subsystem the original still occupies, so
     # the original has to go first (its snapshots stay: they are the delta
     # base). A first fail-over has no original here and this does nothing.
-    ok, err = _retire_superseded_original(db_controller, lvol,
-                                          target_node.cluster_id)
-    if not ok:
-        return None, err
+    #
+    # Gated off while the fork's blob-id-reuse defect is open: this delete
+    # frees the original's blob id, the clone reuses it seconds later, and the
+    # cutover's delta writes then fail rc -1 (see the constant's comment).
+    # The namespace slot the delete used to free is still reclaimed by
+    # _evict_stale_namespace below; the DB-level slot claim may report the
+    # subsystem full on groups at max_namespaces until the original is
+    # removed post-cutover by _swap_failback_lvol_uuid.
+    if constants.REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER:
+        ok, err = _retire_superseded_original(db_controller, lvol,
+                                              target_node.cluster_id)
+        if not ok:
+            return None, err
 
     # Last line of defence for the one-subsystem-one-primary invariant. The
     # target node was chosen when the policy was attached, long before this

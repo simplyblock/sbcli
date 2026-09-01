@@ -440,6 +440,17 @@ REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
 # the task table per pass, and polling a database at 5Hz to detect an event is
 # the wrong shape. Sub-second reaction lives in the RPC-based inline wait.
 REPL_CUTOVER_ACTIVE_POLL_SEC = 1.0
+# Delete the superseded original volume BEFORE building the fail-back clone
+# (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
+# original's blob id while its parent snapshot's clone registry is already
+# inconsistent ("Clone entry not found for blob ... under snapshot ..."), the
+# clone created seconds later reuses the freed id, and every final-step delta
+# write to it fails rc -1 (-EPERM) -> transfer_state Failed on all fail-back
+# cutovers. The SPDK-side namespace slot is still freed by
+# _evict_stale_namespace, and the original's DB record is removed after a
+# successful cutover by _swap_failback_lvol_uuid. Re-enable once the fork's
+# clone-entry/blob-id-reuse defect is fixed.
+REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER = False
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
