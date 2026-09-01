@@ -1,7 +1,7 @@
 # coding=utf-8
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
@@ -108,7 +108,7 @@ def _in_shutdown_longer_than(node, seconds):
     if not ss:
         return False
     try:
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(ss)).total_seconds() >= seconds
+        return (datetime.now(UTC) - datetime.fromisoformat(ss)).total_seconds() >= seconds
     except Exception:
         return False
 
@@ -125,7 +125,7 @@ def _down_longer_than(node, seconds):
     if not ds:
         return True
     try:
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(ds)).total_seconds() >= seconds
+        return (datetime.now(UTC) - datetime.fromisoformat(ds)).total_seconds() >= seconds
     except Exception:
         return True
 
@@ -563,7 +563,7 @@ def _activation_node_gate(cluster_id, nodes, max_fault_tolerance):
             return False, f"node {node.get_id()} has an active restart task"
         if node.online_since:
             try:
-                diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
+                diff = datetime.now(UTC) - datetime.fromisoformat(node.online_since)
                 if diff.total_seconds() < 30:
                     return False, f"node {node.get_id()} has been online less than 30 seconds"
             except (ValueError, TypeError):
@@ -591,7 +591,7 @@ def _watchdog_stuck_activation(cluster):
     if not since:
         return
     try:
-        elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
+        elapsed = (datetime.now(UTC) - datetime.fromisoformat(since)).total_seconds()
     except (ValueError, TypeError):
         return
 
@@ -607,7 +607,7 @@ def _watchdog_stuck_activation(cluster):
     heartbeat = getattr(cluster, "activation_heartbeat", "")
     if heartbeat:
         try:
-            hb_age = (datetime.now(timezone.utc)
+            hb_age = (datetime.now(UTC)
                       - datetime.fromisoformat(heartbeat)).total_seconds()
         except (ValueError, TypeError):
             hb_age = None

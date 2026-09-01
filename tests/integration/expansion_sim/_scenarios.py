@@ -25,7 +25,7 @@ from tests.integration.expansion_sim._rpc_sim import (
 
 
 def _now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return datetime.datetime.now(datetime.UTC).isoformat()
 
 
 def _make_cluster_record(uuid: str, ftt: int):

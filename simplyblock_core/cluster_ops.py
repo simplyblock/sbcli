@@ -9,7 +9,7 @@ import uuid
 import typing as t
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import docker
 from kubernetes import client as k8s_client
@@ -1007,7 +1007,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 fresh = db_controller.get_cluster_by_id(cl_id)
                 if fresh.status != Cluster.STATUS_IN_ACTIVATION:
                     continue
-                now_iso = datetime.now(timezone.utc).isoformat()
+                now_iso = datetime.now(UTC).isoformat()
                 db_controller.atomic_update(
                     fresh, lambda c, v=now_iso: setattr(c, "activation_heartbeat", v))
             except Exception:
@@ -1868,7 +1868,7 @@ def set_cluster_status(cl_id, status) -> None:
         # (incident 2026-06-25). Stamped inside the CAS so it is written
         # atomically with the status flip.
         if status == Cluster.STATUS_IN_ACTIVATION:
-            fresh.in_activation_since = datetime.now(timezone.utc).isoformat()
+            fresh.in_activation_since = datetime.now(UTC).isoformat()
             fresh.activation_heartbeat = fresh.in_activation_since
         elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = ""
@@ -2669,7 +2669,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = deploy.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(timezone.utc).isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
                         deploy.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_deployment(
                             name=deploy.metadata.name,
@@ -2702,7 +2702,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = ds.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(timezone.utc).isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
                         ds.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_daemon_set(
                             name=ds.metadata.name,

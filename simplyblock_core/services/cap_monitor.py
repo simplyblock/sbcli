@@ -1,7 +1,7 @@
 # coding=utf-8
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from simplyblock_core import db_controller, constants, cluster_ops, utils
 from simplyblock_core.controllers import cluster_events, fdb_backup_controller, mgmt_events
@@ -82,7 +82,7 @@ def main():
                     logger.warning(f"Cluster absolute cap critical, util: {size_util}% of cluster util: {cl.cap_crit}, "
                                    f"putting the cluster in read_only mode")
                     if cl.id in last_event:
-                        diff = datetime.now(timezone.utc) - datetime.fromtimestamp(last_event[cl.id]["date"]/1000, timezone.utc)
+                        diff = datetime.now(UTC) - datetime.fromtimestamp(last_event[cl.id]["date"]/1000, UTC)
                         if diff and diff.total_seconds() > 60 * 15:
                             ev = cluster_events.cluster_cap_crit(cl, size_util)
                             if ev:

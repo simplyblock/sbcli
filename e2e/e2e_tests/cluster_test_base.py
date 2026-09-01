@@ -9,7 +9,7 @@ from utils.common_utils import CommonUtils
 from logger_config import setup_logger, start_log_flusher
 from utils.common_utils import sleep_n_sec
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 import string
 import random
@@ -146,7 +146,7 @@ class TestClusterBase:
         # API retries fail, the workflow graylog-collect step can find
         # the test run folder instead of creating an orphaned directory.
         # Record UTC start time for Graylog log export at teardown
-        self.test_start_time_utc = datetime.now(timezone.utc)
+        self.test_start_time_utc = datetime.now(UTC)
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
@@ -1920,16 +1920,8 @@ class TestClusterBase:
         try:
             os_url = self._opensearch_base_url()
             os_session = self._build_opensearch_session()
-            from_ms = int(
-                datetime.fromisoformat(
-                    from_iso.replace("Z", "+00:00")
-                ).timestamp() * 1000
-            )
-            to_ms = int(
-                datetime.fromisoformat(
-                    to_iso.replace("Z", "+00:00")
-                ).timestamp() * 1000
-            )
+            from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+            to_ms = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
             os_pairs = self._os_discover_containers(
                 os_session, os_url, from_ms, to_ms
             )
@@ -1949,8 +1941,8 @@ class TestClusterBase:
         search_url = f"{base_url}/search/universal/absolute"
         pairs = set()
 
-        t_start = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-        t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+        t_start = datetime.fromisoformat(from_iso)
+        t_end = datetime.fromisoformat(to_iso)
         total_minutes = (t_end - t_start).total_seconds() / 60
 
         # Use ~10 slices, minimum 1 minute each
@@ -2244,16 +2236,8 @@ class TestClusterBase:
 
         PAGE_SIZE = 1000
 
-        from_ms = int(
-            datetime.fromisoformat(
-                from_iso.replace("Z", "+00:00")
-            ).timestamp() * 1000
-        )
-        to_ms = int(
-            datetime.fromisoformat(
-                to_iso.replace("Z", "+00:00")
-            ).timestamp() * 1000
-        )
+        from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+        to_ms = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
 
         # One-time probe (cached across calls)
         if probe_cache is None:
@@ -2505,8 +2489,8 @@ class TestClusterBase:
                 f"{total} entries in {chunk_minutes}m window, "
                 f"splitting into {sub_minutes}m sub-windows"
             )
-            t = datetime.fromisoformat(f_iso.replace("Z", "+00:00"))
-            t_end = datetime.fromisoformat(t_iso.replace("Z", "+00:00"))
+            t = datetime.fromisoformat(f_iso)
+            t_end = datetime.fromisoformat(t_iso)
             delta = timedelta(minutes=sub_minutes)
             written = 0
             while t < t_end:
@@ -2538,8 +2522,8 @@ class TestClusterBase:
                     f"[graylog-export] {container_name}: {total} entries "
                     f"(>{MAX_RESULT_WINDOW}), using adaptive sub-windows"
                 )
-                t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-                t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+                t = datetime.fromisoformat(from_iso)
+                t_end = datetime.fromisoformat(to_iso)
                 chunk = timedelta(minutes=10)
                 while t < t_end:
                     chunk_end = min(t + chunk, t_end)
@@ -2600,7 +2584,7 @@ class TestClusterBase:
             from_iso = self.test_start_time_utc.strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z"
             )
-            to_iso = datetime.now(timezone.utc).strftime(
+            to_iso = datetime.now(UTC).strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z"
             )
 
@@ -2686,16 +2670,8 @@ class TestClusterBase:
             os_probe_cache = {}
             if use_opensearch:
                 try:
-                    from_ms = int(
-                        datetime.fromisoformat(
-                            from_iso.replace("Z", "+00:00")
-                        ).timestamp() * 1000
-                    )
-                    to_ms = int(
-                        datetime.fromisoformat(
-                            to_iso.replace("Z", "+00:00")
-                        ).timestamp() * 1000
-                    )
+                    from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+                    to_ms = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
                     os_probe_cache["index"] = self._os_get_index(os_session, os_url)
                     os_probe_cache["probe"] = self._os_probe(
                         os_session, os_url, os_probe_cache["index"], from_ms, to_ms
@@ -3664,7 +3640,7 @@ class TestClusterBase:
         Raises:
             RuntimeError: If any migration task failed, is incomplete, is stuck, or if the timeout is reached.
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
         end_time = start_time + timedelta(seconds=timeout)
 
         # Log initial task list via API (works in both SSH and K8s-native modes)
@@ -3676,7 +3652,7 @@ class TestClusterBase:
 
         migration_tasks_found = False
 
-        while datetime.now(timezone.utc) < end_time:
+        while datetime.now(UTC) < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
             filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp, window_minutes=10)
 
@@ -3689,12 +3665,12 @@ class TestClusterBase:
 
                 for task in filtered_tasks:
                     try:
-                        updated_at = datetime.fromisoformat(task['updated_at']).astimezone(timezone.utc)
+                        updated_at = datetime.fromisoformat(task['updated_at']).astimezone(UTC)
                     except ValueError as e:
                         self.logger.error(f"Error parsing timestamp for task {task['id']}: {e}")
                         continue
 
-                    if datetime.now(timezone.utc) - updated_at > timedelta(minutes=65) and task["status"] != "done":
+                    if datetime.now(UTC) - updated_at > timedelta(minutes=65) and task["status"] != "done":
                         raise RuntimeError(
                             f"Migration task {task['id']} is stuck (last updated at {updated_at.isoformat()})."
                         )

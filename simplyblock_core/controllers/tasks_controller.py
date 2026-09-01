@@ -32,8 +32,8 @@ def _task_lease_is_stale(task):
     except (ValueError, TypeError):
         return True
     if last.tzinfo is None:
-        last = last.replace(tzinfo=datetime.timezone.utc)
-    age = (datetime.datetime.now(datetime.timezone.utc) - last).total_seconds()
+        last = last.replace(tzinfo=datetime.UTC)
+    age = (datetime.datetime.now(datetime.UTC) - last).total_seconds()
     return age > constants.TASK_LEASE_TTL_SEC
 
 
@@ -55,7 +55,7 @@ def claim_task(task, owner=None):
     """
     owner = owner or _RUNNER_HOST
     decision = {"won": False}
-    now = str(datetime.datetime.now(datetime.timezone.utc))
+    now = str(datetime.datetime.now(datetime.UTC))
 
     def _mutate(t):
         if t.status == JobSchedule.STATUS_DONE:
@@ -78,7 +78,7 @@ def refresh_task_lease(task, owner=None):
     (without touching the task) if the task is done or owned by another host —
     the caller lost the lease and should treat the takeover as authoritative."""
     owner = owner or _RUNNER_HOST
-    now = str(datetime.datetime.now(datetime.timezone.utc))
+    now = str(datetime.datetime.now(datetime.UTC))
     refreshed = {"ok": False}
 
     def _mutate(t):
