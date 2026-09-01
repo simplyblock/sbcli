@@ -136,7 +136,7 @@ Do not silently widen the change to include those fixes. Fix the reported fault 
 
 ## Verification
 
-After any code change, run the `tox-verify` skill (`.agents/skills/tox-verify.md`). The short version:
+After any code change, run the `tox-verify` skill (`.agents/skills/tox-verify/SKILL.md`). The short version:
 
 1. `tox run-parallel -e lint,types` — fix lint/type errors first.
 2. `tox run -e unit -- tests/unit/path/to/relevant_test.py` — run targeted tests while iterating.
@@ -191,7 +191,7 @@ docker/AGENTS.md                  ← Container image: stages, cache policy, Doc
 docker/CLAUDE.md                   ← `@AGENTS.md`
 
 .agents/skills/                    ← shared skills (source of truth)
-  tox-verify.md                    ← tox verification workflow
+  tox-verify/SKILL.md              ← tox verification workflow
 .claude/skills → ../.agents/skills ← Claude Code skill symlink
 
 .agents/hooks/                     ← shared, runner-neutral guard scripts (source of truth)

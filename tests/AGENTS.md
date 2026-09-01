@@ -232,7 +232,7 @@ Canonical patterns:
 
 ## Verification
 
-After changes, follow the `tox-verify` skill (`.agents/skills/tox-verify.md`):
+After changes, follow the `tox-verify` skill (`.agents/skills/tox-verify/SKILL.md`):
 
 1. `tox run-parallel -e lint,types`
 2. `tox run -e unit -- <changed paths>` for iteration.
