@@ -44,6 +44,16 @@ MAX_LVOL = "75"  # capped by constants.MAX_SUBSYSTEMS_PER_NODE (75): above it, v
 # Replace this with your actual Subnet ID (e.g., "subnet-0593459d6b931ee4c")
 SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
+#: Root disk of the mgmt node. 30G filled to 100% four hours into the
+#: 2026-08-31 soak: /etc/foundationdb/backup reached 7.0G (524 unpruned
+#: ~28MB backups, one per minute) on top of ~14G of fixed overhead
+#: (containerd blobs 9.9G, Graylog/OpenSearch indices 4.2G). A full disk
+#: made FDB transactions time out (error 1031), `sbctl sn list --json`
+#: returned rc=1, and the run aborted at iteration 37 of 40 with 36 passes
+#: and no product failure. 60G buys roughly 27h at that backup rate; the
+#: real fix is retention on fdb_backup.
+MGMT_ROOT_GB = 60
+
 SN_TYPE = "i3en.2xlarge"
 #: Pin the SPDK/ultra image so a run is reproducible and comparable against
 #: another run. Without it, sn add-node takes the control-plane default, which
@@ -86,9 +96,9 @@ VOLUME_PLAN = [
 ]
 
 
-# --- Helper: Management Node with 30GB Root ---
+# --- Helper: Management Node with 60GB Root ---
 def launch_mgmt():
-    print("Launching Management Node with 30GB Root Volume...")
+    print(f"Launching Management Node with {MGMT_ROOT_GB}GB Root Volume...")
     return ec2.create_instances(
         KeyName=KEY_NAME,
         MinCount=1,
@@ -99,7 +109,7 @@ def launch_mgmt():
         BlockDeviceMappings=[{
             'DeviceName': '/dev/sda1',
             'Ebs': {
-                'VolumeSize': 30,
+                'VolumeSize': MGMT_ROOT_GB,
                 'DeleteOnTermination': True,
                 'VolumeType': 'gp3'
             }

@@ -63,7 +63,11 @@ DATA2_SG        = "sg-069a5f96309b8dbdd"      # allow only from 172.31.97.0/24
 # Kept for backwards compat with any existing consumer of these names.
 SUBNET_ID      = MGMT_SUBNET_ID
 STORAGE_SG     = MGMT_SG
-BRANCH       = "main"
+#: Must be the branch carrying the env_var ultra pin -- env_var ships inside
+#: the pip package, so "main" would give the nodes main's pin (ultra:main-latest)
+#: and the dbg-main pin would silently not apply. ultra-dbg-main is main plus
+#: that pin, and it also carries the 2026-08-31 port-fence fixes.
+BRANCH       = "ultra-dbg-main"
 #: SPDK/ultra image for the storage nodes. Empty string = let sbcli use its
 #: default (``ultra:main-latest``).
 #:
@@ -87,7 +91,13 @@ BRANCH       = "main"
 #: itself, so a stale pin fails loudly instead of running old code quietly.
 #: 8d2e5215 = ultra main "Build main on the R26.3 spdk-core base", built on
 #: spdk-core R26.3 a311a6852 which carries upstream d528e1a67 (spdk/spdk#3686).
-SPDK_IMAGE   = "public.ecr.aws/simply-block/ultra:main-b44de698-amd64"
+#: Empty ON PURPOSE for the dbg-main arm: sn add-node then omits
+#: --spdk-image and the nodes take the control-plane default from
+#: simplyblock_core/env_var, which is where the dbg-main pin lives
+#: (ultra:dbg-main-3c5f8c25 -- the same build as the 2026-08-31 single-path
+#: run, so the two arms stay comparable). A value here would override
+#: env_var and the two could drift apart.
+SPDK_IMAGE   = ""
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
 DATA_NICS    = ["eth1", "eth2"]          # Names the OS assigns to ENI index 1, 2
