@@ -26,6 +26,7 @@ from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core import jm_raid
 from simplyblock_core.utils import port_block
+from simplyblock_core.utils import rpc_budget
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
@@ -9657,6 +9658,9 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     finally:
         # Idempotent; the in-flow release above is the normal path.
         _release_block_gate()
+        # An unbounded fence is bad; a fence budget leaking onto this thread's
+        # later work would be worse. Every exit path clears it.
+        rpc_budget.clear_budget()
 
 
 def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
@@ -10127,6 +10131,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 blocked_peers.remove(peer)
             except ValueError:
                 pass
+            if not blocked_peers:
+                # Fence over: normal work must not inherit the 0.5s budget.
+                rpc_budget.clear_budget()
 
     def _kill_app():
         """Kill SPDK on snode and mark OFFLINE before peer ports unblock.
@@ -10448,6 +10455,13 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                         blocked_peers.append(current_leader)
                         _block_started[current_leader.get_id()] = time.monotonic()
+                        # From here until the last port is released, every
+                        # rpc_client() built on this thread -- including the
+                        # ones inside hublvol/bdev-stack helpers we do not own
+                        # -- is bounded. Cleared in _unblock_peer_port once
+                        # blocked_peers empties, and in the outer finally.
+                        rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                              constants.FENCE_RPC_RETRY)
                     except Exception as e:
                         # Failing to port-block the current leader means we cannot
                         # safely promote snode: the old leader may still be serving
@@ -10526,6 +10540,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
                     blocked_peers.append(sec_node)
                     _block_started[sec_node.get_id()] = time.monotonic()
+                    rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                          constants.FENCE_RPC_RETRY)
                 except Exception as e:
                     # Same rationale as the leader port-block: cannot safely
                     # decide "peer gone" vs "peer slow" before snode has
@@ -10987,6 +11003,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
     finally:
         # Idempotent; the in-flow release above is the normal path.
         _release_block_gate()
+        # An unbounded fence is bad; a fence budget leaking onto this thread's
+        # later work would be worse. Every exit path clears it.
+        rpc_budget.clear_budget()
 
 
 def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):

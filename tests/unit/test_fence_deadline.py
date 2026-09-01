@@ -26,9 +26,15 @@ class TestBudgets:
         assert constants.FENCE_DEADLINE_SEC < reject_threshold
         assert reject_threshold - constants.FENCE_DEADLINE_SEC >= 0.15
 
-    def test_no_retry_inside_the_fence(self):
-        """A retry spends the budget the fence is racing."""
-        assert constants.FENCE_RPC_RETRY == 0
+    def test_one_retry_and_both_attempts_fit_the_deadline(self):
+        """One retry absorbs a transient refusal without aborting a restart.
+
+        What has to hold is that a full call -- both attempts -- still fits
+        inside the deadline; the clamp in _fenced() enforces the rest.
+        """
+        assert constants.FENCE_RPC_RETRY == 1
+        attempts = 1 + constants.FENCE_RPC_RETRY
+        assert attempts * constants.FENCE_RPC_TIMEOUT_SEC < constants.FENCE_DEADLINE_SEC
 
     def test_single_call_budgets_fit_the_deadline(self):
         assert constants.FENCE_RPC_TIMEOUT_SEC <= constants.FENCE_DEADLINE_SEC
