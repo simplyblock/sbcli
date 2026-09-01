@@ -24,6 +24,7 @@ Prerequisites:
 """
 
 import json
+import shlex
 import logging
 import os
 import re
@@ -273,6 +274,55 @@ def ssh_exec(ip, cmds, get_output=False, check=False, jump_ip=None):
                     print(f"    {line}")
     _ssh_close(ssh)
     return results
+
+
+def ssh_exec_detached(ip, cmd, jump_ip=None, timeout=2400, poll=15, label=None):
+    """Run one long command detached and poll a short connection for its rc.
+
+    set_keepalive is not enough for `cluster create`. It deploys the swarm
+    stack -- ~50 images pulled at once, driving the 8-vCPU mgmt node to load
+    ~14 -- and on 2026-09-01 08:22 the channel still died there: rc=-1 raised
+    at "Deploying swarm stack ...", while the cluster went on to converge
+    fully (52/52 services, cluster d0c58a5d created) and the deploy had
+    already thrown. Keepalive keeps an *idle* channel from being reaped; it
+    cannot help a connection whose host is too loaded to service it.
+
+    Retrying is not an option -- cluster create is not idempotent. Detaching
+    decouples the command from the connection, so a dead channel costs one
+    poll instead of the whole deployment. The subshell matters: a command
+    calling `exit` would otherwise kill the shell before the rc is written.
+    """
+    label = label or cmd[:60]
+    tag = f"deploy_{int(time.time())}_{abs(hash(cmd)) % 100000}"
+    out_file, rc_file = f"/tmp/{tag}.out", f"/tmp/{tag}.rc"
+    inner = f"( {cmd} ); echo $? > {rc_file}"
+    print(f"  [{ip}] $ (detached) {label}")
+    ssh_exec(ip, [f"nohup setsid bash -lc {shlex.quote(inner)} "
+                  f"> {out_file} 2>&1 < /dev/null &"], check=False, jump_ip=jump_ip)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(poll)
+        try:
+            got = ssh_exec(ip, [f"cat {rc_file} 2>/dev/null || true"],
+                           get_output=True, check=False, jump_ip=jump_ip)
+        except Exception as exc:  # noqa: BLE001 - a failed poll is not a failure
+            print(f"  [{ip}] poll failed ({type(exc).__name__}); retrying")
+            continue
+        text = "".join(got).strip()
+        if not text:
+            continue
+        try:
+            rc = int(text.splitlines()[-1].strip())
+        except ValueError:
+            continue
+        tail = ssh_exec(ip, [f"tail -25 {out_file}"], get_output=True,
+                        check=False, jump_ip=jump_ip)
+        for line in "".join(tail).splitlines()[-10:]:
+            print(f"    {line}")
+        if rc != 0:
+            raise RuntimeError(f"Detached command failed on {ip} (rc={rc}): {label}")
+        return rc
+    raise RuntimeError(f"Detached command timed out after {timeout}s on {ip}: {label}")
 
 
 def ssh_exec_stream(ip, cmd, check=False, jump_ip=None):
@@ -629,11 +679,13 @@ def main():
 
     # ── Phase 4: Create cluster ──────────────────────────────────────────
     print("\n--- Phase 4: Create cluster ---")
-    ssh_exec(mgmt_ip, [
-        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
+    ssh_exec_detached(
+        mgmt_ip,
+        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
+        f" --max-subsys {MAX_LVOL}"
         f" --data-chunks-per-stripe {DATA_CHUNKS}"
-        f" --parity-chunks-per-stripe {PARITY_CHUNKS}"
-    ], check=True)
+        f" --parity-chunks-per-stripe {PARITY_CHUNKS}",
+        label="cluster create")
 
     cluster_out = ssh_exec(mgmt_ip, [
         "sudo /usr/local/bin/sbctl -d cluster list"
@@ -655,9 +707,13 @@ def main():
     print("  All SNs configured.")
 
     with ThreadPoolExecutor(max_workers=len(sn_priv_ips)) as pool:
-        futures = [pool.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {MGMT_IFACE}"
-        ], check=True, jump_ip=mgmt_ip) for ip in sn_priv_ips]
+        # Detached: sn deploy leaves the SNodeAPI container holding this
+        # channel's stdout, so the pipe never reaches EOF and stdout.read()
+        # blocks past the command's own exit (base deploy, 2026-08-31).
+        futures = [pool.submit(
+            ssh_exec_detached, ip,
+            f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {MGMT_IFACE}",
+            jump_ip=mgmt_ip, label="sn deploy") for ip in sn_priv_ips]
         for f in futures:
             f.result()
     print("  All SNs deployed. Rebooting...")
