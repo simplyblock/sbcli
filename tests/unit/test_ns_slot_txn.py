@@ -24,7 +24,9 @@ from simplyblock_core.models.lvol_model import LVol, LVolMini
 class FakeKV:
     """Dict-backed store implementing the surface BaseModel and _NoTxnStore
     use: get/set/clear + get_range_startswith (read_from_db's fallback for
-    stores without raw range reads)."""
+    stores without raw range reads). ``add`` is the atomic-increment op
+    watched-model writes issue for the watch-index counters; a no-op here
+    since these tests assert on slot-claim logic, not watch delivery."""
 
     def __init__(self):
         self.data = {}
@@ -37,6 +39,9 @@ class FakeKV:
 
     def clear(self, key):
         self.data.pop(key, None)
+
+    def add(self, key, value):
+        pass
 
     def get_range_startswith(self, prefix, limit=0, reverse=False):
         items = sorted((k, v) for k, v in self.data.items() if k.startswith(prefix))
