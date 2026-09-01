@@ -55,7 +55,7 @@ class Backup(BaseModel):
     #: ``backup_manifest.KeyDescriptor``; stored as a dict for the same reason
     #: ``location`` is. Empty for an unencrypted backup, and for one whose
     #: record predates self-describing backups.
-    encryption: dict = {}
+    encryption: dict = default_factory(dict)
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)

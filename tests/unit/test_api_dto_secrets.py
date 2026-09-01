@@ -3,6 +3,7 @@ import json
 
 from pydantic import SecretStr
 
+from simplyblock_core.models.base_model import default_factory
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_web.api.v2._dtos import BackupConfigDTO, ClusterDTO, CapacityStatDTO
 from uuid import uuid4
@@ -57,7 +58,7 @@ def test_backup_config_dump_is_json_serializable():
     }).model_dump(exclude_none=True)
 
     class _Holder(CoreBaseModel):
-        backup_config: dict = {}
+        backup_config: dict = default_factory(dict)
 
     holder = _Holder()
     holder.backup_config = stored
