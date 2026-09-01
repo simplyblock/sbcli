@@ -134,8 +134,37 @@ services:
     command:
       - query
       - --http-address=0.0.0.0:9091
-      - --store=thanos-store:10901
-      - --store=thanos-sidecar:10901
+      # Both prefixes are load-bearing. prometheus/thanos-sidecar/thanos-store
+      # are all `mode: global`, so a 3-manager swarm runs three of each.
+      #
+      #  * `dns+` makes Thanos treat the address as a DNS-discovered SET and
+      #    re-resolve it periodically. Without it the address is ONE static
+      #    endpoint.
+      #  * `tasks.` is the Swarm DNS name that returns every task's real IP.
+      #    These services use the default VIP endpoint mode, so the bare
+      #    service name resolves to a single *virtual* IP -- meaning `dns+`
+      #    alone still yields exactly one endpoint and changes nothing, with
+      #    the routing mesh pinning Thanos's long-lived gRPC connection to
+      #    whichever task it first landed on. prometheus.yml.j2 already uses
+      #    this idiom for tasks.node-exporter.
+      #
+      # Thanos's startup log shows the broken state directly, printing one
+      # "adding new sidecar" line instead of three.
+      #
+      # Why it caused "no data": the most recent ~2h of samples live only in
+      # each Prometheus's local TSDB and are served solely by *its own*
+      # sidecar; only older blocks reach the object store. Grafana alert rules
+      # evaluate recent data, so every evaluation depended on that one pinned
+      # sidecar. When it was slow the query returned an EMPTY result rather
+      # than an error -- surfacing as `noDataState: NoData`, not
+      # `execErrState: Error` -- and self-cleared once it answered again:
+      #   "update of endpoint failed" err="getting metadata: fallback fetching
+      #    info from thanos-sidecar:10901: rpc error: code = DeadlineExceeded"
+      #
+      # `--store` is v0.31's deprecated alias for `--endpoint`; left as-is to
+      # keep the diff to what actually fixes the fault.
+      - --store=dns+tasks.thanos-store:10901
+      - --store=dns+tasks.thanos-sidecar:10901
     deploy:
       mode: global
       placement:
