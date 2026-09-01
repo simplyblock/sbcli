@@ -49,6 +49,7 @@ import os
 import random
 import threading
 import time
+import traceback
 from datetime import datetime
 
 from e2e_tests.backup.test_backup_restore import BackupTestBase, _rand_suffix
@@ -1843,7 +1844,7 @@ class BackupStressComprehensive(BackupStressBase):
                     name, lvol_id = self._create_lvol(
                         name=name,
                         size=self.lvol_size, crypto=crypto)
-                _, mount = self._connect_format_mount(
+                device, mount = self._connect_format_mount(
                     name, lvol_id, fs_type=fs_type)
                 self._run_fio(mount, runtime=30)
                 checksums = self._get_checksums(self.fio_node, mount)
@@ -1859,7 +1860,9 @@ class BackupStressComprehensive(BackupStressBase):
                 self.logger.info(f"  {label} ({name}) ready"
                                  f"{' [NS parent]' if ns_parent else ''}")
             except Exception as e:
-                self.logger.error(f"  {label} creation failed: {e}")
+                self.logger.error(
+                    f"  {label} creation failed: {e}\n"
+                    f"{traceback.format_exc()}")
                 errors.append((label, e))
 
         for item in configs_batch:

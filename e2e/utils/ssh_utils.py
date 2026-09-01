@@ -1645,8 +1645,26 @@ class SshUtils:
         for file in files:
             command = f"md5sum {file}"
             stdout, _ = self.exec_command(node, command)
-            checksum, _ = stdout.split()
-            checksums[file] = checksum
+            parts = stdout.split()
+            if len(parts) >= 2:
+                checksums[file] = parts[0]
+            elif len(parts) == 1:
+                checksums[file] = parts[0]
+            else:
+                # Retry once — SSH under heavy concurrent load can return
+                # empty output.
+                self.logger.warning(
+                    f"md5sum returned empty output for {file} on {node}, "
+                    f"retrying …")
+                time.sleep(1)
+                stdout, _ = self.exec_command(node, command)
+                parts = stdout.split()
+                if len(parts) >= 2:
+                    checksums[file] = parts[0]
+                else:
+                    raise RuntimeError(
+                        f"md5sum failed for {file} on {node}: "
+                        f"stdout={stdout!r}")
         return checksums
 
     def verify_checksums(self, node, files, checksums, clone_base=False, message=None, by_name=False):
