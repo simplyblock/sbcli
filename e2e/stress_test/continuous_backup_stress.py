@@ -170,21 +170,34 @@ class BackupStressBase(BackupTestBase):
     # ── snapshot / backup helpers ─────────────────────────────────────────────
 
     def _snap_and_backup(self, lvol_id: str, label: str) -> str | None:
-        """Create a snapshot + trigger S3 backup; return backup_id or None on failure."""
+        """Create a snapshot + trigger S3 backup; return backup_id or None on failure.
+
+        Thread-safe: resolves the backup ID by matching the snapshot name
+        or lvol ID in the backup list, instead of blindly taking the last
+        entry (which races when multiple threads create backups).
+        """
         snap_name = f"str_{label}_{_rand_suffix()}"
         try:
-            self._create_snapshot(lvol_id, snap_name, backup=True)
-            # backup_id is not always directly returned by snapshot add --backup;
-            # we resolve it from backup list after a short wait
+            snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
             sleep_n_sec(5)
             backups = self._list_backups()
-            if backups:
-                return (
-                    backups[-1].get("id")
-                    or backups[-1].get("ID")
-                    or backups[-1].get("uuid")
-                    or None
-                )
+            # Search for a backup whose Snapshot field matches our snap_id
+            # or snap_name. This uniquely identifies the backup created by
+            # this specific _create_snapshot call.
+            for bk in reversed(backups):
+                bk_snap = bk.get("Snapshot") or bk.get("snapshot") or ""
+                if (snap_id and snap_id in bk_snap) \
+                        or snap_name in bk_snap:
+                    bk_id = (
+                        bk.get("id") or bk.get("ID")
+                        or bk.get("uuid") or None
+                    )
+                    if bk_id:
+                        return bk_id
+            # Last resort: log warning and return None
+            self.logger.warning(
+                f"snap_and_backup: could not resolve backup_id for "
+                f"{label} (snap={snap_name}, lvol={lvol_id})")
         except Exception as e:
             self.logger.warning(f"snap_and_backup error ({label}): {e}")
         return None
