@@ -3577,6 +3577,79 @@ class K8sSbcliUtils:
         )
         existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
 
+        # 2b. If CRDs exist, check if they're stuck in Terminating.
+        #     Previous test runs may have initiated deletion but finalizers
+        #     blocked completion.  Wait up to 120s for them to disappear,
+        #     then force-remove finalizers if still stuck.
+        if existing_crds:
+            term_out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepools -n {ns} --no-headers "
+                f"-o custom-columns="
+                f"NAME:.metadata.name,DEL:.metadata.deletionTimestamp "
+                f"2>/dev/null || true"
+            )
+            terminating = []
+            for line in (term_out or "").strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] != "<none>":
+                    terminating.append(parts[0])
+
+            if terminating:
+                self.logger.warning(
+                    f"[pool] Found Terminating StoragePool CRDs: "
+                    f"{terminating} — waiting for deletion to complete"
+                )
+                deadline = time.time() + 120
+                while time.time() < deadline:
+                    check_out, _ = self.k8s._exec_kubectl(
+                        f"kubectl get storagepools -n {ns} --no-headers "
+                        f"-o custom-columns=NAME:.metadata.name "
+                        f"2>/dev/null || true"
+                    )
+                    remaining = [
+                        r.strip() for r in
+                        (check_out or "").strip().splitlines()
+                        if r.strip()
+                    ]
+                    if not remaining:
+                        self.logger.info(
+                            "[pool] All Terminating CRDs deleted")
+                        break
+                    sleep_n_sec(5)
+                else:
+                    # Force-remove finalizers on stuck CRDs
+                    self.logger.warning(
+                        f"[pool] CRDs still stuck after 120s — "
+                        f"removing finalizers to unblock deletion"
+                    )
+                    for crd_name in terminating:
+                        try:
+                            self.k8s._exec_kubectl(
+                                f"kubectl patch storagepool {crd_name} "
+                                f"-n {ns} --type merge "
+                                f"-p '{{\"metadata\":{{\"finalizers\":[]}}}}'"
+                            )
+                            self.logger.info(
+                                f"[pool] Removed finalizers from "
+                                f"{crd_name}")
+                        except Exception as e:
+                            self.logger.warning(
+                                f"[pool] Failed to patch {crd_name}: "
+                                f"{e}")
+                    sleep_n_sec(10)
+
+                # Re-check — CRDs should be gone now
+                re_out, _ = self.k8s._exec_kubectl(
+                    f"kubectl get storagepools -n {ns} --no-headers "
+                    f"-o custom-columns=NAME:.metadata.name "
+                    f"2>/dev/null || true"
+                )
+                existing_crds = [
+                    r.strip() for r in
+                    (re_out or "").strip().splitlines()
+                    if r.strip()
+                ]
+
         if not existing_crds:
             # 3. No pools at all — create one via kubectl apply
             cid = cluster_id or self.cluster_id
