@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# PYTHON_ARGCOMPLETE_OK
 
 import logging
 import sys

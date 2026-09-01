@@ -21,17 +21,6 @@ pip install --upgrade sbctl
 
 Requires Python 3.9 or newer.
 
-### Shell completion
-
-Tab completion is opt-in. Earlier releases tried to configure it from a `setup.py` post-install
-hook, which only ran for `setup.py install` and does not run for a wheel at all; register it
-explicitly instead:
-
-```bash
-eval "$(register-python-argcomplete sbctl)"          # current shell
-register-python-argcomplete sbctl >> ~/.bashrc       # persist
-```
-
 ## Repository Components
 
 This repository contains the source code for the Simplyblock Control Plane core services and the command line interface
