@@ -2,7 +2,7 @@
 name = "sbctl"
 description = "CLI for managing SimplyBlock cluster"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 authors = [{ name = "Hamdy", email = "hamdy@simplyblock.io" }]
 dynamic = ["version"]
 dependencies = [
@@ -132,7 +132,6 @@ ignore = [
     "PLW1508",
     "PLW1510",
     "RET501",
-    "RUF007",  # Remove when dropping Python 3.9 
     "RUF010",
     "RUF013",
     "RUF015",

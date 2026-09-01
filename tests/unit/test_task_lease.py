@@ -14,7 +14,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 
 
 def _now_iso(offset_sec=0):
-    return str(datetime.datetime.now(datetime.timezone.utc)
+    return str(datetime.datetime.now(datetime.UTC)
                + datetime.timedelta(seconds=offset_sec))
 
 

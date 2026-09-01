@@ -40,7 +40,7 @@ import time
 import traceback
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from exceptions.custom_exception import LvolNotConnectException
@@ -737,7 +737,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         Replaces the parent method which does ssh_obj.exec_command() to
         mgmt_nodes[0]. This version uses K8sSbcliUtils (kubectl exec).
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
         end_time = start_time + timedelta(seconds=timeout)
 
         # Initial task list via kubectl exec (replaces SSH call)
@@ -757,7 +757,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         migration_tasks_found = False
 
-        while datetime.now(timezone.utc) < end_time:
+        while datetime.now(UTC) < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
             filtered_tasks = self.filter_migration_tasks(
                 tasks, node_id, timestamp, window_minutes=10
@@ -774,14 +774,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                     try:
                         updated_at = datetime.fromisoformat(
                             task['updated_at']
-                        ).astimezone(timezone.utc)
+                        ).astimezone(UTC)
                     except ValueError as e:
                         self.logger.error(
                             f"Error parsing timestamp for task {task['id']}: {e}"
                         )
                         continue
 
-                    if (datetime.now(timezone.utc) - updated_at > timedelta(minutes=65)
+                    if (datetime.now(UTC) - updated_at > timedelta(minutes=65)
                             and task["status"] != "done"):
                         raise RuntimeError(
                             f"Migration task {task['id']} is stuck "

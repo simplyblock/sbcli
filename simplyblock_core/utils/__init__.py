@@ -12,7 +12,7 @@ import subprocess
 import sys
 import uuid
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
 
 from pydantic import SecretStr
@@ -3008,7 +3008,7 @@ def patch_cr_lvol_status(
     load_kube_config_with_fallback()
     api = client.CustomObjectsApi()
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     try:
         cr = api.get_namespaced_custom_object(

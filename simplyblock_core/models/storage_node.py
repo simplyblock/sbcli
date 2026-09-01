@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from typing import List, Optional
 from uuid import uuid4
 
@@ -971,7 +971,7 @@ class StorageNode(BaseNodeObject):
 
     def uptime(self) -> Optional[timedelta]:
         return (
-            datetime.now(timezone.utc) - datetime.fromisoformat(self.online_since)
+            datetime.now(UTC) - datetime.fromisoformat(self.online_since)
             if self.online_since and self.status == StorageNode.STATUS_ONLINE
             else None
         )

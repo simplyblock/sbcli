@@ -5397,7 +5397,7 @@ def restart_storage_node(
                 # anyway, but we use a direct write here to avoid any
                 # second-order effects from the helper).
                 post_node.status = StorageNode.STATUS_OFFLINE
-                post_node.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+                post_node.updated_at = str(datetime.datetime.now(datetime.UTC))
                 post_node.online_since = ""
                 # This would disable adding further node restart tasks.
                 # if this restart was because of a restart task, then the same task would continue,
@@ -7751,7 +7751,7 @@ def set_node_status(node_id, status, caused_by="monitor"):
         logger.error(f"set_node_status: node {node_id} not found")
         return False
 
-    now = str(datetime.datetime.now(datetime.timezone.utc))
+    now = str(datetime.datetime.now(datetime.UTC))
     # verdict communicates the (single, committed) outcome of the mutator out
     # of the transaction so the irreversible work — event emission, peer
     # broadcast, task cancellation, error logging — happens exactly once,
