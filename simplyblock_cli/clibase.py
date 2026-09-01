@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# PYTHON_ARGCOMPLETE_OK
 
 import argparse
 import json
@@ -7,8 +6,6 @@ import re
 import sys
 import time
 from pathlib import Path
-
-import argcomplete
 
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, utils, db_controller, constants
@@ -80,7 +77,6 @@ class CLIWrapperBase:
 
     def __init__(self):
         self.parser.add_argument("--cmd", help='cmd', nargs='+')
-        argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(description=f'Simplyblock management CLI v{constants.SIMPLY_BLOCK_VERSION}')
