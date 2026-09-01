@@ -13,6 +13,7 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.utils import rpc_budget
 from simplyblock_core.settings import Settings
 from simplyblock_core.snode_client import SNodeClient
 
@@ -199,7 +200,22 @@ class StorageNode(BaseNodeObject):
 
     def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
+
+        While a port-fence budget is active on this thread (see
+        utils/rpc_budget), a caller that does not ask for a specific timeout
+        gets the fence budget instead of the 180s/retry=3 default. The fenced
+        region reaches this constructor through model methods it does not own
+        -- recreate_hublvol, connect_to_hublvol, create_transfer_hublvol and
+        expose_bdev below them -- so bounding it here is the only way to cover
+        them without threading a timeout through every signature. Callers that
+        pass an explicit timeout keep it: bdev_wait_for_examine needs longer
+        than the default and asks for it.
         """
+        budget = rpc_budget.current_budget()
+        if budget is not None:
+            timeout, retry = budget
+            kwargs.setdefault("timeout", timeout)
+            kwargs.setdefault("retry", retry)
         host = self.mgmt_ip
         if Settings().tls_connect != "disabled":
             host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
