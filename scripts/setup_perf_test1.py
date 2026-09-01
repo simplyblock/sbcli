@@ -19,8 +19,8 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-import boto3
-import paramiko
+import boto3  # noqa: E402  (must follow the stdout reconfigure above)
+import paramiko  # noqa: E402  (must follow the stdout reconfigure above)
 
 # paramiko's transport thread logs banner/handshake errors to stderr on its own;
 # silence them since wait_for_ssh retries through these failures anyway

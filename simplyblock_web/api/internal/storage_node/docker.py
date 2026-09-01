@@ -356,7 +356,7 @@ def _spdk_thread_sample(pid):
     try:
         for tid in os.listdir(f"/proc/{pid}/task"):
             t = f"/proc/{pid}/task/{tid}"
-            entry = {"tid": tid}
+            entry: dict = {"tid": tid}
             for field, path in (("comm", "comm"), ("wchan", "wchan")):
                 try:
                     with open(f"{t}/{path}") as fh:
@@ -424,15 +424,15 @@ def spdk_thread_state(query: utils.RPCPortParams):
     time.sleep(1)
     second = _spdk_thread_sample(pid)
 
-    by_tid = {e["tid"]: e for e in first}
+    by_tid = {t["tid"]: t for t in first}
     threads = []
-    for e in second:
-        prev = by_tid.get(e["tid"], {})
+    for cur in second:
+        prev = by_tid.get(cur["tid"], {})
         threads.append({
-            "tid": e["tid"], "comm": e["comm"], "state": e["state"],
-            "wchan": e["wchan"],
-            "utime_delta": e["utime"] - prev.get("utime", e["utime"]),
-            "stime_delta": e["stime"] - prev.get("stime", e["stime"]),
+            "tid": cur["tid"], "comm": cur["comm"], "state": cur["state"],
+            "wchan": cur["wchan"],
+            "utime_delta": cur["utime"] - prev.get("utime", cur["utime"]),
+            "stime_delta": cur["stime"] - prev.get("stime", cur["stime"]),
         })
     return utils.get_response({"pid": pid, "threads": threads})
 
