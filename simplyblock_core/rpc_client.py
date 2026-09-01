@@ -2015,7 +2015,13 @@ class RPCClient:
                        secret_access_key: Optional[SecretStr] = None,
                        bdb_lcpu_mask: Optional[int] = None,
                        s3_lcpu_mask: Optional[int] = None,
-                       s3_thread_pool_size: Optional[int] = None):
+                       s3_thread_pool_size: Optional[int] = None,
+                       s3_request_timeout_ms: Optional[int] = None,
+                       s3_request_hard_abort_ms: Optional[int] = None,
+                       s3_request_max_attempts: Optional[int] = None,
+                       s3_retry_burst: Optional[int] = None,
+                       s3_retry_refill_ms: Optional[int] = None,
+    ):
         """Create an S3 bdev for one bucket.
 
         A device serves exactly one bucket with one set of credentials, so
