@@ -134,13 +134,22 @@ def start_migration(migration_id,
     if target_node.status != StorageNode.STATUS_ONLINE:
         raise ValueError(f"Target node is not online (status={target_node.status})")
 
-    if active_source_node_id != source_node_id:
+    is_fallback_source = active_source_node_id != source_node_id
+    if is_fallback_source:
         logger.info(
             f"start_migration {migration.uuid}: source primary {source_node_id} is offline; "
             f"continuing with pre-selected fallback source {active_source_node_id}")
 
     cluster = db.get_cluster_by_id(migration.cluster_id)
-    if cluster.status != Cluster.STATUS_ACTIVE:
+    # A fallback migration exists precisely because its primary source node is
+    # down, which is what drives the cluster to DEGRADED in the first place
+    # (storage_node_monitor's one-node-down verdict) — requiring strict ACTIVE
+    # here would make the feature unusable in the scenario it exists for.
+    # Ordinary (non-fallback) migrations keep the stricter ACTIVE-only gate.
+    allowed_statuses = (
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        else (Cluster.STATUS_ACTIVE,))
+    if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
     if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
@@ -1063,13 +1072,21 @@ def create_migration(lvol_id, target_node_id,
         raise ValueError(f"Source node {src_node_id} not found")
 
     active_src_node = _resolve_active_source_node(src_node, target_node_id)
-    if active_src_node.get_id() != src_node_id:
+    is_fallback_source = active_src_node.get_id() != src_node_id
+    if is_fallback_source:
         logger.warning(
             f"create_migration: source primary {src_node_id} is offline; "
             f"using {active_src_node.get_id()} as the effective source for lvol={lvol_id}")
 
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
-    if cluster.status != Cluster.STATUS_ACTIVE:
+    # See the matching comment in start_migration(): a fallback migration's
+    # primary is down, which is what drives the cluster to DEGRADED, so the
+    # strict ACTIVE-only gate would make the feature unusable for the
+    # scenario it exists for. Non-fallback migrations keep the stricter gate.
+    allowed_statuses = (
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        else (Cluster.STATUS_ACTIVE,))
+    if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
     if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
@@ -1565,26 +1582,34 @@ def start_batch_migration(group_id,
             f"Group {group_id} is not in PHASE_PRE_CREATED (phase={group.phase})"
         )
 
+    # active_source_node_id is read-only here — it was resolved once, at
+    # create_batch_migration() time, and must never be re-derived.
+    active_source_node_id = group.active_source_node_id or group.source_node_id
+    is_fallback_source = active_source_node_id != group.source_node_id
+
     # Same preconditions as start_migration's single-lvol path — these are
     # only checked at create_batch_migration (precreate) time today, so a
     # cluster rebalance / conflicting node migration starting in the gap
     # before migrate-continue --batch would otherwise go unnoticed here.
+    # A fallback group's primary is down, which is what drives the cluster to
+    # DEGRADED in the first place, so the strict ACTIVE-only gate would make
+    # the feature unusable for the scenario it exists for (see the matching
+    # comment in start_migration()). Non-fallback groups keep the stricter gate.
     cluster = db.get_cluster_by_id(group.cluster_id)
-    if cluster.status != Cluster.STATUS_ACTIVE:
+    allowed_statuses = (
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        else (Cluster.STATUS_ACTIVE,))
+    if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
     if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
-
-    # active_source_node_id is read-only here — it was resolved once, at
-    # create_batch_migration() time, and must never be re-derived.
-    active_source_node_id = group.active_source_node_id or group.source_node_id
     try:
         active_source_node = db.get_storage_node_by_id(active_source_node_id)
     except KeyError as e:
         raise ValueError(str(e))
     if active_source_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
         raise ValueError(f"Source node is not online (status={active_source_node.status})")
-    if active_source_node_id != group.source_node_id:
+    if is_fallback_source:
         logger.info(
             f"start_batch_migration {group_id}: source primary {group.source_node_id} is offline; "
             f"continuing with pre-selected fallback source {active_source_node_id}")
