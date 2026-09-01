@@ -493,7 +493,18 @@ NON_LEADER_BLOCK_QUIESCE_SEC = 0.2
 # restart; the task runner re-queues it. A retried restart is cheap, a
 # quiesced client path is not.
 FENCE_RPC_TIMEOUT_SEC = 0.5
-FENCE_RPC_RETRY = 1
+# One attempt, no retry. A retry inside the fence spends the very budget the
+# fence is racing: if a call timed out, trying it again can only push the block
+# closer to the reject threshold. Timing out and releasing is strictly better.
+FENCE_RPC_RETRY = 0
+# Hard ceiling on how long any peer's client port may stay fenced, measured
+# from the first block. Sits just under the reject threshold (ack_timeout * 4 =
+# 8s) so the fence is always released by us, never converted to reject by SPDK
+# -- the conversion is what quiesces the client's qpairs and costs it the path.
+# Checked before every in-fence RPC and on every iteration of the two in-window
+# wait loops, and each RPC's timeout is clamped to the time remaining, so a
+# call can never run past the deadline.
+FENCE_DEADLINE_SEC = 7.8
 # bdev_examine only SCHEDULES the examine and returns, so it lives inside the
 # 0.5s budget like everything else. bdev_wait_for_examine is the one call that
 # genuinely blocks -- it waits for the examine to finish -- and gets the longer
