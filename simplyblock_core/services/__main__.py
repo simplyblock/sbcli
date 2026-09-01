@@ -18,15 +18,24 @@ import runpy
 import sys
 
 
-# Modules that live here but are libraries imported by the services, not
-# services themselves -- they have no entry point and nothing invokes them as a
-# command. Listing them would advertise names that do nothing when run.
-_NOT_SERVICES = frozenset({
+# Libraries imported by the services, not services themselves -- they have no
+# entry point and nothing invokes them as a command. Listing them would
+# advertise names that do nothing when run.
+_LIBRARIES = frozenset({
     "hub_controller_manager",
     "migration_task_common",
     "replication_final_step",
     "task_runner_base",
 })
+
+# Modules that do have an entry point of their own, but are not a service:
+# ``task_runners`` is the ``simplyblock-task-runner`` console script, a sibling
+# dispatcher over the task runners' specs.
+_DISPATCHERS = frozenset({
+    "task_runners",
+})
+
+_NOT_SERVICES = _LIBRARIES | _DISPATCHERS
 
 
 def _service_names():

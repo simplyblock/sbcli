@@ -3213,11 +3213,11 @@ def patch_prometheus_configmap(username: str, password: str):
         return False
 
 
-def create_docker_service(cluster_docker: DockerClient, service_name: str, service_file: str, service_image: str):
+def create_docker_service(cluster_docker: DockerClient, service_name: str, command: List[str], service_image: str):
     logger.info(f"Creating service: {service_name}")
     cluster_docker.services.create(
         image=service_image,
-        command=service_file,
+        command=list(command),
         name=service_name,
         mounts=["/etc/foundationdb:/etc/foundationdb"],
         env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
@@ -3230,7 +3230,7 @@ def create_docker_service(cluster_docker: DockerClient, service_name: str, servi
 
 
 def create_k8s_service(namespace: str, deployment_name: str,
-                       container_name: str, service_file: str, container_image: str):
+                       container_name: str, command: List[str], container_image: str):
     logger.info(f"Creating deployment: {deployment_name} in namespace {namespace}")
     load_kube_config_with_fallback()
     apps_v1 = client.AppsV1Api()
@@ -3263,7 +3263,7 @@ def create_k8s_service(namespace: str, deployment_name: str,
     container = V1Container(
         name=container_name,
         image=container_image,
-        command=["python", service_file],
+        command=list(command),
         env=env_list,
         volume_mounts=volume_mounts,
         resources=V1ResourceRequirements(

@@ -168,9 +168,9 @@ COPY . .
 # compatibility scaffolding, not the intended end state: the Helm charts, the
 # Swarm compose file and the operator still name source files
 # (`python3 simplyblock_core/services/<name>.py`), which only resolve because
-# /app is the package. Once those consumers use the `simplyblock-service` and
-# `sbctl` entry points, this becomes `--no-editable` and the `COPY . /app` in
-# the runtime stage goes away. See AGENTS.md.
+# /app is the package. Once those consumers use the `simplyblock-task-runner`,
+# `simplyblock-service` and `sbctl` entry points, this becomes `--no-editable`
+# and the `COPY . /app` in the runtime stage goes away. See AGENTS.md.
 #
 # uv creates the environment without pip, setuptools or wheel, so there is
 # nothing to uninstall afterwards and no vendored pip bundle for the image scan

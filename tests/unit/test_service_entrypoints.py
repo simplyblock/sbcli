@@ -22,18 +22,32 @@ so a service renamed or moved on one side cannot silently drop the other.
 
 import ast
 import importlib
+import io
 import pathlib
+import sys
 import unittest
 from typing import ClassVar
+from unittest import mock
+
+import yaml
 
 from simplyblock_core.services import __main__ as dispatcher
+from simplyblock_core.services import task_runners
 
 
 SERVICES_DIR = pathlib.Path(dispatcher.__file__).parent
+REPO_ROOT = SERVICES_DIR.parent.parent
 
 
 def _module_path(name):
     return SERVICES_DIR / f"{name.replace('-', '_')}.py"
+
+
+def _defines_main(path):
+    return any(
+        isinstance(node, ast.FunctionDef) and node.name == "main"
+        for node in ast.parse(path.read_text()).body
+    )
 
 
 class TestServiceDispatcher(unittest.TestCase):
@@ -51,23 +65,28 @@ class TestServiceDispatcher(unittest.TestCase):
         for name in dispatcher._service_names():
             self.assertNotIn("_", name, f"{name} should use hyphens, not underscores")
 
-    def test_excluded_modules_are_libraries_with_no_entry_point(self):
+    def test_excluded_libraries_have_no_entry_point(self):
         """The exclusion list must stay justified: these have no way to be run.
 
         If one of them ever grows a ``main()`` it is a service and belongs in the
         listing, so this fails rather than letting it stay hidden.
         """
-        for name in dispatcher._NOT_SERVICES:
+        for name in dispatcher._LIBRARIES:
             with self.subTest(module=name):
                 path = SERVICES_DIR / f"{name}.py"
                 self.assertTrue(path.is_file())
-                tree = ast.parse(path.read_text())
-                has_main = any(
-                    isinstance(node, ast.FunctionDef) and node.name == "main"
-                    for node in tree.body
-                )
-                self.assertFalse(has_main, f"{name} has main(); it is a service")
+                self.assertFalse(_defines_main(path), f"{name} has main(); it is a service")
                 self.assertNotIn("__main__", path.read_text())
+
+    def test_excluded_dispatchers_are_entry_points_of_their_own(self):
+        """The other half of the exclusion: a module kept out of the listing
+        because it is a command in its own right, not because it is a library.
+        One that lost its ``main()`` would be excluded for no reason."""
+        for name in dispatcher._DISPATCHERS:
+            with self.subTest(module=name):
+                path = SERVICES_DIR / f"{name}.py"
+                self.assertTrue(path.is_file())
+                self.assertTrue(_defines_main(path), f"{name} has no main()")
 
     def test_importing_the_package_is_side_effect_free(self):
         """``runpy`` imports the parent package, which plain ``python3 <file>``
@@ -123,7 +142,7 @@ class TestServicesHaveMain(unittest.TestCase):
     runs it through ``runpy``, which needs no ``main()``.
     """
 
-    EXEMPT: ClassVar[str] = {"spdk_http_proxy_server"}
+    EXEMPT: ClassVar[set] = {"spdk_http_proxy_server"}
 
     def test_every_service_defines_main(self):
         for name in dispatcher._service_names():
@@ -131,8 +150,112 @@ class TestServicesHaveMain(unittest.TestCase):
             if module in self.EXEMPT:
                 continue
             with self.subTest(service=name):
-                tree = ast.parse(_module_path(name).read_text())
-                self.assertTrue(
-                    any(isinstance(n, ast.FunctionDef) and n.name == "main" for n in tree.body),
-                    f"{module} has no top-level main()",
-                )
+                self.assertTrue(_defines_main(_module_path(name)),
+                                f"{module} has no top-level main()")
+
+
+class TestTaskRunnerDispatcher(unittest.TestCase):
+    """The task runners' own entry point, ``simplyblock-task-runner <name>``.
+
+    A task runner is fully described by the ``RunnerSpec`` its module exports, so
+    this dispatcher serves the spec directly rather than executing a module. The
+    name it takes is ``RunnerSpec.name`` — the deployment surface is the runner's
+    identity, not a path inside the image.
+    """
+
+    def test_advertises_every_task_runner_module(self):
+        modules = {path.stem for path in SERVICES_DIR.glob("tasks_runner_*.py")}
+        self.assertEqual(
+            {name.replace("-", "_") for name in task_runners.runner_names()},
+            modules,
+        )
+
+    def test_names_are_hyphenated(self):
+        for name in task_runners.runner_names():
+            self.assertNotIn("_", name, f"{name} should use hyphens, not underscores")
+
+    def test_every_advertised_name_loads_a_spec_of_that_name(self):
+        """``load_spec`` raises on a mismatch; this walks every runner so a
+        rename on either side is caught here rather than at deploy time."""
+        for name in task_runners.runner_names():
+            if name in task_runners._NOT_ON_DRIVER:
+                continue
+            with self.subTest(runner=name):
+                self.assertEqual(task_runners.load_spec(name).name, name)
+
+    def test_runners_listed_as_not_on_the_driver_really_export_no_spec(self):
+        """Keeps the exemption honest: once one of these migrates it exports a
+        SPEC, and leaving it listed would silently keep it on its own loop."""
+        for name in task_runners._NOT_ON_DRIVER:
+            with self.subTest(runner=name):
+                module = importlib.import_module(
+                    f"simplyblock_core.services.{name.replace('-', '_')}")
+                self.assertFalse(hasattr(module, "SPEC"),
+                                 f"{name} has a SPEC; drop it from _NOT_ON_DRIVER")
+
+    def test_serves_the_named_spec(self):
+        with mock.patch.object(task_runners, "serve") as serve, \
+                mock.patch.object(sys, "argv", ["simplyblock-task-runner", "tasks-runner-fdb-backup"]):
+            task_runners.main()
+
+        import simplyblock_core.services.tasks_runner_fdb_backup as runner
+        serve.assert_called_once_with(runner.SPEC)
+
+    def test_a_runner_not_on_the_driver_is_started_through_its_own_main(self):
+        import simplyblock_core.services.tasks_runner_lvol_migration as runner
+        with mock.patch.object(runner, "main") as legacy_main, \
+                mock.patch.object(task_runners, "serve") as serve, \
+                mock.patch.object(sys, "argv",
+                                  ["simplyblock-task-runner", "tasks-runner-lvol-migration"]):
+            task_runners.main()
+
+        legacy_main.assert_called_once_with()
+        serve.assert_not_called()
+
+    def test_an_unknown_runner_is_rejected(self):
+        with mock.patch.object(sys, "argv", ["simplyblock-task-runner", "tasks-runner-nope"]), \
+                mock.patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                task_runners.main()
+
+    def test_the_console_script_is_declared(self):
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+        self.assertIn(
+            'simplyblock-task-runner = "simplyblock_core.services.task_runners:main"',
+            pyproject,
+        )
+
+
+class TestDeploymentCommands(unittest.TestCase):
+    """The consumers this repository owns must start runners by name.
+
+    Everything else — the Helm charts, the operator, Swarm services created by an
+    older control plane — still uses the paths, which is why
+    ``TestPathInvocationContract`` above keeps them working. These two files are
+    the ones a change here can actually fix, so they are pinned.
+    """
+
+    COMPOSE = pathlib.Path(
+        SERVICES_DIR.parent / "scripts" / "docker-compose-swarm.yml")
+
+    def _compose_commands(self):
+        compose = yaml.safe_load(self.COMPOSE.read_text().replace("$", "_"))
+        return {name: service.get("command", "")
+                for name, service in compose["services"].items()}
+
+    def test_every_task_runner_service_uses_the_entry_point(self):
+        expected = {f"simplyblock-task-runner {name}"
+                    for name in task_runners.runner_names()}
+        found = {command for command in self._compose_commands().values()
+                 if command.startswith("simplyblock-task-runner ")}
+        self.assertEqual(found, expected)
+
+    def test_no_compose_service_starts_a_runner_by_path(self):
+        for name, command in self._compose_commands().items():
+            with self.subTest(service=name):
+                self.assertNotIn("services/tasks_runner_", command)
+
+    def test_cluster_ops_creates_runner_services_by_name(self):
+        source = (REPO_ROOT / "simplyblock_core" / "cluster_ops.py").read_text()
+        self.assertNotIn("services/tasks_runner_", source)
+        self.assertIn('"simplyblock-task-runner"', source)
