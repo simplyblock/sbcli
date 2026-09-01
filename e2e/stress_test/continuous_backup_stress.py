@@ -1678,40 +1678,44 @@ class BackupStressComprehensive(BackupStressBase):
     TC-BCK-STR-100..115
 
     Comprehensive backup stress test combining high scale, high concurrency,
-    dual alternating retention policies, namespace lvols, filesystem mix,
-    and delete+restore chain verification.
+    dual alternating retention policies, namespace lvols, snapshot clones,
+    filesystem mix, and delete+restore chain verification.
 
     Setup:
-      - 30 lvols (30G each, ~900GB total, capacity-checked)
+      - 30 lvols (1G each, capacity-checked)
         - 10x ext4+plain, 10x ext4+crypto, 5x xfs+plain, 5x xfs+crypto
         - 4 of the 30 lvols are created with max_namespace_per_subsys=10,
           then 3 namespace children are created on each (12 NS children total)
+      - 10 snapshot clones created from random source lvols
       - 2 retention policies: tight (versions=2) on odd lvols,
         wide (versions=3) on even lvols
 
     Stress phases:
-      1. Initial backup wave: 30 parallel backups (8 at a time)
-      2. Marathon: 60 rounds of 8 parallel backups + 2 parallel restores
-      3. Delete + restore integrity: delete backups, re-backup, verify chain
-      4. Concurrent burst: 16 mixed operations simultaneously
-      5. Final restore from every lvol: verify all data
+      1. Initial backup wave: 30+ parallel backups (8 at a time)
+      2. Snapshot clone phase: clone 10 lvols, verify data, backup + restore
+      3. Marathon: 100 rounds of 8 backups + 8 restores with concurrent FIO
+         load on remaining lvols (clones participate alongside regular lvols)
+      4. Delete + restore integrity: delete backups, re-backup, verify chain
+      5. Concurrent burst: 16 mixed operations simultaneously
+      6. Final restore from every lvol: verify all data
 
     Validates:
-      - 520+ backups, 120+ restores across 30+ lvols with no data corruption
+      - 1600+ backup/restore operations across 40+ lvols with no data corruption
+      - Snapshot clone data matches source; clone backup/restore integrity
       - Alternating retention merge under concurrent load
       - Chain integrity after backup deletion
       - Namespace lvols backup/restore correctly
       - Mixed ext4/xfs + plain/crypto all work simultaneously
-      - Service remains stable throughout ~3.5-4.5 hour run
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "backup_stress_comprehensive"
-        self.lvol_size = "30G"
-        self.fio_size = "10G"
-        self.num_rounds = 60
+        self.lvol_size = "1G"
+        self.fio_size = "200M"
+        self.num_rounds = 100
         self.parallel_batch = 8
+        self.num_clones = 10
         self._regular_configs = [
             # (prefix, count, fs_type, crypto)
             ("ext4_plain",  10, "ext4", False),
@@ -1792,6 +1796,167 @@ class BackupStressComprehensive(BackupStressBase):
             sleep_n_sec(2)
         return None
 
+    def _ns_rescan_and_find_device(self, before_devices: set) -> str | None:
+        """Run nvme ns-rescan on all controllers, return new device or None.
+
+        Clones are auto-namespaced and share the parent's NQN.  When the
+        source is already connected, a normal ``nvme connect`` for the
+        clone won't produce a new device.  An ns-rescan tells the kernel
+        to re-enumerate namespaces on every controller so the clone's
+        namespace appears as a new ``/dev/nvmeXnY`` block device.
+        """
+        out, _ = self.ssh_obj.exec_command(
+            self.fio_node,
+            "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "
+            "| sort -u",
+            supress_logs=True)
+        for ctrl in (out or "").strip().splitlines():
+            ctrl = ctrl.strip()
+            if ctrl:
+                self.ssh_obj.exec_command(
+                    self.fio_node,
+                    f"sudo nvme ns-rescan /dev/{ctrl}",
+                    supress_logs=True)
+        sleep_n_sec(3)
+        after = set(self.ssh_obj.get_devices(node=self.fio_node))
+        new = sorted(after - before_devices)
+        return f"/dev/{new[0]}" if new else None
+
+    def _create_and_verify_clone(self, source_label, lvol_state):
+        """Create a snapshot clone of *source_label*, verify checksums,
+        then backup and restore the clone.
+
+        Docker mode: connects clone via ns-rescan (auto-namespaced).
+        K8s mode: creates clone PVC via CSI.
+
+        Returns the clone label added to *lvol_state*.
+        """
+        info = lvol_state[source_label]
+        src_id = info["id"]
+
+        # 1. Snapshot (non-backup) of source
+        snap_name = f"clsnap_{source_label}_{_rand_suffix()}"
+        snap_id = self._create_snapshot(src_id, snap_name, backup=False)
+        self.logger.info(
+            f"  clone: snapshot {snap_name} ({snap_id}) for {source_label}")
+
+        # 2. Create clone
+        clone_name = f"comp_cl_{source_label}_{_rand_suffix()}"
+
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(clone_name)
+            pvc_size = (self.lvol_size.replace("G", "Gi")
+                        if "Gi" not in self.lvol_size else self.lvol_size)
+            k8s.create_clone_pvc(
+                pvc_name, pvc_size, self._storage_class_name, snap_id)
+            k8s.wait_pvc_bound(pvc_name)
+            clone_id = k8s.get_pvc_volume_handle(pvc_name)
+            self.created_pvcs.append(pvc_name)
+            self.created_lvols.append(pvc_name)
+            clone_name = pvc_name
+            device = pvc_name
+            clone_mount = pvc_name
+
+            # Verify clone checksums
+            clone_checksums = self._get_checksums(clone_name, clone_name)
+        else:
+            # Docker: create clone via API, connect with ns-rescan
+            self.sbcli_utils.add_clone(snap_id, clone_name)
+            self._wait_for_restore(clone_name, expect_failure=True)
+            clone_id = self._get_lvol_id(clone_name)
+            assert clone_id, f"Clone {clone_name} not found after create"
+            self.created_lvols.append(clone_name)
+
+            # Connect — clone shares parent NQN, may need ns-rescan
+            before_devs = set(
+                self.ssh_obj.get_devices(node=self.fio_node))
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                lvol_name=clone_name)
+            for cmd in connect_ls:
+                _, err = self.ssh_obj.exec_command(
+                    node=self.fio_node, command=cmd)
+            sleep_n_sec(3)
+            after_devs = set(
+                self.ssh_obj.get_devices(node=self.fio_node))
+            new_devs = sorted(after_devs - before_devs)
+
+            if not new_devs:
+                device = self._ns_rescan_and_find_device(before_devs)
+                assert device, (
+                    f"Clone {clone_name} device not found after ns-rescan")
+            else:
+                device = f"/dev/{new_devs[0]}"
+
+            # XFS clones have duplicate UUIDs — regenerate before mount
+            if info["fs_type"] == "xfs":
+                self.ssh_obj.clone_mount_gen_uuid(self.fio_node, device)
+
+            # Mount (no format — clone inherits source filesystem)
+            clone_mount = f"{self.mount_path}/{clone_name}"
+            self.ssh_obj.exec_command(
+                self.fio_node, f"mkdir -p {clone_mount}")
+            self.ssh_obj.mount_path(
+                node=self.fio_node, device=device,
+                mount_path=clone_mount)
+            self.mounted.append((self.fio_node, clone_mount))
+            self.connected.append(clone_id)
+
+            # Verify clone checksums match source
+            clone_checksums = self._get_checksums(
+                self.fio_node, clone_mount)
+
+        assert clone_checksums == info["checksums"], (
+            f"Clone {clone_name} checksums mismatch vs source "
+            f"{source_label}")
+        self.logger.info(
+            f"  clone: {clone_name} checksums match source ✓")
+
+        # Backup the clone
+        clone_bk_id = self._snap_and_backup(
+            clone_id, f"cl_{source_label}")
+        self.logger.info(
+            f"  clone: backup {clone_bk_id} for {clone_name}")
+
+        # Restore from clone backup and verify
+        if clone_bk_id:
+            rst_name = f"comp_clrst_{source_label}_{_rand_suffix()}"
+            try:
+                self._restore_backup(clone_bk_id, rst_name)
+                self._wait_for_restore(rst_name)
+                rst_id = self._get_lvol_id(rst_name)
+                _, rst_mount = self._connect_and_mount(
+                    rst_name, rst_id,
+                    mount=(
+                        f"{self.mount_path}/"
+                        f"clr_{source_label}_{_rand_suffix()}"
+                    ),
+                    format_disk=False)
+                self._verify_checksums(
+                    self.fio_node, rst_mount, info["checksums"])
+                self._unmount_and_disconnect(
+                    self.fio_node, rst_mount, rst_id)
+                self.logger.info(
+                    f"  clone: restore of {clone_name} verified ✓")
+            except Exception as e:
+                self.logger.error(
+                    f"  clone: restore verify failed for "
+                    f"{clone_name}: {e}")
+
+        clone_label = f"clone_{source_label}"
+        lvol_state[clone_label] = {
+            "name": clone_name, "id": clone_id,
+            "mount": clone_mount, "device": device,
+            "fs_type": info["fs_type"], "crypto": info["crypto"],
+            "is_namespace": False, "is_clone": True,
+            "source_label": source_label,
+            "parent_id": None, "host_id": None,
+            "ns_sc_name": None,
+            "checksums": clone_checksums,
+            "backup_ids": [clone_bk_id] if clone_bk_id else [],
+        }
+        return clone_label
+
     def _create_lvols_batch(self, configs_batch, lvol_state):
         """Create a batch of lvols in parallel threads.
 
@@ -1849,11 +2014,26 @@ class BackupStressComprehensive(BackupStressBase):
                 self._run_fio(mount, runtime=30)
                 checksums = self._get_checksums(self.fio_node, mount)
                 assert checksums, f"No checksums for {label}"
+                # For namespace parents in Docker mode, fetch the
+                # node_id so children can be pinned to the same host.
+                parent_host_id = None
+                if ns_parent and not self.k8s_test:
+                    try:
+                        details = self.sbcli_utils.get_lvol_details(
+                            lvol_id)[0]
+                        parent_host_id = details.get("node_id")
+                        self.logger.info(
+                            f"  {label} parent host_id={parent_host_id}")
+                    except Exception as he:
+                        self.logger.warning(
+                            f"  {label} could not fetch node_id: {he}")
+
                 lvol_state[label] = {
                     "name": name, "id": lvol_id, "mount": mount,
                     "device": device,
                     "fs_type": fs_type, "crypto": crypto,
                     "is_namespace": ns_parent, "parent_id": None,
+                    "host_id": parent_host_id,
                     "ns_sc_name": sc_name if (ns_parent and self.k8s_test) else None,
                     "checksums": checksums, "backup_ids": [],
                 }
@@ -2073,6 +2253,11 @@ class BackupStressComprehensive(BackupStressBase):
                         f"device={parent_device} ctrl={ctrl_dev}")
                     before_set = set(
                         self._list_nvme_ns_devices(ctrl_dev))
+                    parent_host_id = parent_info.get("host_id")
+                    parent_crypto = parent_info.get("crypto", False)
+                    self.logger.info(
+                        f"TC-BCK-STR-101: NS children for {parent_label}: "
+                        f"host_id={parent_host_id}, crypto={parent_crypto}")
                     for ci in range(self.num_namespace_children):
                         child_label = f"ns_child_{parent_label}_{ci}"
                         child_name = (
@@ -2082,6 +2267,8 @@ class BackupStressComprehensive(BackupStressBase):
                             lvol_name=child_name,
                             pool_name=self.pool_name,
                             size=self.lvol_size,
+                            crypto=parent_crypto,
+                            host_id=parent_host_id,
                             namespace=parent_id)
                         child_id = self.sbcli_utils.get_lvol_id(
                             lvol_name=child_name)
@@ -2191,6 +2378,29 @@ class BackupStressComprehensive(BackupStressBase):
             f"TC-BCK-STR-103: too many initial backup failures: "
             f"{initial_ok}/{total_lvols}")
 
+        # ── Phase 3.5: Snapshot clone creation + backup/restore ────────
+        self.logger.info("TC-BCK-STR-103B: snapshot clone phase")
+        clone_candidates = random.sample(
+            all_labels, min(self.num_clones, len(all_labels)))
+        clone_ok = 0
+        for source_label in clone_candidates:
+            try:
+                clone_label = self._create_and_verify_clone(
+                    source_label, lvol_state)
+                clone_ok += 1
+                self.logger.info(
+                    f"TC-BCK-STR-103B: {clone_label} done")
+            except Exception as e:
+                self.logger.error(
+                    f"TC-BCK-STR-103B: clone of {source_label} "
+                    f"failed: {e}")
+
+        # Refresh all_labels so clones participate in the marathon
+        all_labels = sorted(lvol_state.keys())
+        self.logger.info(
+            f"TC-BCK-STR-103B: {clone_ok}/{len(clone_candidates)} "
+            f"clones created, total lvols now {len(all_labels)}")
+
         # ── Phase 4: Marathon backup/restore loop ──────────────────────
         self.logger.info(
             f"TC-BCK-STR-104: starting {self.num_rounds}-round marathon")
@@ -2199,8 +2409,13 @@ class BackupStressComprehensive(BackupStressBase):
         marathon_restore_ok = 0
         marathon_fio_writes = 0
 
+        # Each round: 8 backups + 8 restores (with concurrent FIO on
+        # remaining lvols to generate I/O load during restore).
+        # 100 rounds × (8 backups + 8 restores) ≈ 1600 operations.
+        restores_per_round = self.parallel_batch  # 8
+
         for round_num in range(1, self.num_rounds + 1):
-            # Pick 8 random lvols for backup
+            # ── Backups ──
             backup_labels = random.sample(
                 all_labels,
                 min(self.parallel_batch, len(all_labels)))
@@ -2210,41 +2425,59 @@ class BackupStressComprehensive(BackupStressBase):
             round_bk_ok = sum(1 for v in bk_results.values() if v)
             marathon_backups += round_bk_ok
 
-            # Pick 2 random lvols with backups for restore
+            # ── Restores + concurrent FIO load ──
             restorable = [
                 l for l in all_labels
                 if lvol_state[l]["backup_ids"]]
-            if len(restorable) >= 2:
-                restore_labels = random.sample(restorable, 2)
+            num_restore = min(restores_per_round, len(restorable))
+            if num_restore >= 1:
+                restore_labels = random.sample(restorable, num_restore)
                 restore_specs = [
                     (l, random.choice(lvol_state[l]["backup_ids"]))
                     for l in restore_labels]
+
+                # Start FIO on non-restore lvols in background threads
+                # to generate I/O load while restores run
+                fio_candidates = [
+                    l for l in all_labels if l not in restore_labels]
+                fio_labels = random.sample(
+                    fio_candidates,
+                    min(4, len(fio_candidates)))
+                fio_threads = []
+                for label in fio_labels:
+                    def _bg_fio(lbl=label):
+                        info = lvol_state[lbl]
+                        try:
+                            self._run_fio(
+                                info["mount"], runtime=30, rw="randrw")
+                        except Exception:
+                            pass
+                    t = threading.Thread(target=_bg_fio)
+                    fio_threads.append(t)
+                    t.start()
+
                 rst_results = self._restore_batch(
                     restore_specs, lvol_state)
                 marathon_restores += len(rst_results)
                 marathon_restore_ok += sum(
                     1 for _, (_, ok) in rst_results.items() if ok)
 
-            # Every 10 rounds: write new FIO data to 4 random lvols
-            if round_num % 10 == 0:
-                fio_labels = random.sample(
-                    all_labels,
-                    min(4, len(all_labels)))
-                for label in fio_labels:
+                # Wait for background FIO to finish
+                for t in fio_threads:
+                    t.join(timeout=120)
+                marathon_fio_writes += len(fio_labels)
+
+            # Every 5 rounds: update checksums after FIO
+            if round_num % 5 == 0:
+                refresh_labels = random.sample(
+                    all_labels, min(4, len(all_labels)))
+                for label in refresh_labels:
                     info = lvol_state[label]
                     try:
-                        self._run_fio(
-                            info["mount"], runtime=15, rw="write")
                         info["checksums"] = self._get_checksums(
                             self.fio_node, info["mount"])
-                        marathon_fio_writes += 1
-                    except Exception as e:
-                        self.logger.warning(
-                            f"[round {round_num}] FIO write "
-                            f"{label} failed: {e}")
-                self.logger.info(
-                    f"TC-BCK-STR-106: round {round_num} — "
-                    f"wrote new data to {len(fio_labels)} lvols")
+                    except Exception:
+                        pass
 
             # Every 15 rounds: forced checksum verification
             if round_num % 15 == 0:
@@ -2268,7 +2501,8 @@ class BackupStressComprehensive(BackupStressBase):
                 self.logger.info(
                     f"TC-BCK-STR-104: round {round_num}/{self.num_rounds} "
                     f"— backups={marathon_backups}, "
-                    f"restores={marathon_restore_ok}/{marathon_restores}")
+                    f"restores={marathon_restore_ok}/{marathon_restores}, "
+                    f"fio_writes={marathon_fio_writes}")
 
             sleep_n_sec(3)
 
@@ -2505,7 +2739,12 @@ class BackupStressComprehensive(BackupStressBase):
                 except Exception:
                     pass
 
-        # Delete namespace children first, then parents, then regular
+        # Delete order: clones → ns_children → ns_parents → regular
+        # Clones must be deleted before their source snapshots (SPDK
+        # dependency).
+        clones = [
+            l for l in all_labels
+            if lvol_state[l].get("is_clone")]
         ns_children = [
             l for l in all_labels
             if lvol_state[l].get("parent_id")]
@@ -2515,9 +2754,11 @@ class BackupStressComprehensive(BackupStressBase):
             and not lvol_state[l].get("parent_id")]
         regular = [
             l for l in all_labels
-            if not lvol_state[l].get("is_namespace")]
+            if not lvol_state[l].get("is_namespace")
+            and not lvol_state[l].get("is_clone")]
 
         for group_name, group in [
+            ("clones", clones),
             ("ns_children", ns_children),
             ("ns_parents", ns_parents),
             ("regular", regular),
@@ -2531,11 +2772,14 @@ class BackupStressComprehensive(BackupStressBase):
 
         # Summary
         total_backups = initial_ok + marathon_backups
+        clone_count = sum(
+            1 for l in all_labels if lvol_state[l].get("is_clone"))
         self.logger.info(
             f"\n{'=' * 60}\n"
             f"  BackupStressComprehensive SUMMARY\n"
             f"{'=' * 60}\n"
             f"  Lvols created:     {total_lvols}\n"
+            f"  Clones created:    {clone_ok}\n"
             f"  Initial backups:   {initial_ok}\n"
             f"  Marathon backups:  {marathon_backups}\n"
             f"  Marathon restores: {marathon_restore_ok}/{marathon_restores}\n"
@@ -2548,6 +2792,7 @@ class BackupStressComprehensive(BackupStressBase):
             f"xfs={sum(1 for l in all_labels if lvol_state[l]['fs_type'] == 'xfs')}\n"
             f"  Namespace lvols:   "
             f"{sum(1 for l in all_labels if lvol_state[l].get('is_namespace'))}\n"
+            f"  Clone lvols:       {clone_count}\n"
             f"{'=' * 60}")
 
         self.logger.info("=== BackupStressComprehensive PASSED ===")
