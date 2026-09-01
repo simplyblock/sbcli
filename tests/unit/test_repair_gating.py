@@ -117,13 +117,16 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         def nic(ip):
-            iface = MagicMock(); iface.trtype = "TCP"; iface.ip4_address = ip
+            iface = MagicMock()
+            iface.trtype = "TCP"
+            iface.ip4_address = ip
             return iface
 
         primary = MagicMock()
         primary.status = StorageNode.STATUS_ONLINE
         primary.lvstore_status = "ready"
-        primary.active_rdma = False; primary.active_tcp = True
+        primary.active_rdma = False
+        primary.active_tcp = True
         primary.data_nics = [nic("10.0.0.1"), nic("10.0.1.1")]
         primary.hublvol.bdev_name = "LVS_1/hublvol"
         primary.get_id.return_value = "primary-1"
@@ -131,7 +134,8 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
 
         secondary = MagicMock()
         secondary.status = StorageNode.STATUS_ONLINE
-        secondary.active_rdma = False; secondary.active_tcp = True
+        secondary.active_rdma = False
+        secondary.active_tcp = True
         secondary.data_nics = [nic("10.0.0.2"), nic("10.0.1.2")]
 
         node = MagicMock()
