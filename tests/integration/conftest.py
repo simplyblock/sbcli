@@ -30,6 +30,7 @@ testcontainer's cluster file instead.
 """
 import os
 import shutil
+import socket
 import tempfile
 import time
 from pathlib import Path
@@ -38,7 +39,6 @@ from unittest.mock import patch
 import pytest
 
 FDB_IMAGE = "foundationdb/foundationdb:7.3.63"
-FDB_CLUSTER_CONTENTS = "docker:docker@127.0.0.1:4500"
 FDB_READY_TIMEOUT_S = 60
 
 # Provisioning state shared between pytest_configure (setup), the
@@ -58,13 +58,33 @@ def _exec(container, *argv):
     return container.exec(list(argv))
 
 
+def _free_port() -> int:
+    """Ask the OS for an unused host port.
+
+    The container runs with ``network_mode="host"``, so there is no Docker
+    port mapping to allocate one dynamically the usual testcontainers way —
+    ``fdbserver`` binds directly to the host's network stack. Racy in the
+    same way every "ask the kernel, then bind later" trick is (the port
+    could theoretically be taken between here and container start), but the
+    window is milliseconds and a collision fails fast with a clear bind
+    error instead of corrupting a run.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def _start_fdb_container():
     from testcontainers.core.container import DockerContainer
+
+    port = _free_port()
+    cluster_contents = f"docker:docker@127.0.0.1:{port}"
 
     container = (
         DockerContainer(FDB_IMAGE)
         .with_env("FDB_NETWORKING_MODE", "host")
-        .with_env("FDB_CLUSTER_FILE_CONTENTS", FDB_CLUSTER_CONTENTS)
+        .with_env("FDB_PORT", str(port))
+        .with_env("FDB_CLUSTER_FILE_CONTENTS", cluster_contents)
         .with_kwargs(network_mode="host")
     )
     container.start()
@@ -78,7 +98,7 @@ def _start_fdb_container():
         )
         text = last_out.lower() if isinstance(last_out, (bytes, bytearray)) else str(last_out).encode().lower()
         if last_rc == 0 and b"available" in text and b"unavailable" not in text:
-            return container
+            return container, cluster_contents
         if not configured:
             _exec(
                 container,
@@ -137,14 +157,14 @@ def _provision_fdb() -> None:
         return
 
     try:
-        _container = _start_fdb_container()
+        _container, cluster_contents = _start_fdb_container()
     except Exception as e:  # noqa: BLE001 - report as a skip, don't crash collection
         _skip_reason = f"FoundationDB testcontainer did not start: {e}"
         return
 
     _tmpdir = Path(tempfile.mkdtemp(prefix="sbcli-fdb-"))
     cluster_file = _tmpdir / "fdb.cluster"
-    cluster_file.write_text(FDB_CLUSTER_CONTENTS)
+    cluster_file.write_text(cluster_contents)
     _bind_cluster_file(str(cluster_file))
 
 
