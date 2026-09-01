@@ -10012,6 +10012,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         return False
 
     rpc_client = snode.rpc_client()
+    # Clients for calls made while a peer's client port is fenced. See
+    # constants.FENCE_RPC_TIMEOUT_SEC for why the 180s default cannot be used
+    # inside that window.
+    fenced_rpc = snode.rpc_client(timeout=constants.FENCE_RPC_TIMEOUT_SEC,
+                                  retry=constants.FENCE_RPC_RETRY)
+    wait_examine_rpc = snode.rpc_client(
+        timeout=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC,
+        retry=constants.FENCE_RPC_RETRY)
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(lvs_node.get_id()):
@@ -10219,6 +10227,20 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         _release_block_gate()
         _flush_port_events()
         raise Exception(f"Abort restart: {reason}")
+
+    def _fenced(what, fn, *args, **kwargs):
+        """Run an RPC issued while a peer's client port is fenced.
+
+        Any failure -- a timeout above all -- releases the fence and aborts the
+        restart. Letting a call run on would push the block past the reject
+        threshold, and that does not just delay IO: SPDK quiesces every qpair
+        on the port, so the client loses the path instead of waiting for it.
+        """
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            _abort_restart_and_unblock(
+                f"{what} failed inside the port-fence window: {e}")
 
     # #4: compute the examine-idempotency probes BEFORE the block window —
     # they only read snode's own fresh SPDK (raid built at ###1 pre-block),
@@ -10557,13 +10579,15 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
             if disconnected_peers:
                 logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
-                rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
+                _fenced("jc_explicit_synchronization",
+                        fenced_rpc.jc_explicit_synchronization, lvs_jm_vuid)
 
         ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
         # #4: raid/lvstore probes were computed pre-block (see above the block
         # section) — they read snode's own fresh SPDK only, and
         # force_to_non_leader does not affect bdev/lvstore presence.
-        rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+        _fenced("bdev_distrib_force_to_non_leader",
+                fenced_rpc.bdev_distrib_force_to_non_leader, lvs_jm_vuid)
         if raid_already and lvstore_already:
             logger.info(
                 "Raid %s and lvstore %s already present on %s; skipping examine",
@@ -10589,7 +10613,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     "dropping raid for clean re-examine",
                     lvs_raid, lvs_name, snode.get_id())
                 try:
-                    rpc_client.bdev_raid_delete(lvs_raid)
+                    fenced_rpc.bdev_raid_delete(lvs_raid)
                 except Exception as e:
                     logger.warning(
                         "bdev_raid_delete(%s) raised: %s — proceeding to "
@@ -10621,13 +10645,15 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # restart path: _create_bdev_stack leaves the raid in place but does
             # not examine it, so the lvstore never surfaces and the subsequent
             # bdev_lvol_get_lvstores validation fails every time.
-            rpc_client.bdev_examine(lvs_raid)
+            _fenced("bdev_examine", fenced_rpc.bdev_examine, lvs_raid)
 
             ### 6- wait for examine
-            rpc_client.bdev_wait_for_examine()
+            _fenced("bdev_wait_for_examine",
+                    wait_examine_rpc.bdev_wait_for_examine)
 
         # Validate lvstore recovery
-        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+        ret = _fenced("bdev_lvol_get_lvstores",
+                      fenced_rpc.bdev_lvol_get_lvstores, lvs_name)
         if not ret:
             logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
             if activation_mode:
@@ -10677,18 +10703,21 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             _abort_restart_and_unblock(
                 f"snode {snode.get_id()} is not a registered peer of "
                 f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
-        ret = rpc_client.bdev_lvol_set_lvs_opts(
+        ret = _fenced(
+            "bdev_lvol_set_lvs_opts",
+            fenced_rpc.bdev_lvol_set_lvs_opts,
             lvs_name,
             groupid=lvs_jm_vuid,
             subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
             hublvol_port=lvs_node.get_hublvol_port(lvs_name),
             role=snode_lvs_role,
         )
-        ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
+        ret = _fenced("bdev_lvol_set_leader",
+                      fenced_rpc.bdev_lvol_set_leader, lvs_name, leader=True)
         leader_restored = False
         for _ in range(10):
             try:
-                ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+                ret = fenced_rpc.bdev_lvol_get_lvstores(lvs_name)
                 if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
                     leader_restored = True
                     break
