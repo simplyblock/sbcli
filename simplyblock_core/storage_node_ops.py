@@ -619,6 +619,45 @@ def duplicate_attached_paths(ctrlr_list):
     return {ip for ip, n in seen.items() if n > 1}
 
 
+def prune_duplicate_paths(rpc_client, name, ctrlr_list, nvmf_port, tr_type):
+    """Detach every copy of any address attached more than once on ``name``.
+
+    Returns True if anything was pruned, so the caller knows to re-read the
+    controller list. Detaching is by trid and therefore removes ALL copies of
+    a duplicated address -- the address becomes *missing*, and re-attaching it
+    exactly once is left to the caller's own reconcile path. That split
+    matters for hublvol, whose (re)attach must go through
+    HublvolReconnectCoordinator: its cooldown is what closes the "cntlid N are
+    duplicated" race, so a prune helper that also re-attached would risk
+    recreating the very duplicate it just removed.
+    """
+    duplicates = duplicate_attached_paths(ctrlr_list)
+    if not duplicates:
+        return False
+    logger.error(
+        "Controller %s has duplicate path(s) %s -- pruning. Two "
+        "controllers on one address serve no purpose and give the bdev "
+        "two unordered qpairs to the same target.", name, duplicates)
+    for dup_ip in sorted(duplicates):
+        # Keep at least one other address alive: detaching by trid drops
+        # EVERY controller on that address, so pruning the only address
+        # would tear the bdev down instead of repairing it.
+        others = {ip for ip, _p in _collect_attached_paths(ctrlr_list)} - {dup_ip}
+        if not others:
+            logger.warning(
+                "Not pruning duplicate %s on %s: it is the only attached "
+                "address, so a detach would remove the last path", dup_ip, name)
+            continue
+        try:
+            rpc_client.bdev_nvme_detach_controller(
+                name, traddr=dup_ip, trsvcid=nvmf_port, trtype=tr_type)
+        except Exception as e:
+            logger.error("Failed to prune duplicate path %s on %s: %s",
+                         dup_ip, name, e)
+            continue
+    return True
+
+
 def _collect_attached_ips(ctrlr_list):
     """Aggregate the set of currently-attached traddrs across every ctrlr entry.
 
@@ -929,29 +968,7 @@ def _repair_multipath_controller_locked(node, name, device, rpc_client, ret,
     # comparison below cannot see it: (96.179, 97.9, 97.9) reads as 2-of-2.
     # Prune first, because the missing-path logic would otherwise report the
     # controller complete and return while it still carries the surplus path.
-    duplicates = duplicate_attached_paths(ret)
-    if duplicates:
-        logger.error(
-            "Controller %s has duplicate path(s) %s -- pruning. Two "
-            "controllers on one address serve no purpose and give the bdev "
-            "two unordered qpairs to the same target.", name, duplicates)
-        for dup_ip in sorted(duplicates):
-            # Keep at least one other address alive: detaching by trid drops
-            # EVERY controller on that address, so pruning the only address
-            # would tear the bdev down instead of repairing it.
-            others = {ip for ip, _p in _collect_attached_paths(ret)} - {dup_ip}
-            if not others:
-                logger.warning(
-                    "Not pruning duplicate %s on %s: it is the only attached "
-                    "address, so a detach would remove the last path", dup_ip, name)
-                continue
-            try:
-                rpc_client.bdev_nvme_detach_controller(
-                    name, traddr=dup_ip, trsvcid=device.nvmf_port, trtype=tr_type)
-            except Exception as e:
-                logger.error("Failed to prune duplicate path %s on %s: %s",
-                             dup_ip, name, e)
-                continue
+    if prune_duplicate_paths(rpc_client, name, ret, device.nvmf_port, tr_type):
         # Re-read: the detach removed every copy of each duplicated address,
         # so those addresses are now missing and the loop below re-attaches
         # each exactly once.
