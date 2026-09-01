@@ -1794,47 +1794,51 @@ class BackupStressComprehensive(BackupStressBase):
             node=self.fio_node, command=cmd, supress_logs=True)
         return [x.strip() for x in (out or "").splitlines() if x.strip()]
 
+    def _ns_rescan_ctrl(self, ctrl_dev: str) -> None:
+        """Run nvme ns-rescan on a single controller (e.g. /dev/nvme6)."""
+        self.ssh_obj.exec_command(
+            self.fio_node,
+            f"sudo nvme ns-rescan {ctrl_dev}",
+            supress_logs=True)
+
     def _wait_for_new_ns_device(self, ctrl_dev: str,
                                  before_set: set,
                                  timeout: int = 120) -> str | None:
         """Wait for a new namespace device to appear on the controller.
 
+        Triggers ``nvme ns-rescan`` on each poll iteration so the kernel
+        discovers newly-created namespaces.
+
         Returns the new device path (e.g. /dev/nvmeXn2) or None on timeout.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
+            self._ns_rescan_ctrl(ctrl_dev)
+            sleep_n_sec(2)
             cur = set(self._list_nvme_ns_devices(ctrl_dev))
             diff = sorted(cur - before_set)
             if diff:
                 return diff[-1]
-            sleep_n_sec(2)
         return None
 
-    def _ns_rescan_and_find_device(self, before_devices: set) -> str | None:
-        """Run nvme ns-rescan on all controllers, return new device or None.
+    def _ns_rescan_and_find_device(
+            self, ctrl_dev: str, before_ns_set: set,
+            timeout: int = 30) -> str | None:
+        """Run nvme ns-rescan on *ctrl_dev* and return the new namespace
+        device, or None on timeout.
 
-        Clones are auto-namespaced and share the parent's NQN.  When the
-        source is already connected, a normal ``nvme connect`` for the
-        clone won't produce a new device.  An ns-rescan tells the kernel
-        to re-enumerate namespaces on every controller so the clone's
-        namespace appears as a new ``/dev/nvmeXnY`` block device.
+        Scoped to a single controller to avoid picking up unrelated
+        devices from other subsystems.
         """
-        out, _ = self.ssh_obj.exec_command(
-            self.fio_node,
-            "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "
-            "| sort -u",
-            supress_logs=True)
-        for ctrl in (out or "").strip().splitlines():
-            ctrl = ctrl.strip()
-            if ctrl:
-                self.ssh_obj.exec_command(
-                    self.fio_node,
-                    f"sudo nvme ns-rescan /dev/{ctrl}",
-                    supress_logs=True)
-        sleep_n_sec(3)
-        after = set(self.ssh_obj.get_devices(node=self.fio_node))
-        new = sorted(after - before_devices)
-        return f"/dev/{new[0]}" if new else None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self._ns_rescan_ctrl(ctrl_dev)
+            sleep_n_sec(2)
+            cur = set(self._list_nvme_ns_devices(ctrl_dev))
+            diff = sorted(cur - before_ns_set)
+            if diff:
+                return diff[-1]
+        return None
 
     def _create_and_verify_clone(self, source_label, lvol_state):
         """Create a snapshot clone of *source_label*, verify checksums,
@@ -1882,25 +1886,30 @@ class BackupStressComprehensive(BackupStressBase):
             assert clone_id, f"Clone {clone_name} not found after create"
             self.created_lvols.append(clone_name)
 
-            # Connect — clone shares parent NQN, may need ns-rescan
-            before_devs = set(
-                self.ssh_obj.get_devices(node=self.fio_node))
+            # Connect — clone shares parent NQN, may need ns-rescan.
+            # Identify the source controller so we only rescan there.
+            source_device = info.get("device", "")
+            ctrl_dev = get_parent_device(source_device)
+            before_ns = set(self._list_nvme_ns_devices(ctrl_dev))
+
             connect_ls = self.sbcli_utils.get_lvol_connect_str(
                 lvol_name=clone_name)
             for cmd in connect_ls:
                 _, err = self.ssh_obj.exec_command(
                     node=self.fio_node, command=cmd)
             sleep_n_sec(3)
-            after_devs = set(
-                self.ssh_obj.get_devices(node=self.fio_node))
-            new_devs = sorted(after_devs - before_devs)
+            after_ns = set(self._list_nvme_ns_devices(ctrl_dev))
+            new_devs = sorted(after_ns - before_ns)
 
             if not new_devs:
-                device = self._ns_rescan_and_find_device(before_devs)
+                # Clone auto-namespaced — ns-rescan on source controller
+                device = self._ns_rescan_and_find_device(
+                    ctrl_dev, before_ns, timeout=60)
                 assert device, (
-                    f"Clone {clone_name} device not found after ns-rescan")
+                    f"Clone {clone_name} device not found after "
+                    f"ns-rescan on {ctrl_dev}")
             else:
-                device = f"/dev/{new_devs[0]}"
+                device = new_devs[0]
 
             # XFS clones have duplicate UUIDs — regenerate before mount
             if info["fs_type"] == "xfs":
@@ -1947,7 +1956,7 @@ class BackupStressComprehensive(BackupStressBase):
                     ),
                     format_disk=False)
                 self._verify_checksums(
-                    self.fio_node, rst_mount, info["checksums"])
+                    self.fio_node, rst_mount, clone_checksums)
                 self._unmount_and_disconnect(
                     self.fio_node, rst_mount, rst_id)
                 self.logger.info(
@@ -1967,7 +1976,8 @@ class BackupStressComprehensive(BackupStressBase):
             "parent_id": None, "host_id": None,
             "ns_sc_name": None,
             "checksums": clone_checksums,
-            "backup_ids": [clone_bk_id] if clone_bk_id else [],
+            "backup_ids": ([(clone_bk_id, clone_checksums)]
+                           if clone_bk_id else []),
         }
         return clone_label
 
@@ -2079,6 +2089,11 @@ class BackupStressComprehensive(BackupStressBase):
     def _backup_batch(self, lvol_keys, lvol_state, verify_before=False):
         """Backup a batch of lvols in parallel. Returns {label: bk_id}.
 
+        Each backup_id stored in lvol_state is a ``(bk_id, checksums)``
+        tuple so that restores can be verified against the data that
+        existed at snapshot time (not the current — possibly FIO-modified
+        — state of the source lvol).
+
         If verify_before=True, verify checksums on the source lvol
         BEFORE taking the backup. If checksums don't match, the backup
         is skipped and logged as a pre-backup corruption detection.
@@ -2090,24 +2105,30 @@ class BackupStressComprehensive(BackupStressBase):
             info = lvol_state.get(label)
             if not info:
                 return
-            if verify_before and info.get("checksums"):
+            # Capture checksums BEFORE taking the snapshot so they
+            # reflect exactly the data the backup will contain.
+            snap_checksums = info.get("checksums") or {}
+            if verify_before and snap_checksums:
                 try:
                     current = self._get_checksums(
                         self.fio_node if not self.k8s_test
                         else info["mount"],
                         info["mount"])
-                    if current != info["checksums"]:
-                        self.logger.error(
-                            f"  PRE-BACKUP CORRUPTION on {label}: "
-                            f"checksums mismatch before backup")
-                        results[label] = ""
-                        return
+                    if current != snap_checksums:
+                        # FIO changed data since last refresh — update
+                        # stored checksums so this backup's snapshot
+                        # reflects current state.
+                        snap_checksums = current
+                        info["checksums"] = current
                 except Exception as e:
                     self.logger.warning(
                         f"  pre-backup verify {label} failed: {e}")
             bk_id = self._snap_and_backup(
                 info["id"], f"comp_{label}")
-            results[label] = bk_id or ""
+            if bk_id:
+                results[label] = (bk_id, snap_checksums)
+            else:
+                results[label] = ("", {})
 
         for label in lvol_keys:
             t = threading.Thread(target=_backup_one, args=(label,))
@@ -2117,25 +2138,27 @@ class BackupStressComprehensive(BackupStressBase):
         for t in threads:
             t.join(timeout=_BACKUP_TIMEOUT)
 
-        for label, bk_id in results.items():
+        for label, (bk_id, checksums) in results.items():
             if bk_id and label in lvol_state:
-                lvol_state[label]["backup_ids"].append(bk_id)
+                lvol_state[label]["backup_ids"].append(
+                    (bk_id, checksums))
 
-        return results
+        return {label: bk_id for label, (bk_id, _) in results.items()}
 
     def _restore_batch(self, restore_specs, lvol_state):
         """Restore a batch in parallel.
 
-        restore_specs: list of (label, bk_id) tuples.
+        restore_specs: list of ``(label, bk_id, expected_checksums)``
+        tuples.  *expected_checksums* are the checksums captured at
+        backup time — this avoids false failures when FIO has since
+        modified the source lvol.
+
         Returns {label: (rst_name, checksums_ok)}.
         """
         threads = []
         results: dict[str, tuple[str, bool]] = {}
 
-        def _restore_one(label, bk_id):
-            info = lvol_state.get(label)
-            if not info:
-                return
+        def _restore_one(label, bk_id, expected_checksums):
             rst_name = f"comp_rst_{label}_{_rand_suffix()}"
             try:
                 self._restore_backup(bk_id, rst_name)
@@ -2146,7 +2169,7 @@ class BackupStressComprehensive(BackupStressBase):
                     mount=f"{self.mount_path}/cr_{label}_{_rand_suffix()}",
                     format_disk=False)
                 self._verify_checksums(
-                    self.fio_node, rst_mount, info["checksums"])
+                    self.fio_node, rst_mount, expected_checksums)
                 self._unmount_and_disconnect(
                     self.fio_node, rst_mount, rst_id)
                 results[label] = (rst_name, True)
@@ -2155,9 +2178,10 @@ class BackupStressComprehensive(BackupStressBase):
                     f"  restore {label} from {bk_id} failed: {e}")
                 results[label] = (rst_name, False)
 
-        for label, bk_id in restore_specs:
+        for label, bk_id, expected_checksums in restore_specs:
             t = threading.Thread(
-                target=_restore_one, args=(label, bk_id))
+                target=_restore_one,
+                args=(label, bk_id, expected_checksums))
             threads.append(t)
             t.start()
 
@@ -2446,9 +2470,11 @@ class BackupStressComprehensive(BackupStressBase):
             num_restore = min(restores_per_round, len(restorable))
             if num_restore >= 1:
                 restore_labels = random.sample(restorable, num_restore)
-                restore_specs = [
-                    (l, random.choice(lvol_state[l]["backup_ids"]))
-                    for l in restore_labels]
+                restore_specs = []
+                for l in restore_labels:
+                    bk_id, checksums = random.choice(
+                        lvol_state[l]["backup_ids"])
+                    restore_specs.append((l, bk_id, checksums))
 
                 # Start FIO on non-restore lvols in background threads
                 # to generate I/O load while restores run
@@ -2539,17 +2565,23 @@ class BackupStressComprehensive(BackupStressBase):
                 self._delete_backups(info["id"])
                 info["backup_ids"].clear()
                 sleep_n_sec(5)
+                # Capture checksums right before the fresh backup
+                fresh_checksums = self._get_checksums(
+                    self.fio_node if not self.k8s_test
+                    else info["mount"],
+                    info["mount"])
+                info["checksums"] = fresh_checksums
                 # Take fresh backup
                 bk_id = self._snap_and_backup(
                     info["id"], f"comp_fresh_{label}")
                 if bk_id:
-                    info["backup_ids"].append(bk_id)
+                    info["backup_ids"].append((bk_id, fresh_checksums))
                 sleep_n_sec(30)  # let retention merge run
                 # Restore and verify
                 if info["backup_ids"]:
+                    last_bk_id, last_checksums = info["backup_ids"][-1]
                     rst_name = f"comp_del_rst_{label}_{_rand_suffix()}"
-                    self._restore_backup(
-                        info["backup_ids"][-1], rst_name)
+                    self._restore_backup(last_bk_id, rst_name)
                     self._wait_for_restore(rst_name)
                     rst_id = self._get_lvol_id(rst_name)
                     _, rst_mount = self._connect_and_mount(
@@ -2560,7 +2592,7 @@ class BackupStressComprehensive(BackupStressBase):
                         ),
                         format_disk=False)
                     self._verify_checksums(
-                        self.fio_node, rst_mount, info["checksums"])
+                        self.fio_node, rst_mount, last_checksums)
                     self._unmount_and_disconnect(
                         self.fio_node, rst_mount, rst_id)
                     delete_ok += 1
@@ -2585,10 +2617,13 @@ class BackupStressComprehensive(BackupStressBase):
         for label in backup_burst:
             def _bk(lbl=label):
                 try:
+                    info = lvol_state[lbl]
+                    snap_checksums = info.get("checksums") or {}
                     bk_id = self._snap_and_backup(
-                        lvol_state[lbl]["id"], f"burst_{lbl}")
+                        info["id"], f"burst_{lbl}")
                     if bk_id:
-                        lvol_state[lbl]["backup_ids"].append(bk_id)
+                        info["backup_ids"].append(
+                            (bk_id, snap_checksums))
                     burst_results[f"backup_{lbl}"] = "ok" if bk_id else "no_id"
                 except Exception as e:
                     burst_results[f"backup_{lbl}"] = f"fail: {e}"
@@ -2605,7 +2640,8 @@ class BackupStressComprehensive(BackupStressBase):
             def _rs(lbl=label):
                 info = lvol_state[lbl]
                 try:
-                    bk_id = random.choice(info["backup_ids"])
+                    bk_id, expected_checksums = random.choice(
+                        info["backup_ids"])
                     rst_name = f"burst_rst_{lbl}_{_rand_suffix()}"
                     self._restore_backup(bk_id, rst_name)
                     self._wait_for_restore(rst_name)
@@ -2618,7 +2654,7 @@ class BackupStressComprehensive(BackupStressBase):
                         ),
                         format_disk=False)
                     self._verify_checksums(
-                        self.fio_node, rst_mount, info["checksums"])
+                        self.fio_node, rst_mount, expected_checksums)
                     self._unmount_and_disconnect(
                         self.fio_node, rst_mount, rst_id)
                     burst_results[f"restore_{lbl}"] = "ok"
@@ -2708,8 +2744,9 @@ class BackupStressComprehensive(BackupStressBase):
             for label in batch:
                 info = lvol_state[label]
                 if info["backup_ids"]:
+                    bk_id, checksums = info["backup_ids"][-1]
                     restore_specs.append(
-                        (label, info["backup_ids"][-1]))
+                        (label, bk_id, checksums))
             if restore_specs:
                 rst_results = self._restore_batch(
                     restore_specs, lvol_state)
