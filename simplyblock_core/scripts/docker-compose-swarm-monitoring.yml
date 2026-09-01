@@ -203,7 +203,14 @@ services:
       - ./objstore.yml:/etc/thanos/objstore.yml
       - thanos_compactor_data:/data
     deploy:
-      mode: global
+      # Thanos requires a SINGLE compactor per bucket. `mode: global` ran one
+      # per manager -- three concurrent compactors rewriting the same blocks,
+      # which Thanos documents as a data-corruption risk. It matters more now
+      # that --deduplication.replica-label makes them perform vertical
+      # compaction. Store and query stay global (read-only, safe to scale);
+      # only the compactor is a singleton.
+      mode: replicated
+      replicas: 1
       placement:
         constraints: [node.role == manager]
     networks:
