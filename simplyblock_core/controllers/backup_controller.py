@@ -17,7 +17,7 @@ from simplyblock_core.kms import (
     lvol_dek_path, pool_kek_name,
 )
 from simplyblock_core.utils.secrets import unwrap_secret
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import InsufficientCapacityError, PreconditionError
 from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger()
@@ -487,6 +487,8 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
         fabric="tcp",
     )
     if error or not lvol_id:
+        if lvol_controller.is_capacity_error(error):
+            raise InsufficientCapacityError(str(error))
         raise RuntimeError(f"Failed to create restore volume: {error}")
 
     # Mark volume as restoring

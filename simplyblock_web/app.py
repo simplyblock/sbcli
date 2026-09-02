@@ -18,7 +18,7 @@ from simplyblock_web.api import v1, v2
 from simplyblock_web.settings import Settings as WebSettings
 from simplyblock_core import constants, utils as core_utils
 from simplyblock_core.settings import Settings
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import InsufficientCapacityError, PreconditionError
 
 logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
@@ -78,22 +78,46 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 app: FastAPI = FastAPI()
 Instrumentator().instrument(app).expose(app, endpoint="/_meta/metrics")
 
-@app.exception_handler(PreconditionError)
-async def precondition_handler(request: Request, exc: PreconditionError):
-    logger.exception("Preciondition checks failed", exc_info=exc)
-    return JSONResponse(status_code=400, content={
-        "error": "Preconditions are not met",
-        "detail": str(exc),
-    })
+
+def register_exception_handlers(app: FastAPI) -> None:
+    """Map the core exception types onto their HTTP responses.
+
+    Kept as a function so tests can build an app that answers the way the real
+    one does. An endpoint's status code is part of its contract, and a test app
+    without these handlers cannot observe it.
+    """
+
+    @app.exception_handler(PreconditionError)
+    async def precondition_handler(request: Request, exc: PreconditionError):
+        logger.exception("Precondition checks failed", exc_info=exc)
+        return JSONResponse(status_code=400, content={
+            "error": "Preconditions are not met",
+            "detail": str(exc),
+        })
+
+    @app.exception_handler(InsufficientCapacityError)
+    async def insufficient_capacity_handler(request: Request, exc: InsufficientCapacityError):
+        # Deliberately 409 and not 507: 507 is the more precise name for the
+        # condition, but it is a 5xx, and generic retry policies retry those. A
+        # refusal that no retry can change has to land in the 4xx class to be
+        # read correctly by a client that has not special-cased it.
+        logger.warning("Cluster has no capacity for the requested volume: %s", exc)
+        return JSONResponse(status_code=409, content={
+            "error": "Insufficient capacity",
+            "code": "insufficient_capacity",
+            "detail": str(exc),
+        })
+
+    @app.exception_handler(RuntimeError)
+    async def runtime_error_handler(request: Request, exc: RuntimeError):
+        logger.exception("Unexpected error while processing request", exc_info=exc)
+        return JSONResponse(status_code=500, content={
+            "status": "An error occured while processing the request",
+            "detail": str(exc),
+        })
 
 
-@app.exception_handler(RuntimeError)
-async def runtime_error_handler(request: Request, exc: RuntimeError):
-    logger.exception("Unexcpected error while processing request", exc_info=exc)
-    return JSONResponse(status_code=500, content={
-        "status": "An error occured while processing the request",
-        "detail": str(exc),
-    })
+register_exception_handlers(app)
 
 
 _web_settings = WebSettings()

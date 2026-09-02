@@ -30,6 +30,28 @@ from simplyblock_core.prom_client import PromClient
 logger = utils.get_logger(__name__)
 
 
+#: The cluster-wide placement refusal: no node can hold another object.
+ERR_NO_NODE_WITH_CAPACITY = "No nodes found with enough resources to create the LVol"
+
+#: The per-lvstore refusal, raised when a pinned node is already at its object cap.
+#: A prefix rather than a whole message: the rest names the node and the counts.
+ERR_OBJECT_LIMIT_PREFIX = "Object limit reached on lvstore"
+
+
+def is_capacity_error(error) -> bool:
+    """True when ``error`` is one of the placement refusals above.
+
+    Callers converting ``(id, error)`` returns into exceptions use this to tell a
+    cluster that has no room from one that genuinely failed. Both refusals are
+    matched through the constants they are built from, so a reworded message
+    cannot silently stop being recognized.
+    """
+    if not error:
+        return False
+    error = str(error)
+    return ERR_NO_NODE_WITH_CAPACITY in error or ERR_OBJECT_LIMIT_PREFIX in error
+
+
 def _create_crypto_lvol(rpc_client, lvol, cluster):
     name = lvol.crypto_bdev
     base_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
@@ -404,7 +426,7 @@ def check_lvstore_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
                      if s.lvol and s.lvol.node_id == node_id and not s.deleted)
     total = lvol_count + snap_count
     if total + new_objects > limit:
-        return (f"Object limit reached on lvstore of node {node_id}: {total} "
+        return (f"{ERR_OBJECT_LIMIT_PREFIX} of node {node_id}: {total} "
                 f"objects (lvols/clones: {lvol_count}, snapshots: "
                 f"{snap_count}); the hard limit is {limit} per lvstore")
     return None
@@ -628,7 +650,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced))
         if not nodes:
-            return False, "No nodes found with enough resources to create the LVol"
+            return False, ERR_NO_NODE_WITH_CAPACITY
         host_node = nodes[0]
 
     limit_error = check_lvstore_object_limit(host_node, all_lvols, all_snaps)
@@ -4098,7 +4120,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         # get new source node from the new cluster
         nodes = _get_next_3_nodes(new_source_cluster.get_id(), lvol.size)
         if not nodes:
-            return False, "No nodes found with enough resources to create the LVol"
+            return False, ERR_NO_NODE_WITH_CAPACITY
         source_node = nodes[0]
 
     if not source_node:
