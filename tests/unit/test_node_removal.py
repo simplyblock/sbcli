@@ -3033,5 +3033,130 @@ class TestVerifyReplicaStacks(unittest.TestCase):
         self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
 
 
+# ---------------------------------------------------------------------------
+# jc_remove_jm — hand the JM back to JC before deleting its bdev.
+#
+# JC holds an open descriptor + IO channel on the JM bdev. Deleting the bdev
+# first leaves JC naming something that no longer exists (observed live
+# 2026-09-02: a peer's JC member list carried a remote_jm_* absent from that
+# node's own bdev_get_bdevs). jc_remove_jm closes JC's side, and its -22 is
+# positive proof that some jm_vuid still references the JM -- including one the
+# control plane cannot enumerate, because a vuid whose primary was already
+# removed appears in no `decisions` entry and under no back-reference.
+# ---------------------------------------------------------------------------
+class TestJcRemoveJmBeforeBdevDelete(unittest.TestCase):
+
+    def _rpc(self, jc_remove_jm):
+        rpc = MagicMock()
+        rpc.jc_remove_jm = jc_remove_jm
+        rpc.jc_replace_jm = MagicMock(return_value=True)
+        rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
+        rpc.get_bdevs = MagicMock(return_value=[])
+        return rpc
+
+    def _run(self, jc_remove_jm):
+        """Drive _decommission_node_jm with one peer that needs its JM replaced."""
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=9, lvstore="LVS_9", failure_domain=1)
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
+        spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41", failure_domain=3)
+        peer.jm_ids = ["jm-dead", "jm-peer"]
+        removed.jm_ids = ["jm-dead"]
+        spare.jm_ids = ["jm-spare"]
+        rd = RemoteJMDevice()
+        rd.uuid = "jm-dead"
+        rd.remote_bdev = "remote_jm_deadn1"
+        peer.remote_jm_devices = [rd]
+        rpc = self._rpc(jc_remove_jm)
+        peer.rpc_client = MagicMock(return_value=rpc)
+
+        db = FakeDB(cl, [removed, peer, spare])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                  "jm-peer": peer.jm_device,
+                                  "jm-spare": spare.jm_device}.get(i))
+        new_rd = RemoteJMDevice()
+        new_rd.uuid = "jm-spare"
+        new_rd.remote_bdev = "remote_jm_sparen1"
+        # Faithful to _connect_to_remote_jm_devs' delta mode: it carries the
+        # existing different-owner entries over untouched and adds the new one.
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=["jm-spare"]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[rd, new_rd]):
+            storage_node_ops._decommission_node_jm(removed)
+        return rpc, peer
+
+    def test_jc_remove_jm_is_called_before_the_bdev_is_deleted(self):
+        calls = []
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=lambda n: calls.append(("remove", n)) or True))
+        rpc.bdev_nvme_detach_controller.side_effect = None
+        self.assertEqual(rpc.jc_remove_jm.call_args[0][0], "remote_jm_deadn1")
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+
+    def test_minus_22_leaves_the_bdev_in_place(self):
+        # The whole point: a jm_vuid we could not enumerate still references
+        # this JM. Deleting the bdev now is what corrupts JC's view.
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCRemoteError("in use", -22)))
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+        self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices],
+                      "the bookkeeping entry must survive too -- the bdev is still there")
+
+    def test_other_jc_errors_also_leave_the_bdev_in_place(self):
+        for code in (-3, -6, -10, -12, -13, -21):
+            with self.subTest(code=code):
+                rpc, _peer = self._run(
+                    jc_remove_jm=MagicMock(side_effect=RPCRemoteError("nope", code)))
+                rpc.bdev_nvme_detach_controller.assert_not_called()
+
+    def test_a_raised_exception_leaves_the_bdev_in_place(self):
+        rpc, _peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCConnectionError("unreachable")))
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+
+    def test_unsupported_build_keeps_the_previous_behaviour(self):
+        # spdk:main-latest as of 2026-09-02 has no jc_remove_jm. Degrade to the
+        # old delete rather than stranding every superseded controller forever.
+        from simplyblock_core.rpc_client import RPC_UNSUPPORTED
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=RPC_UNSUPPORTED))
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        uuids = [rd.uuid for rd in peer.remote_jm_devices]
+        self.assertNotIn("jm-dead", uuids, "the dead JM's entry must be dropped")
+        self.assertIn("jm-spare", uuids, "the replacement's entry must survive")
+
+
+class TestJcRemoveJmClient(unittest.TestCase):
+    """The client wrapper's contract: success / unsupported / coded error."""
+
+    def _client(self, response):
+        from simplyblock_core import rpc_client as rc
+        c = rc.RPCClient.__new__(rc.RPCClient)
+        c._request2 = MagicMock(return_value=response)  # type: ignore[method-assign]
+        return c
+
+    def test_success_returns_the_result(self):
+        self.assertTrue(self._client((True, None)).jc_remove_jm("remote_jm_xn1"))
+
+    def test_method_not_found_returns_the_unsupported_sentinel(self):
+        from simplyblock_core.rpc_client import RPC_UNSUPPORTED
+        c = self._client((None, {"code": -32601, "message": "Method not found"}))
+        self.assertEqual(c.jc_remove_jm("remote_jm_xn1"), RPC_UNSUPPORTED)
+
+    def test_still_in_use_raises_with_code_22(self):
+        c = self._client((None, {"code": -22, "message": "still in use"}))
+        with self.assertRaises(RPCRemoteError) as ctx:
+            c.jc_remove_jm("remote_jm_xn1")
+        self.assertEqual(ctx.exception.code, -22)
+
+    def test_other_errors_raise_with_their_code(self):
+        c = self._client((None, {"code": -12, "message": "another removal in progress"}))
+        with self.assertRaises(RPCRemoteError) as ctx:
+            c.jc_remove_jm("remote_jm_xn1")
+        self.assertEqual(ctx.exception.code, -12)
+
+
 if __name__ == "__main__":
     unittest.main()
