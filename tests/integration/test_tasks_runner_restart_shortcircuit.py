@@ -84,7 +84,7 @@ def _load_runner_module():
             if os.path.basename(frame.f_code.co_filename) == "tasks_runner_restart.py":
                 raise SystemExit("test-bailout")
             frame = frame.f_back
-        return None
+        # falls through: implicit None == a no-op sleep for every other caller
 
     with patch("simplyblock_core.db_controller.DBController") as mock_db_cls, \
          patch("time.sleep", side_effect=_break):
