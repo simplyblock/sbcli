@@ -1586,6 +1586,15 @@ commands:
             dest: force
             type: bool
             action: store_true
+      - name: switch-write-protection
+        help: "Activate v2 distrib write protection cluster-wide."
+        usage: "Needed once after upgrading a cluster from a release without v2; new clusters are created on v2 already. Sends the runtime distr_write_protection_v2 RPC to every ONLINE storage node -- the only way an already-created distrib gains v2, since a create parameter cannot retrofit an existing bdev. Only if every online node succeeds is the generation recorded, on the cluster row and on every node's lvstore_stack distrib entries, so later (re-)creations use the v2 parameter. Partial success records nothing, so a retry is a plain re-run. Offline nodes are not an error: they have no running bdev to migrate and come back on v2 at their next restart."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: change-name
         help: Assigns or changes a name to a cluster
         arguments:
