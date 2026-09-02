@@ -151,6 +151,17 @@ class _ProxyHandle:
         self.error = exc
         self._ready.set()
 
+    def settled_within(self, timeout):
+        """True if the thread has already bound (or failed) within timeout.
+
+        Event.wait, deliberately, not time.sleep: another module in this test
+        session patches time.sleep globally, so any duration measured against
+        a sleep is meaningless here. That is what made the first version of
+        the gate assertion below read 7ms for a 1s delay in CI run
+        33671036716 -- the delay simply never happened.
+        """
+        return self._ready.wait(timeout)
+
     def wait(self, timeout=30):
         """Bound port, or an assertion naming the actual problem."""
         if not self._ready.wait(timeout):
@@ -390,14 +401,15 @@ class TestProxyReadinessGate(unittest.TestCase):
         """Proxy should not accept HTTP requests until SPDK responds."""
         tmpdir = tempfile.mkdtemp()
         sock_path = os.path.join(tmpdir, "spdk_delayed.sock")
-        spdk_delay = 1.0
 
         ready_time = {"t": None}
-        started_at = time.monotonic()
+        # SPDK appears when this test says so, rather than after a sleep a
+        # sibling test module may have patched away.
+        release_spdk = threading.Event()
 
-        # Start SPDK server with a 1-second delay before it's available
+        # Start the SPDK server only once release_spdk fires.
         def delayed_spdk():
-            time.sleep(spdk_delay)
+            release_spdk.wait(30)
             server = _start_mock_spdk(sock_path)
             ready_time["t"] = time.monotonic()
             return server
@@ -408,10 +420,22 @@ class TestProxyReadinessGate(unittest.TestCase):
         _, stop_event, mod_ref, handle = _start_proxy(
             sock_path, 0, max_concurrent=4, timeout=5)
 
-        # Blocks until the proxy binds, or fails with the real reason.
+        # The gate itself: with SPDK absent, the proxy must not open its HTTP
+        # port. This is the assertion the test was named for and never made.
+        self.assertFalse(
+            handle.settled_within(0.5),
+            "proxy bound its HTTP port while SPDK was still absent: the "
+            "readiness gate did not hold")
+
+        # Now let SPDK up; the proxy should follow.
+        release_spdk.set()
         http_port = handle.wait(timeout=30)
 
-        # Wait for proxy to come up
+        # Wait for the bound proxy to serve. Paced with Event.wait rather
+        # than time.sleep: a sibling module patches time.sleep globally, which
+        # would collapse all 40 attempts into microseconds and turn a slow
+        # start into a spurious "Proxy should eventually come up".
+        pacer = threading.Event()
         proxy_up = False
         for _ in range(40):
             try:
@@ -426,22 +450,12 @@ class TestProxyReadinessGate(unittest.TestCase):
                     break
             except requests.ConnectionError:
                 pass
-            time.sleep(0.2)
+            pacer.wait(0.2)
 
         stop_event.set()
 
         self.assertTrue(proxy_up, "Proxy should eventually come up")
-
-        # The actual gate: the HTTP port must not have opened while SPDK was
-        # still absent. Asserted against the known delay rather than against
-        # ready_time directly -- the mock's socket exists a hair before
-        # delayed_spdk() records the timestamp, so comparing the two is
-        # inherently racy while "not before 1s had passed" is not.
         self.assertIsNotNone(ready_time["t"], "mock SPDK never came up")
-        self.assertGreaterEqual(
-            handle.bind_time - started_at, spdk_delay,
-            "proxy bound its HTTP port before SPDK was ready: the readiness "
-            "gate did not hold")
         # Proxy should have waited for SPDK: verify no zombie sockets
         self.assertEqual(len(mod_ref.unix_sockets), 0)
 
