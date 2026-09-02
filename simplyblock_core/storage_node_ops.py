@@ -11831,6 +11831,14 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     write_protection = False
     if ndcs > 1:
         write_protection = True
+    # Which generation of write protection to create these distribs with. New
+    # clusters are v2 from the start; a cluster upgraded from a release without
+    # v2 stays on v1 until `sbctl cluster switch-write-protection` has run the
+    # runtime RPC on every node (see cluster.write_protection_v2). Persisted on
+    # the stack entry like the other create flags, and re-normalised against
+    # the cluster on every replay by apply_write_protection_mode.
+    wp_key = ("write_protection_v2" if cluster.write_protection_v2
+              else "write_protection")
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
         while distrib_vuid in distrib_vuids:
@@ -11847,7 +11855,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
             "block_size": distr_bs,
             "chunk_size": distr_chunk_bs,
             "pba_page_size": distr_page_size,
-            "write_protection": write_protection,
+            wp_key: write_protection,
         }
         # Per-chunk placement is a cluster-wide opt-in. Persist it on each
         # stack entry so subsequent restarts re-create the bdev with the
@@ -12044,6 +12052,32 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
 _DISTR_RECREATE_RETRY_DELAY_SEC = 5
 
 
+def apply_write_protection_mode(params, use_v2):
+    """Normalise the write-protection generation in one distrib param dict.
+
+    A distrib carries write protection under one of two mutually exclusive
+    keys, ``write_protection`` (v1) or ``write_protection_v2``. Which one is
+    correct is a property of the CLUSTER, not of the stored params: the params
+    are persisted on the node's lvstore_stack at create time and replayed at
+    every restart, so a stack written before the cluster switched to v2 still
+    says v1 -- and replaying it verbatim would re-create the bdev on the old
+    generation while every other distrib in the cluster is on the new one.
+
+    So the stored value answers only "is write protection on at all?" (it is
+    off for ndcs == 1) and the cluster flag answers "under which key?".
+
+    Mutates and returns ``params``.
+    """
+    enabled = bool(params.get("write_protection") or
+                   params.get("write_protection_v2"))
+    params.pop("write_protection", None)
+    params.pop("write_protection_v2", None)
+    if enabled:
+        params["write_protection_v2" if use_v2 else "write_protection"] = True
+    return params
+
+
+
 def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None):
     # Per-distrib creation outcome, keyed by bdev name. Threads write their own
     # key (distinct keys -> GIL-safe), the main loop reads after join.
@@ -12124,6 +12158,10 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
 
             params['full_page_unmap'] = cluster.full_page_unmap
+            # The stack may have been written before this cluster switched
+            # write-protection generation; replay it under whichever key the
+            # cluster is on now, never the one that happens to be stored.
+            apply_write_protection_mode(params, cluster.write_protection_v2)
             t = threading.Thread(target=_create_distr, args=(snode, name, params,))
             thread_list.append(t)
             t.start()
