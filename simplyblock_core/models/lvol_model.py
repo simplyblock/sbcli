@@ -50,6 +50,12 @@ class LVol(BaseModel):
     nodes: List[str] = default_factory(list)
     nqn: str = ""
     ns_id: int = 1
+    # The UUID the NVMe namespace advertises on the wire when it differs from
+    # the record's uuid (migration/fail-back clones inherit another volume's
+    # identity so the client's multipath head keeps its paths). Empty means
+    # the namespace carries the record's own uuid. connect_lvol reports it as
+    # target_lvol_id so the CSI globs /dev/disk/by-id/nvme-uuid.<this>.
+    ns_uuid: str = ""
     max_namespace_per_subsys: int = 1
     subsys_port: int = 9090
     # Node ids whose sync delete already completed inline in the API delete

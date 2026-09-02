@@ -461,6 +461,92 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     assert ("S", False) in added
 
 
+def test_failback_clone_keeps_the_superseded_originals_wire_identity(monkeypatch):
+    """Run 2026-09-02 16:00: the fail-back clone was re-added at the preserved
+    nsid with the DR lvol's uuid and nguid (deep-copied), but the client's
+    multipath head for that nsid was built from the ORIGINAL's ids — the
+    kernel rejected every new path ("IDs don't match for shared namespace N")
+    and, on the shared subsystem, the eviction at prepare_cutover had already
+    removed the head's only live path: XFS shut down on running pods. The
+    clone must advertise the superseded original's uuid AND nguid, the exact
+    identity _swap_failback_lvol_uuid restores on the record after cutover."""
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    added = []
+    monkeypatch.setattr(lc, "_evict_stale_namespace", lambda lvol, node, **kw: None)
+    monkeypatch.setattr(lc.utils, "get_random_vuid", lambda *a, **kw: 999)
+
+    def _fake_add_lvol_on_node(lvol, node, is_primary=True, ns_uuid=None, **kw):
+        added.append((node.get_id(), ns_uuid, lvol.guid))
+        return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
+
+    monkeypatch.setattr(lc, "add_lvol_on_node", _fake_add_lvol_on_node)
+
+    class _Original:
+        uuid = "ORIG_ID"
+        guid = "ORIG_NGUID"
+
+    monkeypatch.setattr(lc, "_superseded_original", lambda *a, **kw: _Original())
+
+    class _N:
+        def __init__(self, nid, secondary=""):
+            self._id, self.secondary_node_id, self.tertiary_node_id = nid, secondary, ""
+            self.lvstore = "LVS_1"
+            self.status = lc.StorageNode.STATUS_ONLINE
+            self.cluster_id = "CL_tgt"
+
+        def get_lvol_subsys_port(self, lvstore):
+            return 4420
+
+        def get_id(self):
+            return self._id
+
+    primary = _N("P", secondary="S")
+    peer = _N("S")
+
+    class _DB:
+        kv_store = None
+
+        def get_storage_node_by_id(self, nid):
+            return {"P": primary, "S": peer}[nid]
+
+        def release_lvol_ns_slot(self, lvol):
+            pass
+
+        def get_lvols(self):
+            return []
+
+    class _Lvol:
+        uuid = "DR_ID"; nqn = "nqn.test:lvol:SHARED"; ns_id = 3
+        guid = "DR_NGUID"
+        namespace = ""
+        max_namespace_per_subsys = 10
+        lvol_bdev = "LVOL_28"; crypto_bdev = ""
+
+        def __deepcopy__(self, memo):
+            c = _Lvol(); c.__dict__.update(self.__dict__); return c
+
+        def write_to_db(self, kv=None):
+            pass
+
+    class _Snap:
+        cluster_id = "C1"; snap_bdev = "LVS_1/SNAP_1"
+
+        def get_id(self):
+            return "SNAP1"
+
+    new_lvol, error = lc._create_target_lvol_clone(
+        _DB(), _Lvol(), primary, "POOL", _Snap(), for_migration=True)
+    assert error is None
+    # Every node's add_ns must carry the original's identity, never the DR's.
+    assert [(nid, ns) for nid, ns, _ in added] == [("P", "ORIG_ID"), ("S", "ORIG_ID")]
+    assert all(guid == "ORIG_NGUID" for _, _, guid in added)
+    # The wire identity is persisted so connect_lvol can report it.
+    assert new_lvol.ns_uuid == "ORIG_ID"
+    # And the clone still got its own bdev name (adoption guard).
+    assert new_lvol.lvol_bdev == "LVOL_999"
+
+
 def test_interrupted_landing_volume_is_adopted_or_cleared():
     """Case 6, run 20260824_144226: a node outage mid-create left a REP_*
     landing volume whose id was never stored on the task; every retry then

@@ -2799,26 +2799,37 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 entry.target_lvol_id = clone_id
         out.extend(entries)
 
-    # Device-lookup identity for the FAIL-BACK shape. The clone's wire NSUUID
-    # is inherited from the migration SOURCE (the kernel merges multipath
-    # paths only on matching NSUUIDs), so the client's /dev/disk/by-id links
-    # carry the source volume's id — for clients that rode through the
-    # cutover AND for fresh connects, since the NSUUID is baked into the
-    # namespace. After a forward migration the requested volume is the
-    # relationship's source end, the loop above redirects to the target and
-    # target_lvol_id points at the right device. After a fail-back the UUID
-    # swap makes the requested volume the TARGET end under its original id,
-    # clone_id == uuid for every entry, and nothing reports the source id the
-    # device actually advertises — the CSI then cannot find the block device.
-    # Emit the other end here; only its ID is needed, so a source record that
-    # was since deleted still resolves.
+    # Device-lookup identity for the FAIL-BACK shape. A clone's wire NSUUID
+    # may be borrowed from another volume (the kernel merges multipath paths
+    # only on matching NSUUIDs), so the client's /dev/disk/by-id links can
+    # carry an id that is not the record's own. After a forward migration the
+    # requested volume is the relationship's source end, the loop above
+    # redirects to the target and target_lvol_id points at the right device.
+    # After a fail-back the UUID swap makes the requested volume the TARGET
+    # end under its original id, clone_id == uuid for every entry, and
+    # nothing would report the id the device actually advertises — the CSI
+    # then cannot find the block device. The record's ns_uuid carries the
+    # wire identity: for a fail-back over a still-live original it equals the
+    # restored original uuid (no override needed — the CSI's own-id lookup
+    # matches), while a fail-back to a fresh cluster keeps the DR source's
+    # id and must be reported.
     if not any(e.target_lvol_id for e in out):
-        rep = _replication_for_lvol(db_controller, uuid)
-        if (rep is not None and rep.state == LVolReplication.STATE_CUTOVER_DONE
-                and rep.target_lvol and rep.target_lvol.get_id() == uuid
-                and rep.source_lvol and rep.source_lvol.get_id() != uuid):
-            for entry in out:
-                entry.target_lvol_id = rep.source_lvol.get_id()
+        wire_id = getattr(lvol, "ns_uuid", "")
+        if wire_id:
+            if wire_id != uuid:
+                for entry in out:
+                    entry.target_lvol_id = wire_id
+        else:
+            # Legacy records created before ns_uuid was persisted: the only
+            # fail-back shape that existed then inherited the DR source's
+            # NSUUID, recoverable from the relationship's other end (only its
+            # ID is needed, so a source record since deleted still resolves).
+            rep = _replication_for_lvol(db_controller, uuid)
+            if (rep is not None and rep.state == LVolReplication.STATE_CUTOVER_DONE
+                    and rep.target_lvol and rep.target_lvol.get_id() == uuid
+                    and rep.source_lvol and rep.source_lvol.get_id() != uuid):
+                for entry in out:
+                    entry.target_lvol_id = rep.source_lvol.get_id()
     return out, None
 
 
@@ -3930,6 +3941,17 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         # NQN/nsid/namespace-UUID, never the bdev name.
         new_lvol.vuid = utils.get_random_vuid()
         new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
+        # And precisely BECAUSE identity is NQN/nsid/UUID/NGUID: the clone must
+        # present the ORIGINAL's NGUID, not the deep-copied source guid. The
+        # client's multipath head for this nsid was built from the original's
+        # ids; a namespace re-added at the same nsid with different ids is
+        # rejected forever ("IDs don't match for shared namespace N") and on a
+        # shared subsystem that leaves the head pathless — the sibling pods
+        # keep the controllers alive, so no reconnect ever rebuilds it
+        # (run 2026-09-02 16:00: nsid 3 evicted at prepare_cutover, clone
+        # re-added with the DR ids, XFS shutdown on the client).
+        if superseded.guid:
+            new_lvol.guid = superseded.guid
     new_lvol.create_dt = str(datetime.now())
     new_lvol.node_id = target_node.get_id()
     new_lvol.nodes = [target_node.get_id()]
@@ -4013,6 +4035,28 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     if not for_migration:
         new_lvol.ns_id = _claim_target_nsid(db_controller, new_lvol, target_node)
 
+    # Which identity the clone's namespace advertises on the wire:
+    #
+    # Migration: preserve the source UUID as the NVMe namespace UUID so the kernel
+    # can merge source and target paths into the same multipath namespace during
+    # the preconnect phase (ANA flip requires matching NSUUID on both paths).
+    # Failover: the source is gone — use the clone's own UUID so it appears as
+    # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
+    # Fail-back over a still-live original: the namespace identity must be the
+    # ORIGINAL's uuid (the very identity _swap_failback_lvol_uuid restores on
+    # the record after cutover). The client's multipath head at this nsid was
+    # built from the original's ids; re-adding the slot under the DR lvol's
+    # uuid makes the kernel reject the path ("IDs don't match for shared
+    # namespace N") and on a shared subsystem the head stays pathless until
+    # the pod is restaged (run 2026-09-02 16:00, nsids 2 and 3).
+    if superseded is not None:
+        _src_ns_uuid = superseded.uuid
+    else:
+        _src_ns_uuid = lvol.uuid if for_migration else new_lvol.uuid
+    # Persist the wire identity when it is borrowed, so connect_lvol can tell
+    # the CSI which /dev/disk/by-id/nvme-uuid.<id> the device really carries.
+    new_lvol.ns_uuid = _src_ns_uuid if _src_ns_uuid != new_lvol.uuid else ""
+
     new_lvol.write_to_db(db_controller.kv_store)
 
     _evict_stale_namespace(new_lvol, target_node, superseded=superseded)
@@ -4027,13 +4071,6 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         random.randint(5001, 5500),  # secondary
         random.randint(6001, 6500),  # tertiary
     ]
-
-    # Migration: preserve the source UUID as the NVMe namespace UUID so the kernel
-    # can merge source and target paths into the same multipath namespace during
-    # the preconnect phase (ANA flip requires matching NSUUID on both paths).
-    # Failover: the source is gone — use the clone's own UUID so it appears as
-    # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
-    _src_ns_uuid = lvol.uuid if for_migration else new_lvol.uuid
 
     # For migration/failover, preserve the source nsid so the kernel can
     # match target paths to source paths under the same NQN. new_lvol is a
