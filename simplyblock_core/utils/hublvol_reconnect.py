@@ -89,6 +89,38 @@ DEFAULT_DETACH_WAIT_SEC = 10.0
 #: ``cntlid N are duplicated`` (LVS_5918 incident, 2026-04-25 12:47:18).
 INTER_ATTACH_SLEEP_SEC = 3.0
 
+#: Optional gate the deferred (redundant-path) attaches wait on before their
+#: first RPC.
+#:
+#: Deferring those attaches to a daemon thread was supposed to move their cost
+#: "outside the IO-impact window". It did not: the thread honours
+#: INTER_ATTACH_SLEEP_SEC relative to the foreground attach, so it wakes ~3s
+#: later -- which, during a restart, is still inside the port fence. On
+#: 2026-09-01 the foreground attach landed at 16:28:24.607 (before the block)
+#: and the deferred one at 16:28:27.739, mid-fence, costing 1.04s of a 12.2s
+#: fence and then being destroyed anyway when the block converted to reject.
+#:
+#: A restart sets this to an Event it fires after the port is unblocked, so
+#: "deferred" means "after the fence" rather than "after a timer". Callers that
+#: set nothing keep the old timer-only behaviour.
+_defer_gate = None
+
+#: Ceiling on waiting for that gate, so a caller that never fires it (crash,
+#: abort along an unexpected path) cannot strand the daemon thread for ever.
+DEFER_GATE_WAIT_SEC = 60.0
+
+
+def set_defer_gate(event):
+    """Make deferred redundant-path attaches wait for ``event``."""
+    global _defer_gate
+    _defer_gate = event
+
+
+def clear_defer_gate():
+    """Drop the gate; deferred attaches resume timer-only behaviour."""
+    global _defer_gate
+    _defer_gate = None
+
 #: How long the FDB advisory lock lives if the holder crashes without
 #: releasing. Must be >> typical reconcile runtime (including detach-wait).
 #: Other callers block on the lock, not on the SPDK RPC, so this only bounds
@@ -738,7 +770,13 @@ class HublvolReconnectCoordinator:
                     "hublvol %s on %s (%s): cannot prepare controller for "
                     "path %s, trying next",
                     ctrl_name, node.get_id(), role, ip)
-                last_attach_at = time.monotonic()
+                # No cooldown stamp: INTER_ATTACH_SLEEP_SEC exists to stop a
+                # second attach racing a controller that was just CREATED
+                # ("cntlid N are duplicated"). Nothing was created here, so
+                # there is nothing to race, and sleeping 3s before the next
+                # candidate is pure fence time. With 4 candidates that was up
+                # to 9s inside a 7.5s budget -- the alternatives could never
+                # actually be tried.
                 continue
             if decision == "skip":
                 logger.debug(
@@ -760,8 +798,9 @@ class HublvolReconnectCoordinator:
                 ret = _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
                                  multipath=attach_mode,
                                  rpc_timeout=rpc_timeout)
-                last_attach_at = time.monotonic()
                 if ret:
+                    # Stamp only on success -- see the "failed" branch above.
+                    last_attach_at = time.monotonic()
                     remaining = paths_list[i + 1:]
                     logger.info(
                         "hublvol %s on %s (%s): attached path %s; deferring "
@@ -787,7 +826,6 @@ class HublvolReconnectCoordinator:
                     "trying next path",
                     ctrl_name, node.get_id(), ip)
             except Exception as e:
-                last_attach_at = time.monotonic()
                 logger.warning(
                     "hublvol %s on %s: attach path %s raised: %s, "
                     "trying next path",
@@ -833,15 +871,30 @@ class HublvolReconnectCoordinator:
         caller can return immediately and proceed to
         ``bdev_lvol_connect_hublvol`` / port-unblock.
 
+        If a defer gate is set (see :func:`set_defer_gate`), the thread waits
+        for it before its first RPC. Without that, "deferred" only meant "on
+        another thread after a 3s sleep", which during a restart lands the
+        attach inside the port fence -- exactly the cost the deferral was
+        meant to avoid.
+
         The background thread logs success/failure per path and never
         propagates exceptions.
         """
         if not remaining:
             return
+        gate = _defer_gate
 
         node_id = node.get_id()
 
         def _worker():
+            if gate is not None and not gate.is_set():
+                # Wait for the port fence to be released. Bounded so a caller
+                # that never fires the gate cannot strand this thread.
+                if not gate.wait(DEFER_GATE_WAIT_SEC):
+                    logger.warning(
+                        "hublvol %s on %s (%s) bg: defer gate not released "
+                        "within %.0fs; proceeding anyway",
+                        ctrl_name, node_id, role, DEFER_GATE_WAIT_SEC)
             local_last = last_attach_at
             for ip, trtype in remaining:
                 now = time.monotonic()
