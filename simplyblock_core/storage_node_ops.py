@@ -5578,41 +5578,55 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
             # for groups that keep running. The batch therefore covers the
             # surviving groups and nothing else, even on the secondary and
             # tertiary, which are the only nodes that carry the leftover at all.
-            # (replica_peer_ids is consequently not consulted here; it still
-            # matters to the caller's logging and to reasoning about which
-            # nodes reach the no-targets branch below.)
+            carries_removed_lvs = node.get_id() in replica_peer_ids
 
             if not targets:
+                if not carries_removed_lvs:
+                    # No surviving group here uses the dying JM, and this node
+                    # never carried removed_node's lvstore either -- so no JC
+                    # operation applies: no jc_remove_jm, no detach. Nothing on
+                    # this node references the JM.
+                    #
+                    # The one thing still done is reconciling the DB record.
+                    # remote_jm_devices is derived from three sources (an
+                    # explicit jm_ids list, the node's own jm_ids, and the JM of
+                    # whichever primary it hosts -- see
+                    # _connect_to_remote_jm_devs); a record that none of them
+                    # justifies any more is not inert, because it is the lookup
+                    # that later removals use to find jc_replace_jm's name_old.
+                    # A splice reshuffle can leave one behind (2026-08-14
+                    # incident: a peer reachable only through the hosted-primary
+                    # path, own jm_ids clean, entry never re-derived). Refresh
+                    # only when such a record is actually present.
+                    if any(d.uuid == removed_jm_id for d in (node.remote_jm_devices or [])):
+                        node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
+                        node.write_to_db()
+                    continue
+
+                # Secondary or tertiary, and no surviving group uses the JM:
+                # removed_node's own lvstore group is the sole remaining user,
+                # and jc_remove_jm is the call for it. That group was never a
+                # replace target -- its lvstore is being destroyed -- so this
+                # is the only place the JM gets released on this node.
+                #
+                # -22 would mean some group still holds it after all; the bdev
+                # then stays, deliberately, and the error names why.
                 old_remote_dev = next(
                     (rd for rd in (node.remote_jm_devices or []) if rd.uuid == removed_jm_id),
                     None)
                 if old_remote_dev:
-                    # No OTHER group on this node uses the dying JM, so there is
-                    # nothing to replace -- this is the remove case. On a
-                    # secondary/tertiary the removed primary's group is then the
-                    # sole user and jc_remove_jm is exactly the operation for
-                    # it; on any other node the entry is simply stale and the
-                    # release is a cheap way to have JC confirm it is done
-                    # before we detach.
-                    #
-                    # -22 here would mean some group still holds the JM after
-                    # all; the bdev then stays, deliberately, and the error
-                    # names why.
                     stale_bdev = old_remote_dev.remote_bdev
                     if not stale_bdev:
-                        # No recorded bdev name, so there is nothing to release
-                        # and nothing to detach. Historical behaviour: refresh,
-                        # which drops the entry since it is reachable through
-                        # neither source any more.
+                        # No recorded bdev name: nothing to release and nothing
+                        # to detach, so just drop the unreachable entry.
                         node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
                     elif _release_jm_from_jc(node, stale_bdev):
                         _drop_superseded_jm_bdev(node, stale_bdev, removed_jm_id)
-                    # else: release refused (-22 or an error). Deliberately
-                    # leave BOTH the bdev and its remote_jm_devices entry
-                    # alone -- refreshing here would drop the entry while the
-                    # bdev is still present and still held by JC, which is the
-                    # bookkeeping-vs-reality split this whole sequence exists
-                    # to avoid. Keep describing what is actually there.
+                    # else: release refused. Leave BOTH the bdev and its
+                    # remote_jm_devices entry alone -- dropping the entry while
+                    # the bdev is still present and still held by JC is the
+                    # bookkeeping-vs-reality split this sequence exists to
+                    # avoid. Keep describing what is actually there.
                     node.write_to_db()
                 continue
 
