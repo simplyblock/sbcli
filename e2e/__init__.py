@@ -266,6 +266,8 @@ from e2e_tests.backup.test_backup_restore import (
     # DISABLED: lvol-level backup delete not supported (SFAM-2792)
     # TestBackupDeleteInProgress,
     TestBackupPolicyMultipleLvols,
+    TestBackupBulkLoadIntegrity,
+    TestBackupHighVolumeCombosSequential,
     # Extended backup tests (TC-BCK-150..190)
     TestBackupSecurityLvol,
     TestBackupPolicyVersionsOne,
@@ -395,6 +397,8 @@ ALL_TESTS = [
     # DISABLED: lvol-level backup delete not supported (SFAM-2792)
     # TestBackupDeleteInProgress,
     TestBackupPolicyMultipleLvols,
+    TestBackupBulkLoadIntegrity,
+    TestBackupHighVolumeCombosSequential,
     # Extended backup E2E tests (TC-BCK-150..190)
     TestBackupSecurityLvol,
     TestBackupPolicyVersionsOne,
@@ -856,6 +860,8 @@ def get_backup_tests():
         # DISABLED: lvol-level backup delete not supported (SFAM-2792)
         # TestBackupDeleteInProgress,
         TestBackupPolicyMultipleLvols,
+        TestBackupBulkLoadIntegrity,
+    TestBackupHighVolumeCombosSequential,
         # Extended backup tests (TC-BCK-150..190)
         TestBackupSecurityLvol,
         TestBackupPolicyVersionsOne,

@@ -54,6 +54,8 @@ Test class map
   TestBackupLargeLvol              – TC-BCK-136..138
   TestBackupDeleteInProgress       – TC-BCK-139..142
   TestBackupPolicyMultipleLvols    – TC-BCK-143..148
+  TestBackupBulkLoadIntegrity      – TC-BCK-210..214
+  TestBackupHighVolumeCombosSequential – TC-BCK-220..227
 
   NOTE – Cross-cluster restore
   ----------------------------
@@ -5041,6 +5043,567 @@ class TestBackupPolicyMultipleLvols(BackupTestBase):
         self.logger.info("=== TestBackupPolicyMultipleLvols PASSED ===")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 20 – Bulk pool-wide backup load, no deliberate concurrency
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupBulkLoadIntegrity(BackupTestBase):
+    """
+    TC-BCK-210..214 – Many lvols backed up back-to-back via a plain
+    sequential loop (no threading), simulating a customer running a
+    scheduled/bulk backup across every volume in a pool.
+
+    This deliberately avoids engineering any concurrency in the test itself
+    — every backup is kicked off one after another in ordinary Python code.
+    The point is that a storage node's lvstore is shared by every lvol
+    placed on it, and the backup task runner drains its pending-task queue
+    every tick regardless of how the requests were submitted: a plain loop
+    that snapshots+backs-up N lvols within a few seconds still hands the
+    task runner several backup tasks that land in the same tick, which can
+    still produce overlapping S3 backup transfers on a shared lvstore. If
+    that's unsafe, ordinary multi-tenant backup scheduling — not an
+    artificial race — is enough to trigger it.
+
+    Covers:
+      - NUM_LVOLS lvols created and written with distinct data
+      - All of them snapshotted+backed up in a plain sequential loop
+      - Every completed backup restored and checksum-verified (a corrupted
+        restore fails to mount/checksum here, the same way the CSI driver's
+        own staging check would)
+      - Backup and restore failures are recorded per-lvol instead of
+        aborting the whole run on the first one, so a partial failure rate
+        is visible rather than hidden behind the first exception
+
+    Runtime note: with the k8s-mode 60s pre-restore stabilisation wait
+    baked into `_restore_backup`, NUM_LVOLS=20 takes on the order of an
+    hour end to end. Lower NUM_LVOLS for a quicker smoke run.
+    """
+
+    NUM_LVOLS = 20
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_bulk_load_integrity"
+
+    def run(self):
+        self.logger.info("=== TestBackupBulkLoadIntegrity START ===")
+        self.fio_node = self.fio_node[0]
+        self._ensure_pool_and_sc()
+
+        # TC-BCK-210: create N lvols with distinct data
+        self.logger.info(f"TC-BCK-210: create {self.NUM_LVOLS} lvols with data")
+        lvols = []
+        checksums = {}
+        for i in range(self.NUM_LVOLS):
+            name, lid = self._create_lvol(name=f"bulk_lv{i}_{_rand_suffix()}")
+            _, mnt = self._connect_and_mount(name, lid)
+            self._run_fio(mnt, runtime=15)
+            checksums[name] = self._get_checksums(self.fio_node, mnt)
+            lvols.append((name, lid, mnt))
+        self.logger.info(f"TC-BCK-210: {self.NUM_LVOLS} lvols created with data ✓")
+
+        # TC-BCK-211: snapshot+backup every lvol back-to-back — a plain
+        # sequential loop, no threading — exactly what a "back up the whole
+        # pool" job produces: many backup requests landing within the same
+        # task-runner tick, on whatever lvstores those lvols happen to share.
+        self.logger.info(
+            f"TC-BCK-211: snapshot+backup all {self.NUM_LVOLS} lvols "
+            f"back-to-back (no explicit concurrency)")
+        snap_names = {}
+        backup_errors = {}
+        for name, lid, mnt in lvols:
+            try:
+                self._unmount_and_disconnect(self.fio_node, mnt, lid)
+            except Exception:
+                pass
+            sn = f"bulk_s_{name[-6:]}_{_rand_suffix()}"
+            try:
+                self._create_snapshot(lid, sn, backup=True)
+                snap_names[name] = sn
+            except Exception as e:
+                backup_errors[name] = f"snapshot/backup kickoff failed: {e}"
+        self.logger.info(
+            f"TC-BCK-211: {len(snap_names)}/{self.NUM_LVOLS} backups kicked off ✓")
+
+        # TC-BCK-212: wait for every backup, recording failures individually
+        # instead of aborting on the first one.
+        self.logger.info("TC-BCK-212: wait for all backups to complete")
+        bk_ids = {}
+        for name, sn in snap_names.items():
+            try:
+                bk_ids[name] = self._wait_for_backup_by_snap(
+                    sn, f"TC-BCK-212[{name}]")
+            except Exception as e:
+                backup_errors[name] = f"backup failed: {e}"
+        self.logger.info(
+            f"TC-BCK-212: {len(bk_ids)}/{len(snap_names)} backups completed "
+            f"({len(backup_errors)} failed)")
+        for name, err in backup_errors.items():
+            self.logger.error(f"TC-BCK-212: {name}: {err}")
+
+        # TC-BCK-213: restore every completed backup and verify checksums.
+        # A corrupted filesystem fails to mount here, exactly like the CSI
+        # driver's own staging check would.
+        self.logger.info(f"TC-BCK-213: restore + verify {len(bk_ids)} backups")
+        restore_errors = {}
+        for name, bk_id in bk_ids.items():
+            rname = f"bulk_r_{name[-6:]}_{_rand_suffix()}"
+            try:
+                self._restore_backup(bk_id, rname)
+                self._wait_for_restore(rname)
+                rid = self._get_lvol_id(rname)
+                _, r_mnt = self._connect_and_mount(
+                    rname, rid,
+                    mount=f"{self.mount_path}/bulk_{rname[-6:]}_{_rand_suffix()}",
+                    format_disk=False)
+                self._verify_checksums(self.fio_node, r_mnt, checksums[name])
+                self.logger.info(f"TC-BCK-213: {name} -> {rname} ✓")
+            except Exception as e:
+                restore_errors[name] = str(e)
+                self.logger.error(
+                    f"TC-BCK-213: {name} restore/verify failed: {e}")
+
+        # TC-BCK-214: summary + pass/fail — surfaces the failure rate rather
+        # than just the first exception.
+        total = self.NUM_LVOLS
+        backup_ok = len(bk_ids)
+        restore_ok = backup_ok - len(restore_errors)
+        self.logger.info(
+            f"TC-BCK-214: summary — lvols={total}, "
+            f"backups_ok={backup_ok}/{total}, "
+            f"restores_ok={restore_ok}/{backup_ok}")
+        if backup_errors:
+            self.logger.error(
+                f"TC-BCK-214: backup failures: {list(backup_errors.keys())}")
+        if restore_errors:
+            self.logger.error(
+                f"TC-BCK-214: restore/verify failures: {list(restore_errors.keys())}")
+
+        assert not backup_errors and not restore_errors, (
+            f"TC-BCK-214: bulk pool-wide backup load produced "
+            f"{len(backup_errors)} backup failure(s) and "
+            f"{len(restore_errors)} restore/verify failure(s) out of "
+            f"{total} lvols with no deliberate concurrency in the test — "
+            f"backup_errors={backup_errors}, restore_errors={restore_errors}"
+        )
+
+        self.logger.info("=== TestBackupBulkLoadIntegrity PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 21 – High-volume sequential backup/restore across fs/crypto combos
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupHighVolumeCombosSequential(BackupTestBase):
+    """
+    TC-BCK-220..228 – ~150-200 backups and ~150-200 restores, entirely
+    sequential (no threading anywhere in this test), spread across every
+    filesystem/crypto combination (ext4-plain, ext4-crypto, xfs-plain,
+    xfs-crypto), plus snapshot clones and namespace-child lvols.
+
+    This is a different shape from TestBackupBulkLoadIntegrity, which
+    creates many *distinct* lvols and backs each up once. Here a modest,
+    fixed set of lvols is backed up and restored *repeatedly* over many
+    rounds, strictly one operation after another, to reach a high total
+    operation count (quantity over time) without ever dispatching two
+    backup or restore requests at the same instant. If ordinary repeated
+    backup/restore activity at this volume is enough to surface failures
+    or corruption, this test shows it without needing an artificial race.
+
+    Covers:
+      - LVOLS_PER_COMBO lvols created for each of 4 fs_type x crypto combos
+      - One snapshot clone created per combo (snapshot -> clone -> the
+        clone itself is then backed up/restored like any other lvol)
+      - NUM_NS_PARENTS namespace-parent lvols, each with
+        NS_CHILDREN_PER_PARENT namespace-child lvols sharing its NVMe
+        subsystem
+      - NUM_ROUNDS rounds, each doing one snapshot+backup and one
+        restore+verify+cleanup per lvol (regular, clone, or namespace),
+        strictly sequential
+      - Per-combo failure breakdown, so a fs_type/crypto/clone/namespace
+        -specific pattern is visible rather than averaged away
+      - Restored lvols are deleted right after verification each round to
+        avoid exhausting per-node lvol capacity over many restores
+
+    Namespace-restore note: restore_backup() creates every restored volume
+    as a fresh standalone lvol via add_lvol_ha() — it has no notion of the
+    original lvol's namespace/parent relationship, and per confirmation
+    from the storage team the namespace ID is an arbitrary placement
+    detail (like which storage node is chosen), not something a restore
+    is expected to preserve. So namespace-child lvols here are verified
+    for data integrity (checksums) only; the test does not assert
+    anything about the resulting namespace/subsystem placement.
+    """
+
+    COMBOS = [
+        ("ext4", False), ("ext4", True),
+        ("xfs", False), ("xfs", True),
+    ]
+    LVOLS_PER_COMBO = 4          # 16 regular lvols
+    NUM_NS_PARENTS = 2           # ext4, non-crypto — keeps NS scenario simple
+    NS_CHILDREN_PER_PARENT = 2   # 2 parents + 4 children = 6 namespace lvols
+    # 16 regular + 4 clones (1/combo) + 6 namespace = 26 lvols/round
+    NUM_ROUNDS = 7               # 26 * 7 = 182 backups, up to 182 restores
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_high_volume_combos_sequential"
+
+    @staticmethod
+    def _combo_label(fs_type: str, crypto: bool) -> str:
+        return f"{fs_type}-{'crypto' if crypto else 'plain'}"
+
+    def _create_combo_lvol(self, fs_type: str, crypto: bool, sc_name: str, name: str):
+        """Create + connect + mount a lvol with the given fs_type/crypto.
+
+        Sequential, single-threaded — no concurrency here either.
+        Returns (name, lvol_id, mount).
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(name)
+            pvc_size = (self.lvol_size if "Gi" in self.lvol_size
+                       else self.lvol_size.replace("G", "Gi"))
+            k8s.create_pvc(name=pvc_name, size=pvc_size, storage_class=sc_name)
+            k8s.wait_pvc_bound(pvc_name)
+            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            self.created_pvcs.append(pvc_name)
+            self.created_lvols.append(pvc_name)
+            _, mnt = self._connect_and_mount(pvc_name, lvol_id)
+            return pvc_name, lvol_id, mnt
+
+        # Docker mode: crypto goes through _create_lvol; xfs needs manual
+        # format (mirrors TestBackupFilesystemXFS._connect_format_mount_xfs).
+        lvol_name, lvol_id = self._create_lvol(name=name, crypto=crypto)
+        if fs_type == "xfs":
+            mount = f"{self.mount_path}/{lvol_name}"
+            initial = self.ssh_obj.get_devices(node=self.fio_node)
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            for cmd in connect_ls:
+                self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+            sleep_n_sec(3)
+            final = self.ssh_obj.get_devices(node=self.fio_node)
+            new_devs = [d for d in final if d not in initial]
+            assert new_devs, f"No new block device after connecting {lvol_name}"
+            device = f"/dev/{new_devs[0]}"
+            self.ssh_obj.format_disk(node=self.fio_node, device=device, fs_type="xfs")
+            self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
+            self.ssh_obj.mount_path(node=self.fio_node, device=device, mount_path=mount)
+            self.mounted.append((self.fio_node, mount))
+            self.connected.append(lvol_id)
+            return lvol_name, lvol_id, mount
+        _, mnt = self._connect_and_mount(lvol_name, lvol_id)
+        return lvol_name, lvol_id, mnt
+
+    def _create_clone(self, src_info: dict, combo: str, index: int):
+        """Snapshot src_info's lvol (no backup) and clone it. Sequential —
+        no concurrency. Returns (clone_name, clone_id).
+        """
+        snap_name = f"hv_clonesrc_{combo}_{index}_{_rand_suffix()}"
+        snap_id = self._create_snapshot(src_info["id"], snap_name, backup=False)
+        clone_label = f"hv_clone_{combo}_{index}_{_rand_suffix()}"
+
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(clone_label)
+            pvc_size = (self.lvol_size if "Gi" in self.lvol_size
+                       else self.lvol_size.replace("G", "Gi"))
+            # Same StorageClass as the source so the clone keeps its
+            # fs_type/crypto.
+            sc_name = src_info.get("sc_name") or self._storage_class_name
+            k8s.create_clone_pvc(pvc_name, pvc_size, sc_name, snap_id)
+            k8s.wait_pvc_bound(pvc_name)
+            clone_id = k8s.get_pvc_volume_handle(pvc_name)
+            self.created_pvcs.append(pvc_name)
+            self.created_lvols.append(pvc_name)
+            return pvc_name, clone_id
+
+        self.ssh_obj.add_clone(self.mgmt_nodes[0], snap_id, clone_label)
+        self._wait_for_restore(clone_label, expect_failure=True)
+        self.created_lvols.append(clone_label)
+        clone_id = self._get_lvol_id(clone_label)
+        assert clone_id, f"Clone {clone_label} not found after create"
+        return clone_label, clone_id
+
+    def _create_ns_parent_and_children(self, fs_type: str, num_children: int,
+                                        index: int):
+        """Create one namespace-parent lvol plus `num_children` namespace
+        children sharing its NVMe subsystem. Sequential — no concurrency.
+
+        Returns a list of (label, info_dict) tuples, parent first.
+        Data-integrity only: nsid/subsystem placement is not asserted (see
+        class docstring).
+        """
+        entries = []
+        parent_label = f"hv_nsp_{fs_type}_{index}_{_rand_suffix()}"
+        combo = f"{fs_type}-nsparent"
+
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            ns_sc = f"sc-hv-ns-{fs_type}-{index}-{_rand_suffix()}"
+            k8s.create_storage_class(
+                name=ns_sc, cluster_id=self.cluster_id,
+                pool_name=self.pool_name,
+                ndcs=getattr(self, "ndcs", 1),
+                npcs=getattr(self, "npcs", 0),
+                encryption=False, fs_type=fs_type,
+                max_namespace_per_subsys=10,
+            )
+            pvc_size = (self.lvol_size if "Gi" in self.lvol_size
+                       else self.lvol_size.replace("G", "Gi"))
+
+            def _make(label, ns_combo):
+                pvc_name = self._k8s_normalize_name(label)
+                k8s.create_pvc(name=pvc_name, size=pvc_size, storage_class=ns_sc)
+                k8s.wait_pvc_bound(pvc_name)
+                lid = k8s.get_pvc_volume_handle(pvc_name)
+                self.created_pvcs.append(pvc_name)
+                self.created_lvols.append(pvc_name)
+                _, mnt = self._connect_and_mount(pvc_name, lid)
+                self._run_fio(mnt, runtime=15)
+                checksums = self._get_checksums(self.fio_node, mnt)
+                self._unmount_and_disconnect(self.fio_node, mnt, lid)
+                return pvc_name, lid, checksums
+
+            name, lid, checksums = _make(parent_label, combo)
+            entries.append((parent_label, {
+                "id": lid, "name": name, "combo": combo,
+                "checksums": checksums, "backup_ids": [],
+            }))
+            for ci in range(num_children):
+                child_label = f"hv_nsc_{fs_type}_{index}_{ci}_{_rand_suffix()}"
+                cname, clid, cchecksums = _make(
+                    child_label, f"{fs_type}-nschild")
+                entries.append((child_label, {
+                    "id": clid, "name": cname, "combo": f"{fs_type}-nschild",
+                    "checksums": cchecksums, "backup_ids": [],
+                }))
+            return entries
+
+        # Docker mode: parent gets max_namespace_per_subsys; children are
+        # created pinned to the parent's node_id + namespace=parent_id, so
+        # they share the parent's NVMe subsystem (new namespace devices
+        # appear on the same controller, no separate connect).
+        self.sbcli_utils.add_lvol(
+            lvol_name=parent_label, pool_name=self.pool_name,
+            size=self.lvol_size, crypto=False,
+            max_namespace_per_subsys=10)
+        parent_id = self._get_lvol_id(parent_label)
+        assert parent_id, f"NS parent {parent_label} not found after create"
+        self.created_lvols.append(parent_label)
+        _, mnt = self._connect_and_mount(parent_label, parent_id)
+        self._run_fio(mnt, runtime=15)
+        checksums = self._get_checksums(self.fio_node, mnt)
+        details = self.sbcli_utils.get_lvol_details(parent_id)[0]
+        parent_host_id = details.get("node_id")
+        self._unmount_and_disconnect(self.fio_node, mnt, parent_id)
+        entries.append((parent_label, {
+            "id": parent_id, "name": parent_label, "combo": combo,
+            "checksums": checksums, "backup_ids": [],
+        }))
+
+        for ci in range(num_children):
+            child_label = f"hv_nsc_{fs_type}_{index}_{ci}_{_rand_suffix()}"
+            self.sbcli_utils.add_lvol(
+                lvol_name=child_label, pool_name=self.pool_name,
+                size=self.lvol_size, crypto=False,
+                host_id=parent_host_id, namespace=parent_id)
+            child_id = self._get_lvol_id(child_label)
+            assert child_id, f"NS child {child_label} not found after create"
+            self.created_lvols.append(child_label)
+            _, cmnt = self._connect_and_mount(child_label, child_id)
+            self._run_fio(cmnt, runtime=15)
+            cchecksums = self._get_checksums(self.fio_node, cmnt)
+            self._unmount_and_disconnect(self.fio_node, cmnt, child_id)
+            entries.append((child_label, {
+                "id": child_id, "name": child_label,
+                "combo": f"{fs_type}-nschild",
+                "checksums": cchecksums, "backup_ids": [],
+            }))
+        return entries
+
+    def run(self):
+        self.logger.info("=== TestBackupHighVolumeCombosSequential START ===")
+        self.fio_node = self.fio_node[0]
+        self._ensure_pool_and_sc()
+
+        # TC-BCK-220: one dedicated StorageClass per combo (k8s only), then
+        # LVOLS_PER_COMBO lvols for each of the 4 fs_type x crypto combos.
+        combo_sc = {}
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            for fs_type, crypto in self.COMBOS:
+                combo = self._combo_label(fs_type, crypto)
+                sc_name = f"sc-hv-{combo}-{_rand_suffix()}"
+                k8s.create_storage_class(
+                    name=sc_name,
+                    cluster_id=self.cluster_id,
+                    pool_name=self.pool_name,
+                    ndcs=getattr(self, "ndcs", 1),
+                    npcs=getattr(self, "npcs", 0),
+                    encryption=crypto,
+                    fs_type=fs_type,
+                )
+                combo_sc[combo] = sc_name
+
+        self.logger.info(
+            f"TC-BCK-220: create {self.LVOLS_PER_COMBO} lvols x "
+            f"{len(self.COMBOS)} combos "
+            f"({len(self.COMBOS) * self.LVOLS_PER_COMBO} total)")
+        lvol_state = {}   # label -> {id, name, combo, checksums, backup_ids}
+        for fs_type, crypto in self.COMBOS:
+            combo = self._combo_label(fs_type, crypto)
+            for i in range(self.LVOLS_PER_COMBO):
+                label = f"hv_{combo}_{i}_{_rand_suffix()}"
+                name, lid, mnt = self._create_combo_lvol(
+                    fs_type, crypto, combo_sc.get(combo), label)
+                self._run_fio(mnt, runtime=15)
+                checksums = self._get_checksums(self.fio_node, mnt)
+                self._unmount_and_disconnect(self.fio_node, mnt, lid)
+                lvol_state[label] = {
+                    "id": lid, "name": name, "combo": combo,
+                    "checksums": checksums, "backup_ids": [],
+                    "sc_name": combo_sc.get(combo),
+                }
+        self.logger.info(
+            f"TC-BCK-220: {len(lvol_state)} lvols created across "
+            f"{len(self.COMBOS)} combos ✓")
+
+        # TC-BCK-226: one snapshot clone per combo, cloned from that
+        # combo's first lvol — reproduces the exact 2-backup chain
+        # (parent snapshot + clone's own snapshot) that a clone's backup
+        # structurally requires, sequentially like everything else here.
+        self.logger.info(
+            f"TC-BCK-226: create 1 snapshot clone per combo "
+            f"({len(self.COMBOS)} clones)")
+        for fs_type, crypto in self.COMBOS:
+            combo = self._combo_label(fs_type, crypto)
+            src_label = next(
+                lbl for lbl in lvol_state
+                if lvol_state[lbl]["combo"] == combo)
+            src_info = lvol_state[src_label]
+            clone_name, clone_id = self._create_clone(src_info, combo, 0)
+            lvol_state[f"clone_{combo}"] = {
+                "id": clone_id, "name": clone_name,
+                "combo": f"{combo}-clone",
+                "checksums": src_info["checksums"], "backup_ids": [],
+            }
+        self.logger.info(f"TC-BCK-226: {len(self.COMBOS)} clones created ✓")
+
+        # TC-BCK-227: namespace-parent + child lvols (ext4, non-crypto —
+        # keeps the namespace scenario itself simple; the fs/crypto matrix
+        # is already covered above).
+        self.logger.info(
+            f"TC-BCK-227: create {self.NUM_NS_PARENTS} namespace-parent "
+            f"lvols x {self.NS_CHILDREN_PER_PARENT} children each")
+        ns_count = 0
+        for i in range(self.NUM_NS_PARENTS):
+            for label, info in self._create_ns_parent_and_children(
+                    "ext4", self.NS_CHILDREN_PER_PARENT, i):
+                lvol_state[label] = info
+                ns_count += 1
+        self.logger.info(f"TC-BCK-227: {ns_count} namespace lvols created ✓")
+
+        # TC-BCK-221/222: NUM_ROUNDS rounds of sequential backup, then
+        # sequential restore+verify+cleanup — one lvol at a time throughout.
+        backup_total = 0
+        backup_failed = {}     # combo -> count
+        restore_total = 0
+        restore_failed = {}    # combo -> count
+        labels = sorted(lvol_state.keys())
+
+        for round_num in range(1, self.NUM_ROUNDS + 1):
+            self.logger.info(
+                f"TC-BCK-221: round {round_num}/{self.NUM_ROUNDS} — "
+                f"backing up {len(labels)} lvols sequentially")
+            for label in labels:
+                info = lvol_state[label]
+                sn = f"hv_s_{label[-6:]}_r{round_num}_{_rand_suffix()}"
+                backup_total += 1
+                try:
+                    self._create_snapshot(info["id"], sn, backup=True)
+                    bk_id = self._wait_for_backup_by_snap(
+                        sn, f"TC-BCK-221[{label}][round {round_num}]")
+                    info["backup_ids"].append(bk_id)
+                except Exception as e:
+                    backup_failed[info["combo"]] = (
+                        backup_failed.get(info["combo"], 0) + 1)
+                    self.logger.error(
+                        f"TC-BCK-221: round {round_num} backup failed for "
+                        f"{label} ({info['combo']}): {e}")
+
+            self.logger.info(
+                f"TC-BCK-222: round {round_num}/{self.NUM_ROUNDS} — "
+                f"restoring {len(labels)} lvols sequentially")
+            for label in labels:
+                info = lvol_state[label]
+                if not info["backup_ids"]:
+                    continue
+                bk_id = info["backup_ids"][-1]
+                rname = f"hv_r_{label[-6:]}_r{round_num}_{_rand_suffix()}"
+                restore_total += 1
+                r_mnt, r_id = None, None
+                try:
+                    self._restore_backup(bk_id, rname)
+                    self._wait_for_restore(rname)
+                    r_id = self._get_lvol_id(rname)
+                    _, r_mnt = self._connect_and_mount(
+                        rname, r_id,
+                        mount=f"{self.mount_path}/hv_{rname[-6:]}_{_rand_suffix()}",
+                        format_disk=False)
+                    self._verify_checksums(self.fio_node, r_mnt, info["checksums"])
+                except Exception as e:
+                    restore_failed[info["combo"]] = (
+                        restore_failed.get(info["combo"], 0) + 1)
+                    self.logger.error(
+                        f"TC-BCK-222: round {round_num} restore failed for "
+                        f"{label} ({info['combo']}) from {bk_id}: {e}")
+                finally:
+                    # Always clean up the restore lvol so ~150 restores
+                    # don't exhaust per-node lvol capacity.
+                    try:
+                        if r_mnt:
+                            self._unmount_and_disconnect(self.fio_node, r_mnt, r_id)
+                    except Exception:
+                        pass
+                    try:
+                        self._delete_lvol(rname)
+                    except Exception:
+                        pass
+
+            self.logger.info(
+                f"TC-BCK-223: round {round_num}/{self.NUM_ROUNDS} complete — "
+                f"backups={backup_total - sum(backup_failed.values())}/{backup_total}, "
+                f"restores={restore_total - sum(restore_failed.values())}/{restore_total}")
+
+        # TC-BCK-224: per-combo summary — covers regular, clone, and
+        # namespace flavors, not just the original 4 fs/crypto combos.
+        self.logger.info(
+            f"TC-BCK-224: FINAL — {backup_total} backups attempted "
+            f"({sum(backup_failed.values())} failed), "
+            f"{restore_total} restores attempted "
+            f"({sum(restore_failed.values())} failed)")
+        all_combos = sorted({info["combo"] for info in lvol_state.values()})
+        for combo in all_combos:
+            self.logger.info(
+                f"TC-BCK-224: {combo} — "
+                f"backup_failures={backup_failed.get(combo, 0)}, "
+                f"restore_failures={restore_failed.get(combo, 0)}")
+
+        # TC-BCK-225: pass/fail
+        total_failures = sum(backup_failed.values()) + sum(restore_failed.values())
+        assert total_failures == 0, (
+            f"TC-BCK-225: {total_failures} failure(s) across "
+            f"{backup_total} backups + {restore_total} restores, "
+            f"no deliberate concurrency anywhere in the test — "
+            f"backup_failed={backup_failed}, restore_failed={restore_failed}"
+        )
+
+        self.logger.info("=== TestBackupHighVolumeCombosSequential PASSED ===")
+
+
 def get_backup_extra_tests():
     """Return additional backup E2E test classes beyond the default get_backup_tests() suite."""
     return [
@@ -5055,6 +5618,8 @@ def get_backup_extra_tests():
         TestBackupLargeLvol,
         TestBackupDeleteInProgress,
         TestBackupPolicyMultipleLvols,
+        TestBackupBulkLoadIntegrity,
+        TestBackupHighVolumeCombosSequential,
     ]
 
 
