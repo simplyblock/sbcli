@@ -2438,6 +2438,13 @@ class RPCClient:
                 carry several, and "the first" is ambiguous.
             cluster_batch: batch size in clusters (default 1)
         Returns RPC result (truthy on success). Poll with bdev_lvol_transfer_stat.
+
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another backup/recovery/merge transfer in flight -- the caller
+                should retry once that transfer completes, not treat this as a
+                failure. Concurrent transfers against the same device corrupt
+                the shared channel state.
         """
         params = {
             "s3_id": s3_id,
@@ -2445,7 +2452,7 @@ class RPCClient:
             "s3_bdev": s3_bdev,
             "cluster_batch": cluster_batch,
         }
-        return self._request("bdev_lvol_s3_backup", params)
+        return self._request3("bdev_lvol_s3_backup", **params)
 
     # Backup/recovery polling: use bdev_lvol_transfer_stat(lvol_name) which
     # reads lvol->transfer_status on the data plane. Works for backup (pass
@@ -2467,6 +2474,11 @@ class RPCClient:
         treated the same as a fresh success (returns True) rather than
         raised. A caller that needs to distinguish "started this call" from
         "already running" can pass allow_exist=False.
+
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another transfer in flight -- retry rather than fail; see
+                bdev_lvol_s3_backup.
         """
         params: dict[str, Any] = {
             "s3_id": s3_id,
@@ -2505,13 +2517,17 @@ class RPCClient:
             s3_bdev: which S3 device to read from. Required: a restore from a
                 foreign bucket attaches a second device, so "the first" is
                 ambiguous exactly when it matters.
+
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another transfer in flight -- retry rather than fail; see
+                bdev_lvol_s3_backup.
         """
-        return self._request("bdev_lvol_s3_recovery", {
-            "lvol_name": lvol_name,
-            "cluster_batch": cluster_batch,
-            "s3_ids": s3_ids,
-            "s3_bdev": s3_bdev,
-        })
+        return self._request3("bdev_lvol_s3_recovery",
+                              lvol_name=lvol_name,
+                              cluster_batch=cluster_batch,
+                              s3_ids=s3_ids,
+                              s3_bdev=s3_bdev)
 
     def bdev_s3_delete(self, name: str):
         """Delete an S3 bdev.
