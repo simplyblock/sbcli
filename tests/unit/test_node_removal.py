@@ -3122,20 +3122,20 @@ class TestJcRemoveJmBeforeBdevDelete(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
 
-    def _run(self, replica_peer_ids):
+    def _run(self, replica_peer_ids, jc_replace_jm=None, peer_jm_ids=None):
         cl = _cluster()
         removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2", failure_domain=1)
         peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
         spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41", failure_domain=3)
         removed.jm_ids = ["jm-dead"]
-        peer.jm_ids = ["jm-dead", "jm-peer"]
+        peer.jm_ids = list(peer_jm_ids) if peer_jm_ids else ["jm-dead", "jm-peer"]
         spare.jm_ids = ["jm-spare"]
         rd = RemoteJMDevice()
         rd.uuid = "jm-dead"
         rd.remote_bdev = "remote_jm_deadn1"
         peer.remote_jm_devices = [rd]
         rpc = MagicMock()
-        rpc.jc_replace_jm = MagicMock(return_value=True)
+        rpc.jc_replace_jm = jc_replace_jm or MagicMock(return_value=True)
         rpc.jc_remove_jm = MagicMock(return_value=True)
         rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
         rpc.get_bdevs = MagicMock(return_value=[])
@@ -3175,6 +3175,47 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
         rpc = self._run(("peer",))
         rpc.jc_remove_jm.assert_not_called()
         rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+
+    def test_rejection_on_the_blind_entry_retries_without_it(self):
+        # The removed primary's vuid is added without being able to inspect its
+        # group. If SPDK does not count it as a user of name_old it rejects the
+        # WHOLE batch (-19/-20), which would leave this node's real groups
+        # still holding the dead JM -- worse than the leak. Retry once without
+        # it so the surviving groups are still patched.
+        for code in (-19, -20):
+            with self.subTest(code=code):
+                calls = []
+
+                def replace(name_old, replacements):
+                    calls.append(sorted(r["jm_vuid"] for r in replacements))
+                    if len(calls) == 1:
+                        raise RPCRemoteError("nope", code)
+                    return True
+
+                rpc = self._run(("peer",), jc_replace_jm=MagicMock(side_effect=replace))
+                self.assertEqual(calls, [[2, 37], [37]],
+                                 "first call blind-includes vuid 2, retry drops it")
+                rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+
+    def test_a_rejection_for_any_other_reason_is_not_retried(self):
+        # -17 means the batch was incomplete, not that the blind entry was
+        # bogus; dropping it would make the next attempt more incomplete still.
+        rpc = self._run(
+            ("peer",),
+            jc_replace_jm=MagicMock(side_effect=RPCRemoteError("covers not all", -17)))
+        self.assertEqual(rpc.jc_replace_jm.call_count, 1)
+        # The superseded JM's own controller must survive a failed replace.
+        # (The detaches that do happen here are the pre-existing rollback of
+        # the replacement candidates this attempt connected.)
+        detached = [c.args[0] for c in rpc.bdev_nvme_detach_controller.call_args_list]
+        self.assertNotIn("remote_jm_dead", detached)
+
+    def test_no_retry_when_the_blind_entry_was_the_only_target(self):
+        # Dropping it would leave an empty batch; nothing useful to retry.
+        rpc = self._run(
+            ("peer",), peer_jm_ids=["jm-peer"],
+            jc_replace_jm=MagicMock(side_effect=RPCRemoteError("unknown", -19)))
+        self.assertLessEqual(rpc.jc_replace_jm.call_count, 1)
 
     def test_a_node_with_no_leftover_group_covers_only_its_own_vuids(self):
         rpc = self._run(("someone-else",))
