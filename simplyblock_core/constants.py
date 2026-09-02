@@ -415,7 +415,14 @@ REPL_CUTOVER_MIN_INLINE_SEC = 30
 # fed the 25-72s freezes. Deployments whose operator posts
 # .../replication/cutover-proceed set this True and accept that cost until the
 # clone's base can be advanced after the signal.
-REPL_CUTOVER_PROCEED_REQUIRED = False
+#
+# Enabled 2026-09-02: the operator's reconcileCutoverPending runs the
+# preconnect Job and posts cutover-proceed for both migration and failback
+# (annotFailbackTarget routes the call to the target cluster on failback).
+# Without the gate, the flip races the client: the 2026-09-02 failback run
+# flipped ANA on listeners no client had connected to and deleted the DR-side
+# subsystem 150ms later, orphaning every connected client for ctrl_loss_tmo.
+REPL_CUTOVER_PROCEED_REQUIRED = True
 
 # --- noticing a finished transfer ----------------------------------------
 # A transfer that has completed must be acted on within a second: the next

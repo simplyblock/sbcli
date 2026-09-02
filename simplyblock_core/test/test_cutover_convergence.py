@@ -205,11 +205,18 @@ class TestConvergence(unittest.TestCase):
 class TestProceedGate(unittest.TestCase):
     """The preconnect wait must be opt-in: it costs freeze time."""
 
-    def test_disabled_by_default(self):
-        self.assertFalse(
+    def test_enabled_now_that_the_operator_signals(self):
+        """Flipped 2026-09-02: the operator's reconcileCutoverPending posts
+        cutover-proceed for migration AND failback (annotFailbackTarget routes
+        the call to the target cluster). Without the gate the ANA flip races
+        the client's preconnect: the 2026-09-02 failback run flipped listeners
+        no client had connected to and deleted the DR-side subsystem 150ms
+        later, orphaning every connected client for ctrl_loss_tmo."""
+        self.assertTrue(
             constants.REPL_CUTOVER_PROCEED_REQUIRED,
-            "waiting for a signal nobody sends put 120s of writes into the "
-            "frozen final step")
+            "cutover must wait for the operator's preconnect signal; "
+            "flipping ANA on listeners no client is connected to and then "
+            "deleting the source subsystem strands every live client")
 
     def test_the_wait_is_guarded_by_the_flag(self):
         import inspect
