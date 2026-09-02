@@ -458,7 +458,14 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             # verifier counted 3-of-2 and eventually gave up. Two controllers
             # on one address also give the bdev two unordered qpairs to the
             # same target, so this is a fault to surface, not cosmetics.
-            duplicate_ips = storage_node_ops.duplicate_attached_paths(ret)
+            # Only meaningful for a named controller: ``ret`` came from
+            # bdev_nvme_controller_list(bdev_name), and an empty name makes
+            # that return every controller on the node -- whose paths then
+            # look mutually "duplicated".
+            hub_bdev = (primary_node.hublvol.bdev_name
+                        if primary_node.hublvol else "")
+            duplicate_ips = (storage_node_ops.duplicate_attached_paths(ret)
+                             if hub_bdev else set())
             if duplicate_ips:
                 # Detecting this without acting on it is what made the
                 # 2026-09-01 multipath soak unrunnable: LVS_4/hublvol carried
