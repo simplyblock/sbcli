@@ -84,33 +84,6 @@ def _create_compress_lvol(rpc_client, base_bdev_name):
     return ret
 
 
-def ask_for_device_number(devices_list):
-    question = f"Enter the device number [1-{len(devices_list)}]: "
-    while True:
-        sys.stdout.write(question)
-        choice = str(input())
-        try:
-            ch = int(choice.strip())
-            ch -= 1
-            return devices_list[ch]
-        except Exception as e:
-            logger.debug(e)
-            sys.stdout.write(f"Please respond with numbers 1 - {len(devices_list)}\n")
-
-
-def ask_for_lvol_vuid():
-    question = "Enter VUID number: "
-    while True:
-        sys.stdout.write(question)
-        choice = str(input())
-        try:
-            ch = int(choice.strip())
-            return ch
-        except Exception as e:
-            logger.debug(e)
-            sys.stdout.write("Please respond with numbers")
-
-
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
                            max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols=None, all_snaps=None):
     #  Validation
