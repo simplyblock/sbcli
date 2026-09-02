@@ -3306,6 +3306,88 @@ class TestOrchestratorCapturesReplicaPeersBeforeTeardown(unittest.TestCase):
         self.assertEqual(sorted(seen.get("ids", ())), ["sec", "ter"])
 
 
+# ---------------------------------------------------------------------------
+# The no-targets branch: a node that has the dying JM connected but no vuid
+# this removal can patch. Until now it fell straight through -- no release, no
+# delete -- while the jc_remove_jm below the replace ran only where a replace
+# had already made it a no-op (-13). Redundant where it fired, absent where it
+# mattered.
+# ---------------------------------------------------------------------------
+class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
+
+    def _run(self, jc_remove_jm):
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2", failure_domain=1)
+        # peer holds the dying JM but NONE of its vuids reference it, so Pass 2
+        # produces no targets for it.
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
+        removed.jm_ids = ["jm-dead"]
+        peer.jm_ids = ["jm-peer"]
+        rd = RemoteJMDevice()
+        rd.uuid = "jm-dead"
+        rd.remote_bdev = "remote_jm_deadn1"
+        peer.remote_jm_devices = [rd]
+        rpc = MagicMock()
+        rpc.jc_remove_jm = jc_remove_jm
+        rpc.jc_replace_jm = MagicMock(return_value=True)
+        rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
+        peer.rpc_client = MagicMock(return_value=rpc)
+        db = FakeDB(cl, [removed, peer])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                  "jm-peer": peer.jm_device}.get(i))
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+            storage_node_ops._decommission_node_jm(removed)
+        return rpc, peer
+
+    def test_release_is_attempted_even_though_no_replace_happened(self):
+        rpc, _peer = self._run(jc_remove_jm=MagicMock(return_value=True))
+        rpc.jc_replace_jm.assert_not_called()
+        rpc.jc_remove_jm.assert_called_once_with("remote_jm_deadn1")
+
+    def test_successful_release_deletes_the_bdev_and_drops_bookkeeping(self):
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=True))
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_minus_22_here_keeps_the_bdev(self):
+        # The leftover vuid genuinely still references it -- exactly the case
+        # this branch exists to surface.
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCRemoteError("in use", -22)))
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+        self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_unsupported_build_still_cleans_up(self):
+        from simplyblock_core.rpc_client import RPC_UNSUPPORTED
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=RPC_UNSUPPORTED))
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_node_without_the_dying_jm_is_left_completely_alone(self):
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2")
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37")
+        removed.jm_ids = ["jm-dead"]
+        peer.jm_ids = ["jm-peer"]
+        peer.remote_jm_devices = []          # never had it
+        rpc = MagicMock()
+        peer.rpc_client = MagicMock(return_value=rpc)
+        db = FakeDB(cl, [removed, peer])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device}.get(i))
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+            storage_node_ops._decommission_node_jm(removed)
+        rpc.jc_remove_jm.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+
+
 class TestJcRemoveJmClient(unittest.TestCase):
     """The client wrapper's contract: success / unsupported / coded error."""
 
