@@ -199,6 +199,24 @@ class Cluster(BaseModel):
     # storage_node_monitor consumes this flag, calls set_shared_placement once,
     # and clears it. shared_placement (above) is the durable "done" marker.
     shared_placement_migration_pending: bool = False
+    # Which generation of distrib write protection this cluster runs.
+    #   False (NO)  -> v1: distribs are created with `write_protection`
+    #   True  (YES) -> v2: distribs are created with `write_protection_v2`
+    #
+    # Cluster-wide because a distrib must be re-created with the same
+    # generation it was created with, and an already-existing distrib can only
+    # be moved to v2 by the runtime distr_write_protection_v2 RPC -- not by a
+    # create parameter. So the flag says "every distrib in this cluster has
+    # been switched to v2", which is the only state in which it is correct to
+    # create new ones that way.
+    #
+    # Default is deliberately False: a cluster row written by an older release
+    # has no such key, and reading it back must mean "not switched yet".
+    # Fresh clusters set it True at create (create_cluster / _add_cluster_impl);
+    # update_cluster stamps it back to False because an upgraded cluster's
+    # pre-existing distribs are still v1 until `sbctl cluster
+    # switch-write-protection` runs the RPC on every online node.
+    write_protection_v2: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
