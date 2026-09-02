@@ -384,7 +384,7 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
 
     evicted, added = [], []
     monkeypatch.setattr(lc, "_evict_stale_namespace",
-                        lambda lvol, node: evicted.append(node.get_id()))
+                        lambda lvol, node, **kw: evicted.append(node.get_id()))
 
     def _fake_add_lvol_on_node(lvol, node, is_primary=True, **kw):
         # The real signature also takes min_cntlid / ns_uuid / primary_nsid;

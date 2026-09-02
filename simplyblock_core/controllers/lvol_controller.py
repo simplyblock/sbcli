@@ -4015,7 +4015,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     new_lvol.write_to_db(db_controller.kv_store)
 
-    _evict_stale_namespace(new_lvol, target_node)
+    _evict_stale_namespace(new_lvol, target_node, superseded=superseded)
 
     # The target clone shares the source NQN.  During preconnect the host has
     # live paths to the source (cntlids 1, 1000, 2000) AND tries to add paths
@@ -4076,7 +4076,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         # succeed while the peer's failed with the same -32602, and the
         # peer failure rolled the whole cutover back (run 20260824_113711:
         # primary add_ns result:1, peer -32602, 0/5 cutovers).
-        _evict_stale_namespace(new_lvol, peer_node)
+        _evict_stale_namespace(new_lvol, peer_node, superseded=superseded)
         _peer_cntlid = next(_tgt_cntlid_iter, None)
         lvol_bdev, error = add_lvol_on_node(new_lvol, peer_node, is_primary=False,
                                              min_cntlid=_peer_cntlid, ns_uuid=_src_ns_uuid)
@@ -4173,8 +4173,17 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generat
     return None
 
 
-def _evict_stale_namespace(new_lvol, target_node):
+def _evict_stale_namespace(new_lvol, target_node, superseded=None):
     """Make room for the preserved identity on a RECOVERED fail-back target.
+
+    ``superseded`` is the still-live original volume this fail-back replaces
+    (from :func:`_superseded_original`, present since the pre-cutover retire
+    was disabled). Its namespace carries the ORIGINAL record's uuid — not the
+    clone's — so on a SHARED subsystem the own-uuid match below cannot see it
+    and the clone's add_ns fails -32602 forever (2026-09-02: shared subsystem
+    holding nsids 1-5, clone wanted nsid 1, occupant was the original).
+    Matching on the superseded original's identity is safe on shared
+    subsystems: it names exactly one namespace, never a sibling's.
 
     The cutover clone keeps the ORIGINAL volume's NQN and nsid so the client
     reconnects to the same identity. Failing back to a recovered source means
@@ -4225,8 +4234,20 @@ def _evict_stale_namespace(new_lvol, target_node):
             single_namespace_subsystem = len(namespaces) <= 1
             own_uuid = getattr(new_lvol, "uuid", None)
             own_nsid = getattr(new_lvol, "ns_id", None)
+            # The superseded original's namespace is identified by ITS record
+            # uuid (the ns uuid it was added with) or its bdev — SPDK reports
+            # lvol namespaces' bdev_name as the raw lvol_uuid.
+            superseded_ids = set()
+            if superseded is not None:
+                superseded_ids = {
+                    v for v in (getattr(superseded, "uuid", None),
+                                getattr(superseded, "lvol_uuid", None),
+                                getattr(superseded, "top_bdev", None))
+                    if v}
             stale = [ns for ns in namespaces
                      if ((own_uuid is not None and ns.get("uuid") == own_uuid)
+                         or ns.get("uuid") in superseded_ids
+                         or ns.get("bdev_name") in superseded_ids
                          or (single_namespace_subsystem
                              and own_nsid is not None
                              and ns.get("nsid") == own_nsid))
