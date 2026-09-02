@@ -2482,18 +2482,41 @@ class BackupStressComprehensive(BackupStressBase):
         self.logger.info("TC-BCK-STR-103B: snapshot clone phase")
         clone_candidates = random.sample(
             all_labels, min(self.num_clones, len(all_labels)))
-        clone_ok = 0
-        for source_label in clone_candidates:
+        clone_results = {}  # source_label -> clone_label or Exception
+
+        def _clone_one(src_label):
             try:
-                clone_label = self._create_and_verify_clone(
-                    source_label, lvol_state)
-                clone_ok += 1
+                cl_label = self._create_and_verify_clone(
+                    src_label, lvol_state)
+                clone_results[src_label] = cl_label
                 self.logger.info(
-                    f"TC-BCK-STR-103B: {clone_label} done")
-            except Exception as e:
+                    f"TC-BCK-STR-103B: {cl_label} done")
+            except Exception as exc:
+                clone_results[src_label] = exc
                 self.logger.error(
-                    f"TC-BCK-STR-103B: clone of {source_label} "
-                    f"failed: {e}")
+                    f"TC-BCK-STR-103B: clone of {src_label} "
+                    f"failed: {exc}")
+
+        if self.k8s_test:
+            # K8s mode: run clones in parallel — no shared device state.
+            clone_threads = []
+            for source_label in clone_candidates:
+                t = threading.Thread(
+                    target=_clone_one, args=(source_label,),
+                    name=f"clone-{source_label}")
+                clone_threads.append(t)
+                t.start()
+            for t in clone_threads:
+                t.join(timeout=_BACKUP_TIMEOUT * 3)
+        else:
+            # Docker mode: sequential — parallel device baseline
+            # capture causes race conditions with ns-rescan.
+            for source_label in clone_candidates:
+                _clone_one(source_label)
+
+        clone_ok = sum(
+            1 for v in clone_results.values()
+            if isinstance(v, str))
 
         # Refresh all_labels so clones participate in the marathon
         all_labels = sorted(lvol_state.keys())
