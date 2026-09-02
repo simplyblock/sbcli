@@ -1879,37 +1879,77 @@ class BackupStressComprehensive(BackupStressBase):
             # Verify clone checksums
             clone_checksums = self._get_checksums(clone_name, clone_name)
         else:
-            # Docker: create clone via API, connect with ns-rescan
+            # Docker: create clone via API, connect with ns-rescan.
+            # Capture global device baseline BEFORE clone creation —
+            # namespaced clones may auto-appear if the parent
+            # subsystem is already connected.
+            initial_devices = set(
+                self.ssh_obj.get_devices(node=self.fio_node))
+
             self.sbcli_utils.add_clone(snap_id, clone_name)
             self._wait_for_restore(clone_name, expect_failure=True)
             clone_id = self._get_lvol_id(clone_name)
             assert clone_id, f"Clone {clone_name} not found after create"
             self.created_lvols.append(clone_name)
 
-            # Connect — clone shares parent NQN, may need ns-rescan.
-            # Identify the source controller so we only rescan there.
-            source_device = info.get("device", "")
-            ctrl_dev = get_parent_device(source_device)
-            before_ns = set(self._list_nvme_ns_devices(ctrl_dev))
+            # Check clone's nsid to determine connection strategy:
+            # nsid=1 → clone got its own subsystem → nvme connect
+            # nsid>1 → shares parent's subsystem → ns-rescan
+            clone_details = self.sbcli_utils.get_lvol_details(clone_id)
+            clone_nsid = (clone_details[0].get("nsid", 1)
+                          if clone_details else 1)
+            self.logger.info(
+                f"  clone: {clone_name} nsid={clone_nsid}")
 
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(
-                lvol_name=clone_name)
-            for cmd in connect_ls:
-                _, err = self.ssh_obj.exec_command(
-                    node=self.fio_node, command=cmd)
-            sleep_n_sec(3)
-            after_ns = set(self._list_nvme_ns_devices(ctrl_dev))
-            new_devs = sorted(after_ns - before_ns)
-
-            if not new_devs:
-                # Clone auto-namespaced — ns-rescan on source controller
-                device = self._ns_rescan_and_find_device(
-                    ctrl_dev, before_ns, timeout=60)
-                assert device, (
-                    f"Clone {clone_name} device not found after "
-                    f"ns-rescan on {ctrl_dev}")
+            if clone_nsid == 1:
+                # Own subsystem — standard connect
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                    lvol_name=clone_name)
+                for cmd in connect_ls:
+                    self.ssh_obj.exec_command(
+                        node=self.fio_node, command=cmd)
+                sleep_n_sec(5)
+                post_connect = set(
+                    self.ssh_obj.get_devices(node=self.fio_node))
+                new_devs = sorted(post_connect - initial_devices)
+                assert new_devs, (
+                    f"Clone {clone_name} (nsid=1) device not found "
+                    f"after nvme connect")
+                device = f"/dev/{new_devs[0]}"
             else:
-                device = new_devs[0]
+                # Shared subsystem — ns-rescan needed.  The parent is
+                # already connected so `nvme connect` returns
+                # "already connected".  Rescan all live controllers.
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                    lvol_name=clone_name)
+                for cmd in connect_ls:
+                    self.ssh_obj.exec_command(
+                        node=self.fio_node, command=cmd)
+                sleep_n_sec(3)
+                post_connect = set(
+                    self.ssh_obj.get_devices(node=self.fio_node))
+                new_devs = sorted(post_connect - initial_devices)
+
+                if not new_devs:
+                    # Rescan all live controllers
+                    for attempt in range(3):
+                        self.ssh_obj.rescan_live_nvme_controllers(
+                            self.fio_node)
+                        sleep_n_sec(5)
+                        post_rescan = set(
+                            self.ssh_obj.get_devices(
+                                node=self.fio_node))
+                        new_devs = sorted(
+                            post_rescan - initial_devices)
+                        if new_devs:
+                            break
+                        self.logger.info(
+                            f"  clone: ns-rescan attempt "
+                            f"{attempt + 1}/3 — no device yet")
+                    assert new_devs, (
+                        f"Clone {clone_name} (nsid={clone_nsid}) "
+                        f"device not found after ns-rescan × 3")
+                device = f"/dev/{new_devs[0]}"
 
             # XFS clones have duplicate UUIDs — regenerate before mount
             if info["fs_type"] == "xfs":
@@ -1944,6 +1984,8 @@ class BackupStressComprehensive(BackupStressBase):
         # Restore from clone backup and verify
         if clone_bk_id:
             rst_name = f"comp_clrst_{source_label}_{_rand_suffix()}"
+            rst_mount = None
+            rst_id = None
             try:
                 self._restore_backup(clone_bk_id, rst_name)
                 self._wait_for_restore(rst_name)
@@ -1957,14 +1999,14 @@ class BackupStressComprehensive(BackupStressBase):
                     format_disk=False)
                 self._verify_checksums(
                     self.fio_node, rst_mount, clone_checksums)
-                self._unmount_and_disconnect(
-                    self.fio_node, rst_mount, rst_id)
                 self.logger.info(
                     f"  clone: restore of {clone_name} verified ✓")
             except Exception as e:
                 self.logger.error(
                     f"  clone: restore verify failed for "
                     f"{clone_name}: {e}")
+            finally:
+                self._cleanup_restore_lvol(rst_name, rst_mount, rst_id)
 
         clone_label = f"clone_{source_label}"
         lvol_state[clone_label] = {
@@ -2145,8 +2187,25 @@ class BackupStressComprehensive(BackupStressBase):
 
         return {label: bk_id for label, (bk_id, _) in results.items()}
 
+    def _cleanup_restore_lvol(self, rst_name: str, rst_mount: str = None,
+                              rst_id: str = None):
+        """Unmount, disconnect, and delete a restore lvol to free
+        subsystem slots.  Best-effort — errors are logged but swallowed.
+        """
+        try:
+            if rst_mount:
+                self._unmount_and_disconnect(
+                    self.fio_node, rst_mount, rst_id or "")
+        except Exception:
+            pass
+        try:
+            self._delete_lvol(rst_name, skip_error=True)
+        except Exception:
+            pass
+
     def _restore_batch(self, restore_specs, lvol_state):
-        """Restore a batch in parallel.
+        """Restore a batch in parallel, verify, then **delete** the
+        restore lvols to free subsystem capacity.
 
         restore_specs: list of ``(label, bk_id, expected_checksums)``
         tuples.  *expected_checksums* are the checksums captured at
@@ -2160,6 +2219,8 @@ class BackupStressComprehensive(BackupStressBase):
 
         def _restore_one(label, bk_id, expected_checksums):
             rst_name = f"comp_rst_{label}_{_rand_suffix()}"
+            rst_mount = None
+            rst_id = None
             try:
                 self._restore_backup(bk_id, rst_name)
                 self._wait_for_restore(rst_name)
@@ -2170,13 +2231,14 @@ class BackupStressComprehensive(BackupStressBase):
                     format_disk=False)
                 self._verify_checksums(
                     self.fio_node, rst_mount, expected_checksums)
-                self._unmount_and_disconnect(
-                    self.fio_node, rst_mount, rst_id)
                 results[label] = (rst_name, True)
             except Exception as e:
                 self.logger.error(
                     f"  restore {label} from {bk_id} failed: {e}")
                 results[label] = (rst_name, False)
+            finally:
+                # Always clean up restore lvol to free subsystem slots
+                self._cleanup_restore_lvol(rst_name, rst_mount, rst_id)
 
         for label, bk_id, expected_checksums in restore_specs:
             t = threading.Thread(
@@ -2464,6 +2526,9 @@ class BackupStressComprehensive(BackupStressBase):
             marathon_backups += round_bk_ok
 
             # ── Restores + concurrent FIO load ──
+            # Prefer lvols with ≥2 backups — the oldest are more likely
+            # to have completed S3 upload (avoids "Incomplete backups
+            # in chain" errors from freshly-created backups).
             restorable = [
                 l for l in all_labels
                 if lvol_state[l]["backup_ids"]]
@@ -2472,8 +2537,12 @@ class BackupStressComprehensive(BackupStressBase):
                 restore_labels = random.sample(restorable, num_restore)
                 restore_specs = []
                 for l in restore_labels:
-                    bk_id, checksums = random.choice(
-                        lvol_state[l]["backup_ids"])
+                    bk_list = lvol_state[l]["backup_ids"]
+                    # Pick from older backups (exclude most recent which
+                    # may still be uploading to S3).  Fall back to the
+                    # oldest if there's only one.
+                    older = bk_list[:-1] if len(bk_list) > 1 else bk_list
+                    bk_id, checksums = random.choice(older)
                     restore_specs.append((l, bk_id, checksums))
 
                 # Start FIO on non-restore lvols in background threads
@@ -2581,23 +2650,27 @@ class BackupStressComprehensive(BackupStressBase):
                 if info["backup_ids"]:
                     last_bk_id, last_checksums = info["backup_ids"][-1]
                     rst_name = f"comp_del_rst_{label}_{_rand_suffix()}"
-                    self._restore_backup(last_bk_id, rst_name)
-                    self._wait_for_restore(rst_name)
-                    rst_id = self._get_lvol_id(rst_name)
-                    _, rst_mount = self._connect_and_mount(
-                        rst_name, rst_id,
-                        mount=(
-                            f"{self.mount_path}/"
-                            f"cdel_{label}_{_rand_suffix()}"
-                        ),
-                        format_disk=False)
-                    self._verify_checksums(
-                        self.fio_node, rst_mount, last_checksums)
-                    self._unmount_and_disconnect(
-                        self.fio_node, rst_mount, rst_id)
-                    delete_ok += 1
-                    self.logger.info(
-                        f"TC-BCK-STR-108: {label} delete+restore OK")
+                    rst_mount = None
+                    rst_id = None
+                    try:
+                        self._restore_backup(last_bk_id, rst_name)
+                        self._wait_for_restore(rst_name)
+                        rst_id = self._get_lvol_id(rst_name)
+                        _, rst_mount = self._connect_and_mount(
+                            rst_name, rst_id,
+                            mount=(
+                                f"{self.mount_path}/"
+                                f"cdel_{label}_{_rand_suffix()}"
+                            ),
+                            format_disk=False)
+                        self._verify_checksums(
+                            self.fio_node, rst_mount, last_checksums)
+                        delete_ok += 1
+                        self.logger.info(
+                            f"TC-BCK-STR-108: {label} delete+restore OK")
+                    finally:
+                        self._cleanup_restore_lvol(
+                            rst_name, rst_mount, rst_id)
             except Exception as e:
                 self.logger.error(
                     f"TC-BCK-STR-108: {label} delete+restore failed: {e}")
@@ -2639,10 +2712,12 @@ class BackupStressComprehensive(BackupStressBase):
         for label in restore_burst:
             def _rs(lbl=label):
                 info = lvol_state[lbl]
+                rst_name = f"burst_rst_{lbl}_{_rand_suffix()}"
+                rst_mount = None
+                rst_id = None
                 try:
                     bk_id, expected_checksums = random.choice(
                         info["backup_ids"])
-                    rst_name = f"burst_rst_{lbl}_{_rand_suffix()}"
                     self._restore_backup(bk_id, rst_name)
                     self._wait_for_restore(rst_name)
                     rst_id = self._get_lvol_id(rst_name)
@@ -2655,11 +2730,12 @@ class BackupStressComprehensive(BackupStressBase):
                         format_disk=False)
                     self._verify_checksums(
                         self.fio_node, rst_mount, expected_checksums)
-                    self._unmount_and_disconnect(
-                        self.fio_node, rst_mount, rst_id)
                     burst_results[f"restore_{lbl}"] = "ok"
                 except Exception as e:
                     burst_results[f"restore_{lbl}"] = f"fail: {e}"
+                finally:
+                    self._cleanup_restore_lvol(
+                        rst_name, rst_mount, rst_id)
             t = threading.Thread(target=_rs)
             burst_threads.append(t)
 
