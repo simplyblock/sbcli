@@ -3941,17 +3941,6 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         # NQN/nsid/namespace-UUID, never the bdev name.
         new_lvol.vuid = utils.get_random_vuid()
         new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
-        # And precisely BECAUSE identity is NQN/nsid/UUID/NGUID: the clone must
-        # present the ORIGINAL's NGUID, not the deep-copied source guid. The
-        # client's multipath head for this nsid was built from the original's
-        # ids; a namespace re-added at the same nsid with different ids is
-        # rejected forever ("IDs don't match for shared namespace N") and on a
-        # shared subsystem that leaves the head pathless — the sibling pods
-        # keep the controllers alive, so no reconnect ever rebuilds it
-        # (run 2026-09-02 16:00: nsid 3 evicted at prepare_cutover, clone
-        # re-added with the DR ids, XFS shutdown on the client).
-        if superseded.guid:
-            new_lvol.guid = superseded.guid
     new_lvol.create_dt = str(datetime.now())
     new_lvol.node_id = target_node.get_id()
     new_lvol.nodes = [target_node.get_id()]
@@ -4037,22 +4026,29 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     # Which identity the clone's namespace advertises on the wire:
     #
-    # Migration: preserve the source UUID as the NVMe namespace UUID so the kernel
-    # can merge source and target paths into the same multipath namespace during
-    # the preconnect phase (ANA flip requires matching NSUUID on both paths).
+    # Migration and fail-back: preserve the SOURCE's wire identity — what the
+    # connected client's multipath head currently holds — so the kernel can
+    # merge source and target paths during the preconnect phase (the ANA flip
+    # requires matching NSUUIDs on both paths). The source's own wire identity
+    # may itself be borrowed (its ns_uuid, e.g. a fail-back clone from an
+    # earlier cycle), so propagate the chain, not the record uuid.
     # Failover: the source is gone — use the clone's own UUID so it appears as
     # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
-    # Fail-back over a still-live original: the namespace identity must be the
-    # ORIGINAL's uuid (the very identity _swap_failback_lvol_uuid restores on
-    # the record after cutover). The client's multipath head at this nsid was
-    # built from the original's ids; re-adding the slot under the DR lvol's
-    # uuid makes the kernel reject the path ("IDs don't match for shared
-    # namespace N") and on a shared subsystem the head stays pathless until
-    # the pod is restaged (run 2026-09-02 16:00, nsids 2 and 3).
-    if superseded is not None:
-        _src_ns_uuid = superseded.uuid
+    #
+    # Do NOT use the superseded original's uuid here. That was tried (run
+    # 2026-09-02 17:00) to serve clients whose heads still held the ORIGINAL
+    # identity — but such clients only exist because failover leaves the
+    # original unfenced and their writes land on superseded data that fail-back
+    # discards anyway. For the canonical shape — pods restaged onto the DR side
+    # after failover, heads built from the DR identity — restoring the original
+    # uuid made the kernel reject every preconnected target path ("IDs don't
+    # match for shared namespace N"), and deleteSource then removed the head's
+    # only live paths: no available path, XFS shutdown (run 2026-09-02 ~19:00,
+    # subsystem 20d8a917 nsid 1).
+    if for_migration:
+        _src_ns_uuid = getattr(lvol, "ns_uuid", "") or lvol.uuid
     else:
-        _src_ns_uuid = lvol.uuid if for_migration else new_lvol.uuid
+        _src_ns_uuid = new_lvol.uuid
     # Persist the wire identity when it is borrowed, so connect_lvol can tell
     # the CSI which /dev/disk/by-id/nvme-uuid.<id> the device really carries.
     new_lvol.ns_uuid = _src_ns_uuid if _src_ns_uuid != new_lvol.uuid else ""

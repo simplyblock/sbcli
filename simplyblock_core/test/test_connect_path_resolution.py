@@ -159,22 +159,22 @@ def test_legacy_failback_record_falls_back_to_the_relationship(monkeypatch):
     assert [e.target_lvol_id for e in entries] == ["LV_DR"]
 
 
-def test_failback_with_restored_identity_needs_no_override(monkeypatch):
-    """A fail-back over a still-live original registers the clone's namespace
-    under the ORIGINAL's uuid — after the UUID swap the wire identity equals
-    the volume's own id, so the CSI's own-id lookup matches and emitting the
-    DR source id would point it at a NSUUID that does not exist."""
+def test_wire_identity_equal_to_own_id_needs_no_override(monkeypatch):
+    """A volume whose persisted wire identity equals its own id needs no
+    redirect: the CSI's own-id lookup already matches the device, and any
+    emission would point it elsewhere."""
     dr, back = _lvol("LV_DR"), _lvol("LV_BACK")
-    back.ns_uuid = "LV_BACK"  # what _swap_failback_lvol_uuid leaves behind
+    back.ns_uuid = "LV_BACK"
     db = _FakeDB([dr, back], [_rep(dr, back, LVolReplication.STATE_CUTOVER_DONE)])
     entries = _connect(monkeypatch, db, "LV_BACK")
     assert [e.target_lvol_id for e in entries] == [None]
 
 
-def test_fresh_cluster_failback_reports_the_wire_identity(monkeypatch):
-    """A fail-back to a fresh cluster has no still-live original: the clone
-    keeps the DR source's NSUUID, persisted in ns_uuid, and connect reports
-    exactly that — no relationship walk needed."""
+def test_failback_reports_the_persisted_wire_identity(monkeypatch):
+    """After a fail-back the UUID swap gives the record its original id while
+    the namespace keeps advertising the DR source's wire identity (that is
+    what kept the client's multipath head alive through the cutover). Connect
+    must report the persisted ns_uuid — no relationship walk needed."""
     back = _lvol("LV_BACK")
     back.ns_uuid = "LV_DR"
     db = _FakeDB([back])

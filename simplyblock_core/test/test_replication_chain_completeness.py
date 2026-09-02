@@ -461,15 +461,16 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     assert ("S", False) in added
 
 
-def test_failback_clone_keeps_the_superseded_originals_wire_identity(monkeypatch):
-    """Run 2026-09-02 16:00: the fail-back clone was re-added at the preserved
-    nsid with the DR lvol's uuid and nguid (deep-copied), but the client's
-    multipath head for that nsid was built from the ORIGINAL's ids — the
-    kernel rejected every new path ("IDs don't match for shared namespace N")
-    and, on the shared subsystem, the eviction at prepare_cutover had already
-    removed the head's only live path: XFS shut down on running pods. The
-    clone must advertise the superseded original's uuid AND nguid, the exact
-    identity _swap_failback_lvol_uuid restores on the record after cutover."""
+def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
+    """The fail-back clone must advertise the SOURCE's wire identity — what
+    the connected client's multipath head currently holds — or the kernel
+    rejects every preconnected target path ("IDs don't match for shared
+    namespace N") and deleteSource then removes the head's only live paths
+    (run 2026-09-02 ~19:00, subsystem 20d8a917: no available path, XFS
+    shutdown on a restaged pod). Explicitly NOT the superseded original's
+    uuid: that variant was tried (run 2026-09-02 17:00) and only served
+    clients still riding the unfenced superseded original, whose writes
+    fail-back discards anyway."""
     from simplyblock_core.controllers import lvol_controller as lc
 
     added = []
@@ -519,6 +520,7 @@ def test_failback_clone_keeps_the_superseded_originals_wire_identity(monkeypatch
     class _Lvol:
         uuid = "DR_ID"; nqn = "nqn.test:lvol:SHARED"; ns_id = 3
         guid = "DR_NGUID"
+        ns_uuid = ""
         namespace = ""
         max_namespace_per_subsys = 10
         lvol_bdev = "LVOL_28"; crypto_bdev = ""
@@ -538,13 +540,29 @@ def test_failback_clone_keeps_the_superseded_originals_wire_identity(monkeypatch
     new_lvol, error = lc._create_target_lvol_clone(
         _DB(), _Lvol(), primary, "POOL", _Snap(), for_migration=True)
     assert error is None
-    # Every node's add_ns must carry the original's identity, never the DR's.
-    assert [(nid, ns) for nid, ns, _ in added] == [("P", "ORIG_ID"), ("S", "ORIG_ID")]
-    assert all(guid == "ORIG_NGUID" for _, _, guid in added)
+    # Every node's add_ns must carry the DR source's wire identity — what the
+    # client's head holds — never the superseded original's.
+    assert [(nid, ns) for nid, ns, _ in added] == [("P", "DR_ID"), ("S", "DR_ID")]
+    assert all(guid == "DR_NGUID" for _, _, guid in added)
     # The wire identity is persisted so connect_lvol can report it.
-    assert new_lvol.ns_uuid == "ORIG_ID"
+    assert new_lvol.ns_uuid == "DR_ID"
     # And the clone still got its own bdev name (adoption guard).
     assert new_lvol.lvol_bdev == "LVOL_999"
+
+    # A second fail-back cycle: the DR source's own wire identity is already
+    # borrowed (its ns_uuid points at an earlier generation). The chain must
+    # propagate — the client's head knows only the ORIGINAL wire id.
+    added.clear()
+
+    class _Gen2Lvol(_Lvol):
+        ns_uuid = "GEN0_WIRE_ID"
+
+    new_lvol, error = lc._create_target_lvol_clone(
+        _DB(), _Gen2Lvol(), primary, "POOL", _Snap(), for_migration=True)
+    assert error is None
+    assert [(nid, ns) for nid, ns, _ in added] == [
+        ("P", "GEN0_WIRE_ID"), ("S", "GEN0_WIRE_ID")]
+    assert new_lvol.ns_uuid == "GEN0_WIRE_ID"
 
 
 def test_interrupted_landing_volume_is_adopted_or_cleared():
