@@ -3054,8 +3054,14 @@ class TestJcRemoveJmBeforeBdevDelete(unittest.TestCase):
         rpc.get_bdevs = MagicMock(return_value=[])
         return rpc
 
-    def _run(self, jc_remove_jm):
-        """Drive _decommission_node_jm with one peer that needs its JM replaced."""
+    def _run(self, jc_remove_jm, replica_peer_ids=("peer",)):
+        """Drive _decommission_node_jm with one peer that needs its JM replaced.
+
+        ``replica_peer_ids`` defaults to naming the peer, because jc_remove_jm
+        is only issued for a node that carries the removed node's OWN lvstore
+        group -- its secondary or tertiary. Everywhere else a replace alone
+        already drops the JM from JC and the release would be a no-op.
+        """
         cl = _cluster()
         removed = _node("dead", with_jm=True, jm_vuid=9, lvstore="LVS_9", failure_domain=1)
         peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
@@ -3085,72 +3091,34 @@ class TestJcRemoveJmBeforeBdevDelete(unittest.TestCase):
              patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=["jm-spare"]), \
              patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
                           return_value=[rd, new_rd]):
-            storage_node_ops._decommission_node_jm(removed)
+            storage_node_ops._decommission_node_jm(
+                removed, replica_peer_ids=replica_peer_ids)
         return rpc, peer
 
-    def test_jc_remove_jm_is_called_before_the_bdev_is_deleted(self):
-        calls = []
-        rpc, peer = self._run(
-            jc_remove_jm=MagicMock(side_effect=lambda n: calls.append(("remove", n)) or True))
-        rpc.bdev_nvme_detach_controller.side_effect = None
-        self.assertEqual(rpc.jc_remove_jm.call_args[0][0], "remote_jm_deadn1")
-        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
-
-    def test_minus_22_leaves_the_bdev_in_place(self):
-        # The whole point: a jm_vuid we could not enumerate still references
-        # this JM. Deleting the bdev now is what corrupts JC's view.
-        rpc, peer = self._run(
-            jc_remove_jm=MagicMock(side_effect=RPCRemoteError("in use", -22)))
-        rpc.bdev_nvme_detach_controller.assert_not_called()
-        self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices],
-                      "the bookkeeping entry must survive too -- the bdev is still there")
-
-    def test_other_jc_errors_also_leave_the_bdev_in_place(self):
-        # -13 deliberately excluded: see the dedicated test below.
-        for code in (-3, -6, -10, -12, -21):
-            with self.subTest(code=code):
-                rpc, _peer = self._run(
-                    jc_remove_jm=MagicMock(side_effect=RPCRemoteError("nope", code)))
-                rpc.bdev_nvme_detach_controller.assert_not_called()
-
-    def test_minus_13_not_used_by_jc_is_the_success_path(self):
-        # Measured live 2026-09-02 on spdk R26.3: a jc_replace_jm that swaps
-        # the JM out of every vuid on the node ALSO drops it from JC, so the
-        # follow-up jc_remove_jm finds nothing and answers -13 -- on every
-        # node. Treating that as a failure strands the bdev and its
-        # remote_jm_devices entry on every peer, which is the opposite of what
-        # this whole sequence is for.
-        rpc, peer = self._run(
-            jc_remove_jm=MagicMock(side_effect=RPCRemoteError("not used by JC", -13)))
+    def test_a_node_with_another_group_using_the_jm_replaces_and_never_removes(self):
+        # Mutually exclusive: this peer's own vuid 37 uses the dead JM, so the
+        # replace covers everything (leftover included) and remove is not
+        # called at all -- on the secondary/tertiary just as much as anywhere.
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=True))
+        rpc.jc_replace_jm.assert_called_once()
+        rpc.jc_remove_jm.assert_not_called()
         rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
         self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
 
-    def test_a_raised_exception_leaves_the_bdev_in_place(self):
-        rpc, _peer = self._run(
-            jc_remove_jm=MagicMock(side_effect=RPCConnectionError("unreachable")))
-        rpc.bdev_nvme_detach_controller.assert_not_called()
-
-    def test_unsupported_build_keeps_the_previous_behaviour(self):
-        # spdk:main-latest as of 2026-09-02 has no jc_remove_jm. Degrade to the
-        # old delete rather than stranding every superseded controller forever.
-        from simplyblock_core.rpc_client import RPC_UNSUPPORTED
-        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=RPC_UNSUPPORTED))
+    def test_same_holds_for_a_node_carrying_no_leftover_group(self):
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=True),
+                              replica_peer_ids=())
+        rpc.jc_remove_jm.assert_not_called()
         rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
-        uuids = [rd.uuid for rd in peer.remote_jm_devices]
-        self.assertNotIn("jm-dead", uuids, "the dead JM's entry must be dropped")
-        self.assertIn("jm-spare", uuids, "the replacement's entry must survive")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
 
 
 # ---------------------------------------------------------------------------
-# The leftover vuid: removed_node's OWN jm_vuid survives on the peers that
-# hosted its replica, still naming the dying JM. Its primary is removed_node
-# (not in live_nodes, so in no `decisions` entry) and phase 3a has already
-# cleared its back-reference -- so Pass 2 cannot reach it through either
-# source. It must be covered in the SAME jc_replace_jm call as that peer's
-# other vuids, or jc_replace_jm's -17 rejects the whole batch.
-#
-# Live 2026-09-02: the one peer whose replace failed -17 was exactly the peer
-# hosting the removed node's own lvstore.
+# Replace and remove are mutually exclusive per node (SPDK team, 2026-09-02):
+# if any OTHER group on the node uses the dead JM, one jc_replace_jm covers
+# them all plus the leftover; if the leftover group is the only user, it is
+# jc_remove_jm alone. Secondary/tertiary matters only in that those are the
+# nodes that carry a leftover group at all.
 # ---------------------------------------------------------------------------
 class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
 
@@ -3190,33 +3158,30 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
                 removed, replica_peer_ids=replica_peer_ids)
         return rpc
 
-    def test_replica_peer_gets_the_leftover_vuid_in_the_same_call(self):
+    def test_leftover_joins_the_batch_when_another_group_uses_the_jm(self):
+        # The peer's own vuid 37 uses the dead JM, so jc_replace_jm must cover
+        # it AND the leftover vuid 2 in ONE call -- SPDK rejects a batch that
+        # misses any local vuid using name_old (-17).
         rpc = self._run(("peer",))
         rpc.jc_replace_jm.assert_called_once()
         kw = rpc.jc_replace_jm.call_args.kwargs
         vuids = sorted(r["jm_vuid"] for r in kw["replacements"])
-        self.assertEqual(vuids, [2, 37],
-                         "one call must cover the peer's own vuid 37 AND the "
-                         "removed node's leftover vuid 2")
+        self.assertEqual(vuids, [2, 37])
         self.assertEqual(kw["name_old"], "remote_jm_deadn1")
 
-    def test_without_the_captured_peer_ids_the_leftover_is_missed(self):
-        # Exactly the pre-fix behaviour, and what produced the live -17.
-        rpc = self._run(())
-        vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
-        self.assertEqual(vuids, [37])
-
-    def test_leftover_coverage_lets_jc_remove_jm_run_and_the_bdev_be_deleted(self):
+    def test_and_then_remove_is_not_called_at_all(self):
+        # Mutually exclusive: the replace already covered every user, so JC has
+        # dropped the JM and a release would be a guaranteed no-op.
         rpc = self._run(("peer",))
-        rpc.jc_remove_jm.assert_called_once_with("remote_jm_deadn1")
+        rpc.jc_remove_jm.assert_not_called()
         rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
 
-    def test_a_non_replica_peer_is_unaffected(self):
-        # A node that never hosted the removed node's replica has no leftover
-        # vuid, so nothing extra may be added to its batch.
+    def test_a_node_with_no_leftover_group_covers_only_its_own_vuids(self):
         rpc = self._run(("someone-else",))
         vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
         self.assertEqual(vuids, [37])
+        rpc.jc_remove_jm.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
 
     def test_removed_node_whose_own_jm_ids_lack_the_dead_jm_does_not_abort_phase_2(self):
         # Regression, found live 2026-09-02. The removed node is itself in
@@ -3261,10 +3226,12 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
             # Must not raise.
             storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
 
-        # And the peer must still have been patched, covering both vuids.
+        # And the peer must still have been patched, covering its own surviving
+        # group AND the leftover in the one call.
         rpc.jc_replace_jm.assert_called_once()
         vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
         self.assertEqual(vuids, [2, 37])
+        rpc.jc_remove_jm.assert_not_called()
         self.assertEqual(removed.jm_ids, ["jm-other-a", "jm-other-b"],
                          "the removed node's unrelated jm_ids must be left alone")
 
@@ -3366,6 +3333,29 @@ class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
         rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=RPC_UNSUPPORTED))
         rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
         self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_minus_13_not_used_by_jc_is_the_success_path(self):
+        # JC already has no record of the JM, so there is nothing to release
+        # and the bdev is safe to delete. Treating it as a failure would strand
+        # the controller and its bookkeeping entry.
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCRemoteError("not used by JC", -13)))
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_other_jc_error_codes_keep_the_bdev(self):
+        for code in (-3, -6, -10, -12, -21):
+            with self.subTest(code=code):
+                rpc, peer = self._run(
+                    jc_remove_jm=MagicMock(side_effect=RPCRemoteError("nope", code)))
+                rpc.bdev_nvme_detach_controller.assert_not_called()
+                self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_a_raised_exception_keeps_the_bdev(self):
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCConnectionError("unreachable")))
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+        self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
 
     def test_node_without_the_dying_jm_is_left_completely_alone(self):
         cl = _cluster()
