@@ -4493,6 +4493,14 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # 2026-08-25: this node's own hosted-replica peer failed the very
             # next removal after the phase 2/3b reorder that fixed the
             # relocation-timing gap).
+            # Captured BEFORE phase 3a, which clears both this node's
+            # secondary/tertiary pointers and those peers' back-references.
+            # These two peers are the ones left running a JC instance for THIS
+            # node's own jm_vuid, and phase 2 cannot find them any other way --
+            # see _decommission_node_jm's replica_peer_ids.
+            replica_peer_ids = tuple(
+                pid for pid in (snode.secondary_node_id, snode.tertiary_node_id) if pid)
+
             logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
             if not _teardown_replicas_of_primary(snode):
                 return False
@@ -4504,7 +4512,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # in its primary's jm_ids bakes that unreachable member into the
             # new host's construct permanently.
             logger.info(f"[REMOVAL] {node_id}: phase 2 — decommission JM")
-            _decommission_node_jm(snode)
+            _decommission_node_jm(snode, replica_peer_ids=replica_peer_ids)
             snode = db_controller.get_storage_node_by_id(node_id)
 
             # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
@@ -5325,9 +5333,22 @@ def _clear_replica_backref(removed_node: StorageNode, backref):
         removed_node.write_to_db()
 
 
-def _decommission_node_jm(removed_node: StorageNode) -> None:
+def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> None:
     """Patch every live JC group that referenced ``removed_node``'s JM out of
     its redundancy set, replacing it with a freshly picked candidate.
+
+    ``replica_peer_ids``: the peers that hosted ``removed_node``'s OWN lvstore
+    replica (its secondary and tertiary), captured by the caller BEFORE phase
+    3a -- which clears both those pointers and the peers' back-references, so
+    by the time this runs nothing in the DB records who they were. They matter
+    because each of them still runs a local JC instance for ``removed_node``'s
+    own jm_vuid, and that instance references the dying JM by name. It is
+    reachable through neither source Pass 2 consults (its primary is
+    ``removed_node``, which is not in ``live_nodes`` and therefore in no
+    ``decisions`` entry; and its back-reference has been cleared), so without
+    this the batched jc_replace_jm cannot cover it and jc_replace_jm's own -17
+    check rejects the whole call. Reproduced live 2026-09-02: the removal's
+    only failing peer was the one hosting the removed node's own lvstore.
 
     Called TWICE by design, both idempotent (guarded by the JM device's own
     status, set below): early, as node_removal_orchestrate's own phase 2 --
@@ -5420,6 +5441,15 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
             if primary.jm_ids and removed_jm_id in primary.jm_ids:
                 decisions[primary.get_id()] = _pick_replacement(primary)
 
+        # removed_node's OWN vuid needs a decision too, even though it is not a
+        # live node: its JC instance survives on whichever peers hosted its
+        # replica (see replica_peer_ids), still naming the dying JM. We are not
+        # keeping that vuid useful -- its lvstore is gone -- only getting the
+        # dead JM out of it, so that name_old ends up referenced by nothing and
+        # jc_remove_jm can release it instead of refusing with -22.
+        if replica_peer_ids and removed_node.jm_vuid:
+            decisions[removed_node.get_id()] = _pick_replacement(removed_node)
+
         # Pass 2: a single storage node can run more than one local JC
         # instance against the removed JM's bdev at once -- its own
         # redundancy set, plus one instance per primary it hosts as
@@ -5437,6 +5467,16 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                 if backref and backref in decisions:
                     hosted_primary = db_controller.get_storage_node_by_id(backref)
                     targets.append((hosted_primary.jm_vuid, hosted_primary, decisions[backref]))
+            # ...plus removed_node's own leftover vuid, on the peers that hosted
+            # its replica. Its back-reference above is already cleared by phase
+            # 3a, so it can only be reached through the ids captured before
+            # that ran. Must be in the SAME call as this node's other targets:
+            # one jc_replace_jm has to cover every local vuid using name_old.
+            if (node.get_id() in replica_peer_ids
+                    and removed_node.get_id() in decisions
+                    and removed_node.jm_vuid):
+                targets.append((removed_node.jm_vuid, removed_node,
+                                decisions[removed_node.get_id()]))
 
             if not targets:
                 if any(d.uuid == removed_jm_id for d in (node.remote_jm_devices or [])):
