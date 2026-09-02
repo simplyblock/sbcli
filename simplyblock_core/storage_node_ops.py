@@ -27,6 +27,7 @@ from simplyblock_core import utils
 from simplyblock_core import jm_raid
 from simplyblock_core.utils import port_block
 from simplyblock_core.utils import rpc_budget
+from simplyblock_core.utils import hublvol_reconnect
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
@@ -9606,6 +9607,11 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # An unbounded fence is bad; a fence budget leaking onto this thread's
         # later work would be worse. Every exit path clears it.
         rpc_budget.clear_budget()
+        try:
+            # this function never arms the gate; just release it
+            hublvol_reconnect.clear_defer_gate()
+        except Exception:
+            pass
 
 
 def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
@@ -10034,6 +10040,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
     # 6.2-8.9s true block->unblock from spdk logs). The 6s nvmf ack-timeout
     # reject applies to THIS number, per port.
     _block_started: dict = {}
+    #: Fired once every fenced port is released, so deferred redundant-path
+    #: hublvol attaches run outside the client-visible window.
+    _defer_gate_event = threading.Event()
     _block_longest = {"sec": 0.0}
 
     # #3: port deny/allow event emission (FDB+graylog write, ~190ms measured
@@ -10110,8 +10119,10 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             except ValueError:
                 pass
             if not blocked_peers:
-                # Fence over: normal work must not inherit the 0.5s budget.
+                # Fence over: normal work must not inherit the 0.5s budget,
+                # and the deferred hublvol attaches may now run.
                 rpc_budget.clear_budget()
+                _defer_gate_event.set()
 
     def _kill_app():
         """Kill SPDK on snode and mark OFFLINE before peer ports unblock.
@@ -10440,6 +10451,10 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         # blocked_peers empties, and in the outer finally.
                         rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
                                               constants.FENCE_RPC_RETRY)
+                        # Redundant hublvol paths must land AFTER the fence,
+                        # not 3s after the foreground attach (which is still
+                        # inside it -- 2026-09-01 16:28:27.739, mid-block).
+                        hublvol_reconnect.set_defer_gate(_defer_gate_event)
                     except Exception as e:
                         # Failing to port-block the current leader means we cannot
                         # safely promote snode: the old leader may still be serving
@@ -10984,6 +10999,11 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         # An unbounded fence is bad; a fence budget leaking onto this thread's
         # later work would be worse. Every exit path clears it.
         rpc_budget.clear_budget()
+        try:
+            _defer_gate_event.set()
+            hublvol_reconnect.clear_defer_gate()
+        except Exception:
+            pass
 
 
 def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):

@@ -20,11 +20,20 @@ from simplyblock_core.controllers import health_controller
 
 
 class TestRepairCompletesTheConnect:
-    def test_attach_only_reconcile_is_no_longer_the_repair(self):
-        """coordinator.reconcile() attaches but never connects, so the health
-        path must not use it as the whole repair."""
+    def test_reconcile_is_still_used_for_the_paths(self):
+        """reconcile() is the only thing that adds a MISSING path through the
+        coordinator's cooldown / cntlid-duplicate protection. Replacing it
+        with connect_to_hublvol broke exactly that: connect_to_hublvol skips
+        the attach when the remote bdev already exists, so a partially
+        attached controller never got its missing path."""
         src = inspect.getsource(health_controller)
-        assert "coordinator.reconcile(" not in src
+        assert "coordinator.reconcile(" in src
+
+    def test_reconcile_is_followed_by_the_rejoin(self):
+        """Both steps, in order: paths first, then rejoin the lvstore."""
+        src = inspect.getsource(health_controller)
+        assert src.index("coordinator.reconcile(") < src.index(
+            "connected = node.connect_to_hublvol(")
 
     def test_repair_calls_connect_to_hublvol(self):
         src = inspect.getsource(health_controller)
@@ -33,7 +42,9 @@ class TestRepairCompletesTheConnect:
     def test_role_is_derived_from_topology_not_defaulted(self):
         """A wrong role stamps two nodes as the same role for one LVS."""
         src = inspect.getsource(health_controller)
-        assert 'role="tertiary" if is_sec2 else "secondary"' in src
+        assert 'role = "tertiary" if is_sec2 else "secondary"' in src
+        # and that same value is what both steps receive
+        assert "role=role" in src
 
     def test_connect_is_bounded_so_one_peer_cannot_stall_the_cycle(self):
         assert health_controller.HUBLVOL_REPAIR_RPC_TIMEOUT_SEC > 0
