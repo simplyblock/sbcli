@@ -5531,17 +5531,17 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         # remove an id its jm_ids never held -- ValueError, phase 2 aborted
         # mid-flight, and NO peer got its jc_replace_jm at all (found live
         # 2026-09-02: strictly worse than the gap it was meant to close).
+        # removed_node's OWN lvstore group survives on its secondary and
+        # tertiary as a "leftover": no live primary, no back-reference, so
+        # Pass 2's two sources cannot see it. It still needs a replacement
+        # candidate, because in one of the two cases below it does get replaced.
         leftover_replacement = (
             _pick_replacement(removed_node)
             if (replica_peer_ids and removed_node.jm_vuid) else None)
-        # Logged because its absence is silent otherwise, and "the leftover was
-        # never covered" and "there was no leftover to cover" look identical
-        # from outside (2026-09-02: two runs where the coverage did not fire
-        # and the log could not say which).
         logger.info(
-            f"[REMOVAL] {removed_node.get_id()}: leftover vuid {removed_node.jm_vuid} "
-            f"on replica peers {list(replica_peer_ids)} -> replacement "
-            f"{leftover_replacement or 'NONE (no candidate; leftover will NOT be patched)'}")
+            f"[REMOVAL] {removed_node.get_id()}: own lvstore vuid {removed_node.jm_vuid} "
+            f"leftover on replica peers {list(replica_peer_ids)} -> replacement "
+            f"{leftover_replacement or 'NONE (no candidate)'}")
 
         # Pass 2: a single storage node can run more than one local JC
         # instance against the removed JM's bdev at once -- its own
@@ -5560,37 +5560,42 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                 if backref and backref in decisions:
                     hosted_primary = db_controller.get_storage_node_by_id(backref)
                     targets.append((hosted_primary.jm_vuid, hosted_primary, decisions[backref]))
-            # ...plus removed_node's own leftover vuid, on the peers that hosted
-            # its replica. Its back-reference above is already cleared by phase
-            # 3a, so it can only be reached through the ids captured before
-            # that ran. Must be in the SAME call as this node's other targets:
-            # one jc_replace_jm has to cover every local vuid using name_old.
-            if node.get_id() in replica_peer_ids and leftover_replacement is not None:
-                targets.append((removed_node.jm_vuid, removed_node,
-                                leftover_replacement))
+            # Replace and remove are MUTUALLY EXCLUSIVE on a node -- per the
+            # SPDK team (2026-09-02), and forced by the two RPCs' own rules:
+            #
+            #   * jc_replace_jm must cover EVERY local vuid using name_old or
+            #     it rejects the batch (-17). So if any surviving group uses the
+            #     dead JM, the leftover group must be in that same call too --
+            #     it cannot be left out and handled separately.
+            #   * jc_remove_jm refuses while any vuid still uses the JM (-22).
+            #     So it is only available when nothing else holds it, i.e. when
+            #     the leftover group is the sole user.
+            #
+            # Hence: other groups present -> replace all of them plus the
+            # leftover, and never call remove. Only the leftover -> remove
+            # alone, and never call replace. Whether the node is secondary or
+            # tertiary does not enter into it beyond determining whether it
+            # carries a leftover group at all.
+            carries_removed_lvs = node.get_id() in replica_peer_ids
+            if targets and carries_removed_lvs and leftover_replacement is not None:
+                targets.append((removed_node.jm_vuid, removed_node, leftover_replacement))
 
             if not targets:
                 old_remote_dev = next(
                     (rd for rd in (node.remote_jm_devices or []) if rd.uuid == removed_jm_id),
                     None)
                 if old_remote_dev:
-                    # This node has the dying JM connected but no vuid THIS
-                    # removal can patch. That is not a harmless leftover: it is
-                    # precisely the peer whose only user of the JM is the
-                    # removed node's OWN vuid, which has no live primary and no
-                    # back-reference and therefore yields no target.
+                    # No OTHER group on this node uses the dying JM, so there is
+                    # nothing to replace -- this is the remove case. On a
+                    # secondary/tertiary the removed primary's group is then the
+                    # sole user and jc_remove_jm is exactly the operation for
+                    # it; on any other node the entry is simply stale and the
+                    # release is a cheap way to have JC confirm it is done
+                    # before we detach.
                     #
-                    # It is also the one place jc_remove_jm can still do real
-                    # work. After a successful jc_replace_jm JC has already
-                    # dropped the JM (it answers -13), so the call below the
-                    # replace is a no-op assertion -- redundant exactly where it
-                    # runs, and absent exactly where it mattered, until now.
-                    # Here nothing has replaced anything, so JC still holds the
-                    # descriptor and only an explicit release frees it.
-                    #
-                    # -22 back from this means the leftover vuid genuinely still
-                    # references the JM; the bdev then stays, deliberately, and
-                    # the error names why.
+                    # -22 here would mean some group still holds the JM after
+                    # all; the bdev then stays, deliberately, and the error
+                    # names why.
                     stale_bdev = old_remote_dev.remote_bdev
                     if not stale_bdev:
                         # No recorded bdev name, so there is nothing to release
@@ -5719,26 +5724,37 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # timeout eventually noticed (found live 2026-08-25).
                     # Clean up both sides here instead of waiting for that.
                     #
-                    # Hand the JM back to JC FIRST. JC holds an open descriptor
-                    # and IO channel on this bdev; jc_remove_jm closes them and
-                    # drops the JM's JC context, and only then may the bdev be
-                    # deleted. Deleting it while JC still holds the descriptor
-                    # is what leaves JC naming a bdev that no longer exists --
-                    # observed live 2026-09-02, where a peer's JC member list
-                    # still carried a remote_jm_* absent from its own
-                    # bdev_get_bdevs.
+                    # Whether a release is needed first depends on what else
+                    # this node carries, not on the fact that a replace just
+                    # happened:
                     #
-                    # jc_remove_jm also VERIFIES the assumption this branch
-                    # used to just assert ("name_old is now unused by any local
-                    # JC instance"). It is not always true: a jm_vuid whose
-                    # primary has already been removed appears in no
-                    # `decisions` entry and under no back-reference, so the
-                    # batch above cannot cover it, and jc_replace_jm's own -17
-                    # check then rejects a LATER call on this node. -22 turns
-                    # that invisible leftover into a definite answer, at the
-                    # one moment we can act on it.
-                    if _release_jm_from_jc(node, name_old):
-                        _drop_superseded_jm_bdev(node, name_old, removed_jm_id)
+                    #   * carries removed_node's own lvstore group (secondary
+                    #     or tertiary) -- that group is being destroyed rather
+                    #     than repaired, so it was never a replace target and
+                    #     is still holding the JM. jc_remove_jm is the call
+                    #     that frees it, and -22 says it could not.
+                    #   * carries no such group -- the replace above already
+                    #     dropped the JM from JC entirely (measured live
+                    #     2026-09-02 on spdk R26.3: jc_remove_jm answers -13,
+                    #     "not used by JC", on every one of those nodes). The
+                    #     call would be a no-op, so skip it and delete.
+                    # The replace above already covered every vuid using this JM
+                    # on this node -- including removed_node's own lvstore vuid
+                    # on its secondary/tertiary, which is added blind: by the
+                    # time this runs phase 3a has deleted that lvstore, its raid
+                    # and its distribs, and cleared both the forward pointers
+                    # and the back-references, so the group cannot be observed
+                    # at all. Its JC membership outlives the stack it belonged
+                    # to (live 2026-09-02: mg6fm's SYNCD showed vuid 45 still
+                    # holding the dead JM in slot 0, blocked=1, long after the
+                    # lvstore was gone), so it must go into the batch on the
+                    # strength of replica_peer_ids alone.
+                    #
+                    # JC has therefore dropped the JM (spdk R26.3 answers -13,
+                    # "not used by JC", after any successful replace). A release
+                    # here would be a guaranteed no-op, and the two calls are
+                    # mutually exclusive per node by design.
+                    _drop_superseded_jm_bdev(node, name_old, removed_jm_id)
 
                 if not replaced:
                     for controller_name, pre_existing in connected_controllers:
