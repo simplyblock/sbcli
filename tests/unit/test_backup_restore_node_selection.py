@@ -11,7 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.exceptions import InsufficientCapacityError, PreconditionError
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -192,6 +193,22 @@ class TestFailures:
         add_lvol_ha.return_value = (None, "Pool not found")
 
         with pytest.raises(RuntimeError, match="Failed to create restore volume"):
+            _restore()
+
+    @pytest.mark.parametrize("refusal", [
+        lvol_controller.ERR_NO_NODE_WITH_CAPACITY,
+        f"{lvol_controller.ERR_OBJECT_LIMIT_PREFIX} of node abc: 35 objects "
+        f"(lvols/clones: 35, snapshots: 0); the hard limit is 35 per lvstore",
+    ])
+    def test_capacity_exhaustion_is_not_a_server_error(self, db, add_lvol_ha, refusal):
+        """A cluster with nowhere to put the volume has not failed, it has declined.
+
+        Reported as a RuntimeError, it reached clients as a 500 and every generic
+        retry policy treated a permanent refusal as a transient fault.
+        """
+        add_lvol_ha.return_value = (None, refusal)
+
+        with pytest.raises(InsufficientCapacityError):
             _restore()
 
     def test_task_creation_failure_is_a_runtime_error(self, db, add_lvol_ha, tasks):

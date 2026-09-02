@@ -12,6 +12,8 @@ core logic is mocked out:
   parameters.
 - Authentication is bypassed via ``app.dependency_overrides``; it has its own
   unit tests in ``test_auth.py``.
+- The app registers the same exception handlers as the real one, so a test sees
+  the status code a client would actually get rather than a raised exception.
 - ``Thread`` is replaced with an inline runner so fire-and-forget endpoints
   (cluster start/shutdown, node restart, …) can be asserted synchronously.
 """
@@ -23,6 +25,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_web.app import register_exception_handlers
 
 import simplyblock_web.api.v2 as v2
 import simplyblock_web.api.v2._auth as auth_module
@@ -105,6 +108,7 @@ def db(monkeypatch):
 @pytest.fixture(scope='session')
 def app():
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(v2.api, prefix='/api/v2')
     app.dependency_overrides[auth_module.verify_api_token] = lambda: None
     app.dependency_overrides[auth_module.verify_metrics_token] = lambda: None

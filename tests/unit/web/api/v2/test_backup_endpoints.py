@@ -1,6 +1,8 @@
 # coding=utf-8
 """Unit tests for /api/v2/clusters/{id}/backups endpoints (backup_controller mocked)."""
 
+from simplyblock_core.exceptions import InsufficientCapacityError
+
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
     BACKUP_ID,
@@ -82,6 +84,20 @@ class TestRestoreBackup:
         assert response.json() == {'lvol_id': VOLUME_ID}
         backup_controller.restore_backup.assert_called_once_with(
             BACKUP_ID, 'restored-volume', 'pool-1', target_node_id=None)
+
+    def test_capacity_exhaustion_is_a_conflict_not_a_server_error(
+            self, client, db, cluster, backup_controller):
+        backup_controller.restore_backup.side_effect = InsufficientCapacityError(
+            'No nodes found with enough resources to create the LVol')
+
+        response = client.post(f'{BASE}/restore', json={
+            'backup_id': BACKUP_ID,
+            'lvol_name': 'restored-volume',
+            'pool': 'pool-1',
+        })
+
+        assert response.status_code == 409
+        assert response.json()['code'] == 'insufficient_capacity'
 
 
 class TestBackupPolicies:

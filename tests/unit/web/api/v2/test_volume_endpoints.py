@@ -31,6 +31,17 @@ class TestListVolumes:
 
 class TestCreateVolume:
 
+    def test_capacity_exhaustion_is_a_conflict_not_a_server_error(
+            self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.return_value = (
+            False, 'No nodes found with enough resources to create the LVol')
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G'})
+
+        assert response.status_code == 409
+        assert response.json()['code'] == 'insufficient_capacity'
+
     def test_calls_add_lvol_ha(self, client, db, pool, lvol_controller):
         db.get_lvol_by_name.side_effect = KeyError('LVol not found')
         lvol_controller.add_lvol_ha.return_value = (VOLUME_ID, None)
