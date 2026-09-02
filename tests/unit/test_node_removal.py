@@ -3106,11 +3106,24 @@ class TestJcRemoveJmBeforeBdevDelete(unittest.TestCase):
                       "the bookkeeping entry must survive too -- the bdev is still there")
 
     def test_other_jc_errors_also_leave_the_bdev_in_place(self):
-        for code in (-3, -6, -10, -12, -13, -21):
+        # -13 deliberately excluded: see the dedicated test below.
+        for code in (-3, -6, -10, -12, -21):
             with self.subTest(code=code):
                 rpc, _peer = self._run(
                     jc_remove_jm=MagicMock(side_effect=RPCRemoteError("nope", code)))
                 rpc.bdev_nvme_detach_controller.assert_not_called()
+
+    def test_minus_13_not_used_by_jc_is_the_success_path(self):
+        # Measured live 2026-09-02 on spdk R26.3: a jc_replace_jm that swaps
+        # the JM out of every vuid on the node ALSO drops it from JC, so the
+        # follow-up jc_remove_jm finds nothing and answers -13 -- on every
+        # node. Treating that as a failure strands the bdev and its
+        # remote_jm_devices entry on every peer, which is the opposite of what
+        # this whole sequence is for.
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCRemoteError("not used by JC", -13)))
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
 
     def test_a_raised_exception_leaves_the_bdev_in_place(self):
         rpc, _peer = self._run(
