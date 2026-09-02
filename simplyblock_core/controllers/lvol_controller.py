@@ -1,11 +1,10 @@
 # coding=utf-8
 import copy
 import random
-import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import ops_gate
@@ -82,33 +81,6 @@ def _create_compress_lvol(rpc_client, base_bdev_name):
         logger.error("failed to create compress LVol on the storage node")
         return False
     return ret
-
-
-def ask_for_device_number(devices_list):
-    question = f"Enter the device number [1-{len(devices_list)}]: "
-    while True:
-        sys.stdout.write(question)
-        choice = str(input())
-        try:
-            ch = int(choice.strip())
-            ch -= 1
-            return devices_list[ch]
-        except Exception as e:
-            logger.debug(e)
-            sys.stdout.write(f"Please respond with numbers 1 - {len(devices_list)}\n")
-
-
-def ask_for_lvol_vuid():
-    question = "Enter VUID number: "
-    while True:
-        sys.stdout.write(question)
-        choice = str(input())
-        try:
-            ch = int(choice.strip())
-            return ch
-        except Exception as e:
-            logger.debug(e)
-            sys.stdout.write("Please respond with numbers")
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
@@ -310,36 +282,6 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
         return ret
     else:
         return online_nodes
-
-def is_hex(s: str) -> bool:
-    """
-    given an input checks if the value is hex encoded or not
-    """
-    try:
-        int(s, 16)
-        return True
-    except ValueError:
-        return False
-
-def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
-    """
-    Key Length: each key should be either 128 or 256 bits long.
-    since hex values of the keys are expected, the key lengths should be either 32 or 64
-    """
-
-    if len(key1) != len(key2):
-        return False, "both the keys should be of the same length"
-
-    if len(key1) not in [32, 64] or len(key2) not in [32, 64]:
-        return False, "each key should be either 16 or 32 bytes long"
-
-    if not is_hex(key1):
-        return False, "please provide hex encoded value for crypto_key1"
-
-    if not is_hex(key2):
-        return False, "please provide hex encoded value for crypto_key2"
-
-    return True, ""
 
 
 def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
