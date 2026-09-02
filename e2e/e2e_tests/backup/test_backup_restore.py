@@ -5441,6 +5441,24 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
             }))
         return entries
 
+    @staticmethod
+    def _resolve_live_backup_id(info: dict, live_ids: set):
+        """Return the newest of info['backup_ids'] that's still present in
+        the live backup list.
+
+        With a versions=3 policy attached, the two oldest backups in a
+        chain get merged and the absorbed one is deleted — a tracked id
+        that was live when appended can go stale by the time a later
+        round tries to restore it. Walk backward through our own
+        chronological record and return the first entry that's still
+        actually restorable, instead of blindly trusting the last-appended
+        id.
+        """
+        for bk_id in reversed(info["backup_ids"]):
+            if bk_id in live_ids:
+                return bk_id
+        return None
+
     def run(self):
         self.logger.info("=== TestBackupHighVolumeCombosSequential START ===")
         self.fio_node = self.fio_node[0]
@@ -5566,11 +5584,33 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
             self.logger.info(
                 f"TC-BCK-222: round {round_num}/{self.NUM_ROUNDS} — "
                 f"restoring {len(labels)} lvols sequentially")
+            # Fetch the live, restorable backup ids once per round (not
+            # once per lvol) — with the versions=3 policy attached, an
+            # absorbed backup doesn't disappear, it transitions to
+            # status='merged' (Backup.STATUS_MERGED) and is no longer
+            # restorable, so presence alone isn't enough: filter to only
+            # ids still in a completed/restorable state.
+            live_ids = {
+                (b.get("id") or b.get("ID") or b.get("uuid") or "")
+                for b in self._list_backups()
+                if (b.get("status") or b.get("Status") or "").lower()
+                   in ("done", "complete", "completed")
+            }
             for label in labels:
                 info = lvol_state[label]
                 if not info["backup_ids"]:
                     continue
-                bk_id = info["backup_ids"][-1]
+                bk_id = self._resolve_live_backup_id(info, live_ids)
+                if not bk_id:
+                    self.logger.warning(
+                        f"TC-BCK-222: round {round_num} — no live backup "
+                        f"id for {label} ({info['combo']}); all tracked "
+                        f"ids appear merged/deleted, skipping this round")
+                    continue
+                # Drop stale ids older than the one we're restoring so we
+                # don't keep re-checking dead entries every round.
+                keep_from = info["backup_ids"].index(bk_id)
+                info["backup_ids"] = info["backup_ids"][keep_from:]
                 rname = f"hv_r_{label[-6:]}_r{round_num}_{_rand_suffix()}"
                 restore_total += 1
                 r_mnt, r_id = None, None
