@@ -5441,14 +5441,25 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
             if primary.jm_ids and removed_jm_id in primary.jm_ids:
                 decisions[primary.get_id()] = _pick_replacement(primary)
 
-        # removed_node's OWN vuid needs a decision too, even though it is not a
-        # live node: its JC instance survives on whichever peers hosted its
-        # replica (see replica_peer_ids), still naming the dying JM. We are not
-        # keeping that vuid useful -- its lvstore is gone -- only getting the
-        # dead JM out of it, so that name_old ends up referenced by nothing and
-        # jc_remove_jm can release it instead of refusing with -22.
-        if replica_peer_ids and removed_node.jm_vuid:
-            decisions[removed_node.get_id()] = _pick_replacement(removed_node)
+        # removed_node's OWN vuid needs a replacement too: its JC instance
+        # survives on whichever peers hosted its replica (see
+        # replica_peer_ids), still naming the dying JM. We are not keeping that
+        # vuid useful -- its lvstore is gone -- only getting the dead JM out of
+        # it, so name_old ends up referenced by nothing and jc_remove_jm can
+        # release it instead of refusing with -22.
+        #
+        # Deliberately NOT stored in `decisions`. Every `decisions` entry means
+        # "this primary's OWN redundancy set lists the dead JM", and Pass 2
+        # relies on that: it keys the node's own-vuid target off membership,
+        # and both jm_ids.remove() calls below assume it. removed_node is
+        # itself in live_nodes (status in_removal, not removed), so putting it
+        # in `decisions` made Pass 2 treat it as a normal consumer and then
+        # remove an id its jm_ids never held -- ValueError, phase 2 aborted
+        # mid-flight, and NO peer got its jc_replace_jm at all (found live
+        # 2026-09-02: strictly worse than the gap it was meant to close).
+        leftover_replacement = (
+            _pick_replacement(removed_node)
+            if (replica_peer_ids and removed_node.jm_vuid) else None)
 
         # Pass 2: a single storage node can run more than one local JC
         # instance against the removed JM's bdev at once -- its own
@@ -5472,11 +5483,9 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
             # 3a, so it can only be reached through the ids captured before
             # that ran. Must be in the SAME call as this node's other targets:
             # one jc_replace_jm has to cover every local vuid using name_old.
-            if (node.get_id() in replica_peer_ids
-                    and removed_node.get_id() in decisions
-                    and removed_node.jm_vuid):
+            if node.get_id() in replica_peer_ids and leftover_replacement is not None:
                 targets.append((removed_node.jm_vuid, removed_node,
-                                decisions[removed_node.get_id()]))
+                                leftover_replacement))
 
             if not targets:
                 if any(d.uuid == removed_jm_id for d in (node.remote_jm_devices or [])):
@@ -5569,8 +5578,16 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                             f"{replacements} replacing removed JM {removed_jm_id}")
                         for _jm_vuid, owner_primary, new_jm_id in targets:
                             if owner_primary.get_id() == node.get_id():
-                                node.jm_ids.remove(removed_jm_id)
-                                node.jm_ids.append(new_jm_id)
+                                # Membership-conditional: a target can exist for
+                                # a vuid whose OWNER is not this node, and an
+                                # unguarded remove() throws ValueError and
+                                # aborts the whole phase mid-node, leaving every
+                                # peer after it unpatched (found live
+                                # 2026-09-02).
+                                if removed_jm_id in node.jm_ids:
+                                    node.jm_ids.remove(removed_jm_id)
+                                if new_jm_id not in node.jm_ids:
+                                    node.jm_ids.append(new_jm_id)
                         replaced = True
                     except Exception as e:
                         logger.error(
@@ -5707,7 +5724,11 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     logger.error(
                         f"[REMOVAL] {node.get_id()}: no replacement candidate for jm_vuid(s) "
                         f"{[jm_vuid for jm_vuid, _, new_jm_id in targets if new_jm_id is None]}")
-                if node.get_id() in decisions:
+                if node.get_id() in decisions and removed_jm_id in node.jm_ids:
+                    # Guarded for the same reason as the success path above: an
+                    # unguarded remove() here threw ValueError and aborted
+                    # phase 2 before any peer was patched (found live
+                    # 2026-09-02).
                     node.jm_ids.remove(removed_jm_id)
             node.write_to_db()
 

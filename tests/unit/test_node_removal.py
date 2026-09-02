@@ -3205,6 +3205,56 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
         vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
         self.assertEqual(vuids, [37])
 
+    def test_removed_node_whose_own_jm_ids_lack_the_dead_jm_does_not_abort_phase_2(self):
+        # Regression, found live 2026-09-02. The removed node is itself in
+        # live_nodes (status in_removal), so if the leftover replacement is
+        # stored in `decisions` it becomes a normal Pass-2 consumer -- and the
+        # unguarded node.jm_ids.remove(removed_jm_id) then raised ValueError,
+        # aborting phase 2 before ANY peer was patched. Strictly worse than the
+        # gap it was meant to close.
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2", failure_domain=1)
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
+        spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41", failure_domain=3)
+        # The removed node's OWN jm_ids does NOT list its own dying JM.
+        removed.jm_ids = ["jm-other-a", "jm-other-b"]
+        removed.status = StorageNode.STATUS_IN_REMOVAL
+        peer.jm_ids = ["jm-dead", "jm-peer"]
+        spare.jm_ids = ["jm-spare"]
+        rd = RemoteJMDevice()
+        rd.uuid = "jm-dead"
+        rd.remote_bdev = "remote_jm_deadn1"
+        peer.remote_jm_devices = [rd]
+        rpc = MagicMock()
+        rpc.jc_replace_jm = MagicMock(return_value=True)
+        rpc.jc_remove_jm = MagicMock(return_value=True)
+        rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
+        rpc.get_bdevs = MagicMock(return_value=[])
+        peer.rpc_client = MagicMock(return_value=rpc)
+
+        db = FakeDB(cl, [removed, peer, spare])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                  "jm-peer": peer.jm_device,
+                                  "jm-spare": spare.jm_device}.get(i))
+        new_rd = RemoteJMDevice()
+        new_rd.uuid = "jm-spare"
+        new_rd.remote_bdev = "remote_jm_sparen1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=["jm-spare"]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[rd, new_rd]):
+            # Must not raise.
+            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
+
+        # And the peer must still have been patched, covering both vuids.
+        rpc.jc_replace_jm.assert_called_once()
+        vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
+        self.assertEqual(vuids, [2, 37])
+        self.assertEqual(removed.jm_ids, ["jm-other-a", "jm-other-b"],
+                         "the removed node's unrelated jm_ids must be left alone")
+
 
 class TestOrchestratorCapturesReplicaPeersBeforeTeardown(unittest.TestCase):
 
