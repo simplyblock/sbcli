@@ -633,6 +633,18 @@ def prune_duplicate_paths(rpc_client, name, ctrlr_list, nvmf_port, tr_type):
     duplicated" race, so a prune helper that also re-attached would risk
     recreating the very duplicate it just removed.
     """
+    if not name:
+        # An empty controller name makes bdev_nvme_controller_list() return
+        # EVERY controller on the node, so duplicate_attached_paths() then
+        # aggregates unrelated controllers and reports the same target IP
+        # "duplicated" across them. Detaching on that is destructive and
+        # wrong. Observed 2026-09-02 12:16 during activation: 10 false
+        # duplicates on one node, and the detach ran.
+        logger.warning(
+            "prune_duplicate_paths called with an empty controller name; "
+            "refusing to prune (the controller list would cover all "
+            "controllers)")
+        return False
     duplicates = duplicate_attached_paths(ctrlr_list)
     if not duplicates:
         return False
