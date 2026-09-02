@@ -915,20 +915,30 @@ def check_node(node_id, with_devices=True):
             for remote_device in snode.remote_jm_devices:
 
                 name = remote_device.remote_bdev
-                bdev_info = rpc_client.get_bdevs(name)
-                logger.log(INFO if bdev_info else ERROR,
-                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                # Owner resolved BEFORE the probe, not after. Previously the
+                # RPC went out unconditionally and the ERROR line was logged
+                # before anything knew the owner was gone -- so a removed
+                # node's stale entry cost one RPC per cycle and left an ERROR
+                # in the log that the very next line classified as expected,
+                # and never retracted. Live 2026-09-02: 1797 such hits on one
+                # removed node's JM.
                 try:
                     jm_owner = db_controller.get_storage_node_by_id(remote_device.node_id)
                 except KeyError:
                     jm_owner = None
-                if _peer_connections_relevant(jm_owner):
-                    node_remote_devices_check &= bool(bdev_info)
-                elif not bdev_info:
+                owner_relevant = _peer_connections_relevant(jm_owner)
+                if not owner_relevant:
                     logger.info(
-                        "Remote JM %s missing, but owning node %s is %s — expected, "
-                        "not failing health", name, remote_device.node_id,
+                        "Remote JM %s belongs to node %s (%s); not probing and not "
+                        "failing health", name, remote_device.node_id,
                         jm_owner.status if jm_owner else "not-found")
+                    connected_jms.append(remote_device.get_id())
+                    continue
+
+                bdev_info = rpc_client.get_bdevs(name)
+                logger.log(INFO if bdev_info else ERROR,
+                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                node_remote_devices_check &= bool(bdev_info)
                 connected_jms.append(remote_device.get_id())
 
                 controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
