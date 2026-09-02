@@ -96,7 +96,12 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
             db.return_value.get_storage_node_by_id.return_value = primary
             health_controller._check_sec_node_hublvol(
                 node, primary_node_id="primary-1", **kwargs)
-        return coordinator_cls.return_value.reconcile.called
+        # The repair is driven by connect_to_hublvol now, not by the
+        # coordinator directly: reconcile() only re-attaches the
+        # transport and leaves the lvstore unconnected (2026-09-01,
+        # LVS_10). The question these tests ask -- "was the repair
+        # driven?" -- is unchanged; only the call that answers it is.
+        return node.connect_to_hublvol.called
 
     def test_repair_paths_reconciles_the_missing_path(self):
         self.assertTrue(self._call(self.ONE_PATH, repair_paths=True))
@@ -155,8 +160,13 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
             db.return_value.get_storage_node_by_id.side_effect =                 lambda i: {"primary-1": primary, "sec-1": secondary}[i]
             hc._check_sec_node_hublvol(node, primary_node_id="primary-1",
                                        repair_paths=True)
-        self.assertTrue(coordinator_cls.return_value.reconcile.called,
-                        "the missing secondary path was not reconciled")
+        self.assertTrue(node.connect_to_hublvol.called,
+                        "the missing secondary path was not repaired")
+        # A tertiary must be wired to the primary AND the secondary, with its
+        # role stamped from topology rather than defaulted.
+        kwargs = node.connect_to_hublvol.call_args.kwargs
+        self.assertEqual(kwargs.get("role"), "tertiary")
+        self.assertIs(kwargs.get("failover_node"), secondary)
 
     def test_refused_when_the_primary_cannot_answer(self):
         self.assertFalse(self._call(
