@@ -81,3 +81,43 @@ class TestConnectContract:
             __import__("simplyblock_core.models.storage_node", fromlist=["StorageNode"])
             .StorageNode.connect_to_hublvol)
         assert "rpc_timeout" in sig.parameters
+
+
+class TestEmptyControllerNameIsNotPruned:
+    """An empty controller name must never reach the prune.
+
+    bdev_nvme_controller_list("") returns EVERY controller on the node, so
+    duplicate_attached_paths() then aggregates unrelated controllers and
+    reports the same target IP as "duplicated" across them. Acting on that
+    detaches live paths.
+
+    Observed on the 2026-09-02 cluster at 12:16 during activation: 10 false
+    duplicates reported on one node and the detach ran, because the prior
+    commit made the (previously log-only) detection act.
+    """
+
+    def test_primitive_refuses_an_empty_name(self):
+        from unittest.mock import MagicMock
+        from simplyblock_core import storage_node_ops
+        rpc = MagicMock()
+        dup = [{"ctrlrs": [
+            {"state": "enabled", "trid": {"traddr": "10.0.0.1"}},
+            {"state": "enabled", "trid": {"traddr": "10.0.0.1"}}]}]
+        assert storage_node_ops.prune_duplicate_paths(rpc, "", dup, 4420, "TCP") is False
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+
+    def test_primitive_still_prunes_a_named_controller(self):
+        from unittest.mock import MagicMock
+        from simplyblock_core import storage_node_ops
+        rpc = MagicMock()
+        dup = [{"ctrlrs": [
+            {"state": "enabled", "trid": {"traddr": "10.0.0.1"}},
+            {"state": "enabled", "trid": {"traddr": "10.0.0.1"}},
+            {"state": "enabled", "trid": {"traddr": "10.0.0.2"}}]}]
+        assert storage_node_ops.prune_duplicate_paths(
+            rpc, "LVS_1/hublvol", dup, 4420, "TCP") is True
+        rpc.bdev_nvme_detach_controller.assert_called_once()
+
+    def test_health_check_gates_on_a_named_hublvol(self):
+        src = inspect.getsource(health_controller)
+        assert "if hub_bdev else set()" in src
