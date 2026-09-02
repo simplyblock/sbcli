@@ -369,6 +369,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     # from a legacy release, whose pre-existing bdevs need the one-shot
     # runtime flip via set_shared_placement.
     cluster.shared_placement = True
+    # New clusters create every distrib with v2 write protection from the
+    # start, so there is nothing to migrate and the runtime
+    # distr_write_protection_v2 RPC is never needed here. Only a cluster
+    # UPGRADED from a release without v2 goes through
+    # `cluster switch-write-protection`.
+    cluster.write_protection_v2 = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -603,6 +609,12 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     # from a legacy release, whose pre-existing bdevs need the one-shot
     # runtime flip via set_shared_placement.
     cluster.shared_placement = True
+    # New clusters create every distrib with v2 write protection from the
+    # start, so there is nothing to migrate and the runtime
+    # distr_write_protection_v2 RPC is never needed here. Only a cluster
+    # UPGRADED from a release without v2 goes through
+    # `cluster switch-write-protection`.
+    cluster.write_protection_v2 = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -2063,6 +2075,102 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
     return True
 
 
+def switch_write_protection(cl_id) -> bool:
+    """Move a cluster from v1 to v2 distrib write protection.
+
+    Two steps, strictly in this order, so the recorded generation never claims
+    more than the data plane has actually done:
+
+      1. Send the runtime ``distr_write_protection_v2(enable=True)`` RPC to
+         every ONLINE storage node, with no ``name`` so it covers every distrib
+         bdev on that node. This is the only way an already-created distrib
+         gains v2 -- a create parameter cannot reach a bdev that exists. Every
+         online node must succeed; a single failure aborts the switch and
+         leaves the cluster on v1, so recovery is just re-running the command.
+
+      2. Only then stamp the generation: into each node's stored distrib params
+         (so a restart replays the right key) and onto the cluster row (so
+         newly created distribs, and nodes added later, pick it up).
+
+    Offline nodes are not a failure and are not skipped: they have no running
+    bdevs to migrate, and step 2 rewrites their stored stack, so their distribs
+    come back on v2 when they next restart.
+
+    Idempotent: a cluster already on v2 returns True untouched.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if cluster.write_protection_v2:
+        logger.info(
+            "Cluster %s already runs v2 write protection; nothing to do", cl_id)
+        return True
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    online = [n for n in nodes if n.status == StorageNode.STATUS_ONLINE]
+    if not online:
+        logger.error(
+            "Cluster %s has no online storage node; cannot switch write "
+            "protection", cl_id)
+        return False
+
+    # Step 1: the runtime RPC on every online node.
+    failures = []
+    for node in online:
+        try:
+            if node.rpc_client().distr_write_protection_v2(enable=True):
+                logger.info("Node %s: v2 write protection activated",
+                            node.get_id())
+            else:
+                failures.append(node.get_id())
+                logger.error(
+                    "Node %s rejected distr_write_protection_v2(enable=True)",
+                    node.get_id())
+        except Exception as e:
+            failures.append(node.get_id())
+            logger.error(
+                "Node %s raised on distr_write_protection_v2(enable=True): %s",
+                node.get_id(), e)
+
+    if failures:
+        logger.error(
+            "Aborting write-protection switch: %d of %d online node(s) failed "
+            "(%s). The cluster stays on v1 -- fix those nodes and re-run.",
+            len(failures), len(online), ", ".join(failures))
+        return False
+
+    # Step 2a: persist the generation in every stored distrib stack entry, on
+    # every node including offline ones. Atomic compare-and-set so the long
+    # per-node RPC loop above cannot clobber a concurrent node.status write
+    # (lost-update class -- incident 2026-06-18).
+    for node in nodes:
+        def _mut(n):
+            changed = False
+            for entry in (n.lvstore_stack or []):
+                if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                    continue
+                params = entry.get("params")
+                if not isinstance(params, dict):
+                    continue
+                before = ("write_protection" in params,
+                          "write_protection_v2" in params)
+                storage_node_ops.apply_write_protection_mode(params, True)
+                if before != ("write_protection" in params,
+                              "write_protection_v2" in params):
+                    changed = True
+            return changed
+
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()), _mut)
+
+    # Step 2b: the cluster row (atomic, so it does not clobber a concurrent
+    # cluster.status write from set_cluster_status).
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cl_id),
+        lambda c: setattr(c, "write_protection_v2", True))
+    logger.info("Cluster %s switched to v2 write protection (%d node(s))",
+                cl_id, len(online))
+    return True
+
+
 def list() -> t.List[dict]:
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
@@ -2466,6 +2574,26 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     # upgrade before anything was changed. Completed later by
     # `cluster upgrade-complete` (upgrade_complete below).
     release_upgrades.run_pre_update(cluster)
+
+    # An upgraded cluster's existing distribs carry v1 write protection, and no
+    # create parameter can retrofit a bdev that already exists -- only the
+    # runtime distr_write_protection_v2 RPC can, via
+    # `sbctl cluster switch-write-protection`. Stamp the generation back to v1
+    # BEFORE the rolling restart below, because those restarts replay each
+    # node's stored distrib stack and must replay it under the key the running
+    # bdevs actually use.
+    #
+    # This also demotes a cluster that was already on v2: after an upgrade the
+    # switch has to be re-run either way, and claiming v2 we have not verified
+    # on the new image is the one failure mode worth avoiding here.
+    if cluster.write_protection_v2:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "write_protection_v2", False))
+        logger.info(
+            "Cluster %s stamped back to v1 write protection for the upgrade; "
+            "run `sbctl cluster switch-write-protection` once every node is "
+            "back online", cluster_id)
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":

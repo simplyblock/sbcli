@@ -388,6 +388,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__set_shared_placement(subparser)
+        self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
         self.init_cluster__replication_target_add(subparser)
@@ -616,6 +617,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__set_shared_placement(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set-shared-placement', 'Enable cluster-wide per-chunk data placement-binding for distrib bdevs (forward-only upgrade; --disable is reserved for debug).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__switch_write_protection(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'switch-write-protection', 'Activate v2 distrib write protection cluster-wide. Runs the runtime RPC on every online storage node and, only if all of them succeed, records the cluster as v2 so later (re-)creations use it. Needed once after upgrading a cluster from a release without v2; new clusters are v2 already.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
         subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
@@ -1481,6 +1486,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['set-shared-placement']:
                     ret = self.cluster__set_shared_placement(sub_command, args)
+                elif sub_command in ['switch-write-protection']:
+                    ret = self.cluster__switch_write_protection(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:
