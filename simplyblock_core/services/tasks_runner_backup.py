@@ -7,6 +7,7 @@ Handles three task types:
   - FN_BACKUP_RESTORE: restore a backup chain into a new lvol
   - FN_BACKUP_MERGE: merge two backups to shorten the chain
 """
+import errno
 import time
 
 from simplyblock_core import constants, db_controller, utils
@@ -20,7 +21,7 @@ from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 
 logger = utils.get_logger(__name__)
 
@@ -92,6 +93,17 @@ def _run_backup(task):
             if not ret:
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return
+        except RPCRemoteError as e:
+            if e.code == -errno.EBUSY:
+                # Target S3 device already has another transfer in flight.
+                # Expected, self-resolving contention -- retry without
+                # counting against max_retry or failing the backup.
+                task.function_result = "S3 device busy with another transfer, retrying"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return
+            _fail_backup(backup, task, f"RPC error: {e}")
+            return
         except RPCException as e:
             _fail_backup(backup, task, f"RPC error: {e}")
             return
@@ -307,6 +319,20 @@ def _run_restore(task):
                 task.status = JobSchedule.STATUS_SUSPENDED
                 task.write_to_db(db.kv_store)
                 return
+        except RPCRemoteError as e:
+            if e.code == -errno.EBUSY:
+                # Target S3 device already has another transfer in flight.
+                # Expected, self-resolving contention -- retry without
+                # counting against max_retry.
+                task.function_result = "S3 device busy with another transfer, retrying"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return
+            task.function_result = f"RPC error: {e}"
+            task.retry += 1
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return
         except RPCException as e:
             task.function_result = f"RPC error: {e}"
             task.retry += 1
@@ -422,6 +448,20 @@ def _run_merge(task):
                 task.status = JobSchedule.STATUS_SUSPENDED
                 task.write_to_db(db.kv_store)
                 return
+        except RPCRemoteError as e:
+            if e.code == -errno.EBUSY:
+                # Target S3 device already has another transfer in flight.
+                # Expected, self-resolving contention -- retry without
+                # counting against max_retry.
+                task.function_result = "S3 device busy with another transfer, retrying"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return
+            task.function_result = f"RPC error: {e}"
+            task.retry += 1
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return
         except RPCException as e:
             task.function_result = f"RPC error: {e}"
             task.retry += 1
