@@ -2,6 +2,23 @@ global:
   scrape_interval: 60s
   external_labels:
     monitor: 'codelab-monitor'
+    # Thanos identifies an HA Prometheus group by a label that DIFFERS per
+    # replica, and drops it when deduplicating. Without one, all three
+    # replicas emit series with byte-identical identity ({job, instance,
+    # monitor}), so thanos-query has nothing to dedup on and all three
+    # sidecars upload blocks with identical external labels into the same
+    # bucket -- which the compactor treats as overlapping and halts on.
+    #
+    # This file is bind-mounted, so every replica reads the SAME bytes and the
+    # value cannot come from file content. ${REPLICA} is expanded from the
+    # environment by Prometheus (--enable-feature=expand-external-labels); the
+    # compose sets REPLICA per task from the swarm node-hostname template.
+    #
+    # Careful: this file is rendered by Jinja before deployment, so a swarm
+    # template written literally with double braces here would be evaluated as
+    # a Jinja expression and break rendering. Hence the shell-style ${REPLICA}
+    # placeholder, with the swarm template kept in the compose file.
+    replica: '${REPLICA}'
 
 scrape_configs:
 

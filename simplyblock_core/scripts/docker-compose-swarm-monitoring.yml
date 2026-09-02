@@ -87,6 +87,14 @@ services:
       - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"
       - "--storage.tsdb.min-block-duration=2h"
       - "--storage.tsdb.max-block-duration=2h"
+      # Expands ${REPLICA} in prometheus.yml's external_labels from the env
+      # below. Required because prometheus.yml is bind-mounted: every replica
+      # reads identical bytes and cannot self-identify from file content.
+      - "--enable-feature=expand-external-labels"
+    environment:
+      # Swarm service template, evaluated per task, so each replica gets a
+      # distinct value -- this is what makes Thanos deduplication possible.
+      - "REPLICA={{.Node.Hostname}}"
     restart: "always"
     deploy:
       mode: global
@@ -134,8 +142,41 @@ services:
     command:
       - query
       - --http-address=0.0.0.0:9091
-      - --store=thanos-store:10901
-      - --store=thanos-sidecar:10901
+      # Both prefixes are load-bearing. prometheus/thanos-sidecar/thanos-store
+      # are all `mode: global`, so a 3-manager swarm runs three of each.
+      #
+      #  * `dns+` makes Thanos treat the address as a DNS-discovered SET and
+      #    re-resolve it periodically. Without it the address is ONE static
+      #    endpoint.
+      #  * `tasks.` is the Swarm DNS name that returns every task's real IP.
+      #    These services use the default VIP endpoint mode, so the bare
+      #    service name resolves to a single *virtual* IP -- meaning `dns+`
+      #    alone still yields exactly one endpoint and changes nothing, with
+      #    the routing mesh pinning Thanos's long-lived gRPC connection to
+      #    whichever task it first landed on. prometheus.yml.j2 already uses
+      #    this idiom for tasks.node-exporter.
+      #
+      # Thanos's startup log shows the broken state directly, printing one
+      # "adding new sidecar" line instead of three.
+      #
+      # Why it caused "no data": the most recent ~2h of samples live only in
+      # each Prometheus's local TSDB and are served solely by *its own*
+      # sidecar; only older blocks reach the object store. Grafana alert rules
+      # evaluate recent data, so every evaluation depended on that one pinned
+      # sidecar. When it was slow the query returned an EMPTY result rather
+      # than an error -- surfacing as `noDataState: NoData`, not
+      # `execErrState: Error` -- and self-cleared once it answered again:
+      #   "update of endpoint failed" err="getting metadata: fallback fetching
+      #    info from thanos-sidecar:10901: rpc error: code = DeadlineExceeded"
+      #
+      # `--store` is v0.31's deprecated alias for `--endpoint`; left as-is to
+      # keep the diff to what actually fixes the fault.
+      - --store=dns+tasks.thanos-store:10901
+      - --store=dns+tasks.thanos-sidecar:10901
+      # Drop the `replica` external label when merging series from the three
+      # Prometheus replicas, so a query yields one series instead of three
+      # same-identity ones with interleaved samples.
+      - --query.replica-label=replica
     deploy:
       mode: global
       placement:
@@ -153,12 +194,23 @@ services:
       - --retention.resolution-5m=60d
       - --retention.resolution-1h=90d
       - --compact.concurrency=1
+      # Vertically compact the replicas' overlapping blocks instead of halting
+      # on them, which is what a bucket fed by identically-labelled sidecars
+      # produces.
+      - --deduplication.replica-label=replica
       - --wait
     volumes:
       - ./objstore.yml:/etc/thanos/objstore.yml
       - thanos_compactor_data:/data
     deploy:
-      mode: global
+      # Thanos requires a SINGLE compactor per bucket. `mode: global` ran one
+      # per manager -- three concurrent compactors rewriting the same blocks,
+      # which Thanos documents as a data-corruption risk. It matters more now
+      # that --deduplication.replica-label makes them perform vertical
+      # compaction. Store and query stay global (read-only, safe to scale);
+      # only the compactor is a singleton.
+      mode: replicated
+      replicas: 1
       placement:
         constraints: [node.role == manager]
     networks:
