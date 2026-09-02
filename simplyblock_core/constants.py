@@ -493,6 +493,26 @@ NON_LEADER_BLOCK_QUIESCE_SEC = 0.2
 # restart; the task runner re-queues it. A retried restart is cheap, a
 # quiesced client path is not.
 FENCE_RPC_TIMEOUT_SEC = 0.5
+#: Per-peer budget for the data-plane quorum vote, and the ceiling on waiting
+#: for the vote threads.
+#:
+#: This vote is a liveness question -- "does this peer still see the node's
+#: remote_jm controller?" -- so a slow answer IS the answer. It used to run
+#: rpc_client(timeout=8, retry=1) and then join() the vote threads with no
+#: timeout at all, which put an unbounded wait inside the restart's port
+#: fence.
+#:
+#: 2026-09-01, LVS_10: three peers voted in 3ms (16:28:29.006-29.009); a
+#: fourth was dialling the node the soak had host-rebooted at 16:28:23 and
+#: burned one full 8s timeout. The unbounded join held the fence until
+#: 16:28:36.961 -- 7.95s, 65% of a 12.2s fence, waiting on a node already
+#: known to be rebooting.
+DP_VOTE_RPC_TIMEOUT_SEC = 0.5
+DP_VOTE_RPC_RETRY = 1
+#: Ceiling on the whole vote round. A thread still running when this expires
+#: abstains -- which the quorum logic already handles -- rather than holding
+#: its caller.
+DP_VOTE_JOIN_TIMEOUT_SEC = 1.5
 # One retry. Two attempts of 0.5s still fit comfortably under the deadline, and
 # the deadline clamp below is what actually bounds the total -- a single
 # transient refusal should not abort a restart on its own.
@@ -504,7 +524,7 @@ FENCE_RPC_RETRY = 1
 # Checked before every in-fence RPC and on every iteration of the two in-window
 # wait loops, and each RPC's timeout is clamped to the time remaining, so a
 # call can never run past the deadline.
-FENCE_DEADLINE_SEC = 7.8
+FENCE_DEADLINE_SEC = 7.5
 # bdev_examine only SCHEDULES the examine and returns, so it lives inside the
 # 0.5s budget like everything else. bdev_wait_for_examine is the one call that
 # genuinely blocks -- it waits for the examine to finish -- and gets the longer

@@ -60,10 +60,16 @@ class TestClamp:
         assert got == constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC
 
     def test_long_call_started_late_is_clamped(self):
-        """6s wait_for_examine begun at t=5.0 must not run to t=11.0."""
-        got = self._clamp(constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC, elapsed=5.0)
-        assert got == pytest.approx(2.8)
-        assert 5.0 + got <= constants.FENCE_DEADLINE_SEC
+        """A 6s wait_for_examine begun at t=5.0 must not run past the deadline.
+
+        Derived from the constant rather than hardcoded: the deadline is a
+        tuning knob (7.8 -> 7.5 on 2026-09-02) and this invariant has to hold
+        at whatever value it takes.
+        """
+        elapsed = 5.0
+        got = self._clamp(constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC, elapsed=elapsed)
+        assert got == pytest.approx(constants.FENCE_DEADLINE_SEC - elapsed)
+        assert elapsed + got <= constants.FENCE_DEADLINE_SEC
 
     def test_clamped_call_can_never_pass_the_deadline(self):
         for elapsed in (0.0, 1.0, 3.3, 5.0, 7.0, 7.79):
