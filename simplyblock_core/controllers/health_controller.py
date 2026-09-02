@@ -539,6 +539,11 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
                     # stamps the role via bdev_lvol_set_lvs_opts and issues
                     # bdev_lvol_connect_hublvol. It is idempotent: an already
                     # attached path is skipped.
+                    from simplyblock_core.utils.hublvol_reconnect import (
+                        HublvolReconnectCoordinator,
+                    )
+                    role = "tertiary" if is_sec2 else "secondary"
+                    peers = [primary_node]
                     failover_node = None
                     if is_sec2 and primary_node.secondary_node_id:
                         try:
@@ -546,18 +551,41 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
                                 primary_node.secondary_node_id)
                             if repairs_allowed(sec1):
                                 failover_node = sec1
+                                peers.append(sec1)
                         except Exception:
                             pass
-                    # Bounded: this runs on the health-check cycle, so a slow
-                    # peer must not stall every other node's checks.
+
+                    # Two steps, not one. reconcile() adds the MISSING PATHS
+                    # to an existing controller -- that is the repair, and it
+                    # is the only thing that goes through the coordinator's
+                    # cooldown / cntlid-duplicate protection.
+                    coordinator = HublvolReconnectCoordinator(db_controller)
+                    coordinator.reconcile(node, primary_node, peers, role=role)
+
+                    # Then rejoin the lvstore. reconcile() deliberately stops
+                    # at the transport -- its docstring says the caller "can
+                    # return immediately and proceed to
+                    # bdev_lvol_connect_hublvol" -- and until now nothing here
+                    # did. On 2026-09-01 node ...4424 was re-attached at
+                    # 16:25:35 and never connected, so it sat half-wired as
+                    # secondary: when IO arrived at 16:28:31 it could not
+                    # redirect and triggered a leadership switch instead,
+                    # which is what led to the client EIO.
+                    #
+                    # connect_to_hublvol skips the attach when the remote bdev
+                    # is already present, so after reconcile() it contributes
+                    # only set_lvs_opts + connect_hublvol. Calling it INSTEAD
+                    # of reconcile() was wrong for exactly that reason: a
+                    # partially attached controller has its bdev, so the
+                    # missing path never got added (caught by
+                    # test_repairs_missing_primary_nic_path).
                     connected = node.connect_to_hublvol(
-                        primary_node, failover_node=failover_node,
-                        role="tertiary" if is_sec2 else "secondary",
+                        primary_node, failover_node=failover_node, role=role,
                         rpc_timeout=HUBLVOL_REPAIR_RPC_TIMEOUT_SEC,
                         lvs_node=primary_node)
                     if not connected:
                         logger.error(
-                            "Hublvol %s on %s: attach/connect did not complete",
+                            "Hublvol %s on %s: rejoin did not complete",
                             primary_node.hublvol.bdev_name, node.get_id())
                         passed = False
                 except Exception as e:

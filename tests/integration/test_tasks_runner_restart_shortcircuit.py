@@ -34,6 +34,7 @@ Note on import:
 import importlib.util
 import inspect
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -46,6 +47,10 @@ _RUNNER_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..",
     "simplyblock_core", "services", "tasks_runner_restart.py",
 )
+
+
+#: Captured before any patching so unrelated threads keep real sleeps.
+_real_sleep = time.sleep
 
 
 def _load_runner_module():
@@ -84,7 +89,12 @@ def _load_runner_module():
             if os.path.basename(frame.f_code.co_filename) == "tasks_runner_restart.py":
                 raise SystemExit("test-bailout")
             frame = frame.f_back
-        return None
+        # Everyone else sleeps for real. Returning None instead turned their
+        # sleep into a no-op, so spdk_http_proxy_server's stats loop span hot
+        # -- which broke TestProxyReadinessGate. Neither killing those threads
+        # (the original behaviour) nor busy-spinning them is acceptable; they
+        # must be left exactly as they were.
+        return _real_sleep(*_a, **_kw)
 
     with patch("simplyblock_core.db_controller.DBController") as mock_db_cls, \
          patch("time.sleep", side_effect=_break):
