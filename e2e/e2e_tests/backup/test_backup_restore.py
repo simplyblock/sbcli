@@ -55,7 +55,10 @@ Test class map
   TestBackupDeleteInProgress       – TC-BCK-139..142
   TestBackupPolicyMultipleLvols    – TC-BCK-143..148
   TestBackupBulkLoadIntegrity      – TC-BCK-210..214
-  TestBackupHighVolumeCombosSequential – TC-BCK-220..227
+  TestBackupHighVolumeCombosSequential – TC-BCK-219..228
+    NOTE: stress-category test, registered in get_backup_stress_tests()
+    (not get_backup_tests()) — takes several hours in k8s mode. Run
+    explicitly via: python e2e.py --testname TestBackupHighVolumeCombosSequential
 
   NOTE – Cross-cluster restore
   ----------------------------
@@ -5198,10 +5201,18 @@ class TestBackupBulkLoadIntegrity(BackupTestBase):
 
 class TestBackupHighVolumeCombosSequential(BackupTestBase):
     """
-    TC-BCK-220..228 – ~150-200 backups and ~150-200 restores, entirely
+    TC-BCK-219..228 – ~150-200 backups and ~150-200 restores, entirely
     sequential (no threading anywhere in this test), spread across every
     filesystem/crypto combination (ext4-plain, ext4-crypto, xfs-plain,
     xfs-crypto), plus snapshot clones and namespace-child lvols.
+
+    This is a stress-category test — registered in get_backup_stress_tests()
+    alongside BackupStressComprehensive, NOT in the routine get_backup_tests()
+    E2E suite. In k8s mode alone it takes on the order of several hours
+    (dominated by the fixed 60s pre-restore wait baked into
+    _restore_backup(), times ~150-200 restores), which is expected/budgeted
+    for the stress category the same way BackupStressComprehensive already
+    runs 8+ hours, but is not appropriate for the routine backup suite.
 
     This is a different shape from TestBackupBulkLoadIntegrity, which
     creates many *distinct* lvols and backs each up once. Here a modest,
@@ -5213,6 +5224,10 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
     or corruption, this test shows it without needing an artificial race.
 
     Covers:
+      - A versions=3 retention policy attached to the pool for the whole
+        run, so the service's own merge logic has to keep trimming each
+        lvol's growing backup chain — exercising merge-at-scale alongside
+        chain-restore, instead of letting chains grow unbounded
       - LVOLS_PER_COMBO lvols created for each of 4 fs_type x crypto combos
       - One snapshot clone created per combo (snapshot -> clone -> the
         clone itself is then backed up/restored like any other lvol)
@@ -5226,6 +5241,8 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
         -specific pattern is visible rather than averaged away
       - Restored lvols are deleted right after verification each round to
         avoid exhausting per-node lvol capacity over many restores
+      - Post-run chain-depth check (informational) confirming merge kept
+        each lvol's backup chain from growing unbounded
 
     Namespace-restore note: restore_backup() creates every restored volume
     as a fresh standalone lvol via add_lvol_ha() — it has no notion of the
@@ -5429,6 +5446,18 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
         self.fio_node = self.fio_node[0]
         self._ensure_pool_and_sc()
 
+        # TC-BCK-219: attach a retention policy (versions=3) to the pool so
+        # that, as each lvol's backup chain grows round over round, the
+        # service's own merge logic (bdev_lvol_s3_merge) has to keep
+        # trimming it back down — exercising merge-at-scale alongside the
+        # chain-restore path, instead of letting chains grow unbounded.
+        pol_name = f"hv_pol_{_rand_suffix()}"
+        policy_id = self._add_policy(pol_name, versions=3, age="7d")
+        pool_id = self.sbcli_utils.get_storage_pool_id(pool_name=self.pool_name)
+        self._attach_policy(policy_id, "pool", pool_id)
+        self.logger.info(
+            f"TC-BCK-219: policy {policy_id} (versions=3) attached to pool ✓")
+
         # TC-BCK-220: one dedicated StorageClass per combo (k8s only), then
         # LVOLS_PER_COMBO lvols for each of the 4 fs_type x crypto combos.
         combo_sc = {}
@@ -5592,6 +5621,34 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
                 f"backup_failures={backup_failed.get(combo, 0)}, "
                 f"restore_failures={restore_failed.get(combo, 0)}")
 
+        # TC-BCK-228: with a versions=3 policy attached for the whole run,
+        # the service's merge logic should have kept each lvol's backup
+        # chain bounded even though NUM_ROUNDS backups were requested per
+        # lvol — log actual chain depth per lvol as a merge-at-scale
+        # sanity check. Informational only (merge timing/lag isn't
+        # asserted here to avoid flakiness); a chain far beyond ~versions+2
+        # would indicate merge isn't keeping up under this load.
+        self.logger.info("TC-BCK-228: checking backup chain depth after merge")
+        all_backups = self._list_backups()
+        depths = []
+        for label, info in lvol_state.items():
+            matches = [
+                b for b in all_backups
+                if info["name"] in " ".join(str(v) for v in b.values())]
+            depths.append(len(matches))
+            if len(matches) > 5:
+                self.logger.warning(
+                    f"TC-BCK-228: {label} ({info['combo']}) has "
+                    f"{len(matches)} backups in chain — merge may be "
+                    f"lagging under load")
+        if depths:
+            self.logger.info(
+                f"TC-BCK-228: chain depth — avg={sum(depths)/len(depths):.1f}, "
+                f"max={max(depths)} (policy versions=3)")
+
+        self._detach_policy(policy_id, "pool", pool_id)
+        self.logger.info("TC-BCK-228: policy detached ✓")
+
         # TC-BCK-225: pass/fail
         total_failures = sum(backup_failed.values()) + sum(restore_failed.values())
         assert total_failures == 0, (
@@ -5619,7 +5676,8 @@ def get_backup_extra_tests():
         TestBackupDeleteInProgress,
         TestBackupPolicyMultipleLvols,
         TestBackupBulkLoadIntegrity,
-        TestBackupHighVolumeCombosSequential,
+        # TestBackupHighVolumeCombosSequential is a stress-category test —
+        # registered in get_backup_stress_tests() instead, not here.
     ]
 
 

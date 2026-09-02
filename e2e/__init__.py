@@ -861,7 +861,6 @@ def get_backup_tests():
         # TestBackupDeleteInProgress,
         TestBackupPolicyMultipleLvols,
         TestBackupBulkLoadIntegrity,
-    TestBackupHighVolumeCombosSequential,
         # Extended backup tests (TC-BCK-150..190)
         TestBackupSecurityLvol,
         TestBackupPolicyVersionsOne,
@@ -906,6 +905,7 @@ def get_backup_stress_tests():
         BackupStressFilesystemSecurityMix,
         BackupStressRetentionMergeCycles,
         BackupStressComprehensive,
+        TestBackupHighVolumeCombosSequential,
     ]
 
 
