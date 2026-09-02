@@ -44,8 +44,8 @@ from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import (  # noqa: F401  (RPCClient kept as a patch target for tests)
-    JC_REMOVE_JM_STILL_IN_USE, RPC_UNSUPPORTED, RPCClient, RPCErrorCode, RPCRemoteError,
-    RPCException, namespace_matches)
+    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, RPC_UNSUPPORTED, RPCClient,
+    RPCErrorCode, RPCRemoteError, RPCException, namespace_matches)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import dial_backoff
 from simplyblock_web import node_utils
@@ -5460,6 +5460,14 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         leftover_replacement = (
             _pick_replacement(removed_node)
             if (replica_peer_ids and removed_node.jm_vuid) else None)
+        # Logged because its absence is silent otherwise, and "the leftover was
+        # never covered" and "there was no leftover to cover" look identical
+        # from outside (2026-09-02: two runs where the coverage did not fire
+        # and the log could not say which).
+        logger.info(
+            f"[REMOVAL] {removed_node.get_id()}: leftover vuid {removed_node.jm_vuid} "
+            f"on replica peers {list(replica_peer_ids)} -> replacement "
+            f"{leftover_replacement or 'NONE (no candidate; leftover will NOT be patched)'}")
 
         # Pass 2: a single storage node can run more than one local JC
         # instance against the removed JM's bdev at once -- its own
@@ -5643,7 +5651,20 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                                 f"[REMOVAL] {node.get_id()}: jc_remove_jm released {name_old}")
                     except RPCRemoteError as re:
                         safe_to_delete = False
-                        if re.code == JC_REMOVE_JM_STILL_IN_USE:
+                        if re.code == JC_REMOVE_JM_NOT_USED:
+                            # Already released. Measured live 2026-09-02 on
+                            # spdk R26.3: a successful jc_replace_jm that swaps
+                            # the JM out of every vuid on the node ALSO drops
+                            # it from JC entirely, so the follow-up
+                            # jc_remove_jm finds nothing to release and answers
+                            # -13 on every node. That is the success path, not
+                            # a failure -- treating it as one strands the bdev
+                            # and its remote_jm_devices entry on every peer.
+                            safe_to_delete = True
+                            logger.info(
+                                f"[REMOVAL] {node.get_id()}: {name_old} already released by "
+                                f"jc_replace_jm (jc_remove_jm -13); proceeding to delete the bdev")
+                        elif re.code == JC_REMOVE_JM_STILL_IN_USE:
                             logger.error(
                                 f"[REMOVAL] {node.get_id()}: jc_remove_jm refused {name_old} "
                                 f"(-22: still used by one or more jm_vuids) -- a jm_vuid this "

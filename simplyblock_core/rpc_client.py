@@ -162,6 +162,11 @@ RPC_UNSUPPORTED = "__rpc_unsupported__"
 #: a separate, JC-specific space whose small negatives collide with that enum's
 #: generic meanings (-1 there is invalid_state). See RPCClient.jc_remove_jm.
 JC_REMOVE_JM_STILL_IN_USE = -22
+#: ``jc_remove_jm``: JC does not know this JM at all. After a successful
+#: ``jc_replace_jm`` this is the NORMAL answer, not a failure -- measured live
+#: 2026-09-02 on spdk R26.3: replacing the JM out of every vuid on a node also
+#: drops it from JC, so the follow-up release finds nothing left to do.
+JC_REMOVE_JM_NOT_USED = -13
 
 
 class RPCClient:
