@@ -350,7 +350,9 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
                 return True
             def bind_device_to_nvme(self, pci):
                 return True
-        snode.client = lambda timeout=None, retry=None: _DyingClient()
+        # **kwargs, not (timeout, retry): kill_client_kwargs(force=True) also
+        # passes connect_retry=0, so a fixed signature raises TypeError.
+        snode.client = lambda **kwargs: _DyingClient()
 
         db = MagicMock()
 
