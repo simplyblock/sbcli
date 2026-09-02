@@ -167,12 +167,6 @@ JC_REMOVE_JM_STILL_IN_USE = -22
 #: 2026-09-02 on spdk R26.3: replacing the JM out of every vuid on a node also
 #: drops it from JC, so the follow-up release finds nothing left to do.
 JC_REMOVE_JM_NOT_USED = -13
-#: ``jc_replace_jm``: this jm_vuid is unknown to JC. Reachable when management
-#: names a vuid whose group has already been torn down.
-JC_REPLACE_JM_UNKNOWN_VUID = -19
-#: ``jc_replace_jm``: this jm_vuid does not use ``name_old``. Same situation as
-#: -19 from the caller's side: a vuid we believed held the JM does not, per JC.
-JC_REPLACE_JM_VUID_NOT_USING = -20
 
 
 class RPCClient:

@@ -44,9 +44,8 @@ from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import (  # noqa: F401  (RPCClient kept as a patch target for tests)
-    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, JC_REPLACE_JM_UNKNOWN_VUID,
-    JC_REPLACE_JM_VUID_NOT_USING, RPC_UNSUPPORTED, RPCClient, RPCErrorCode,
-    RPCRemoteError, RPCException, namespace_matches)
+    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, RPC_UNSUPPORTED, RPCClient,
+    RPCErrorCode, RPCRemoteError, RPCException, namespace_matches)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import dial_backoff
 from simplyblock_web import node_utils
@@ -5532,17 +5531,13 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         # remove an id its jm_ids never held -- ValueError, phase 2 aborted
         # mid-flight, and NO peer got its jc_replace_jm at all (found live
         # 2026-09-02: strictly worse than the gap it was meant to close).
-        # removed_node's OWN lvstore group survives on its secondary and
-        # tertiary as a "leftover": no live primary, no back-reference, so
-        # Pass 2's two sources cannot see it. It still needs a replacement
-        # candidate, because in one of the two cases below it does get replaced.
-        leftover_replacement = (
-            _pick_replacement(removed_node)
-            if (replica_peer_ids and removed_node.jm_vuid) else None)
+        # removed_node's OWN lvstore group lives on as a "leftover" on its
+        # secondary and tertiary: no live primary, no back-reference, and by
+        # phase 2 no lvstore, raid or distribs either. It deliberately gets no
+        # decision and never becomes a replace target -- see the note in Pass 2.
         logger.info(
             f"[REMOVAL] {removed_node.get_id()}: own lvstore vuid {removed_node.jm_vuid} "
-            f"leftover on replica peers {list(replica_peer_ids)} -> replacement "
-            f"{leftover_replacement or 'NONE (no candidate)'}")
+            f"leftover on replica peers {list(replica_peer_ids)}; not a replace target")
 
         # Pass 2: a single storage node can run more than one local JC
         # instance against the removed JM's bdev at once -- its own
@@ -5577,9 +5572,15 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
             # alone, and never call replace. Whether the node is secondary or
             # tertiary does not enter into it beyond determining whether it
             # carries a leftover group at all.
-            carries_removed_lvs = node.get_id() in replica_peer_ids
-            if targets and carries_removed_lvs and leftover_replacement is not None:
-                targets.append((removed_node.jm_vuid, removed_node, leftover_replacement))
+            # removed_node's own lvstore group is NEVER a replace target. Its
+            # lvstore is being destroyed, so there is nothing to keep redundant
+            # and no reason to burn a spare JM on it -- jc_replace_jm is only
+            # for groups that keep running. The batch therefore covers the
+            # surviving groups and nothing else, even on the secondary and
+            # tertiary, which are the only nodes that carry the leftover at all.
+            # (replica_peer_ids is consequently not consulted here; it still
+            # matters to the caller's logging and to reasoning about which
+            # nodes reach the no-targets branch below.)
 
             if not targets:
                 old_remote_dev = next(
@@ -5688,46 +5689,8 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
 
                 if connect_ok:
                     try:
-                        try:
-                            node.rpc_client(timeout=30, retry=2).jc_replace_jm(
-                                name_old=name_old, replacements=replacements)
-                        except RPCRemoteError as rre:
-                            # The removed primary's group is added blind (its
-                            # stack is already gone, so nothing can be
-                            # inspected). If SPDK does not regard it as a user
-                            # of name_old, it answers -19 "unknown jm_vuid" or
-                            # -20 "this jm_vuid does not use name_old" -- and
-                            # rejects the WHOLE batch, leaving this node's real
-                            # groups still pointing at a dead JM. That is worse
-                            # than the leak we are closing (live 2026-09-02:
-                            # a node left holding a dead JM in its own
-                            # lvstore's group after one rejected call), so
-                            # retry once without the blind entry rather than
-                            # lose the node.
-                            #
-                            # Which way SPDK actually behaves here is an open
-                            # question with the SPDK team: in the 2026-09-02
-                            # removal a replace covering only the surviving
-                            # vuid succeeded -- no -17 -- even though SYNCD
-                            # showed the leftover group still holding the JM.
-                            # Until that is settled this stays defensive.
-                            blind = [r for r in replacements
-                                     if r["jm_vuid"] == removed_node.jm_vuid]
-                            if (rre.code not in (JC_REPLACE_JM_UNKNOWN_VUID,
-                                                 JC_REPLACE_JM_VUID_NOT_USING)
-                                    or not blind or len(replacements) == len(blind)):
-                                raise
-                            replacements = [r for r in replacements
-                                            if r["jm_vuid"] != removed_node.jm_vuid]
-                            logger.warning(
-                                f"[REMOVAL] {node.get_id()}: jc_replace_jm rejected "
-                                f"({rre.code}) with the removed primary's vuid "
-                                f"{removed_node.jm_vuid} included; SPDK does not count it as "
-                                f"a user of {name_old}. Retrying with the surviving groups "
-                                f"only ({replacements}) so this node's real groups still get "
-                                f"patched -- the leftover group is then left as-is")
-                            node.rpc_client(timeout=30, retry=2).jc_replace_jm(
-                                name_old=name_old, replacements=replacements)
+                        node.rpc_client(timeout=30, retry=2).jc_replace_jm(
+                            name_old=name_old, replacements=replacements)
                         logger.info(
                             f"[REMOVAL] {node.get_id()}: jc_replace_jm {name_old} replaced for "
                             f"{replacements} replacing removed JM {removed_jm_id}")
@@ -5763,36 +5726,22 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # timeout eventually noticed (found live 2026-08-25).
                     # Clean up both sides here instead of waiting for that.
                     #
-                    # Whether a release is needed first depends on what else
-                    # this node carries, not on the fact that a replace just
-                    # happened:
+                    # No release here, on any node. jc_replace_jm and
+                    # jc_remove_jm are alternatives, never a sequence:
                     #
-                    #   * carries removed_node's own lvstore group (secondary
-                    #     or tertiary) -- that group is being destroyed rather
-                    #     than repaired, so it was never a replace target and
-                    #     is still holding the JM. jc_remove_jm is the call
-                    #     that frees it, and -22 says it could not.
-                    #   * carries no such group -- the replace above already
-                    #     dropped the JM from JC entirely (measured live
-                    #     2026-09-02 on spdk R26.3: jc_remove_jm answers -13,
-                    #     "not used by JC", on every one of those nodes). The
-                    #     call would be a no-op, so skip it and delete.
-                    # The replace above already covered every vuid using this JM
-                    # on this node -- including removed_node's own lvstore vuid
-                    # on its secondary/tertiary, which is added blind: by the
-                    # time this runs phase 3a has deleted that lvstore, its raid
-                    # and its distribs, and cleared both the forward pointers
-                    # and the back-references, so the group cannot be observed
-                    # at all. Its JC membership outlives the stack it belonged
-                    # to (live 2026-09-02: mg6fm's SYNCD showed vuid 45 still
-                    # holding the dead JM in slot 0, blocked=1, long after the
-                    # lvstore was gone), so it must go into the batch on the
-                    # strength of replica_peer_ids alone.
+                    #   * this branch means at least one SURVIVING group used
+                    #     the JM and has just been repointed. removed_node's
+                    #     own lvstore group is never in that batch -- it is
+                    #     being destroyed, not repaired, so a replacement
+                    #     member would buy nothing.
+                    #   * the release belongs to the other case only: a node
+                    #     where NO surviving group used the JM, handled in the
+                    #     no-targets branch above.
                     #
-                    # JC has therefore dropped the JM (spdk R26.3 answers -13,
-                    # "not used by JC", after any successful replace). A release
-                    # here would be a guaranteed no-op, and the two calls are
-                    # mutually exclusive per node by design.
+                    # Measured live 2026-09-02 on spdk R26.3: after any
+                    # successful replace jc_remove_jm answers -13 ("not used
+                    # by JC") on every node, so calling it here would be a
+                    # guaranteed no-op.
                     _drop_superseded_jm_bdev(node, name_old, removed_jm_id)
 
                 if not replaced:
