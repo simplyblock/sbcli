@@ -2735,6 +2735,27 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
             for entry in entries:
                 entry.target_lvol_id = clone_id
         out.extend(entries)
+
+    # Device-lookup identity for the FAIL-BACK shape. The clone's wire NSUUID
+    # is inherited from the migration SOURCE (the kernel merges multipath
+    # paths only on matching NSUUIDs), so the client's /dev/disk/by-id links
+    # carry the source volume's id — for clients that rode through the
+    # cutover AND for fresh connects, since the NSUUID is baked into the
+    # namespace. After a forward migration the requested volume is the
+    # relationship's source end, the loop above redirects to the target and
+    # target_lvol_id points at the right device. After a fail-back the UUID
+    # swap makes the requested volume the TARGET end under its original id,
+    # clone_id == uuid for every entry, and nothing reports the source id the
+    # device actually advertises — the CSI then cannot find the block device.
+    # Emit the other end here; only its ID is needed, so a source record that
+    # was since deleted still resolves.
+    if not any(e.target_lvol_id for e in out):
+        rep = _replication_for_lvol(db_controller, uuid)
+        if (rep is not None and rep.state == LVolReplication.STATE_CUTOVER_DONE
+                and rep.target_lvol and rep.target_lvol.get_id() == uuid
+                and rep.source_lvol and rep.source_lvol.get_id() != uuid):
+            for entry in out:
+                entry.target_lvol_id = rep.source_lvol.get_id()
     return out, None
 
 
@@ -2761,16 +2782,7 @@ def _connect_path_volumes(db_controller, lvol):
     destination primary and may differ -- so every path returned here
     aggregates into one multipath device on the client.
     """
-    from simplyblock_core.models.lvol_model import LVolReplication
-
-    lvol_id = lvol.get_id()
-    rep = None
-    for candidate in reversed(db_controller.get_lvol_replication_objects()):
-        source_id = candidate.source_lvol.get_id() if candidate.source_lvol else ""
-        target_id = candidate.target_lvol.get_id() if candidate.target_lvol else ""
-        if lvol_id in (source_id, target_id):
-            rep = candidate
-            break
+    rep = _replication_for_lvol(db_controller, lvol.get_id())
 
     if rep is None or rep.state == LVolReplication.STATE_REPLICATING:
         return [lvol]
@@ -2791,6 +2803,20 @@ def _connect_path_volumes(db_controller, lvol):
         return [v for v in (target, source) if v is not None] or [lvol]
     # failed_over and cutover_done: the volume now lives on the target side.
     return [target or source or lvol]
+
+
+def _replication_for_lvol(db_controller, lvol_id):
+    """The most recent replication relationship *lvol_id* is an end of, or None.
+
+    Newest-first so a volume that went through several cycles (fail-over then
+    fail-back) resolves to the relationship describing its CURRENT location.
+    """
+    for candidate in reversed(db_controller.get_lvol_replication_objects()):
+        source_id = candidate.source_lvol.get_id() if candidate.source_lvol else ""
+        target_id = candidate.target_lvol.get_id() if candidate.target_lvol else ""
+        if lvol_id in (source_id, target_id):
+            return candidate
+    return None
 
 
 def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, host_nqn):
@@ -3684,6 +3710,34 @@ def _claim_target_nsid(db_controller, new_lvol, target_node):
     return 0
 
 
+def _superseded_original(db_controller, lvol, dest_cluster_id):
+    """The still-live volume a fail-back of *lvol* supersedes on
+    *dest_cluster_id* — the original this copy descends from — or None when
+    nothing is in the way (first fail-over, original already deleted, or the
+    original lives on some other cluster)."""
+    original = None
+    for rep in db_controller.get_lvol_replication_objects():
+        target = getattr(rep, "target_lvol", None)
+        if target and target.get_id() == lvol.get_id() and rep.source_lvol:
+            original = rep.source_lvol          # keep the LAST match: the
+                                                # most recent fail-over wins
+    if not original:
+        return None
+    try:
+        current = db_controller.get_lvol_by_id(original.get_id())
+    except KeyError:
+        return None                              # already gone
+    if current.status in (LVol.STATUS_DELETED, LVol.STATUS_IN_DELETION):
+        return None
+    try:
+        node = db_controller.get_storage_node_by_id(current.node_id)
+    except KeyError:
+        return None
+    if node.cluster_id != dest_cluster_id:
+        return None                              # not in our way
+    return current
+
+
 def _retire_superseded_original(db_controller, lvol, dest_cluster_id):
     """Delete the volume a fail-back replaces. Returns (ok, error).
 
@@ -3705,26 +3759,9 @@ def _retire_superseded_original(db_controller, lvol, dest_cluster_id):
     A no-op unless *lvol* is itself a fail-over copy whose original still
     lives on the destination cluster, so a first fail-over deletes nothing.
     """
-    original = None
-    for rep in db_controller.get_lvol_replication_objects():
-        target = getattr(rep, "target_lvol", None)
-        if target and target.get_id() == lvol.get_id() and rep.source_lvol:
-            original = rep.source_lvol          # keep the LAST match: the
-                                                # most recent fail-over wins
-    if not original:
+    current = _superseded_original(db_controller, lvol, dest_cluster_id)
+    if current is None:
         return True, ""
-    try:
-        current = db_controller.get_lvol_by_id(original.get_id())
-    except KeyError:
-        return True, ""                          # already gone
-    if current.status in (LVol.STATUS_DELETED, LVol.STATUS_IN_DELETION):
-        return True, ""
-    try:
-        node = db_controller.get_storage_node_by_id(current.node_id)
-    except KeyError:
-        return True, ""
-    if node.cluster_id != dest_cluster_id:
-        return True, ""                          # not in our way
 
     logger.info(
         "Fail-back: deleting the superseded original %s (nsid %s of subsystem "
@@ -3781,11 +3818,15 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # _evict_stale_namespace below; the DB-level slot claim may report the
     # subsystem full on groups at max_namespaces until the original is
     # removed post-cutover by _swap_failback_lvol_uuid.
+    superseded = None
     if constants.REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER:
         ok, err = _retire_superseded_original(db_controller, lvol,
                                               target_node.cluster_id)
         if not ok:
             return None, err
+    else:
+        superseded = _superseded_original(db_controller, lvol,
+                                          target_node.cluster_id)
 
     # Last line of defence for the one-subsystem-one-primary invariant. The
     # target node was chosen when the policy was attached, long before this
@@ -3815,15 +3856,15 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     new_lvol = copy.deepcopy(lvol)
     new_lvol.uuid = str(uuid.uuid4())
-    if not constants.REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER:
-        # The superseded original is left alive (see the constant) and — on a
-        # fail-back — still owns this deep-copied bdev name on the target
-        # lvstore. Creating the clone under the same name would not fail: the
-        # idempotency probe in _create_bdev_stack finds the original's bdev,
-        # skips the create, and add_lvol_on_node returns the ORIGINAL's
-        # uuid/blobid as the clone's — aiming the cutover delta at the
-        # original's stale data. Give the clone its own name; client identity
-        # is carried by NQN/nsid/namespace-UUID, never the bdev name.
+    if superseded is not None:
+        # The superseded original is left alive (see the constant) and still
+        # owns this deep-copied bdev name on the target lvstore. Creating the
+        # clone under the same name would not fail: the idempotency probe in
+        # _create_bdev_stack finds the original's bdev, skips the create, and
+        # add_lvol_on_node returns the ORIGINAL's uuid/blobid as the clone's —
+        # aiming the cutover delta at the original's stale data. Give the
+        # clone its own name; client identity is carried by
+        # NQN/nsid/namespace-UUID, never the bdev name.
         new_lvol.vuid = utils.get_random_vuid()
         new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
     new_lvol.create_dt = str(datetime.now())

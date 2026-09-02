@@ -120,3 +120,57 @@ def test_resolution_never_consults_cluster_status():
     db = _FakeDB([src, tgt], [_rep(src, tgt, LVolReplication.STATE_FAILED_OVER)])
     assert not hasattr(db, "get_cluster_by_id")
     assert _ids(lvol_controller._connect_path_volumes(db, src)) == ["LV_TGT"]
+
+
+# ---- device-lookup identity (entry.target_lvol_id) ------------------------ #
+#
+# The clone's wire NSUUID is inherited from the migration SOURCE (the kernel
+# merges multipath paths only on matching NSUUIDs), so the client's
+# /dev/disk/by-id links carry the source volume's id. After a fail-back the
+# UUID swap makes the requested volume the relationship's TARGET end under its
+# original id — every path volume equals the requested one, and without the
+# explicit emission below the CSI has no id that matches the block device.
+
+
+class _FakeEntry:
+    target_lvol_id = None
+
+
+def _connect(monkeypatch, db, requested_id):
+    """Run connect_lvol against the fake DB with the entry builder stubbed."""
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+    monkeypatch.setattr(lvol_controller.HostConnectAuth, "resolve",
+                        classmethod(lambda cls, lvol, host_nqn, db_controller: None))
+    monkeypatch.setattr(lvol_controller, "_connect_entries_for_volume",
+                        lambda *a, **kw: [_FakeEntry()])
+    entries, err = lvol_controller.connect_lvol(requested_id)
+    assert err is None
+    return entries
+
+
+def test_failback_connect_reports_the_source_id_for_device_lookup(monkeypatch):
+    """cutover_done with the requested volume on the TARGET end (the fail-back
+    shape): the device advertises the SOURCE volume's NSUUID, so connect must
+    hand that id out."""
+    dr, back = _lvol("LV_DR"), _lvol("LV_BACK")
+    db = _FakeDB([dr, back], [_rep(dr, back, LVolReplication.STATE_CUTOVER_DONE)])
+    entries = _connect(monkeypatch, db, "LV_BACK")
+    assert [e.target_lvol_id for e in entries] == ["LV_DR"]
+
+
+def test_forward_migration_keeps_the_target_id_for_device_lookup(monkeypatch):
+    """Requested volume on the SOURCE end: the redirect loop already reports the
+    target id; the fail-back emission must not overwrite it."""
+    src, tgt = _lvol("LV_SRC"), _lvol("LV_TGT")
+    db = _FakeDB([src, tgt], [_rep(src, tgt, LVolReplication.STATE_CUTOVER_DONE)])
+    entries = _connect(monkeypatch, db, "LV_SRC")
+    assert [e.target_lvol_id for e in entries] == ["LV_TGT"]
+
+
+def test_failed_over_target_end_reports_no_device_lookup_id(monkeypatch):
+    """A fail-over clone's NSUUID is its own uuid — connecting it by its own id
+    needs no redirect, so nothing must be emitted."""
+    src, tgt = _lvol("LV_SRC"), _lvol("LV_TGT")
+    db = _FakeDB([src, tgt], [_rep(src, tgt, LVolReplication.STATE_FAILED_OVER)])
+    entries = _connect(monkeypatch, db, "LV_TGT")
+    assert [e.target_lvol_id for e in entries] == [None]
