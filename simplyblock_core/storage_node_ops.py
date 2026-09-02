@@ -43,7 +43,9 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches  # noqa: F401  (RPCClient kept as a patch target for tests)
+from simplyblock_core.rpc_client import (  # noqa: F401  (RPCClient kept as a patch target for tests)
+    JC_REMOVE_JM_STILL_IN_USE, RPC_UNSUPPORTED, RPCClient, RPCErrorCode, RPCRemoteError,
+    RPCException, namespace_matches)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import dial_backoff
 from simplyblock_web import node_utils
@@ -5536,7 +5538,6 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                             f"{name_old} ({replacements}): {e}")
 
                 if replaced:
-                    # name_old is now unused by any local JC instance -- but
                     # jc_replace_jm only swaps the live membership pointer, it
                     # never tears down the bdev/controller it swapped AWAY
                     # from, and _connect_to_remote_jm_devs' delta mode above
@@ -5549,15 +5550,70 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                     # ~15+ minutes until some unrelated SPDK-side dead-peer
                     # timeout eventually noticed (found live 2026-08-25).
                     # Clean up both sides here instead of waiting for that.
+                    #
+                    # Hand the JM back to JC FIRST. JC holds an open descriptor
+                    # and IO channel on this bdev; jc_remove_jm closes them and
+                    # drops the JM's JC context, and only then may the bdev be
+                    # deleted. Deleting it while JC still holds the descriptor
+                    # is what leaves JC naming a bdev that no longer exists --
+                    # observed live 2026-09-02, where a peer's JC member list
+                    # still carried a remote_jm_* absent from its own
+                    # bdev_get_bdevs.
+                    #
+                    # jc_remove_jm also VERIFIES the assumption this branch
+                    # used to just assert ("name_old is now unused by any local
+                    # JC instance"). It is not always true: a jm_vuid whose
+                    # primary has already been removed appears in no
+                    # `decisions` entry and under no back-reference, so the
+                    # batch above cannot cover it, and jc_replace_jm's own -17
+                    # check then rejects a LATER call on this node. -22 turns
+                    # that invisible leftover into a definite answer, at the
+                    # one moment we can act on it.
                     old_controller_name = name_old[:-2] if name_old.endswith("n1") else name_old
+                    safe_to_delete = True
                     try:
-                        node.rpc_client().bdev_nvme_detach_controller(old_controller_name)
-                    except Exception as de:
-                        logger.warning(
-                            f"Failed to detach superseded controller "
-                            f"{old_controller_name} on {node.get_id()}: {de}")
-                    node.remote_jm_devices = [
-                        rd for rd in (node.remote_jm_devices or []) if rd.uuid != removed_jm_id]
+                        ret = node.rpc_client().jc_remove_jm(name_old)
+                        if ret == RPC_UNSUPPORTED:
+                            # Build predates the RPC (spdk:main-latest as of
+                            # 2026-09-02). Keep the old behaviour rather than
+                            # stranding the controller: no worse than before.
+                            logger.warning(
+                                f"[REMOVAL] {node.get_id()}: jc_remove_jm unsupported on this "
+                                f"SPDK build; deleting {old_controller_name} with JC's descriptor "
+                                f"possibly still open (pre-existing behaviour)")
+                        else:
+                            logger.info(
+                                f"[REMOVAL] {node.get_id()}: jc_remove_jm released {name_old}")
+                    except RPCRemoteError as re:
+                        safe_to_delete = False
+                        if re.code == JC_REMOVE_JM_STILL_IN_USE:
+                            logger.error(
+                                f"[REMOVAL] {node.get_id()}: jc_remove_jm refused {name_old} "
+                                f"(-22: still used by one or more jm_vuids) -- a jm_vuid this "
+                                f"removal could not enumerate still references the departing "
+                                f"node's JM (typically the removed node's OWN lvstore vuid, "
+                                f"whose primary is gone so it appears in no decision and under "
+                                f"no back-reference). Leaving the bdev in place: deleting it "
+                                f"now would leave JC pointing at a bdev that does not exist")
+                        else:
+                            logger.error(
+                                f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) failed "
+                                f"({re.code}): {re}; leaving the bdev in place")
+                    except Exception as e:
+                        safe_to_delete = False
+                        logger.error(
+                            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) raised: {e}; "
+                            f"leaving the bdev in place")
+
+                    if safe_to_delete:
+                        try:
+                            node.rpc_client().bdev_nvme_detach_controller(old_controller_name)
+                        except Exception as de:
+                            logger.warning(
+                                f"Failed to detach superseded controller "
+                                f"{old_controller_name} on {node.get_id()}: {de}")
+                        node.remote_jm_devices = [
+                            rd for rd in (node.remote_jm_devices or []) if rd.uuid != removed_jm_id]
 
                 if not replaced:
                     for controller_name, pre_existing in connected_controllers:

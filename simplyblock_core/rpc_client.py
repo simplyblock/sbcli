@@ -156,6 +156,12 @@ _response_validator = jsonschema.validators.validator_for(_response_schema)(_res
 RPC_METHOD_NOT_FOUND = -32601
 #: Returned instead of a result when the target does not implement the method.
 RPC_UNSUPPORTED = "__rpc_unsupported__"
+#: ``jc_remove_jm``: the JM is still referenced by at least one jm_vuid, so JC
+#: refuses to release it and the bdev must NOT be deleted. Deliberately a
+#: module-local constant rather than a member of RPCErrorCode: the JC codes are
+#: a separate, JC-specific space whose small negatives collide with that enum's
+#: generic meanings (-1 there is invalid_state). See RPCClient.jc_remove_jm.
+JC_REMOVE_JM_STILL_IN_USE = -22
 
 
 class RPCClient:
@@ -1870,6 +1876,51 @@ class RPCClient:
             logger.error(f"jm_get_events failed: {error}")
             return None
         return result or []
+
+    def jc_remove_jm(self, name):
+        """Close JC's descriptor + IO channel on a JM bdev and drop its JC
+        context, so the bdev itself can then safely be deleted.
+
+        ``name``: the JM bdev name (e.g. ``remote_jm_<uuid>n1``). It must be
+        known to JC and **unused by every jm_vuid** -- swap it out of each one
+        with ``jc_replace_jm`` first.
+
+        This is the step that must come BEFORE deleting the bdev. Detaching the
+        controller while JC still holds a descriptor leaves JC referencing a
+        bdev that no longer exists (observed live 2026-09-02: a JC member list
+        naming a ``remote_jm_*`` bdev absent from that node's
+        ``bdev_get_bdevs``).
+
+        Only one removal may be in progress cluster-side at a time.
+
+        Returns True on success, or ``RPC_UNSUPPORTED`` on a build without the
+        RPC (checked, not assumed -- ``spdk:main-latest`` as of 2026-09-02 does
+        not expose it, so callers must degrade rather than fail). Any other
+        error raises ``RPCRemoteError``, whose ``.code`` distinguishes:
+
+            -10 JC is closing
+            -11 invalid (empty) JM name
+            -12 this JM is already being removed, or another removal is running
+            -13 this JM is not used by JC (unknown name)
+            -21 involved in a pending jc_replace_jm
+            -22 STILL IN USE by one or more jm_vuids
+             -3 JC started closing during the operation
+             -6 timed out closing the JM (c_jc_tmo_ms_remove_jm)
+
+        -22 is the useful one for node removal: it is positive proof that some
+        jm_vuid on this node still references the JM, including one the control
+        plane cannot enumerate (a vuid whose primary has already been removed
+        appears in no `decisions` map and under no back-reference). Treat it as
+        "do not delete this bdev", never as a transient failure.
+        """
+        result, error = self._request2("jc_remove_jm", {"name": name})
+        if error:
+            if error.get("code") == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            raise RPCRemoteError(
+                f"jc_remove_jm({name}) failed: {error.get('message')}",
+                error.get("code", 0), error.get("data"))
+        return result
 
     def jc_compression_get_status(self, jm_vuid):
         """
