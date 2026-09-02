@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Tuple, Optional
 
-from pydantic import BaseModel, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import ops_gate
@@ -116,6 +116,38 @@ def ask_for_lvol_vuid():
 class LVolCreationParameters(BaseModel):
     pool: Pool
     name: Annotated[str, Field(min_length=1)]
+    size: Annotated[int, Field(ge=utils.parse_size("100MiB"))]
+    max_rw_iops: int
+    max_rw_mbytes: int
+    max_r_mbytes: int
+    max_w_mbytes: int
+
+    @field_validator("pool", mode="after")
+    @classmethod
+    def active_pool(cls, pool: Pool):
+        if pool.status != pool.STATUS_ACTIVE:
+            raise ValueError(f"Pool in not active: {pool.pool_name}, status: {pool.status}")
+
+        return pool
+
+    @model_validator(mode="after")
+    def capacity(self, info: ValidationInfo):
+        if 0 < self.pool.lvol_max_size < self.size:
+            raise ValueError(f"Requested size exceeds maximum ({utils.humanbytes(self.pool.lvol_max_size)})")
+
+        ctx = info.context or {}
+
+        if (
+                (self.pool.pool_max_size > 0) and
+                (self.size > (remaining := (self.pool.pool_max_size - pool_controller.get_pool_total_capacity(
+                    self.pool.get_id(),
+                    all_lvols=ctx["all_lvols"],
+                    all_snaps=ctx["all_snaps"],
+                ))))
+        ):
+            raise ValueError(f"Requested size exceeds remaining capacity ({utils.humanbytes(remaining)})")
+
+        return self
 
     @model_validator(mode="after")
     def unique_name(self, info: ValidationInfo):
@@ -124,56 +156,12 @@ class LVolCreationParameters(BaseModel):
 
         return self
 
+    @model_validator(mode="after")
+    def validate_qos(self):
+        if (self.max_rw_iops or self.max_rw_mbytes or self.max_r_mbytes or self.max_w_mbytes) and (self.pool.has_qos()):
+            raise ValueError("Both Lvol and Pool have QOS settings")
 
-def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
-                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols=None, all_snaps=None):
-    #  Validation
-    #  name validation
-    db_controller = DBController()
-
-    #  size validation
-    if size < utils.parse_size('100MiB'):
-        return False, "Size must be larger than 100M"
-
-    #  host validation
-    # snode = db_controller.get_storage_node_by_id(host_id_or_name)
-    # if not snode:
-    #     snode = db_controller.get_storage_nodes_by_hostname(host_id_or_name)
-    #     if not snode:
-    #         return False, f"Can not find storage node: {host_id_or_name}"
-
-    # if snode.status != snode.STATUS_ONLINE:
-    #     return False, "Storage node in not Online"
-    #
-    # if not snode.nvme_devices:
-    #     return False, "Storage node has no nvme devices"
-
-    #  pool validation
-    pool = None
-    for p in db_controller.get_pools():
-        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
-            pool = p
-            break
-    if not pool:
-        return False, f"Pool not found: {pool_id_or_name}"
-
-    if pool.status != pool.STATUS_ACTIVE:
-        return False, f"Pool in not active: {pool_id_or_name}, status: {pool.status}"
-
-    if 0 < pool.lvol_max_size < size:
-        return False, f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
-
-    if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
-        if total + size > pool.pool_max_size:
-            return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
-                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
-
-    # If user gave a QOS and the pool also have a QOS, return error
-    if (max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes) and (pool.has_qos()):
-        return False, "Both Lvol and Pool have QOS settings"
-
-    return True, ""
+        return self
 
 
 def count_lvol_subsystems(node, all_lvols=None):
@@ -502,17 +490,23 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
     all_lvols = cached_mini_lvols(db_controller)
     all_snaps = cached_mini_snapshots(db_controller)
-    result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
-                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
 
-    LVolCreationParameters.model_validate({
-        "pool": pool,
-        "name": name,
-    }, context={"db": db_controller})
-
-    if error:
-        logger.error(error)
-        return False, error
+    try:
+        LVolCreationParameters.model_validate({
+            "pool": pool,
+            "name": name,
+            "size": size,
+            "max_rw_iops": max_rw_iops,
+            "max_rw_mbytes": max_rw_mbytes,
+            "max_r_mbytes": max_r_mbytes,
+            "max_w_mbytes": max_w_mbytes,
+        }, context={
+            "db": db_controller,
+            "all_lvols": all_lvols,
+            "all_snaps": all_snaps,
+        })
+    except ValidationError as e:
+        return False, str(e)
 
     if pool.has_qos():
         host_node = db_controller.get_storage_node_by_id(pool.qos_host)
