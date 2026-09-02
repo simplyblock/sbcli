@@ -1153,11 +1153,19 @@ def _count_data_plane_votes_uncached(node):
     node_id = node.get_id()
     cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
+    # ONLINE in the DB is not proof a peer can answer: node status lags reality
+    # by seconds. On 2026-09-01 this list still contained a node that had been
+    # host-rebooted 6s earlier, and dialling it cost a full RPC timeout inside
+    # a restart's port fence. health_controller.repairs_allowed() is the same
+    # gate the repair paths use; a peer that cannot answer contributes nothing
+    # to a liveness vote anyway.
+    from simplyblock_core.controllers import health_controller as _hc
     online_peers = [
         n for n in cluster_nodes
         if n.get_id() != node_id
         and n.status == StorageNode.STATUS_ONLINE
         and n.jm_vuid
+        and _hc.repairs_allowed(n)
     ]
 
     if not online_peers:
@@ -1170,7 +1178,11 @@ def _count_data_plane_votes_uncached(node):
     votes: dict = {}
 
     def _vote_one_peer(peer):
-        peer_rpc = peer.rpc_client(timeout=8, retry=1)
+        # A liveness vote must not outlive its usefulness: a timeout here IS
+        # a failure to answer, and the caller treats a missing vote as an
+        # abstain. See constants.DP_VOTE_RPC_TIMEOUT_SEC.
+        peer_rpc = peer.rpc_client(timeout=constants.DP_VOTE_RPC_TIMEOUT_SEC,
+                                   retry=constants.DP_VOTE_RPC_RETRY)
 
         # Fast path: does the namespace bdev still exist on the peer?
         # A missing bdev means the controller has been torn down / is being
@@ -1227,8 +1239,21 @@ def _count_data_plane_votes_uncached(node):
                              name=f"dp-vote-{peer.get_id()[:8]}")
         t.start()
         vote_threads.append(t)
+    # Bounded join. An unbounded one made this the single biggest cost inside
+    # a restart's port fence (7.95s of 12.2s on 2026-09-01) because one vote
+    # thread was dialling a rebooting node. A thread still running when the
+    # ceiling expires simply never records a vote, and a missing vote is an
+    # abstain -- the same outcome as a peer that could not answer.
+    deadline = time.time() + constants.DP_VOTE_JOIN_TIMEOUT_SEC
     for t in vote_threads:
-        t.join()
+        t.join(timeout=max(0.0, deadline - time.time()))
+    slow = [t.name for t in vote_threads if t.is_alive()]
+    if slow:
+        logger.warning(
+            "Data-plane vote for %s: %d peer(s) did not answer within %.1fs "
+            "(%s); counting them as abstain",
+            node_id, len(slow), constants.DP_VOTE_JOIN_TIMEOUT_SEC,
+            ", ".join(slow))
 
     disconnected = sum(1 for v in votes.values() if v)
     total = len(votes)

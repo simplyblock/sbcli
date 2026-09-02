@@ -10052,74 +10052,36 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 logger.warning("Deferred port event emit failed: %s", _ev_e)
         del _deferred_port_events[:]
 
-    def _ready_for_unblock(peer):
-        """Make a fenced peer able to serve the IO it is about to receive.
-
-        Returning a peer to service is not just "remove the rule". The client
-        reconnects within milliseconds and resumes IO, so whatever state the
-        peer is in at that instant is what the client sees.
+    def _warn_if_unblocking_a_non_leader(peer):
+        """Read-only: warn when a peer is being returned to service demoted.
 
         Leadership can move WHILE the fence is held. On 2026-09-01 it did: the
         fence went on LVS_10's primary at 16:28:25, the secondary took
-        leadership at 16:28:31 ("Leadership changed due to receive new IO"),
-        and the control plane unblocked the old primary at 16:28:37 without
-        rechecking. The client went straight back to a node that was no longer
-        leader; that node could not redirect, so it failed the IO with a
-        generic status, and Linux nvme-multipath does not retry a generic
-        status on another path -- client EIO, fio rc=4.
+        leadership at 16:28:31, and the control plane unblocked the old primary
+        at 16:28:37 regardless. The client reconnected within milliseconds to a
+        node that was no longer leader, that node could not redirect, and the
+        IO came back as a generic INTERNAL DEVICE ERROR -- which
+        nvme-multipath does not retry on another path. Client EIO, fio rc=4.
 
-        A non-leader serves client IO by redirecting through its hublvol. So
-        before unblocking, if the peer is no longer leader, its hublvol
-        connection must exist; if it does not, wire it first.
-
-        Best effort by design. On any doubt we still unblock: a port left
-        blocked converts to reject at ack_timeout * 4 and SPDK then quiesces
-        every qpair on it, which is strictly worse than a brief redirect gap.
-        All RPCs here inherit the ambient fence budget (utils/rpc_budget), so
-        this check cannot itself push the fence past its deadline.
+        Deliberately does NOT repair here. Wiring a hublvol inside the fence is
+        exactly the kind of extra in-window work that made the fence 12.2s in
+        the first place, and on the abort path it would delay the release we
+        want immediate. One bounded probe (0.5s via the ambient fence budget)
+        buys the diagnosis; the fix belongs to the post-unblock repair, and to
+        keeping the fence short enough that leadership does not move inside it.
         """
         try:
             ret = peer.rpc_client().bdev_lvol_get_lvstores(lvs_name)
-        except Exception as e:
-            logger.warning(
-                "Pre-unblock leadership probe failed on %s for %s: %s "
-                "-- unblocking anyway", peer.get_id()[:8], lvs_name, e)
+        except Exception:
+            return                      # never let a probe delay the release
+        if not ret or ret[0].get("lvs leadership"):
             return
-        if not ret:
-            return
-        if ret[0].get("lvs leadership"):
-            return                      # still leader: serving directly is correct
-
-        # Not leader any more. It must redirect, which needs the hublvol.
-        remote_bdev = None
-        try:
-            if lvs_node.hublvol and lvs_node.hublvol.bdev_name:
-                remote_bdev = lvs_node.hublvol.get_remote_bdev_name()
-            if remote_bdev and peer.rpc_client().get_bdevs(remote_bdev):
-                logger.info(
-                    "Pre-unblock: %s is no longer leader of %s but its hublvol "
-                    "redirect path is up", peer.get_id()[:8], lvs_name)
-                return
-        except Exception as e:
-            logger.warning("Pre-unblock hublvol probe failed on %s: %s",
-                           peer.get_id()[:8], e)
-            return
-
         logger.error(
-            "Pre-unblock: %s lost leadership of %s during the fence and has no "
-            "hublvol redirect path -- wiring it before returning the port, or "
-            "the client's next IO is failed with a generic error",
-            peer.get_id()[:8], lvs_name)
-        try:
-            peer_role = ("tertiary" if peer.get_id() == getattr(
-                lvs_node, "tertiary_node_id", None) else "secondary")
-            peer.connect_to_hublvol(lvs_node, failover_node=None,
-                                    role=peer_role, lvs_node=lvs_node)
-        except Exception as e:
-            logger.error(
-                "Pre-unblock hublvol wiring failed on %s: %s -- unblocking "
-                "anyway; a redirect gap beats a rejected port",
-                peer.get_id()[:8], e)
+            "[RESTART] Unblocking %s for %s while it is NO LONGER leader -- "
+            "the client will reconnect to a demoted node; if its hublvol "
+            "redirect path is missing, its next IO is failed outright. Fence "
+            "held %.3fs.",
+            peer.get_id()[:8], lvs_name, _fence_elapsed())
 
     def _unblock_peer_port(peer):
         """Remove the port block for snode_lvs_port on peer and drop
@@ -10127,7 +10089,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         blocked (no-op). Tolerates RPC failure — logs and continues so
         other peers can still be unblocked."""
         if peer in blocked_peers:
-            _ready_for_unblock(peer)
+            _warn_if_unblocking_a_non_leader(peer)
         try:
             port_block.set_port(peer, snode_lvs_port, block=False, timeout=0.5, retry=2)
             _deferred_port_events.append(("allow", peer, snode_lvs_port))
