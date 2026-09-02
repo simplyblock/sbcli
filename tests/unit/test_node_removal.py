@@ -3128,6 +3128,121 @@ class TestJcRemoveJmBeforeBdevDelete(unittest.TestCase):
         self.assertIn("jm-spare", uuids, "the replacement's entry must survive")
 
 
+# ---------------------------------------------------------------------------
+# The leftover vuid: removed_node's OWN jm_vuid survives on the peers that
+# hosted its replica, still naming the dying JM. Its primary is removed_node
+# (not in live_nodes, so in no `decisions` entry) and phase 3a has already
+# cleared its back-reference -- so Pass 2 cannot reach it through either
+# source. It must be covered in the SAME jc_replace_jm call as that peer's
+# other vuids, or jc_replace_jm's -17 rejects the whole batch.
+#
+# Live 2026-09-02: the one peer whose replace failed -17 was exactly the peer
+# hosting the removed node's own lvstore.
+# ---------------------------------------------------------------------------
+class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
+
+    def _run(self, replica_peer_ids):
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2", failure_domain=1)
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
+        spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41", failure_domain=3)
+        removed.jm_ids = ["jm-dead"]
+        peer.jm_ids = ["jm-dead", "jm-peer"]
+        spare.jm_ids = ["jm-spare"]
+        rd = RemoteJMDevice()
+        rd.uuid = "jm-dead"
+        rd.remote_bdev = "remote_jm_deadn1"
+        peer.remote_jm_devices = [rd]
+        rpc = MagicMock()
+        rpc.jc_replace_jm = MagicMock(return_value=True)
+        rpc.jc_remove_jm = MagicMock(return_value=True)
+        rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
+        rpc.get_bdevs = MagicMock(return_value=[])
+        peer.rpc_client = MagicMock(return_value=rpc)
+
+        db = FakeDB(cl, [removed, peer, spare])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                  "jm-peer": peer.jm_device,
+                                  "jm-spare": spare.jm_device}.get(i))
+        new_rd = RemoteJMDevice()
+        new_rd.uuid = "jm-spare"
+        new_rd.remote_bdev = "remote_jm_sparen1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=["jm-spare"]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[rd, new_rd]):
+            storage_node_ops._decommission_node_jm(
+                removed, replica_peer_ids=replica_peer_ids)
+        return rpc
+
+    def test_replica_peer_gets_the_leftover_vuid_in_the_same_call(self):
+        rpc = self._run(("peer",))
+        rpc.jc_replace_jm.assert_called_once()
+        kw = rpc.jc_replace_jm.call_args.kwargs
+        vuids = sorted(r["jm_vuid"] for r in kw["replacements"])
+        self.assertEqual(vuids, [2, 37],
+                         "one call must cover the peer's own vuid 37 AND the "
+                         "removed node's leftover vuid 2")
+        self.assertEqual(kw["name_old"], "remote_jm_deadn1")
+
+    def test_without_the_captured_peer_ids_the_leftover_is_missed(self):
+        # Exactly the pre-fix behaviour, and what produced the live -17.
+        rpc = self._run(())
+        vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
+        self.assertEqual(vuids, [37])
+
+    def test_leftover_coverage_lets_jc_remove_jm_run_and_the_bdev_be_deleted(self):
+        rpc = self._run(("peer",))
+        rpc.jc_remove_jm.assert_called_once_with("remote_jm_deadn1")
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+
+    def test_a_non_replica_peer_is_unaffected(self):
+        # A node that never hosted the removed node's replica has no leftover
+        # vuid, so nothing extra may be added to its batch.
+        rpc = self._run(("someone-else",))
+        vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
+        self.assertEqual(vuids, [37])
+
+
+class TestOrchestratorCapturesReplicaPeersBeforeTeardown(unittest.TestCase):
+
+    def test_peer_ids_are_captured_before_phase_3a_clears_them(self):
+        # phase 3a clears snode.secondary_node_id/_tertiary_node_id, so the
+        # capture has to happen first or phase 2 gets an empty tuple.
+        cl = _cluster()
+        snode = _node("dead", secondary_id="sec", tertiary_id="ter",
+                      with_jm=True, jm_vuid=2, lvstore="LVS_2")
+        sec = _node("sec", stack_secondary="dead")
+        ter = _node("ter", stack_tertiary="dead")
+        db = FakeDB(cl, [snode, sec, ter])
+        seen = {}
+
+        def fake_teardown(node):
+            # emulate phase 3a wiping the pointers
+            snode.secondary_node_id = ""
+            snode.tertiary_node_id = ""
+            return True
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "cluster_ops"), \
+             patch.object(storage_node_ops, "shutdown_storage_node", return_value=True), \
+             patch.object(storage_node_ops, "set_node_status"), \
+             patch.object(storage_node_ops, "_teardown_replicas_of_primary",
+                          side_effect=fake_teardown), \
+             patch.object(storage_node_ops, "_decommission_node_jm",
+                          side_effect=lambda n, replica_peer_ids=(): seen.update(
+                              ids=replica_peer_ids)), \
+             patch.object(storage_node_ops, "_relocate_replicas_hosted_on", return_value=True), \
+             patch.object(storage_node_ops, "_verify_replica_stacks", return_value=[]), \
+             patch.object(storage_node_ops, "_finalize_node_removal"), \
+             patch.object(storage_node_ops, "_decommission_node_devices", return_value=True):
+            storage_node_ops.node_removal_orchestrate("dead")
+
+        self.assertEqual(sorted(seen.get("ids", ())), ["sec", "ter"])
+
+
 class TestJcRemoveJmClient(unittest.TestCase):
     """The client wrapper's contract: success / unsupported / coded error."""
 
