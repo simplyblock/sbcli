@@ -3307,7 +3307,7 @@ class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
              patch.object(storage_node_ops, "device_controller"), \
              patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
              patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
-            storage_node_ops._decommission_node_jm(removed)
+            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
         return rpc, peer
 
     def test_release_is_attempted_even_though_no_replace_happened(self):
@@ -3373,7 +3373,7 @@ class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
              patch.object(storage_node_ops, "device_controller"), \
              patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
              patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
-            storage_node_ops._decommission_node_jm(removed)
+            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
         rpc.jc_remove_jm.assert_not_called()
         rpc.bdev_nvme_detach_controller.assert_not_called()
 
