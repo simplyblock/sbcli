@@ -118,11 +118,55 @@ def _start_mock_spdk(sock_path, **kwargs):
 # Proxy launcher helper
 # ---------------------------------------------------------------------------
 
-def _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5):
+class _ProxyHandle:
+    """The proxy thread's bound port, when it bound, or why it could not.
+
+    The proxy binds its HTTP port only AFTER ``wait_for_spdk_ready()``
+    returns -- that ordering is the thing TestProxyReadinessGate exists to
+    verify -- so the port cannot be known before the thread runs. Publishing
+    it back turns two silent failure modes into loud ones:
+
+      * a hardcoded port already in use raised OSError inside a daemon thread
+        and was swallowed, so the test saw only "Proxy should eventually come
+        up" after polling for 8s, with nothing to say why. That is exactly how
+        it failed in CI run 33668203362 on main.
+      * every other startup error looked identical to that one.
+
+    Ports are now requested as 0, so the OS picks a free one and neither a
+    sibling test class nor a parallel CI job can contend for a fixed number.
+    """
+
+    def __init__(self):
+        self._ready = threading.Event()
+        self.port = None
+        self.bind_time = None
+        self.error = None
+
+    def _publish_port(self, port, bind_time):
+        self.port = port
+        self.bind_time = bind_time
+        self._ready.set()
+
+    def _publish_error(self, exc):
+        self.error = exc
+        self._ready.set()
+
+    def wait(self, timeout=30):
+        """Bound port, or an assertion naming the actual problem."""
+        if not self._ready.wait(timeout):
+            raise AssertionError(
+                f"proxy thread neither bound nor failed within {timeout}s")
+        if self.error is not None:
+            raise AssertionError(f"proxy failed to start: {self.error!r}")
+        return self.port
+
+
+def _start_proxy(sock_path, http_port=0, max_concurrent=4, timeout=5):
     """Start the spdk_http_proxy_server in a background thread.
 
     We import and configure the module, then run the server.
-    Returns a thread + a stop event.
+    Returns (thread, stop_event, module, handle); pass http_port=0 (the
+    default) to get an OS-assigned port and read it off the handle.
     """
     # The proxy module starts a real server at import time, so we use the
     # shared helper that neutralizes that side-effect during import. The
@@ -143,13 +187,24 @@ def _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5):
 
     stop_event = threading.Event()
 
+    handle = _ProxyHandle()
+
     def run():
-        key = base64.b64encode(b"test:test").decode("ascii")
-        mod.wait_for_spdk_ready()
-        mod.ServerHandler.key = key
-        from http.server import ThreadingHTTPServer
-        httpd = ThreadingHTTPServer(("127.0.0.1", http_port), mod.ServerHandler)
-        httpd.timeout = timeout
+        try:
+            key = base64.b64encode(b"test:test").decode("ascii")
+            mod.wait_for_spdk_ready()
+            mod.ServerHandler.key = key
+            from http.server import ThreadingHTTPServer
+            httpd = ThreadingHTTPServer(("127.0.0.1", http_port), mod.ServerHandler)
+            # Accept timeout only -- the SPDK-side budget is mod.TIMEOUT. Kept
+            # short so stop_event is honoured (and the port released) within a
+            # fraction of a second instead of up to `timeout`, which used to
+            # leave a fixed port bound while the next test tried to claim it.
+            httpd.timeout = 0.2
+            handle._publish_port(httpd.server_address[1], time.monotonic())
+        except Exception as e:      # noqa: BLE001 - reported via the handle
+            handle._publish_error(e)
+            return
 
         while not stop_event.is_set():
             httpd.handle_request()
@@ -157,7 +212,7 @@ def _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5):
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
-    return thread, stop_event, mod
+    return thread, stop_event, mod, handle
 
 
 class TestProxyE2E(unittest.TestCase):
@@ -167,15 +222,14 @@ class TestProxyE2E(unittest.TestCase):
     def setUpClass(cls):
         cls._tmpdir = tempfile.mkdtemp()
         cls._sock_path = os.path.join(cls._tmpdir, "spdk_test.sock")
-        cls._http_port = 18199
-
         # Start mock SPDK
         cls._spdk_server = _start_mock_spdk(cls._sock_path)
         time.sleep(0.1)
 
-        # Start proxy
-        cls._proxy_thread, cls._stop_event, cls._mod = _start_proxy(
-            cls._sock_path, cls._http_port, max_concurrent=4, timeout=5)
+        # Start proxy on an OS-assigned port (see _ProxyHandle).
+        cls._proxy_thread, cls._stop_event, cls._mod, handle = _start_proxy(
+            cls._sock_path, 0, max_concurrent=4, timeout=5)
+        cls._http_port = handle.wait()
 
         # Wait for proxy to be ready
         for _ in range(30):
@@ -336,13 +390,14 @@ class TestProxyReadinessGate(unittest.TestCase):
         """Proxy should not accept HTTP requests until SPDK responds."""
         tmpdir = tempfile.mkdtemp()
         sock_path = os.path.join(tmpdir, "spdk_delayed.sock")
-        http_port = 18200
+        spdk_delay = 1.0
 
         ready_time = {"t": None}
+        started_at = time.monotonic()
 
         # Start SPDK server with a 1-second delay before it's available
         def delayed_spdk():
-            time.sleep(1.0)
+            time.sleep(spdk_delay)
             server = _start_mock_spdk(sock_path)
             ready_time["t"] = time.monotonic()
             return server
@@ -350,7 +405,11 @@ class TestProxyReadinessGate(unittest.TestCase):
         spdk_thread = threading.Thread(target=delayed_spdk, daemon=True)
         spdk_thread.start()
 
-        _, stop_event, mod_ref = _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5)
+        _, stop_event, mod_ref, handle = _start_proxy(
+            sock_path, 0, max_concurrent=4, timeout=5)
+
+        # Blocks until the proxy binds, or fails with the real reason.
+        http_port = handle.wait(timeout=30)
 
         # Wait for proxy to come up
         proxy_up = False
@@ -372,7 +431,18 @@ class TestProxyReadinessGate(unittest.TestCase):
         stop_event.set()
 
         self.assertTrue(proxy_up, "Proxy should eventually come up")
-        # Proxy should have waited for SPDK — verify no zombie sockets
+
+        # The actual gate: the HTTP port must not have opened while SPDK was
+        # still absent. Asserted against the known delay rather than against
+        # ready_time directly -- the mock's socket exists a hair before
+        # delayed_spdk() records the timestamp, so comparing the two is
+        # inherently racy while "not before 1s had passed" is not.
+        self.assertIsNotNone(ready_time["t"], "mock SPDK never came up")
+        self.assertGreaterEqual(
+            handle.bind_time - started_at, spdk_delay,
+            "proxy bound its HTTP port before SPDK was ready: the readiness "
+            "gate did not hold")
+        # Proxy should have waited for SPDK: verify no zombie sockets
         self.assertEqual(len(mod_ref.unix_sockets), 0)
 
         try:
