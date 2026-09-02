@@ -3158,15 +3158,15 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
                 removed, replica_peer_ids=replica_peer_ids)
         return rpc
 
-    def test_leftover_joins_the_batch_when_another_group_uses_the_jm(self):
-        # The peer's own vuid 37 uses the dead JM, so jc_replace_jm must cover
-        # it AND the leftover vuid 2 in ONE call -- SPDK rejects a batch that
-        # misses any local vuid using name_old (-17).
+    def test_the_leftover_is_never_a_replace_target(self):
+        # The removed primary's lvstore is being destroyed, so its group gets
+        # no replacement member -- only the peer's own surviving vuid 37 is in
+        # the batch, even though this peer IS the secondary/tertiary.
         rpc = self._run(("peer",))
         rpc.jc_replace_jm.assert_called_once()
         kw = rpc.jc_replace_jm.call_args.kwargs
         vuids = sorted(r["jm_vuid"] for r in kw["replacements"])
-        self.assertEqual(vuids, [2, 37])
+        self.assertEqual(vuids, [37])
         self.assertEqual(kw["name_old"], "remote_jm_deadn1")
 
     def test_and_then_remove_is_not_called_at_all(self):
@@ -3175,47 +3175,6 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
         rpc = self._run(("peer",))
         rpc.jc_remove_jm.assert_not_called()
         rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
-
-    def test_rejection_on_the_blind_entry_retries_without_it(self):
-        # The removed primary's vuid is added without being able to inspect its
-        # group. If SPDK does not count it as a user of name_old it rejects the
-        # WHOLE batch (-19/-20), which would leave this node's real groups
-        # still holding the dead JM -- worse than the leak. Retry once without
-        # it so the surviving groups are still patched.
-        for code in (-19, -20):
-            with self.subTest(code=code):
-                calls = []
-
-                def replace(name_old, replacements):
-                    calls.append(sorted(r["jm_vuid"] for r in replacements))
-                    if len(calls) == 1:
-                        raise RPCRemoteError("nope", code)
-                    return True
-
-                rpc = self._run(("peer",), jc_replace_jm=MagicMock(side_effect=replace))
-                self.assertEqual(calls, [[2, 37], [37]],
-                                 "first call blind-includes vuid 2, retry drops it")
-                rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
-
-    def test_a_rejection_for_any_other_reason_is_not_retried(self):
-        # -17 means the batch was incomplete, not that the blind entry was
-        # bogus; dropping it would make the next attempt more incomplete still.
-        rpc = self._run(
-            ("peer",),
-            jc_replace_jm=MagicMock(side_effect=RPCRemoteError("covers not all", -17)))
-        self.assertEqual(rpc.jc_replace_jm.call_count, 1)
-        # The superseded JM's own controller must survive a failed replace.
-        # (The detaches that do happen here are the pre-existing rollback of
-        # the replacement candidates this attempt connected.)
-        detached = [c.args[0] for c in rpc.bdev_nvme_detach_controller.call_args_list]
-        self.assertNotIn("remote_jm_dead", detached)
-
-    def test_no_retry_when_the_blind_entry_was_the_only_target(self):
-        # Dropping it would leave an empty batch; nothing useful to retry.
-        rpc = self._run(
-            ("peer",), peer_jm_ids=["jm-peer"],
-            jc_replace_jm=MagicMock(side_effect=RPCRemoteError("unknown", -19)))
-        self.assertLessEqual(rpc.jc_replace_jm.call_count, 1)
 
     def test_a_node_with_no_leftover_group_covers_only_its_own_vuids(self):
         rpc = self._run(("someone-else",))
@@ -3267,11 +3226,11 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
             # Must not raise.
             storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
 
-        # And the peer must still have been patched, covering its own surviving
-        # group AND the leftover in the one call.
+        # And the peer must still have been patched for its surviving group.
+        # The leftover is not a replace target.
         rpc.jc_replace_jm.assert_called_once()
         vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
-        self.assertEqual(vuids, [2, 37])
+        self.assertEqual(vuids, [37])
         rpc.jc_remove_jm.assert_not_called()
         self.assertEqual(removed.jm_ids, ["jm-other-a", "jm-other-b"],
                          "the removed node's unrelated jm_ids must be left alone")
