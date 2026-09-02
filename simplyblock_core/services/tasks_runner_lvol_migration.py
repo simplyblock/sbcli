@@ -3762,6 +3762,18 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
 
         # intermediates_done signalled — wait for batch_result.
         group = db.get_migration_group_by_id(group_id)
+        if group.batch_result is None and group.phase == LVolMigrationGroup.PHASE_CLEANUP_TARGET:
+            # A sibling exhausted its retry budget and forced the group into
+            # cleanup without ever setting batch_result (only the normal
+            # INTERMEDIATE barrier path sets it) -- notice the forced phase
+            # directly instead of polling batch_result forever.
+            migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
+            migration.transfer_context = {}
+            migration.write_to_db(db.kv_store)
+            migration_events.migration_phase_changed(migration)
+            return _group_worker_phase_dispatch(
+                task, migration, LVolMigration.PHASE_CLEANUP_TARGET,
+                src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
         if group.batch_result is True:
             lvol = db.get_lvol_by_id(migration.lvol_id)
             migration.phase = LVolMigration.PHASE_CLEANUP_SOURCE
