@@ -1280,8 +1280,11 @@ def create_migration(lvol_id, target_node_id,
             # namespace occupying a low nsid on the target (or add_ns calls
             # racing/reordering across nodes) would silently diverge the
             # source and target nsid maps for this lvol.
+            # WIRE identity, not the record uuid: a failed-back volume's
+            # namespace advertises its ns_uuid, and the client's multipath
+            # head only merges the migration target's path when it matches.
             _ns = _rpc.nvmf_subsystem_add_ns(
-                nqn, _ns_bdev, lvol.uuid, lvol.guid,
+                nqn, _ns_bdev, lvol.get_ns_uuid(), lvol.guid,
                 nsid=lvol.ns_id if lvol.ns_id else None)
             if _ns:
                 logger.info(

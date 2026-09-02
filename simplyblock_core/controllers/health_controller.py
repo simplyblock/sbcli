@@ -1113,7 +1113,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
                 bdev_check = check_bdev(lvol.top_bdev, rpc_client=rpc_client)
             passed &= bdev_check
 
-        passed &= check_subsystem(lvol.nqn, rpc_client=rpc_client, ns_uuid=lvol.uuid)
+        # The namespace advertises the WIRE identity, which differs from the
+        # record uuid after a fail-back — checking the record uuid flags every
+        # failed-back volume unhealthy and triggers the monitor's self-heal.
+        passed &= check_subsystem(lvol.nqn, rpc_client=rpc_client, ns_uuid=lvol.get_ns_uuid())
 
     except Exception as e:
         logger.error(e)

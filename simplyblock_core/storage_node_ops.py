@@ -11061,14 +11061,18 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
             return False, msg
 
     # Add NS to subsystem (idempotent: skip if already bound with matching NSID).
+    # Probe and register by the WIRE identity (get_ns_uuid), never the record
+    # uuid: after a fail-back the two differ, and re-adding under the record
+    # uuid presents an identity the client's multipath head rejects ("IDs
+    # don't match for shared namespace N"), severing its paths.
     if _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                             bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                             bdev_name=lvol.top_bdev, uuid=lvol.get_ns_uuid()):
         logger.info("Namespace nsid=%s already on subsystem %s, skipping add_ns",
                     lvol.ns_id, lvol.nqn)
     else:
         logger.info("Add BDev to subsystem " + f"{lvol.vuid:016X}")
         if not rpc_client.nvmf_subsystem_add_ns(
-                lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id):
+                lvol.nqn, lvol.top_bdev, lvol.get_ns_uuid(), lvol.guid, nsid=lvol.ns_id):
             # An add_ns error is not by itself a reason to abandon the whole
             # registration. What matters for the client is whether the
             # namespace is on the subsystem now — it may already have been,
@@ -11084,7 +11088,8 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
             # Re-read the subsystem and only give up if the namespace is
             # genuinely absent.
             if _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                                          bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                                          bdev_name=lvol.top_bdev,
+                                          uuid=lvol.get_ns_uuid()):
                 logger.warning(
                     "add_ns for nsid=%s (%s) on %s reported failure but the "
                     "namespace is present; continuing to listener setup",
@@ -11114,9 +11119,10 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
     # path loss the control plane never flagged, re-refused by the lvol-monitor
     # repair loop on every cycle.
     if not _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                                      bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                                      bdev_name=lvol.top_bdev,
+                                      uuid=lvol.get_ns_uuid()):
         msg = (f"Subsystem {lvol.nqn} on {snode.get_id()} has no namespace "
-               f"nsid={lvol.ns_id} ({lvol.top_bdev}, uuid={lvol.uuid}) after "
+               f"nsid={lvol.ns_id} ({lvol.top_bdev}, uuid={lvol.get_ns_uuid()}) after "
                f"registration; refusing to add a listener for an empty subsystem")
         logger.error(msg)
         return False, msg

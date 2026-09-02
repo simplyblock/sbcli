@@ -1493,7 +1493,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 f"maps across the shared subsystem's paths)", is_primary=is_primary)
         requested_nsid = lvol.ns_id
     ret, err = rpc_client.nvmf_subsystem_add_ns2(
-        lvol.nqn, lvol.top_bdev, ns_uuid or lvol.uuid, lvol.guid, nsid=requested_nsid)
+        lvol.nqn, lvol.top_bdev, ns_uuid or lvol.get_ns_uuid(), lvol.guid,
+        nsid=requested_nsid)
     if err:
         def _ns_add_detail():
             """What the node actually holds for this subsystem.
@@ -1703,7 +1704,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
     # correct nsid as well. Only a record with ns_id unset falls back to
     # auto-assignment.
     ret = rpc_client.nvmf_subsystem_add_ns(
-        lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid,
+        lvol.nqn, lvol.top_bdev, lvol.get_ns_uuid(), lvol.guid,
         nsid=lvol.ns_id if lvol.ns_id else None)
     if not ret:
         # FATAL, deliberately. This used to log and fall through to the
@@ -1919,7 +1920,10 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
         return True
 
     for ns in subsystem["namespaces"]:
-        if ns["uuid"] == lvol.uuid:
+        # Match by the WIRE identity: a failed-back volume's namespace
+        # advertises ns_uuid, not the record uuid — matching the record uuid
+        # here leaves the namespace behind on a shared subsystem forever.
+        if ns["uuid"] == lvol.get_ns_uuid():
             logger.info("Removing namespace %s from subsystem %s", ns["uuid"], lvol.nqn)
             ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns['nsid']))
             if not ret:
@@ -4272,8 +4276,12 @@ def _evict_stale_namespace(new_lvol, target_node, superseded=None):
             # lvol namespaces' bdev_name as the raw lvol_uuid.
             superseded_ids = set()
             if superseded is not None:
+                # ns_uuid first: a multi-cycle superseded original is itself an
+                # earlier fail-back clone whose namespace advertises a borrowed
+                # wire identity, not its record uuid.
                 superseded_ids = {
-                    v for v in (getattr(superseded, "uuid", None),
+                    v for v in (getattr(superseded, "ns_uuid", None),
+                                getattr(superseded, "uuid", None),
                                 getattr(superseded, "lvol_uuid", None),
                                 getattr(superseded, "top_bdev", None))
                     if v}
