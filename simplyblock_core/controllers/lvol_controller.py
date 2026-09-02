@@ -5,7 +5,9 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Annotated, Any, Dict, List, Tuple, Optional
+
+from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import ops_gate
@@ -111,13 +113,23 @@ def ask_for_lvol_vuid():
             sys.stdout.write("Please respond with numbers")
 
 
+class LVolCreationParameters(BaseModel):
+    pool: Pool
+    name: Annotated[str, Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def unique_name(self, info: ValidationInfo):
+        if (info.context or {})["db"].lvol_name_taken(self.pool.get_id(), self.name):
+            raise ValueError("LVol name must be unique")
+
+        return self
+
+
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
                            max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols=None, all_snaps=None):
     #  Validation
     #  name validation
     db_controller = DBController()
-    if not name or name == "":
-        return False, "Name can not be empty"
 
     #  size validation
     if size < utils.parse_size('100MiB'):
@@ -156,11 +168,6 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         if total + size > pool.pool_max_size:
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
-
-    # Name uniqueness via the per-pool name index (O(1)) instead of scanning
-    # every lvol in the DB.
-    if db_controller.lvol_name_taken(pool.get_id(), name):
-        return False, f"LVol name must be unique: {name}"
 
     # If user gave a QOS and the pool also have a QOS, return error
     if (max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes) and (pool.has_qos()):
@@ -497,6 +504,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     all_snaps = cached_mini_snapshots(db_controller)
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
                                            max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
+
+    LVolCreationParameters.model_validate({
+        "pool": pool,
+        "name": name,
+    }, context={"db": db_controller})
 
     if error:
         logger.error(error)
