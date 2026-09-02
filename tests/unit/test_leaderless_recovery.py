@@ -39,7 +39,7 @@ def _node(node_id, lvstore="LVS_1", jm_vuid=7):
     return types.SimpleNamespace(
         get_id=lambda: node_id, status=StorageNode.STATUS_ONLINE,
         lvstore=lvstore, jm_vuid=jm_vuid, cluster_id="c1",
-        rpc_client=lambda timeout=None, retry=None: rpc, _rpc=rpc)
+        rpc_client=lambda **kwargs: rpc, _rpc=rpc)
 
 
 class TestRecoverLeaderlessLvs(unittest.TestCase):

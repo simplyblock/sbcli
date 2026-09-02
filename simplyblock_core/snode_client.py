@@ -184,6 +184,10 @@ class SNodeClient:
         #     "db_connection": db_connection}
         # return self._request("POST", "join_swarm", params)
 
+    def spdk_thread_state(self, rpc_port):
+        """Per-thread state of SPDK, sampled twice ~1s apart (diagnostic)."""
+        return self._request("GET", "spdk_thread_state", {"rpc_port": rpc_port})
+
     def spdk_process_kill(self, rpc_port, cluster_id=None):
         return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port, "cluster_id": cluster_id})
 

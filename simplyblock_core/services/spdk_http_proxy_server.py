@@ -25,9 +25,20 @@ logger.setLevel(logging.INFO)
 read_line_time_diff: dict = {}
 recv_from_spdk_time_diff: dict = {}
 def print_stats():
+    # Paced by monotonic elapsed time, not just the sleep call: several
+    # integration tests patch a bare-imported `time.sleep` on some other
+    # module (e.g. storage_node_ops), which mutates the same shared stdlib
+    # `time` module and turns THIS sleep into a no-op for the duration of
+    # that patch. Without this guard the loop degenerates into a hot spin
+    # that floods stdout with duplicate stats and burns CPU other threads
+    # need — see tests/AGENTS.md's note on deadline loops paced by sleep().
+    last_log = time.monotonic()
     while True:
         try:
             time.sleep(3)
+            if time.monotonic() - last_log < 2.5:
+                continue
+            last_log = time.monotonic()
             t = time.time_ns()
             if len(read_line_time_diff) > 0:
                 read_line_time_diff_max = max(list(read_line_time_diff.values()))
@@ -249,6 +260,17 @@ class ServerHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         req_time = time.time_ns()
         self.server_session.append(req_time)
+        try:
+            self._do_POST_inner(req_time)
+        finally:
+            # Cleanup must run for ANY exception the body below can raise
+            # (e.g. ConnectionResetError / socket timeout writing the
+            # response under load), not only the two kinds it explicitly
+            # handles — otherwise the entry is orphaned in server_session
+            # for the rest of the process.
+            self.server_session.remove(req_time)
+
+    def _do_POST_inner(self, req_time):
         logger.info(f"incoming request at: {req_time}")
         logger.info(f"active server session: {len(self.server_session)}")
         # Body must be drained before branching on auth, not only on the
@@ -298,7 +320,6 @@ class ServerHandler(BaseHTTPRequestHandler):
                 logger.warning(f"BrokenPipeError: client disconnected before response could be sent (request {req_time})")
             except ValueError:
                 self.do_INTERNALERROR()
-        self.server_session.remove(req_time)
 
 
 def _bound_connection_concurrency(httpd, max_connections):

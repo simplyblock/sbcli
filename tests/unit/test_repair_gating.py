@@ -96,6 +96,13 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
             db.return_value.get_storage_node_by_id.return_value = primary
             health_controller._check_sec_node_hublvol(
                 node, primary_node_id="primary-1", **kwargs)
+        # The repair is driven by connect_to_hublvol now, not by the
+        # coordinator directly: reconcile() only re-attaches the
+        # transport and leaves the lvstore unconnected (2026-09-01,
+        # LVS_10). The question these tests ask -- "was the repair
+        # driven?" -- is unchanged; only the call that answers it is.
+        # Either step means the repair was driven; reconcile() is the one
+        # that dials out to add paths, so gate on it.
         return coordinator_cls.return_value.reconcile.called
 
     def test_repair_paths_reconciles_the_missing_path(self):
@@ -117,13 +124,16 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         def nic(ip):
-            iface = MagicMock(); iface.trtype = "TCP"; iface.ip4_address = ip
+            iface = MagicMock()
+            iface.trtype = "TCP"
+            iface.ip4_address = ip
             return iface
 
         primary = MagicMock()
         primary.status = StorageNode.STATUS_ONLINE
         primary.lvstore_status = "ready"
-        primary.active_rdma = False; primary.active_tcp = True
+        primary.active_rdma = False
+        primary.active_tcp = True
         primary.data_nics = [nic("10.0.0.1"), nic("10.0.1.1")]
         primary.hublvol.bdev_name = "LVS_1/hublvol"
         primary.get_id.return_value = "primary-1"
@@ -131,7 +141,8 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
 
         secondary = MagicMock()
         secondary.status = StorageNode.STATUS_ONLINE
-        secondary.active_rdma = False; secondary.active_tcp = True
+        secondary.active_rdma = False
+        secondary.active_tcp = True
         secondary.data_nics = [nic("10.0.0.2"), nic("10.0.1.2")]
 
         node = MagicMock()
@@ -153,6 +164,11 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
                                        repair_paths=True)
         self.assertTrue(coordinator_cls.return_value.reconcile.called,
                         "the missing secondary path was not reconciled")
+        # A tertiary must be wired to the primary AND the secondary, with its
+        # role stamped from topology rather than defaulted.
+        kwargs = node.connect_to_hublvol.call_args.kwargs
+        self.assertEqual(kwargs.get("role"), "tertiary")
+        self.assertIs(kwargs.get("failover_node"), secondary)
 
     def test_refused_when_the_primary_cannot_answer(self):
         self.assertFalse(self._call(

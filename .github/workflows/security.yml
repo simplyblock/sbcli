@@ -42,7 +42,6 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:scan
           build-args: CACHE_KEY=${{ env.CACHE_KEY }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       # Grype uses Red Hat's Security Data API — much more current than Trivy's OVAL source.
       - name: Run Grype vulnerability scan (Red Hat advisories)

@@ -379,8 +379,15 @@ LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
 LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=8
 LVOL_NVME_CONNECT_NR_IO_QUEUES=3
-LVOL_NVME_KEEP_ALIVE_TO=7
-LVOL_NVME_KEEP_ALIVE_TO_TCP=4
+# Client keep-alive. A blocked nvmf port stops answering keep-alives, and a
+# block is only bounded by SPDK's own reject conversion at ack_timeout * 4 --
+# with nvmf_create_transport ack_timeout=2000 that is 8s (rpc_client.py:391).
+# At 4s the client gave up mid-fence: on 2026-09-01 a restart fence on a
+# healthy peer held port 4440 for the full 8s, the request sat 7999742us in
+# TCP_REQUEST_STATE_READY_TO_COMPLETE, and the qpairs were quiesced. The
+# client keep-alive must outlast the worst-case fence, not expire inside it.
+LVOL_NVME_KEEP_ALIVE_TO=8
+LVOL_NVME_KEEP_ALIVE_TO_TCP=8
 QPAIR_COUNT=64
 CLIENT_QPAIR_COUNT=3
 # 8 s, not 4 s. 4 s false-positives during a peer-reset reactor stall:
@@ -466,6 +473,64 @@ RESTART_COORDINATOR_MAX_CONCURRENCY=64
 # outstanding commands (nvmf_port_block wait_for_drain, SPDK fork change) —
 # migration-immune and exact, on every node class.
 NON_LEADER_BLOCK_QUIESCE_SEC = 0.2
+
+# Budgets for RPCs issued while a peer's client port is fenced.
+#
+# The default RPCClient (timeout=180, retry=3, ~726s worst case) is unusable
+# there. A blocked nvmf port auto-converts to REJECT at ack_timeout * 4 --
+# nvmf_create_transport sets ack_timeout=2000, so 8s -- and once it does SPDK
+# marks every qpair on that port rejected and drives it to QUIESCING, i.e. the
+# client loses the path outright rather than merely waiting.
+#
+# 2026-09-01: a restart fence on a healthy peer ran the full 8s; one request
+# sat 7,999,742us in TCP_REQUEST_STATE_READY_TO_COMPLETE and was released by
+# the reject timer, not by the fence lifting. That surfaced as an IO timeout,
+# the JC demoted the leader, and IO arriving afterwards was failed with a
+# generic INTERNAL DEVICE ERROR, which Linux nvme-multipath does not retry on
+# another path -- client EIO.
+#
+# Anything that overruns its budget must release the fence and abort the
+# restart; the task runner re-queues it. A retried restart is cheap, a
+# quiesced client path is not.
+FENCE_RPC_TIMEOUT_SEC = 0.5
+#: Per-peer budget for the data-plane quorum vote, and the ceiling on waiting
+#: for the vote threads.
+#:
+#: This vote is a liveness question -- "does this peer still see the node's
+#: remote_jm controller?" -- so a slow answer IS the answer. It used to run
+#: rpc_client(timeout=8, retry=1) and then join() the vote threads with no
+#: timeout at all, which put an unbounded wait inside the restart's port
+#: fence.
+#:
+#: 2026-09-01, LVS_10: three peers voted in 3ms (16:28:29.006-29.009); a
+#: fourth was dialling the node the soak had host-rebooted at 16:28:23 and
+#: burned one full 8s timeout. The unbounded join held the fence until
+#: 16:28:36.961 -- 7.95s, 65% of a 12.2s fence, waiting on a node already
+#: known to be rebooting.
+DP_VOTE_RPC_TIMEOUT_SEC = 0.5
+DP_VOTE_RPC_RETRY = 1
+#: Ceiling on the whole vote round. A thread still running when this expires
+#: abstains -- which the quorum logic already handles -- rather than holding
+#: its caller.
+DP_VOTE_JOIN_TIMEOUT_SEC = 1.5
+# One retry. Two attempts of 0.5s still fit comfortably under the deadline, and
+# the deadline clamp below is what actually bounds the total -- a single
+# transient refusal should not abort a restart on its own.
+FENCE_RPC_RETRY = 1
+# Hard ceiling on how long any peer's client port may stay fenced, measured
+# from the first block. Sits just under the reject threshold (ack_timeout * 4 =
+# 8s) so the fence is always released by us, never converted to reject by SPDK
+# -- the conversion is what quiesces the client's qpairs and costs it the path.
+# Checked before every in-fence RPC and on every iteration of the two in-window
+# wait loops, and each RPC's timeout is clamped to the time remaining, so a
+# call can never run past the deadline.
+FENCE_DEADLINE_SEC = 7.5
+# bdev_examine only SCHEDULES the examine and returns, so it lives inside the
+# 0.5s budget like everything else. bdev_wait_for_examine is the one call that
+# genuinely blocks -- it waits for the examine to finish -- and gets the longer
+# budget. 6s is above the 0.5s norm but still inside the 8s reject threshold,
+# and overrunning it releases the fence rather than stretching the block.
+FENCE_WAIT_EXAMINE_TIMEOUT_SEC = 6
 
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
