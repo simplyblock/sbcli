@@ -85,6 +85,7 @@ from pathlib import Path
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import get_parent_device
 
 
 # ─────────────────────────────────────── helpers ──────────────────────────────
@@ -5401,8 +5402,19 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
 
         # Docker mode: parent gets max_namespace_per_subsys; children are
         # created pinned to the parent's node_id + namespace=parent_id, so
-        # they share the parent's NVMe subsystem (new namespace devices
-        # appear on the same controller, no separate connect).
+        # they share the parent's NVMe subsystem. A child is NOT a
+        # separate nvme-connect target — it's a new namespace on the
+        # controller the parent is already connected to. Connecting again
+        # via the generic _connect_and_mount() is a no-op ("already
+        # connected") and, worse, its before/after device diff races with
+        # how fast the kernel discovers the new namespace: add_lvol() can
+        # trigger kernel auto-discovery before we ever take our "before"
+        # snapshot, so the diff comes back empty and the assertion fails
+        # even though the child was created successfully. Mirror
+        # continuous_backup_stress.py instead: connect the controller once
+        # for the parent, keep it up, and for each child capture the
+        # device list *before* add_lvol() and poll+rescan for the new
+        # device afterward.
         self.sbcli_utils.add_lvol(
             lvol_name=parent_label, pool_name=self.pool_name,
             size=self.lvol_size, crypto=False,
@@ -5410,12 +5422,15 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
         parent_id = self._get_lvol_id(parent_label)
         assert parent_id, f"NS parent {parent_label} not found after create"
         self.created_lvols.append(parent_label)
-        _, mnt = self._connect_and_mount(parent_label, parent_id)
+        parent_device, mnt = self._connect_and_mount(parent_label, parent_id)
+        ctrl_dev = get_parent_device(parent_device)
         self._run_fio(mnt, runtime=15)
         checksums = self._get_checksums(self.fio_node, mnt)
         details = self.sbcli_utils.get_lvol_details(parent_id)[0]
         parent_host_id = details.get("node_id")
-        self._unmount_and_disconnect(self.fio_node, mnt, parent_id)
+        # Unmount the filesystem but keep the controller connected —
+        # children need it alive to discover their namespace on.
+        self._safe_unmount(mnt)
         entries.append((parent_label, {
             "id": parent_id, "name": parent_label, "combo": combo,
             "checksums": checksums, "backup_ids": [],
@@ -5423,6 +5438,7 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
 
         for ci in range(num_children):
             child_label = f"hv_nsc_{fs_type}_{index}_{ci}_{_rand_suffix()}"
+            before_set = set(self._list_nvme_ns_devices(ctrl_dev))
             self.sbcli_utils.add_lvol(
                 lvol_name=child_label, pool_name=self.pool_name,
                 size=self.lvol_size, crypto=False,
@@ -5430,16 +5446,58 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
             child_id = self._get_lvol_id(child_label)
             assert child_id, f"NS child {child_label} not found after create"
             self.created_lvols.append(child_label)
-            _, cmnt = self._connect_and_mount(child_label, child_id)
+            new_dev = self._wait_for_new_ns_device(
+                ctrl_dev, before_set, timeout=120)
+            assert new_dev, (
+                f"Namespace device did not appear for {child_label} "
+                f"on {ctrl_dev}")
+            cmnt = f"{self.mount_path}/{child_label}"
+            self.ssh_obj.format_disk(
+                node=self.fio_node, device=new_dev, fs_type=fs_type)
+            self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {cmnt}")
+            self.ssh_obj.mount_path(
+                node=self.fio_node, device=new_dev, mount_path=cmnt)
+            self.mounted.append((self.fio_node, cmnt))
             self._run_fio(cmnt, runtime=15)
             cchecksums = self._get_checksums(self.fio_node, cmnt)
-            self._unmount_and_disconnect(self.fio_node, cmnt, child_id)
+            self._safe_unmount(cmnt)
             entries.append((child_label, {
                 "id": child_id, "name": child_label,
                 "combo": f"{fs_type}-nschild",
                 "checksums": cchecksums, "backup_ids": [],
             }))
+
+        # All namespaces captured — disconnect the shared controller once,
+        # now that no more children need to be discovered on it.
+        self._disconnect_lvol(parent_id)
+        self.connected = [c for c in self.connected if c != parent_id]
         return entries
+
+    def _list_nvme_ns_devices(self, ctrl_dev: str) -> list:
+        """List namespace devices (/dev/nvmeXnY) on an NVMe controller."""
+        ctrl = get_parent_device(ctrl_dev)
+        cmd = f"bash -lc \"ls -1 {ctrl}n* 2>/dev/null | sort -V || true\""
+        out, _ = self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+        return [x.strip() for x in (out or "").splitlines() if x.strip()]
+
+    def _wait_for_new_ns_device(self, ctrl_dev: str, before_set: set,
+                                 timeout: int = 120):
+        """Wait for a new namespace device to appear on the controller,
+        triggering nvme ns-rescan on each poll so the kernel discovers a
+        namespace added to the subsystem after we already connected.
+
+        Returns the new device path, or None on timeout.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.ssh_obj.exec_command(
+                self.fio_node, f"sudo nvme ns-rescan {ctrl_dev}")
+            sleep_n_sec(2)
+            cur = set(self._list_nvme_ns_devices(ctrl_dev))
+            diff = sorted(cur - before_set)
+            if diff:
+                return diff[-1]
+        return None
 
     @staticmethod
     def _resolve_live_backup_id(info: dict, live_ids: set):
