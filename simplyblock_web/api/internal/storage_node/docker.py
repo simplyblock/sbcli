@@ -350,6 +350,93 @@ def _spdk_unix_socket_alive(rpc_port, timeout=1.0):
         return False
 
 
+def _spdk_thread_sample(pid):
+    """One sample of every thread's name / state / wchan / utime from /proc."""
+    out = []
+    try:
+        for tid in os.listdir(f"/proc/{pid}/task"):
+            t = f"/proc/{pid}/task/{tid}"
+            entry: dict = {"tid": tid}
+            for field, path in (("comm", "comm"), ("wchan", "wchan")):
+                try:
+                    with open(f"{t}/{path}") as fh:
+                        entry[field] = fh.read().strip()
+                except OSError:
+                    entry[field] = ""
+            try:
+                with open(f"{t}/stat") as fh:
+                    # comm can contain spaces/parens; everything after ") " is stable
+                    fields = fh.read().rsplit(") ", 1)[-1].split()
+                entry["state"] = fields[0]
+                entry["utime"] = int(fields[11])
+                entry["stime"] = int(fields[12])
+            except (OSError, IndexError, ValueError):
+                entry["state"], entry["utime"], entry["stime"] = "?", -1, -1
+            out.append(entry)
+    except OSError as e:
+        logger.warning(f"spdk_thread_state: cannot read /proc/{pid}/task: {e}")
+    return out
+
+
+@api.get('/spdk_thread_state', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object'
+    })}}},
+})
+def spdk_thread_state(query: utils.RPCPortParams):
+    """Per-thread state of the SPDK process, sampled twice ~1s apart.
+
+    Exists to answer one question when the RPC channel is wedged but the
+    process is alive: is the app thread (reactor_0, which runs the JSON-RPC
+    poller) BLOCKED or SPINNING? Those need opposite fixes and the logs cannot
+    tell them apart -- on 2026-09-01 node 22f365ef served zero RPCs for 15
+    minutes while its pollers kept printing normally, and the control plane
+    killed it without ever learning why.
+
+    utime frozen across the two samples => the thread is not running (blocked,
+    e.g. on a lock taken with an unbounded wait). utime advancing while RPCs
+    go unanswered => it is running but never returns to the RPC poller.
+
+    Deliberately NOT folded into spdk_process_kill: that path is tuned to
+    ~50-200ms for peer termination and must not grow a 1s sampling delay.
+    """
+    pid = None
+    try:
+        for proc in os.listdir("/proc"):
+            if not proc.isdigit():
+                continue
+            try:
+                with open(f"/proc/{proc}/cmdline", "rb") as fh:
+                    cmdline = fh.read().decode(errors="replace")
+            except OSError:
+                continue
+            if f"spdk_{query.rpc_port}/spdk.sock" in cmdline:
+                pid = int(proc)
+                break
+    except OSError as e:
+        return utils.get_response(None, f"cannot scan /proc: {e}")
+
+    if pid is None:
+        return utils.get_response(None,
+            f"no SPDK process found for rpc_port {query.rpc_port}")
+
+    first = _spdk_thread_sample(pid)
+    time.sleep(1)
+    second = _spdk_thread_sample(pid)
+
+    by_tid = {t["tid"]: t for t in first}
+    threads = []
+    for cur in second:
+        prev = by_tid.get(cur["tid"], {})
+        threads.append({
+            "tid": cur["tid"], "comm": cur["comm"], "state": cur["state"],
+            "wchan": cur["wchan"],
+            "utime_delta": cur["utime"] - prev.get("utime", cur["utime"]),
+            "stime_delta": cur["stime"] - prev.get("stime", cur["stime"]),
+        })
+    return utils.get_response({"pid": pid, "threads": threads})
+
+
 @api.get('/spdk_process_is_up', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'

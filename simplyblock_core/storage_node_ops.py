@@ -26,6 +26,7 @@ from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core import jm_raid
 from simplyblock_core.utils import port_block
+from simplyblock_core.utils import rpc_budget
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
@@ -51,6 +52,51 @@ import os
 
 
 logger = utils.get_logger(__name__)
+
+
+def kill_client_kwargs(force=False):
+    """SNodeClient kwargs for the spdk_process_kill RPC.
+
+    The kill goes to the agent ON the node being killed, so when that agent
+    is not serving, patience buys nothing. SNodeClient defaults to
+    Retry(total=retry, backoff_factor=1, connect=retry): with retry=10 the
+    backoff alone is 0+2+4+8+16+32+64+120+120+120 = 486s (urllib3 caps each
+    at 120s), so a --force shutdown against a dead agent blocked for ~9
+    minutes on 2026-08-27 -- the exact case --force exists to escape.
+
+    connect_retry=0 makes a refused connection fail at once (SNodeClient's
+    own documented rationale); read retries still cover a slow-but-alive
+    agent. The graceful path keeps its patience.
+    """
+    if force:
+        return {"timeout": 10, "retry": 2, "connect_retry": 0}
+    return {"timeout": 10, "retry": 10}
+
+
+def ensure_spdk_stopped(client_factory, rpc_port, cluster_id):
+    """Best-effort kill of an SPDK that is still running before a restart.
+
+    A node's status can read OFFLINE while its SPDK is very much alive: the
+    status write is lost when the DB is unavailable at shutdown time (FDB
+    filled its disk mid-shutdown, 2026-08-27). spdk_process_start against a
+    live process is a no-op, so three node_restart tasks and a --force
+    restart all reported success while the container kept its original ~1h
+    uptime, and the node could never recover without manual intervention.
+
+    Kill first so a restart always bounces the process. Fast-failing and
+    non-fatal: with nothing running this is a no-op, and it must never block
+    or fail the restart path.
+
+    Returns True if a kill was accepted, False otherwise.
+    """
+    try:
+        client_factory(**kill_client_kwargs(force=True)).spdk_process_kill(
+            rpc_port, cluster_id)
+        logger.info("Killed a pre-existing SPDK process before restart")
+        return True
+    except Exception as exc:  # noqa: BLE001 - nothing to kill is the normal case
+        logger.debug("No pre-existing SPDK process to kill: %s", exc)
+        return False
 
 
 class LVSRestartRequiredError(Exception):
@@ -574,6 +620,45 @@ def duplicate_attached_paths(ctrlr_list):
     return {ip for ip, n in seen.items() if n > 1}
 
 
+def prune_duplicate_paths(rpc_client, name, ctrlr_list, nvmf_port, tr_type):
+    """Detach every copy of any address attached more than once on ``name``.
+
+    Returns True if anything was pruned, so the caller knows to re-read the
+    controller list. Detaching is by trid and therefore removes ALL copies of
+    a duplicated address -- the address becomes *missing*, and re-attaching it
+    exactly once is left to the caller's own reconcile path. That split
+    matters for hublvol, whose (re)attach must go through
+    HublvolReconnectCoordinator: its cooldown is what closes the "cntlid N are
+    duplicated" race, so a prune helper that also re-attached would risk
+    recreating the very duplicate it just removed.
+    """
+    duplicates = duplicate_attached_paths(ctrlr_list)
+    if not duplicates:
+        return False
+    logger.error(
+        "Controller %s has duplicate path(s) %s -- pruning. Two "
+        "controllers on one address serve no purpose and give the bdev "
+        "two unordered qpairs to the same target.", name, duplicates)
+    for dup_ip in sorted(duplicates):
+        # Keep at least one other address alive: detaching by trid drops
+        # EVERY controller on that address, so pruning the only address
+        # would tear the bdev down instead of repairing it.
+        others = {ip for ip, _p in _collect_attached_paths(ctrlr_list)} - {dup_ip}
+        if not others:
+            logger.warning(
+                "Not pruning duplicate %s on %s: it is the only attached "
+                "address, so a detach would remove the last path", dup_ip, name)
+            continue
+        try:
+            rpc_client.bdev_nvme_detach_controller(
+                name, traddr=dup_ip, trsvcid=nvmf_port, trtype=tr_type)
+        except Exception as e:
+            logger.error("Failed to prune duplicate path %s on %s: %s",
+                         dup_ip, name, e)
+            continue
+    return True
+
+
 def _collect_attached_ips(ctrlr_list):
     """Aggregate the set of currently-attached traddrs across every ctrlr entry.
 
@@ -884,29 +969,7 @@ def _repair_multipath_controller_locked(node, name, device, rpc_client, ret,
     # comparison below cannot see it: (96.179, 97.9, 97.9) reads as 2-of-2.
     # Prune first, because the missing-path logic would otherwise report the
     # controller complete and return while it still carries the surplus path.
-    duplicates = duplicate_attached_paths(ret)
-    if duplicates:
-        logger.error(
-            "Controller %s has duplicate path(s) %s -- pruning. Two "
-            "controllers on one address serve no purpose and give the bdev "
-            "two unordered qpairs to the same target.", name, duplicates)
-        for dup_ip in sorted(duplicates):
-            # Keep at least one other address alive: detaching by trid drops
-            # EVERY controller on that address, so pruning the only address
-            # would tear the bdev down instead of repairing it.
-            others = {ip for ip, _p in _collect_attached_paths(ret)} - {dup_ip}
-            if not others:
-                logger.warning(
-                    "Not pruning duplicate %s on %s: it is the only attached "
-                    "address, so a detach would remove the last path", dup_ip, name)
-                continue
-            try:
-                rpc_client.bdev_nvme_detach_controller(
-                    name, traddr=dup_ip, trsvcid=device.nvmf_port, trtype=tr_type)
-            except Exception as e:
-                logger.error("Failed to prune duplicate path %s on %s: %s",
-                             dup_ip, name, e)
-                continue
+    if prune_duplicate_paths(rpc_client, name, ret, device.nvmf_port, tr_type):
         # Re-read: the detach removed every copy of each duplicated address,
         # so those addresses are now missing and the loop below re-attaches
         # each exactly once.
@@ -5720,6 +5783,11 @@ def _restart_storage_node_impl(
         if lvol_changed:
             snode_api.persist_node_config(snode.max_lvol, minimum_hp_memory, snode.socket, snode.ssd_pcie)
         snode_api.set_hugepages()
+        # A restart must actually bounce SPDK: see ensure_spdk_stopped.
+        # snode.api_endpoint is already rewritten to node_address above when
+        # restarting onto a new host, so snode.client() targets the right one.
+        ensure_spdk_stopped(
+            snode.client, snode.rpc_port, snode.cluster_id)
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
@@ -7078,7 +7146,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     # kill.
     logger.info("Stopping SPDK")
     try:
-        snode.client(timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        snode.client(**kill_client_kwargs(force)).spdk_process_kill(
+            snode.rpc_port, snode.cluster_id)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
@@ -8433,7 +8502,8 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
 
 
 def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
-                                    leader_op_completed=False, all_nodes=None):
+                                    leader_op_completed=False, all_nodes=None,
+                                    wait_for_restart=0):
     """Check a non-leader node's readiness for a sync operation.
 
     Args:
@@ -8468,10 +8538,31 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
     # (its mgmt RPC goes to port 8085, not 4436), so a pre_block skip can
     # lose a create/delete on the restarting node. See
     # _set_restart_phase for the drain timing.
+    _restart_phases = (StorageNode.RESTART_PHASE_PRE_BLOCK,
+                       StorageNode.RESTART_PHASE_BLOCKED,
+                       StorageNode.RESTART_PHASE_POST_UNBLOCK)
     phase = get_restart_phase(node_id, lvs_name)
-    if phase in (StorageNode.RESTART_PHASE_PRE_BLOCK,
-                 StorageNode.RESTART_PHASE_BLOCKED,
-                 StorageNode.RESTART_PHASE_POST_UNBLOCK):
+    if phase in _restart_phases and wait_for_restart > 0:
+        # Caller holds the chain lock and asked to wait this one out. A
+        # restart is bounded and self-clearing, so waiting keeps the whole
+        # multi-node sequence under one lock instead of handing the leg to
+        # a task runner that will execute it later, in another process,
+        # with no chain lock at all. Bounded: see
+        # DEFERRED_LEG_RESTART_WAIT_SEC -- a wedged restart must not pin
+        # the chain.
+        deadline = time.time() + wait_for_restart
+        while phase in _restart_phases and time.time() < deadline:
+            time.sleep(2)
+            phase = get_restart_phase(node_id, lvs_name)
+        if phase in _restart_phases:
+            logger.info(
+                "Non-leader %s still in restart phase %s after %ss; "
+                "deferring the leg durably", node_id[:8], phase,
+                wait_for_restart)
+            return "queue"
+        logger.info("Non-leader %s left its restart phase; proceeding "
+                    "under the held lock", node_id[:8])
+    elif phase in _restart_phases:
         return "queue"
 
     # 3. Fabric is connected — check RPC responsiveness
@@ -9065,7 +9156,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                         caused_by="restart_cleanup")
         if leader_port_blocked:
             try:
-                port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=5, retry=2)
+                port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=0.5, retry=2)
                 _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                 _mark_leader_unblocked()
             except Exception as ue:
@@ -9555,6 +9646,9 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     finally:
         # Idempotent; the in-flow release above is the normal path.
         _release_block_gate()
+        # An unbounded fence is bad; a fence budget leaking onto this thread's
+        # later work would be worse. Every exit path clears it.
+        rpc_budget.clear_budget()
 
 
 def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
@@ -9586,7 +9680,7 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
             peer = db_controller.get_storage_node_by_id(pid)
             if not peer or peer.status != StorageNode.STATUS_ONLINE:
                 continue
-            port_block.set_port(peer, port, block=False, timeout=5, retry=2)
+            port_block.set_port(peer, port, block=False, timeout=0.5, retry=2)
             tcp_ports_events.port_allowed(peer, port)
             logger.info("Defensive unblock: allowed LVS port %s on peer %s after "
                         "failed recreate of %s", port, pid, lvs_node.lvstore)
@@ -10001,13 +10095,46 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 logger.warning("Deferred port event emit failed: %s", _ev_e)
         del _deferred_port_events[:]
 
+    def _warn_if_unblocking_a_non_leader(peer):
+        """Read-only: warn when a peer is being returned to service demoted.
+
+        Leadership can move WHILE the fence is held. On 2026-09-01 it did: the
+        fence went on LVS_10's primary at 16:28:25, the secondary took
+        leadership at 16:28:31, and the control plane unblocked the old primary
+        at 16:28:37 regardless. The client reconnected within milliseconds to a
+        node that was no longer leader, that node could not redirect, and the
+        IO came back as a generic INTERNAL DEVICE ERROR -- which
+        nvme-multipath does not retry on another path. Client EIO, fio rc=4.
+
+        Deliberately does NOT repair here. Wiring a hublvol inside the fence is
+        exactly the kind of extra in-window work that made the fence 12.2s in
+        the first place, and on the abort path it would delay the release we
+        want immediate. One bounded probe (0.5s via the ambient fence budget)
+        buys the diagnosis; the fix belongs to the post-unblock repair, and to
+        keeping the fence short enough that leadership does not move inside it.
+        """
+        try:
+            ret = peer.rpc_client().bdev_lvol_get_lvstores(lvs_name)
+        except Exception:
+            return                      # never let a probe delay the release
+        if not ret or ret[0].get("lvs leadership"):
+            return
+        logger.error(
+            "[RESTART] Unblocking %s for %s while it is NO LONGER leader -- "
+            "the client will reconnect to a demoted node; if its hublvol "
+            "redirect path is missing, its next IO is failed outright. Fence "
+            "held %.3fs.",
+            peer.get_id()[:8], lvs_name, _fence_elapsed())
+
     def _unblock_peer_port(peer):
         """Remove the port block for snode_lvs_port on peer and drop
         the peer from blocked_peers. Safe to call if peer is not currently
         blocked (no-op). Tolerates RPC failure — logs and continues so
         other peers can still be unblocked."""
+        if peer in blocked_peers:
+            _warn_if_unblocking_a_non_leader(peer)
         try:
-            port_block.set_port(peer, snode_lvs_port, block=False, timeout=5, retry=2)
+            port_block.set_port(peer, snode_lvs_port, block=False, timeout=0.5, retry=2)
             _deferred_port_events.append(("allow", peer, snode_lvs_port))
             _t0 = _block_started.pop(peer.get_id(), None)
             if _t0 is not None:
@@ -10025,6 +10152,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 blocked_peers.remove(peer)
             except ValueError:
                 pass
+            if not blocked_peers:
+                # Fence over: normal work must not inherit the 0.5s budget.
+                rpc_budget.clear_budget()
 
     def _kill_app():
         """Kill SPDK on snode and mark OFFLINE before peer ports unblock.
@@ -10108,14 +10238,72 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         """Abort: kill SPDK, set offline, unblock every blocked peer, raise."""
         logger.error("Aborting recreate_lvstore on %s for %s: %s",
                      snode.get_id(), lvs_name, reason)
+        # Release the fences FIRST. Every fenced peer has its client
+        # listener blocked and cannot answer keep-alives, so each extra
+        # second risks clients (KATO 4s) dropping that path. _kill_app()
+        # used to run first and cost ~1.2s of spdk_process_kill +
+        # spdk_process_is_up polling before any peer was released
+        # (2026-08-31: unblock landed at 13:33:29.13, one second after the
+        # client had already failed IO at 13:33:28). Killing our own SPDK
+        # can wait; a fenced healthy peer cannot.
+        for peer in list(blocked_peers):
+            _unblock_peer_port(peer)
         _persist_deferred_node_fields()
         _release_hub_locks()
         _kill_app()
-        for peer in list(blocked_peers):
-            _unblock_peer_port(peer)
         _release_block_gate()
         _flush_port_events()
         raise Exception(f"Abort restart: {reason}")
+
+    def _fence_elapsed():
+        """Seconds since the first peer port was fenced (0.0 if none is)."""
+        if not _block_started:
+            return 0.0
+        return time.monotonic() - min(_block_started.values())
+
+    def _check_fence_deadline(where):
+        """Release and abort if the fence has run to FENCE_DEADLINE_SEC.
+
+        Called between steps and inside the in-window wait loops. The fence
+        must be lifted by us before SPDK converts the block to reject at
+        ack_timeout * 4 (8s): the conversion quiesces every qpair on the port,
+        so the client loses the path rather than merely waiting for it.
+        """
+        if not _block_started:
+            return
+        elapsed = _fence_elapsed()
+        if elapsed >= constants.FENCE_DEADLINE_SEC:
+            _abort_restart_and_unblock(
+                f"port fence held {elapsed:.3f}s at {where}, over the "
+                f"{constants.FENCE_DEADLINE_SEC}s deadline (reject threshold 8s)")
+
+    def _fenced(method, *args, budget=None, **kwargs):
+        """Run one RPC while a peer's client port is fenced.
+
+        ``method`` is the RPCClient method name. The client is built per call
+        so its timeout can be clamped to the time left on the fence -- a fixed
+        per-call timeout is not enough on its own, since a 6s call started late
+        in the window would still overrun the deadline.
+
+        Any failure, a timeout above all, releases the fence and aborts the
+        restart. The task runner re-queues an aborted restart; a quiesced
+        client path is not recoverable.
+        """
+        budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
+        timeout = budget
+        if _block_started:
+            remaining = constants.FENCE_DEADLINE_SEC - _fence_elapsed()
+            if remaining <= 0:
+                _check_fence_deadline(method)
+            timeout = min(budget, remaining)
+        try:
+            client = snode.rpc_client(timeout=timeout,
+                                      retry=constants.FENCE_RPC_RETRY)
+            return getattr(client, method)(*args, **kwargs)
+        except Exception as e:
+            _abort_restart_and_unblock(
+                f"{method} failed inside the port-fence window "
+                f"(budget {timeout:.2f}s, fence {_fence_elapsed():.3f}s): {e}")
 
     # #4: compute the examine-idempotency probes BEFORE the block window —
     # they only read snode's own fresh SPDK (raid built at ###1 pre-block),
@@ -10257,12 +10445,44 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
                     # b. block the leader's LVS port
                     try:
-                        current_leader.lvstore_status = "in_creation"
-                        current_leader.write_to_db()
-                        port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
+                        # Field-scoped and transactional. A plain
+                        # `leader.lvstore_status = X; leader.write_to_db()`
+                        # serialises the WHOLE record from a copy read at
+                        # the top of this function -- before the peer went
+                        # down -- so it silently restores status=online over
+                        # the monitor's offline write, and emits no
+                        # STATUS_CHANGE event because it never goes through
+                        # the status path.
+                        #
+                        # 2026-08-31: that resurrected "online" for a node
+                        # whose SPDK was dead (it started at 12:02:31, the
+                        # record read online from 11:52 to 12:02). So
+                        # _check_peer_disconnected could never observe
+                        # offline, the port-block below was issued to a dead
+                        # node, and the restart aborted -- and every retry
+                        # re-resurrected it: 5 aborts over 15 minutes, with
+                        # the peer reported online in sn list throughout.
+                        # Deliberately does NOT rebind current_leader: the
+                        # rest of this flow keeps the object it was called
+                        # with, so behaviour is unchanged. Not clobbering the
+                        # record is enough to break the retry loop --
+                        # _check_peer_disconnected re-reads from FDB on the
+                        # next attempt, so it now sees offline and skips the
+                        # port-block instead of failing on it forever.
+                        db_controller.atomic_update(
+                            current_leader,
+                            lambda x: setattr(x, "lvstore_status", "in_creation"))
+                        port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=0.5, retry=1)
                         _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                         blocked_peers.append(current_leader)
                         _block_started[current_leader.get_id()] = time.monotonic()
+                        # From here until the last port is released, every
+                        # rpc_client() built on this thread -- including the
+                        # ones inside hublvol/bdev-stack helpers we do not own
+                        # -- is bounded. Cleared in _unblock_peer_port once
+                        # blocked_peers empties, and in the outer finally.
+                        rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                              constants.FENCE_RPC_RETRY)
                     except Exception as e:
                         # Failing to port-block the current leader means we cannot
                         # safely promote snode: the old leader may still be serving
@@ -10278,12 +10498,22 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     repl_disabled = False
                     # c. suspend journal replication while the port is blocked
                     try:
-                        repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
+                        # Bounded: this runs with the leader's port already
+                        # fenced, and a bare rpc_client() inherits
+                        # RPCClient(timeout=180, retry=3) -> ~726s worst case
+                        # with backoff. The leader answers this in ~11ms; if
+                        # it has just died, the fence must not be held for
+                        # minutes (client KATO is 4s). Failure here is
+                        # already handled: repl_disabled stays False, the
+                        # port is unblocked and the suspend loop retries.
+                        repl_disabled = current_leader.rpc_client(
+                            timeout=0.5, retry=1).jc_disable_replication(lvs_jm_vuid)
                     except RPCRemoteError as e:
                         if e.code == RPCErrorCode.method_not_found:
                             try:
                                 logger.warning("Failed to disable replication on leader, trying other method")
-                                ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
+                                ret = current_leader.rpc_client(
+                                    timeout=0.5, retry=1).jc_get_jm_status(lvs_jm_vuid)
                                 repl_disabled = True
                                 for jm in ret:
                                     if ret[jm] is False:  # jm is not ready (has active replication task)
@@ -10327,10 +10557,12 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 if sec_node in blocked_peers:
                     continue
                 try:
-                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=5, retry=2)
+                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
                     _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
                     blocked_peers.append(sec_node)
                     _block_started[sec_node.get_id()] = time.monotonic()
+                    rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                          constants.FENCE_RPC_RETRY)
                 except Exception as e:
                     # Same rationale as the leader port-block: cannot safely
                     # decide "peer gone" vs "peer slow" before snode has
@@ -10381,6 +10613,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 deadline = time.time() + _DRAIN_BOUND_SEC
                 drained = False
                 while time.time() < deadline:
+                    _check_fence_deadline("inflight drain")
                     try:
                         still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
                     except Exception as e:
@@ -10419,13 +10652,13 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
             if disconnected_peers:
                 logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
-                rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
+                _fenced("jc_explicit_synchronization", lvs_jm_vuid)
 
         ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
         # #4: raid/lvstore probes were computed pre-block (see above the block
         # section) — they read snode's own fresh SPDK only, and
         # force_to_non_leader does not affect bdev/lvstore presence.
-        rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+        _fenced("bdev_distrib_force_to_non_leader", lvs_jm_vuid)
         if raid_already and lvstore_already:
             logger.info(
                 "Raid %s and lvstore %s already present on %s; skipping examine",
@@ -10451,7 +10684,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     "dropping raid for clean re-examine",
                     lvs_raid, lvs_name, snode.get_id())
                 try:
-                    rpc_client.bdev_raid_delete(lvs_raid)
+                    _fenced("bdev_raid_delete", lvs_raid)
                 except Exception as e:
                     logger.warning(
                         "bdev_raid_delete(%s) raised: %s — proceeding to "
@@ -10483,13 +10716,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # restart path: _create_bdev_stack leaves the raid in place but does
             # not examine it, so the lvstore never surfaces and the subsequent
             # bdev_lvol_get_lvstores validation fails every time.
-            rpc_client.bdev_examine(lvs_raid)
+            _fenced("bdev_examine", lvs_raid)
 
             ### 6- wait for examine
-            rpc_client.bdev_wait_for_examine()
+            _fenced("bdev_wait_for_examine",
+                    budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC)
 
         # Validate lvstore recovery
-        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+        ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
         if not ret:
             logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
             if activation_mode:
@@ -10539,18 +10773,22 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             _abort_restart_and_unblock(
                 f"snode {snode.get_id()} is not a registered peer of "
                 f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
-        ret = rpc_client.bdev_lvol_set_lvs_opts(
+        ret = _fenced(
+            "bdev_lvol_set_lvs_opts",
             lvs_name,
             groupid=lvs_jm_vuid,
             subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
             hublvol_port=lvs_node.get_hublvol_port(lvs_name),
             role=snode_lvs_role,
         )
-        ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
+        ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True)
         leader_restored = False
         for _ in range(10):
+            # 10 x 0.2s of sleep plus 10 RPCs is a large slice of the fence
+            # budget on its own; give up the fence rather than the deadline.
+            _check_fence_deadline("leader-restore poll")
             try:
-                ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+                ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
                 if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
                     leader_restored = True
                     break
@@ -10786,6 +11024,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
     finally:
         # Idempotent; the in-flow release above is the normal path.
         _release_block_gate()
+        # An unbounded fence is bad; a fence budget leaking onto this thread's
+        # later work would be worse. Every exit path clears it.
+        rpc_budget.clear_budget()
 
 
 def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):

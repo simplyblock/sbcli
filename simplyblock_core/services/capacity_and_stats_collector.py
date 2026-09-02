@@ -16,6 +16,7 @@ from simplyblock_core.models.stats import (
     ThreadStats,
 )
 from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.utils import capacity
 
 logger = utils.get_logger(__name__)
 
@@ -150,9 +151,21 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
         "date": now}
 
     if capacity_dict and capacity_dict['res'] == 1:
-        size_total = int(capacity_dict['npages_nmax']*capacity_dict['pba_page_size'])
-        size_used = int(capacity_dict['npages_used']*capacity_dict['pba_page_size'])
+        # alceml reports RAW pages: parity chunks occupy them just as data
+        # chunks do. Convert once, here, so every level above this one (node,
+        # cluster) is a sum of effective bytes and is directly comparable with
+        # size_prov and with the lvol/snapshot figures, which are effective by
+        # construction. The raw numbers are kept in the *_raw fields.
+        size_total_raw = int(capacity_dict['npages_nmax']*capacity_dict['pba_page_size'])
+        size_used_raw = int(capacity_dict['npages_used']*capacity_dict['pba_page_size'])
+        size_free_raw = size_total_raw - size_used_raw
+
+        size_total = capacity.to_effective(size_total_raw, cl)
+        size_used = capacity.to_effective(size_used_raw, cl)
         size_free = size_total - size_used
+        # Unchanged by the conversion (both operands scale by the same ratio),
+        # but computed from the effective pair so it stays consistent if the
+        # two ever diverge.
         size_util = 0
         if size_total > 0:
             size_util = int((size_used / size_total) * 100)
@@ -162,6 +175,9 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
             "size_used": size_used,
             "size_free": size_free,
             "size_util": size_util,
+            "size_total_raw": size_total_raw,
+            "size_used_raw": size_used_raw,
+            "size_free_raw": size_free_raw,
             "capacity_dict": capacity_dict
         })
     else:
@@ -269,6 +285,9 @@ def add_node_stats(cluster, node, records, all_lvols, cpu_dict: Optional[CpuStat
         size_used = records_sum.size_used
         data.update(records_sum.get_clean_dict())
 
+    # LVol.size is the client-visible logical size, i.e. already EFFECTIVE --
+    # which is what makes it comparable with size_total below, that being a sum
+    # of parity-adjusted device records rather than raw device capacity.
     size_prov = 0
     for lvol in all_lvols:
         if lvol.node_id == node.get_id():
@@ -307,6 +326,8 @@ def add_cluster_stats(cl, records):
 
     records_sum = utils.sum_records(records)
 
+    # Sums of node records, which are themselves sums of parity-adjusted device
+    # records: EFFECTIVE bytes at every level, and so comparable with size_prov.
     size_util = 0
     size_prov_util = 0
     if records_sum.size_total > 0:

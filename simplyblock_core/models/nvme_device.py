@@ -1,7 +1,7 @@
 # coding=utf-8
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class NVMeDevice(BaseModel):
@@ -17,7 +17,7 @@ class NVMeDevice(BaseModel):
     STATUS_READONLY = 'read_only'
     STATUS_CANNOT_ALLOCATE = 'cannot_allocate'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 1,
         STATUS_NEW: 2,
         STATUS_UNAVAILABLE: 3,
@@ -31,7 +31,7 @@ class NVMeDevice(BaseModel):
 
     alceml_bdev: str = ""
     alceml_name: str = ""
-    bdev_stack: List = []
+    bdev_stack: List = default_factory(list)
     capacity: int = -1
     cluster_device_order: int = -1
     cluster_id: str = ""
@@ -119,15 +119,15 @@ class NVMeDevice(BaseModel):
 
 class JMDevice(NVMeDevice):
 
-    device_data_dict: dict = {}
+    device_data_dict: dict = default_factory(dict)
     jm_bdev: str = ""
-    jm_nvme_bdev_list: List[str] = []
+    jm_nvme_bdev_list: List[str] = default_factory(list)
     raid_bdev: str = ""
     # RAID 0+1 layout: the two leg bdev names fed to the top raid1 (each is a
     # raid0 over a drive group, or a bare device for a single-drive leg), and
     # the per-leg member partitions. Empty for single-device (no-raid) JMs.
-    jm_leg_bdevs: List[str] = []
-    jm_leg_members: List = []
+    jm_leg_bdevs: List[str] = default_factory(list)
+    jm_leg_members: List = default_factory(list)
 
 
 class RemoteDevice(BaseModel):

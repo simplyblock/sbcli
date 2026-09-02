@@ -1,4 +1,5 @@
 import base64
+from typing import ClassVar
 import json
 import logging
 import os
@@ -203,7 +204,7 @@ def _rpc_call_inner(req, req_data, req_time, sock_timeout):
 
 
 class ServerHandler(BaseHTTPRequestHandler):
-    server_session: list[int] = []
+    server_session: ClassVar[list[int]] = []
     key = ""
     def do_HEAD(self):
         self.send_response(200)

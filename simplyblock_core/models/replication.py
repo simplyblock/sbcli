@@ -7,6 +7,7 @@ and a volume optionally references one policy. Structurally this mirrors
 ``BackupPolicy`` / ``BackupPolicyAttachment`` in ``models/backup.py``, including
 the ``cluster_id/uuid`` composite id.
 """
+from typing import ClassVar
 import datetime
 
 from simplyblock_core.models.base_model import BaseModel
@@ -23,7 +24,7 @@ class ReplicationTarget(BaseModel):
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 0,
         STATUS_INACTIVE: 1,
     }
@@ -51,7 +52,7 @@ class ReplicationPolicy(BaseModel):
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 0,
         STATUS_INACTIVE: 1,
     }

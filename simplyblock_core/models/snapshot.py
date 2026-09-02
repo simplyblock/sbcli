@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 from simplyblock_core.models.lvol_model import LVol, LVolMini
 
 
@@ -45,7 +45,7 @@ class SnapShot(BaseModel):
     group_seq: int = 0
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
-    instances: list[dict] = []
+    instances: list[dict] = default_factory(list)
     # Uniquely identifies the data block device that backs this snapshot.
     # It is created once Snapshot is created from an LVol
     # On Snapshot transfer or replicate this field is the same
