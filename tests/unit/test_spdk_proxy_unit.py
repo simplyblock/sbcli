@@ -32,6 +32,7 @@ OPTIONAL_ENV = {
     "TIMEOUT": "5",
     "MAX_CONCURRENT_SPDK": "4",
     "MAX_CONCURRENT_CONNECTIONS": "8",
+    "KEEPALIVE_TIMEOUT": "30",
     "SPDK_TIMEOUT_MARGIN": "2",
     "MULTI_THREADING_ENABLED": "True",
 }
@@ -129,6 +130,7 @@ class TestProxySettings(unittest.TestCase):
         self.assertEqual(settings.timeout, 5 * 60)
         self.assertEqual(settings.max_concurrent_spdk, 16)
         self.assertEqual(settings.max_concurrent_connections, 64)
+        self.assertEqual(settings.keepalive_timeout, 300)
         self.assertEqual(settings.spdk_timeout_margin, 2.0)
         self.assertFalse(settings.multi_threading_enabled)
 
@@ -139,6 +141,7 @@ class TestProxySettings(unittest.TestCase):
         self.assertEqual(settings.timeout, 5)
         self.assertEqual(settings.max_concurrent_spdk, 4)
         self.assertEqual(settings.max_concurrent_connections, 8)
+        self.assertEqual(settings.keepalive_timeout, 30)
         self.assertEqual(settings.spdk_timeout_margin, 2.0)
         self.assertTrue(settings.multi_threading_enabled)
 
