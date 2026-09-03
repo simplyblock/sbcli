@@ -31,6 +31,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.requests import ClientDisconnect
 
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils.secrets import redact_rpc_params
 
 
 logger = logging.getLogger(__name__)
@@ -487,7 +488,7 @@ class SpdkProxy:
             raise ValueError('Not a JSON-RPC request object')
         method = str(req_data['method'])
         req_time = time.time_ns()
-        params = str(req_data['params']) if 'params' in req_data else ""
+        params = str(redact_rpc_params(req_data['params'])) if 'params' in req_data else ""
         logger.info(f"Request:{req_time} function: {method}, params: {params}")
         sock_timeout = self._resolve_sock_timeout(client_timeout)
         async with self.slots:

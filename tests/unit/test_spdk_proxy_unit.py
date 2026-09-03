@@ -17,6 +17,7 @@ from prometheus_client import CollectorRegistry, Histogram
 from pydantic import ValidationError
 
 from simplyblock_core.services import spdk_http_proxy_server as proxy_mod
+from simplyblock_core.utils.secrets import MASK
 
 
 REQUIRED_ENV = {
@@ -332,6 +333,93 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
             await proxy.rpc_call(self.req, client_timeout="3")
 
         self.assertEqual(wait_for.call_args.args[1], 6)
+
+
+class TestRequestLog(unittest.IsolatedAsyncioTestCase):
+    """The per-request log line is relied on for debugging across the org, so
+    it keeps logging params — but the proxy sees bodies that have already been
+    through ``unwrap_secrets_for_send``, with no ``SecretStr`` left to mask by.
+    Redaction is therefore by parameter name, and unconditional.
+    """
+
+    def setUp(self):
+        self.proxy = make_proxy()
+
+    async def _log_for(self, **body):
+        req = json.dumps({"id": 1, **body}).encode("ascii")
+        fake = FakeSpdkSocket([rpc_response(result=True)])
+        with patch_connect(fake):
+            with self.assertLogs(proxy_mod.logger, "INFO") as captured:
+                await self.proxy.rpc_call(req)
+        return "\n".join(captured.output)
+
+    async def test_crypto_keys_are_masked(self):
+        log = await self._log_for(
+            method="accel_crypto_key_create",
+            params={
+                "cipher": "AES_XTS",
+                "name": "key_lvol_1",
+                "key": "DEKSENTINELONE",
+                "key2": "DEKSENTINELTWO",
+            },
+        )
+
+        self.assertNotIn("DEKSENTINELONE", log)
+        self.assertNotIn("DEKSENTINELTWO", log)
+        self.assertIn(MASK, log)
+
+    async def test_the_line_still_names_the_method_and_its_safe_params(self):
+        """The point of the line. A future change must not "fix" a leak by
+        dropping the field."""
+        log = await self._log_for(
+            method="accel_crypto_key_create",
+            params={
+                "cipher": "AES_XTS",
+                "name": "key_lvol_1",
+                "key": "DEKSENTINELONE",
+                "key2": "DEKSENTINELTWO",
+            },
+        )
+
+        self.assertIn("accel_crypto_key_create", log)
+        self.assertIn("AES_XTS", log)
+        self.assertIn("key_lvol_1", log)
+
+    async def test_s3_secret_is_masked_but_its_access_key_id_is_not(self):
+        log = await self._log_for(
+            method="bdev_s3_create",
+            params={
+                "name": "s3bdev",
+                "local_endpoint": "http://minio:9000",
+                "access_key_id": "AKIAIDENTIFIER",
+                "secret_access_key": "S3SENTINEL",
+            },
+        )
+
+        self.assertNotIn("S3SENTINEL", log)
+        self.assertIn("AKIAIDENTIFIER", log)
+        self.assertIn("http://minio:9000", log)
+
+    async def test_a_nested_secret_is_masked(self):
+        log = await self._log_for(
+            method="some_future_rpc",
+            params={"outer": [{"secret_access_key": "NESTEDSENTINEL"}]},
+        )
+
+        self.assertNotIn("NESTEDSENTINEL", log)
+
+    async def test_positional_params_do_not_break_the_line(self):
+        """Redaction runs on the unconditional path for a caller-controlled
+        body, so a shape SPDK never sends must not turn every RPC into a 500."""
+        log = await self._log_for(method="some_future_rpc", params=[1, "two", None])
+
+        self.assertIn("some_future_rpc", log)
+        self.assertIn("two", log)
+
+    async def test_scalar_params_do_not_break_the_line(self):
+        log = await self._log_for(method="some_future_rpc", params="bare")
+
+        self.assertIn("some_future_rpc", log)
 
 
 class TestConcurrencyLimit(unittest.IsolatedAsyncioTestCase):
