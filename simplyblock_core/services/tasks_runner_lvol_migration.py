@@ -1035,7 +1035,7 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         return None, hub_err
 
     # Step 6: fire async transfer via hub
-    ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 512, hub_bdev, "migrate", lvol_id=tgt_map_id)
+    ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 256, hub_bdev, "migrate", lvol_id=tgt_map_id)
     if ret is None:
         _cleanup()
         return None, f"bdev_lvol_transfer failed for snap {snap_uuid}"
@@ -2007,7 +2007,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
         try:
             ret = src_rpc.bdev_lvol_transfer_final_step(
-                src_lvol_composite, tgt_map_id, tgt_snap_composite, 512, hub_bdev, "migrate")
+                src_lvol_composite, tgt_map_id, tgt_snap_composite, 256, hub_bdev, "migrate")
             if not ret:
                 # Falsy, not just None: a target restart mid-RPC can come back as a
                 # 200 with an empty/non-JSON body, which rpc_client._request2 then
@@ -3870,7 +3870,7 @@ def _cancel_stale_new_migrations(cluster_id):
 # Runner main loop
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting LVol Migration task runner...")
 
     while True:
@@ -3897,3 +3897,7 @@ if __name__ == "__main__":
                         task_runner(task)
 
         time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()
