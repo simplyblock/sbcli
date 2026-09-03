@@ -32,11 +32,28 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE):
 
 class TestGracefulShutdownSkipsDepartedNodes(unittest.TestCase):
 
-    def _run(self, nodes):
+    def _run(self, nodes, resurrect=()):
+        """Drive the sweep. A real shutdown drives the node to OFFLINE, so the
+        mock does too -- otherwise the settle check would see every node as a
+        straggler. ``resurrect`` names nodes that come back ONLINE behind the
+        sweep (the live 2026-09-03 failure) and are only stopped for good on
+        the second attempt."""
+        by_id = {n.get_id(): n for n in nodes}
+        pending = dict.fromkeys(resurrect, True)
+
+        def _shutdown(node_id, **_kw):
+            node = by_id[node_id]
+            if pending.pop(node_id, False):
+                node.status = StorageNode.STATUS_ONLINE
+            else:
+                node.status = StorageNode.STATUS_OFFLINE
+            return True
+
         db = MagicMock()
         db.get_cluster_by_id = MagicMock(return_value=MagicMock())
         db.get_storage_nodes_by_cluster_id = MagicMock(return_value=nodes)
         sn = MagicMock()
+        sn.shutdown_storage_node = MagicMock(side_effect=_shutdown)
         with patch.object(cluster_ops, "db_controller", db), \
                 patch.object(cluster_ops, "storage_node_ops", sn):
             cluster_ops.cluster_grace_shutdown("c1")
@@ -76,6 +93,31 @@ class TestGracefulShutdownSkipsDepartedNodes(unittest.TestCase):
         swept, _ = self._run(nodes)
         self.assertEqual(
             swept, ["online", "offline", "unreachable", "restarting", "pending"])
+
+
+class TestGracefulShutdownSettles(unittest.TestCase):
+    """The sweep is serial, so a node it already passed can come back behind
+    it. Live 2026-09-03: queued restart rows put s7457 and zdgtb back ONLINE
+    seconds after the sweep shut them down, and the command still returned as
+    though the cluster were down."""
+
+    _run = TestGracefulShutdownSkipsDepartedNodes._run
+
+    def test_a_node_that_comes_back_is_shut_down_again(self):
+        swept, _ = self._run(
+            [_node("a"), _node("b")], resurrect=("a",))
+        self.assertEqual(swept, ["a", "b", "a"])
+
+    def test_no_second_pass_when_everything_settled(self):
+        swept, _ = self._run([_node("a"), _node("b")])
+        self.assertEqual(swept, ["a", "b"])
+
+    def test_a_removed_node_is_not_treated_as_a_straggler(self):
+        # It is never OFFLINE, so an unfiltered settle check would keep
+        # trying to shut it down -- reintroducing the resurrection bug.
+        swept, _ = self._run(
+            [_node("live"), _node("gone", StorageNode.STATUS_REMOVED)])
+        self.assertEqual(swept, ["live"])
 
 
 if __name__ == "__main__":
