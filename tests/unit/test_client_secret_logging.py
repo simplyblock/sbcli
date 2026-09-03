@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.utils.secrets import MASK
 from simplyblock_core.snode_client import SNodeClient
 
 
@@ -78,6 +79,56 @@ def test_rpc_client_response_body_logged_when_flag_on(rpc_client, caplog, monkey
         rpc_client._request2("some_method", {})
 
     assert "RESPVALUE" in _captured_logs_text(caplog)
+
+
+def test_rpc_client_masks_plaintext_crypto_keys_by_param_name(rpc_client, caplog):
+    """``lvol_crypto_key_create`` is now typed on ``SecretStr``, but the v1 API
+    hands controllers plain ``str`` from raw JSON. The name-based redactor is
+    what covers the values the type system cannot see."""
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client._request2("accel_crypto_key_create", {
+            "cipher": "AES_XTS",
+            "name": "key_lvol_1",
+            "key": "DEKPLAINONE",
+            "key2": "DEKPLAINTWO",
+        })
+
+    posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
+    parsed = json.loads(posted_body)
+    assert parsed["params"]["key"] == "DEKPLAINONE"
+    assert parsed["params"]["key2"] == "DEKPLAINTWO"
+
+    logs = _captured_logs_text(caplog)
+    assert "DEKPLAINONE" not in logs
+    assert "DEKPLAINTWO" not in logs
+    assert MASK in logs
+    assert "accel_crypto_key_create" in logs
+    assert "AES_XTS" in logs
+
+
+def test_rpc_client_request3_masks_secrets_by_param_name(rpc_client, caplog):
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client.bdev_s3_create(
+            name="s3bdev",
+            local_endpoint="http://minio:9000",
+            access_key_id="AKIAIDENTIFIER",
+            secret_access_key=SecretStr("S3PLAIN"),
+        )
+
+    posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
+    assert json.loads(posted_body)["params"]["secret_access_key"] == "S3PLAIN"
+
+    logs = _captured_logs_text(caplog)
+    assert "S3PLAIN" not in logs
+    assert "AKIAIDENTIFIER" in logs
 
 
 @pytest.fixture

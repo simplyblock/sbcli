@@ -2,6 +2,32 @@ from typing import Any
 
 from pydantic import SecretBytes, SecretStr
 
+MASK = "**********"
+
+# RPC param names that carry secrets as plain ``str`` rather than ``SecretStr``
+# (the v1 API hands controllers raw JSON, so the type system can't catch these).
+# A ``SecretStr``/``SecretBytes`` value masks itself via its own ``repr``, so
+# only the plain-``str`` case needs name-based coverage here.
+_SENSITIVE_RPC_PARAM_NAMES = {
+    "key", "key2", "psk", "dhchap_key", "dhchap_ctrlr_key", "secret_access_key",
+}
+
+
+def redact_rpc_params(params: Any) -> Any:
+    """Return a copy of an RPC ``params`` mapping with known secret-bearing
+    values masked by parameter name, for safe inclusion in a log message.
+
+    Leaves ``SecretStr``/``SecretBytes`` values untouched -- their own
+    ``repr`` already masks them.
+    """
+    if not isinstance(params, dict):
+        return params
+    return {
+        key: MASK if key in _SENSITIVE_RPC_PARAM_NAMES and not isinstance(value, (SecretStr, SecretBytes))
+        else value
+        for key, value in params.items()
+    }
+
 
 def unwrap_secrets_for_send(obj: Any) -> Any:
     """Return a copy of ``obj`` with every ``SecretStr``/``SecretBytes`` replaced
