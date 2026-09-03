@@ -248,19 +248,8 @@ class TestWaitForSpdkReady(unittest.IsolatedAsyncioTestCase):
         with patch_connect(fake), patch.object(proxy_mod.asyncio, 'sleep', new=AsyncMock()):
             await proxy.wait_for_spdk_ready()
 
-        self.assertTrue(proxy.spdk_ready)
         self.assertEqual(fake.attempt_count, 3)
         self.assertEqual(fake.paths[0], "/mnt/ramdisk/spdk_19999/spdk.sock")
-
-    async def test_already_ready_returns_immediately(self):
-        fake = FakeSpdkSocket(ConnectionRefusedError("not ready"))
-        proxy = make_proxy()
-        proxy.spdk_ready = True
-
-        with patch_connect(fake):
-            await proxy.wait_for_spdk_ready()
-
-        self.assertEqual(fake.attempt_count, 0)
 
     async def test_probe_sends_spdk_get_version(self):
         fake = FakeSpdkSocket([rpc_response(result={})])
@@ -495,7 +484,6 @@ class TestEndpoint(unittest.TestCase):
     def setUp(self):
         self.app = proxy_mod.create_app(make_settings())
         self.proxy = self.app.state.proxy
-        self.proxy.spdk_ready = True
         # Lifespan (and with it the readiness gate) is deliberately not run:
         # TestClient only starts it when used as a context manager.
         self.client = TestClient(self.app)
@@ -544,7 +532,6 @@ class TestEndpoint(unittest.TestCase):
         """The dependency resolves settings per request, so two apps built in
         one process do not accept each other's credentials."""
         other = proxy_mod.create_app(make_settings(rpc_password="other"))
-        other.state.proxy.spdk_ready = True
 
         with patch.object(other.state.proxy, 'rpc_call', new=AsyncMock(return_value=None)):
             accepted = TestClient(other).post(
@@ -637,7 +624,6 @@ class TestAccessLog(unittest.TestCase):
     def setUp(self):
         self.app = proxy_mod.create_app(make_settings())
         self.proxy = self.app.state.proxy
-        self.proxy.spdk_ready = True
         self.client = TestClient(self.app)
         self.body = json.dumps({"id": 1, "method": "bdev_get_bdevs"})
 
@@ -720,7 +706,6 @@ class TestClientDisconnect(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.app = proxy_mod.create_app(make_settings())
         self.proxy = self.app.state.proxy
-        self.proxy.spdk_ready = True
 
     async def _disconnect_before_body(self):
         scope = {
@@ -914,7 +899,6 @@ class TestMetricsEndpoint(unittest.TestCase):
     def setUp(self):
         self.app = proxy_mod.create_app(make_settings())
         self.proxy = self.app.state.proxy
-        self.proxy.spdk_ready = True
         self.client = TestClient(self.app)
 
     def test_metrics_require_credentials(self):
@@ -965,7 +949,6 @@ class TestMetricsEndpoint(unittest.TestCase):
         """Each app owns its registry, so building a second one neither raises
         nor lets observations bleed between them."""
         other = proxy_mod.create_app(make_settings(rpc_password="other"))
-        other.state.proxy.spdk_ready = True
         self.proxy.metrics.observe_response("only_in_the_first", 0.1)
 
         mine = self.client.get(
