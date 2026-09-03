@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# cleanup_upgrade_test.sh — Full cleanup of both R25 and R26 simplyblock setups
+# cleanup_upgrade_test.sh — Full cleanup of simplyblock K8s deployment
 #
-# Cleans up everything so the next upgrade test run starts completely fresh.
+# Comprehensive 12-phase cleanup that handles all environments (Talos, OpenShift,
+# generic K8s). Cleans up everything so the next test run starts completely fresh.
 # Handles: Helm releases (R25 sbcli/spdk-csi + R26 operator), CRs, CRDs,
 # kube-system leftovers, cert-manager, PVCs, PVs, snapshots, NVMe, hugepages,
 # node labels, CSI hostpath data, and namespaces.
+#
+# Auto-detects Talos clusters and skips node debug operations (immutable OS).
+# Auto-detects worker nodes if not provided via -w.
 #
 # Usage:
 #   ./cleanup_upgrade_test.sh [OPTIONS]
@@ -12,26 +16,29 @@
 # Options:
 #   -n NAMESPACE       Namespace (default: simplyblock)
 #   -e ENVIRONMENT     Cluster environment: local|openshift-baremetal|openshift-local|aws-openshift|gcp
-#                      (default: openshift-baremetal)
+#                      (default: local)
 #   -w WORKER_NODES    Comma-separated worker node names
-#                      (default: worker-0.ocp.simplyblock.ai,...,worker-5.ocp.simplyblock.ai)
+#                      (default: auto-detected from cluster)
 #   -c CRD_DIR         Path to operator CRDs directory for deletion
 #                      (default: searches common locations)
 #   -h                 Show this help message
 #
 # Examples:
-#   # Default (openshift-baremetal, 6 workers)
+#   # Auto-detect everything
 #   ./cleanup_upgrade_test.sh
 #
 #   # Custom namespace and environment
 #   ./cleanup_upgrade_test.sh -n simplyblock -e local -w "node1,node2,node3"
+#
+#   # OpenShift cluster with CRD directory
+#   ./cleanup_upgrade_test.sh -e openshift-baremetal -c /path/to/crds/
 
 set +e  # Don't exit on errors — cleanup must be best-effort
 
 # ── Parse arguments ──
 NAMESPACE="simplyblock"
-CLUSTER_ENV="openshift-baremetal"
-WORKER_NODES="worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai"
+CLUSTER_ENV="local"
+WORKER_NODES=""
 CRD_DIR=""
 
 while getopts "n:e:w:c:h" opt; do
@@ -50,10 +57,23 @@ done
 
 KUBECTL_TIMEOUT="--request-timeout=120s"
 
+# Auto-detect Talos clusters
+IS_TALOS="false"
+if kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.osImage}' 2>/dev/null | grep -q "Talos"; then
+  IS_TALOS="true"
+fi
+
+# Auto-detect worker nodes if not provided
+if [ -z "$WORKER_NODES" ]; then
+  WORKER_NODES=$(kubectl get nodes --no-headers -o custom-columns=:metadata.name 2>/dev/null | tr '\n' ',')
+  WORKER_NODES="${WORKER_NODES%,}"  # Remove trailing comma
+fi
+
 echo "============================================================"
-echo "  SimplyBlock Upgrade Test Cleanup"
+echo "  SimplyBlock Full Cleanup"
 echo "  Namespace:   $NAMESPACE"
 echo "  Environment: $CLUSTER_ENV"
+echo "  Talos:       $IS_TALOS"
 echo "  Workers:     $WORKER_NODES"
 echo "============================================================"
 echo ""
@@ -374,20 +394,25 @@ echo ""
 echo "=== Phase 9: NVMe disconnect, hugepages reset, kubelet restart ==="
 
 IFS=',' read -ra NODES <<< "$WORKER_NODES"
-for NODE in "${NODES[@]}"; do
-  (
-    echo "  Cleaning node: $NODE"
-    if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
-      timeout 90 oc debug node/"$NODE" -- chroot /host bash -c \
-        "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
-    else
-      timeout 90 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-        "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
-    fi
-    echo "  Done: $NODE"
-  ) &
-done
-wait
+
+if [ "$IS_TALOS" = "true" ]; then
+  echo "  Talos cluster detected — skipping node debug operations (immutable OS)"
+else
+  for NODE in "${NODES[@]}"; do
+    (
+      echo "  Cleaning node: $NODE"
+      if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+        timeout 90 oc debug node/"$NODE" -- chroot /host bash -c \
+          "nvme disconnect-all 2>/dev/null; rm -rf /etc/simplyblock 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
+      else
+        timeout 90 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+          "nvme disconnect-all 2>/dev/null; rm -rf /etc/simplyblock 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
+      fi
+      echo "  Done: $NODE"
+    ) &
+  done
+  wait
+fi
 
 echo "  Phase 9 complete."
 echo ""
@@ -411,16 +436,20 @@ echo ""
 # ══════════════════════════════════════════════════════════════════
 echo "=== Phase 11: Cleanup stale CSI hostpath data ==="
 
-for NODE in "${NODES[@]}"; do
-  echo "  Cleaning CSI hostpath data on $NODE..."
-  if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
-    oc debug node/"$NODE" -- chroot /host bash -c \
-      "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
-  else
-    kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-      "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
-  fi
-done
+if [ "$IS_TALOS" = "true" ]; then
+  echo "  Talos cluster detected — skipping CSI hostpath cleanup (immutable OS)"
+else
+  for NODE in "${NODES[@]}"; do
+    echo "  Cleaning CSI hostpath data on $NODE..."
+    if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+      oc debug node/"$NODE" -- chroot /host bash -c \
+        "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+    else
+      kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+        "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+    fi
+  done
+fi
 
 echo "  Phase 11 complete."
 echo ""

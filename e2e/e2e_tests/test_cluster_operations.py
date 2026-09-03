@@ -148,32 +148,31 @@ class TestClusterOperations(TestClusterBase):
         # -- TC-CLOPS-007: Cluster nodes consistency --------------------
         self.logger.info("=== TC-CLOPS-007: Cluster Node Consistency ===")
 
-        nodes = self.sbcli_utils.get_storage_nodes()
+        # get_storage_nodes() returns {"results": [<node dict>, ...]} in both
+        # Docker (REST) and K8s (CLI) modes — iterate the list, not the dict.
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
         mgmt_nodes = self.sbcli_utils.get_management_nodes()
 
         assert nodes, "No storage nodes found in cluster"
         self.logger.info(f"Storage nodes: {len(nodes)}")
         if mgmt_nodes:
-            self.logger.info(f"Management nodes: {len(mgmt_nodes)}")
+            mgmt_list = mgmt_nodes.get("results", mgmt_nodes) if isinstance(mgmt_nodes, dict) else mgmt_nodes
+            self.logger.info(f"Management nodes: {len(mgmt_list)}")
 
         # Verify all storage nodes are in a valid state
-        for nid in nodes:
-            nd = self.sbcli_utils.get_storage_node_details(nid)
-            if nd:
-                st = nd.get("status", "unknown")
-                self.logger.info(f"  Node {nid}: status={st}")
-                assert st in ("online", "active", "in_creation"), (
-                    f"Node {nid} in unexpected state: {st}"
-                )
+        for node in nodes:
+            nid = node.get("uuid") or node.get("id")
+            st = node.get("status", "unknown")
+            self.logger.info(f"  Node {nid}: status={st}")
+            assert st in ("online", "active", "in_creation"), (
+                f"Node {nid} in unexpected state: {st}"
+            )
 
         self.logger.info("TC-CLOPS-007: Cluster Node Consistency — PASS")
 
         # -- Cleanup ----------------------------------------------------
         if not self.k8s_test:
             self._disconnect_and_cleanup_dual(lvol_name)
-        try:
-            self.sbcli_utils.delete_lvol(lvol_name)
-        except Exception as exc:
-            self.logger.warning(f"Cleanup delete {lvol_name}: {exc}")
+        self._delete_lvol_dual(lvol_name)
 
         self.logger.info("=== TestClusterOperations: ALL PASSED ===")

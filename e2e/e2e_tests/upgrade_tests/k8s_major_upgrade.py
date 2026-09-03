@@ -1389,6 +1389,30 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
 
         # 4.3 — New snapshots + clones on old PVCs
+        #
+        # The CSI controller pod was (re)created during Step 6 of the
+        # maintenance window.  By the time we reach Phase 4.3 the
+        # external-provisioner sidecar's Kubernetes watches may have gone
+        # stale (observed as "Watch close" events followed by zero
+        # provisioning activity).  Bouncing the pod gives it fresh watches
+        # so clone PVC provisioning actually triggers.
+        self.logger.info(
+            "Phase 4.3 prep: Restarting CSI controller pod to refresh "
+            "provisioner watches"
+        )
+        try:
+            self.k8s_utils.delete_pod(
+                "simplyblock-csi-controller-0", wait=True,
+            )
+            self.k8s_utils.wait_pod_ready(
+                "simplyblock-csi-controller", timeout=300,
+            )
+            sleep_n_sec(15)  # let provisioner establish new watches
+        except Exception as exc:
+            self.logger.warning(
+                f"CSI controller restart failed (continuing): {exc}"
+            )
+
         self.logger.info(
             "Post-upgrade Phase 4.3: New snapshots and clones on old PVCs"
         )
@@ -1941,18 +1965,28 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self.logger.warning(f"Failed to inject keep annotations via helm upgrade: {e}")
             return False
 
-    def _patch_helm_release_keep_annotations(self, release_name: str):
+    def _patch_helm_release_keep_annotations(
+        self, release_name: str, resource_names: set[str] | None = None,
+    ):
         """Patch the Helm release secret to inject resource-policy: keep.
 
         Helm stores release data in secrets named sh.helm.release.v1.<name>.v<N>.
         The data is: base64 → base64 → gzip → JSON. We decode, inject the keep
-        annotation into matching FDB resource manifests, and re-encode.
+        annotation into matching resource manifests, and re-encode.
+
+        *resource_names* overrides the default FDB resource list when provided,
+        allowing this method to be reused for other charts (e.g. spdk-csi
+        StorageClasses).
         """
         if not release_name:
             self.logger.warning("No Helm release name provided, skipping secret patch")
             return
 
-        fdb_resource_names = {name for _, name in _get_keep_resources(release_name)}
+        fdb_resource_names = (
+            resource_names
+            if resource_names is not None
+            else {name for _, name in _get_keep_resources(release_name)}
+        )
 
         # Find the latest Helm release secret
         cmd = (
@@ -2078,6 +2112,29 @@ class K8sNativeMajorUpgrade(TestClusterBase):
     def _uninstall_helm_releases(self):
         """Steps 3-4: Uninstall old Helm charts."""
         if self.helm_release_spdk_csi:
+            # Preserve StorageClasses across helm uninstall so existing
+            # SC references (in PVCs, snapshots, clones) remain valid
+            # after the upgrade.  The new operator chart may create its
+            # own SCs, but we keep the old ones for backward compat.
+            self.logger.info(
+                "Preserving StorageClasses: patching spdk-csi Helm release "
+                "manifest + annotating live resources"
+            )
+            self._patch_helm_release_keep_annotations(
+                self.helm_release_spdk_csi,
+                resource_names={self.STORAGE_CLASS_NAME},
+            )
+            # Belt-and-suspenders: also annotate live resources directly
+            self.k8s_utils._exec_kubectl(
+                f"kubectl annotate storageclass "
+                f"--selector=app.kubernetes.io/instance={self.helm_release_spdk_csi} "
+                f"helm.sh/resource-policy=keep --overwrite 2>/dev/null || true"
+            )
+            self.k8s_utils._exec_kubectl(
+                f"kubectl annotate storageclass {self.STORAGE_CLASS_NAME} "
+                f"helm.sh/resource-policy=keep --overwrite 2>/dev/null || true"
+            )
+
             self.logger.info(
                 f"Migration Step 3: Uninstalling helm release '{self.helm_release_spdk_csi}'"
             )
@@ -2418,6 +2475,48 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.k8s_utils.get_admin_pod(refresh=True)
         self.logger.info("Operator chart installed")
 
+    def _get_vcpu_count(self):
+        """Compute vcpuCount for StorageCluster CR.
+
+        Reads VCPU_COUNT env var if set; otherwise queries the first
+        worker node's CPU count and applies CORE_PERCENTAGE (50% for
+        OpenShift, 30% otherwise).  Falls back to 4 if detection fails.
+        """
+        vcpu_env = os.environ.get("VCPU_COUNT", "").strip()
+        if vcpu_env:
+            self.logger.info(f"Using VCPU_COUNT from env: {vcpu_env}")
+            return int(vcpu_env)
+
+        core_pct = 50 if self.k8s_utils.detect_openshift() else 30
+        try:
+            worker_nodes_env = os.environ.get("WORKER_NODES", "")
+            if worker_nodes_env:
+                first_worker = worker_nodes_env.split(",")[0].strip()
+            else:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    "kubectl get nodes -l node-role.kubernetes.io/worker "
+                    "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
+                )
+                first_worker = (out or "").replace("'", "").strip()
+
+            if first_worker:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get node {first_worker} "
+                    f"-o jsonpath='{{.status.capacity.cpu}}'"
+                )
+                total_cpus = int((out or "").replace("'", "").strip())
+                vcpu = max(6, total_cpus * core_pct // 100)
+                self.logger.info(
+                    f"Computed vcpuCount={vcpu} "
+                    f"({total_cpus} CPUs * {core_pct}%)"
+                )
+                return vcpu
+        except Exception as e:
+            self.logger.warning(f"Failed to detect CPU count: {e}")
+
+        self.logger.warning("Could not determine CPU count, defaulting vcpuCount to 6")
+        return 6
+
     def _apply_custom_resources(self, storage_node_list: list[dict]):
         """Step 7: Apply StorageCluster, Pool, StorageNode CRs."""
         self.logger.info("Migration Step 7: Applying custom resources")
@@ -2464,6 +2563,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         mgmt_ifc = os.environ.get("MGMT_IFC", "ens18")
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
+        vcpu_count = self._get_vcpu_count()
+        is_talos = self.k8s_utils.detect_talos()
+        enable_cpu_topo = "false" if is_talos else "true"
+        enable_cpu_topo_skip = "true" if is_talos else "false"
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -2473,9 +2576,7 @@ metadata:
   namespace: {_NAMESPACE}
 spec:
   fabricType: tcp
-  isSingleNode: false
   enableNodeAffinity: true
-  strictNodeAntiAffinity: false
   stripe:
     dataChunks: {self.ndcs}
     parityChunks: {self.npcs}
@@ -2485,6 +2586,8 @@ spec:
   criticalThreshold:
     capacity: 96
     provisionedCapacity: 98
+  maxSubsystemCount: {max_lvol}
+  vcpuCount: {vcpu_count}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -2507,8 +2610,8 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  maxSubsystemCount: {max_lvol}
-  enableCpuTopology: true
+  skipKubeletConfiguration: {enable_cpu_topo_skip}
+  enableCpuTopology: {enable_cpu_topo}
   workerNodes:
 {worker_yaml}"""
 
@@ -2516,20 +2619,34 @@ spec:
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
         self.logger.info(f"CRs applied (stdout): {out}")
         if err and err.strip():
-            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+            # Fail fast if critical CRs were rejected by the API server
+            err_stripped = err.strip()
+            if any(kw in err_stripped for kw in (
+                "BadRequest", "strict decoding error", "NotFound",
+                "could not find the requested resource",
+                "is invalid", "Required value",
+            )):
+                raise RuntimeError(
+                    f"CRs rejected by API server: {err_stripped}"
+                )
+            self.logger.warning(f"CRs apply stderr: {err_stripped}")
         # Verify critical CRs were actually created — fail early instead
         # of discovering a missing CR much later during node restart.
         for cr_kind, cr_name in [
             ("storagecluster", self.cluster_cr_name),
+            ("storagepool", self.pool_cr_name),
             ("storagenodeset", self.node_cr_name),
         ]:
-            chk_out, _ = self.k8s_utils._exec_kubectl(
+            chk_out, chk_err = self.k8s_utils._exec_kubectl(
                 f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
-                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+                f"-o jsonpath='{{.metadata.name}}'"
             )
-            if cr_name not in (chk_out or ""):
+            not_found = "not found" in (chk_err or "").lower()
+            no_resource = "could not find the requested resource" in (chk_err or "").lower()
+            if not_found or no_resource or cr_name not in (chk_out or ""):
                 raise RuntimeError(
                     f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl get stderr: {chk_err}, "
                     f"kubectl apply stderr: {err}"
                 )
             self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")
@@ -3033,6 +3150,10 @@ class K8sNativeMajorUpgradeDualNode(K8sNativeMajorUpgrade):
         mgmt_ifc = os.environ.get("MGMT_IFC", "ens18")
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
+        vcpu_count = self._get_vcpu_count()
+        is_talos = self.k8s_utils.detect_talos()
+        enable_cpu_topo = "false" if is_talos else "true"
+        enable_cpu_topo_skip = "true" if is_talos else "false"
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -3042,9 +3163,7 @@ metadata:
   namespace: {_NAMESPACE}
 spec:
   fabricType: tcp
-  isSingleNode: false
   enableNodeAffinity: true
-  strictNodeAntiAffinity: false
   stripe:
     dataChunks: {self.ndcs}
     parityChunks: {self.npcs}
@@ -3054,6 +3173,8 @@ spec:
   criticalThreshold:
     capacity: 96
     provisionedCapacity: 98
+  maxSubsystemCount: {max_lvol}
+  vcpuCount: {vcpu_count}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -3076,8 +3197,8 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  maxSubsystemCount: {max_lvol}
-  enableCpuTopology: true
+  skipKubeletConfiguration: {enable_cpu_topo_skip}
+  enableCpuTopology: {enable_cpu_topo}
   nodesPerSocket: {self.nodes_per_socket}
   workerNodes:
 {worker_yaml}"""
@@ -3086,18 +3207,31 @@ spec:
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
         self.logger.info(f"CRs applied (stdout): {out}")
         if err and err.strip():
-            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+            err_stripped = err.strip()
+            if any(kw in err_stripped for kw in (
+                "BadRequest", "strict decoding error", "NotFound",
+                "could not find the requested resource",
+                "is invalid", "Required value",
+            )):
+                raise RuntimeError(
+                    f"CRs rejected by API server: {err_stripped}"
+                )
+            self.logger.warning(f"CRs apply stderr: {err_stripped}")
         for cr_kind, cr_name in [
             ("storagecluster", self.cluster_cr_name),
+            ("storagepool", self.pool_cr_name),
             ("storagenodeset", self.node_cr_name),
         ]:
-            chk_out, _ = self.k8s_utils._exec_kubectl(
+            chk_out, chk_err = self.k8s_utils._exec_kubectl(
                 f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
-                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+                f"-o jsonpath='{{.metadata.name}}'"
             )
-            if cr_name not in (chk_out or ""):
+            not_found = "not found" in (chk_err or "").lower()
+            no_resource = "could not find the requested resource" in (chk_err or "").lower()
+            if not_found or no_resource or cr_name not in (chk_out or ""):
                 raise RuntimeError(
                     f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl get stderr: {chk_err}, "
                     f"kubectl apply stderr: {err}"
                 )
             self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")

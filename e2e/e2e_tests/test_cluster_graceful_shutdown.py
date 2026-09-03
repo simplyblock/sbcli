@@ -142,30 +142,34 @@ class TestClusterGracefulShutdown(TestClusterBase):
             self.logger.error(f"graceful-startup command failed: {exc}")
             raise
 
-        # ── Step 6: Wait for all nodes to come back online ───────────
+        # ── Step 6: Wait for all nodes to come back online AND healthy ─
         self.logger.info(
             "Waiting for all storage nodes to come back online "
-            "(timeout 300s)..."
+            "and healthy (timeout 600s)..."
         )
-        deadline = time.time() + 300
-        all_online = False
+        deadline = time.time() + 600
+        all_healthy = False
         while time.time() < deadline:
             try:
                 storage_data = self.sbcli_utils.get_storage_nodes()
                 nodes = storage_data.get(
                     "results", storage_data
                 ) if isinstance(storage_data, dict) else storage_data
-                statuses = [
-                    node.get("status", "unknown") for node in nodes
-                ]
-                online_count = sum(
-                    1 for s in statuses if s == "online"
-                )
+                online_count = 0
+                healthy_count = 0
+                for node in nodes:
+                    status = node.get("status", "unknown")
+                    health = node.get("health_check", False)
+                    if status == "online":
+                        online_count += 1
+                    if status == "online" and health:
+                        healthy_count += 1
                 self.logger.info(
-                    f"  {online_count}/{len(nodes)} nodes online"
+                    f"  {online_count}/{len(nodes)} online, "
+                    f"{healthy_count}/{len(nodes)} healthy"
                 )
-                if online_count == len(nodes) and len(nodes) > 0:
-                    all_online = True
+                if healthy_count == len(nodes) and len(nodes) > 0:
+                    all_healthy = True
                     break
             except Exception as exc:
                 self.logger.warning(
@@ -173,10 +177,11 @@ class TestClusterGracefulShutdown(TestClusterBase):
                 )
             sleep_n_sec(15)
 
-        assert all_online, (
-            "Not all storage nodes came back online within 300s timeout"
+        assert all_healthy, (
+            "Not all storage nodes came back online and healthy "
+            "within 600s timeout"
         )
-        self.logger.info("All storage nodes are back online")
+        self.logger.info("All storage nodes are back online and healthy")
 
         # ── Step 7: Reconnect lvols, run FIO again, validate ─────────
         self.logger.info("Reconnecting lvols and running post-startup FIO...")
@@ -223,12 +228,7 @@ class TestClusterGracefulShutdown(TestClusterBase):
                     )
 
         for name in lvol_names:
-            try:
-                self.sbcli_utils.delete_lvol(name)
-            except Exception as exc:
-                self.logger.warning(
-                    f"Cleanup delete lvol {name}: {exc}"
-                )
+            self._delete_lvol_dual(name)
 
         sleep_n_sec(5)
 

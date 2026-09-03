@@ -45,15 +45,20 @@ class TestLvolNegativeCases(TestClusterBase):
         )
         self.logger.info(f"Created {dup_name} — now attempting duplicate")
 
-        if not self._expect_failure(
-            "duplicate_name",
-            self.sbcli_utils.add_lvol,
-            lvol_name=dup_name,
-            pool_name=self.pool_name,
-            size="1G",
-            retry=1,
-        ):
-            failures.append("duplicate_name: should have failed")
+        # The duplicate-name collision only applies in Docker mode. In K8s the
+        # first volume is a CSI-provisioned PVC whose backend lvol is named
+        # after the PV (pvc-<uuid>), so a same-name ``lvol add`` does not
+        # collide — skip the assertion there.
+        if not self.k8s_test:
+            if not self._expect_failure(
+                "duplicate_name",
+                self.sbcli_utils.add_lvol,
+                lvol_name=dup_name,
+                pool_name=self.pool_name,
+                size="1G",
+                retry=1,
+            ):
+                failures.append("duplicate_name: should have failed")
 
         # ── 2. Non-existent pool ───────────────────────────────────
         if not self._expect_failure(
@@ -88,7 +93,7 @@ class TestLvolNegativeCases(TestClusterBase):
             self.logger.warning("delete_nonexistent: did not fail — may be idempotent")
 
         # ── 5. Resize to smaller ───────────────────────────────────
-        lvol_id = self.sbcli_utils.get_lvol_id(dup_name)
+        lvol_id = self._get_lvol_id_dual(dup_name)
         if lvol_id:
             if not self._expect_failure(
                 "resize_smaller",
@@ -109,10 +114,7 @@ class TestLvolNegativeCases(TestClusterBase):
             self.logger.warning("connect_nonexistent: did not fail — may return empty")
 
         # ── Cleanup ────────────────────────────────────────────────
-        try:
-            self.sbcli_utils.delete_lvol(dup_name)
-        except Exception:
-            pass
+        self._delete_lvol_dual(dup_name)
 
         if failures:
             raise AssertionError(

@@ -30,8 +30,12 @@ class TestLvolPlacement(TestClusterBase):
             self._k8s_ensure_storage_class()
 
         nodes = self.sbcli_utils.get_storage_nodes()
-        assert nodes, "No storage nodes found"
-        node_list = list(nodes.keys()) if isinstance(nodes, dict) else list(nodes)
+        sn_results = nodes.get("results", nodes) if isinstance(nodes, dict) else nodes
+        assert sn_results, "No storage nodes found"
+        node_list = [
+            n.get("uuid") or n.get("id") or n
+            for n in (sn_results if isinstance(sn_results, list) else [sn_results])
+        ]
         self.logger.info(f"Available storage nodes: {len(node_list)}")
 
         # -- TC-PLACE-001: Explicit host_id placement -------------------
@@ -46,7 +50,7 @@ class TestLvolPlacement(TestClusterBase):
                 size="256M",
                 host_id=target_node,
             )
-            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+            lvol_id = self._get_lvol_id_dual(lvol_name)
             assert lvol_id, f"Could not get lvol_id for {lvol_name}"
 
             details = self.sbcli_utils.get_lvol_details(lvol_id)
@@ -59,7 +63,7 @@ class TestLvolPlacement(TestClusterBase):
                     f"LVOL {lvol_name} correctly placed on {target_node}"
                 )
 
-            self.sbcli_utils.delete_lvol(lvol_name)
+            self._delete_lvol_dual(lvol_name)
             sleep_n_sec(3)
         else:
             self.logger.info("Skipping explicit placement (K8s mode or no nodes)")
@@ -84,7 +88,7 @@ class TestLvolPlacement(TestClusterBase):
 
         # Check placement distribution
         for name in created:
-            lvol_id = self.sbcli_utils.get_lvol_id(name)
+            lvol_id = self._get_lvol_id_dual(name)
             if lvol_id:
                 det = self.sbcli_utils.get_lvol_details(lvol_id)
                 if det and isinstance(det, list) and len(det) > 0:
@@ -129,7 +133,7 @@ class TestLvolPlacement(TestClusterBase):
 
             # Verify each went to the right node
             for name, expected_node in per_node_lvols:
-                lvol_id = self.sbcli_utils.get_lvol_id(name)
+                lvol_id = self._get_lvol_id_dual(name)
                 if lvol_id:
                     det = self.sbcli_utils.get_lvol_details(lvol_id)
                     if det and isinstance(det, list) and len(det) > 0:
@@ -143,10 +147,7 @@ class TestLvolPlacement(TestClusterBase):
 
             # Cleanup per-node lvols
             for name, _ in per_node_lvols:
-                try:
-                    self.sbcli_utils.delete_lvol(name)
-                except Exception:
-                    pass
+                self._delete_lvol_dual(name)
         else:
             self.logger.info("Skipping per-node placement (K8s mode)")
 
@@ -179,9 +180,6 @@ class TestLvolPlacement(TestClusterBase):
 
         # -- Cleanup ----------------------------------------------------
         for name in created:
-            try:
-                self.sbcli_utils.delete_lvol(name)
-            except Exception as exc:
-                self.logger.warning(f"Cleanup delete {name}: {exc}")
+            self._delete_lvol_dual(name)
 
         self.logger.info("=== TestLvolPlacement: ALL PASSED ===")

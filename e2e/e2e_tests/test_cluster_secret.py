@@ -79,19 +79,13 @@ class TestClusterSecret(TestClusterBase):
         )
 
         # Verify lvol exists
-        lvols = self.sbcli_utils.list_lvols()
-        assert lvol_name in lvols, (
-            f"LVOL {lvol_name} not found after create: {list(lvols.keys())}"
-        )
+        self._verify_lvol_exists_dual(lvol_name)
         self.logger.info(f"LVOL {lvol_name} created successfully")
 
         # Delete lvol and verify removal
-        self.sbcli_utils.delete_lvol(lvol_name)
+        self._delete_lvol_dual(lvol_name)
         sleep_n_sec(5)
-        lvols = self.sbcli_utils.list_lvols()
-        assert lvol_name not in lvols, (
-            f"LVOL {lvol_name} still present after delete"
-        )
+        self._verify_lvol_absent_dual(lvol_name)
         self.logger.info("LVOL deleted and verified absent")
 
         # ── Step 3: Cleanup ──────────────────────────────────────────

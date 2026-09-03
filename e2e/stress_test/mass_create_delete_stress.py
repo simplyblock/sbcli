@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import json as _json
 import math
-from typing import ClassVar
 import os
 import random
 import string
@@ -50,6 +49,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
@@ -563,6 +563,9 @@ class _MassCreateDeleteMixin:
 
     def _run_mass_create_delete_test(self):
         self._init_mixin_state()
+        # Enable extended API recovery: wait up to 30 min for transient
+        # API outages (e.g. Docker Swarm restarts) instead of failing fast.
+        self.sbcli_utils.api_recovery_timeout = 1800
 
         # Apply entity cap: reduce NUM_SUBSYSTEMS / NS_PER_SUBSYSTEM on the
         # instance so all phase methods automatically use the capped values.
@@ -1056,6 +1059,7 @@ class _MassCreateDeleteMixin:
         )
 
         results = []
+        failures = 0
         for i in range(1, iterations + 1):
             self.logger.info(
                 f"[{label}] --- Iteration {i}/{iterations} ---"
@@ -1076,14 +1080,17 @@ class _MassCreateDeleteMixin:
             )
 
             # Wait for node to go offline then back online
+            offline_ok = True
             try:
                 self.sbcli_utils.wait_for_storage_node_status(
                     node_uuid, ["offline", "unreachable"], timeout=600,
                 )
             except Exception as exc:
+                offline_ok = False
+                failures += 1
                 self.logger.warning(
                     f"[{label}][{i}] Timed out waiting for "
-                    f"offline/unreachable: {exc}"
+                    f"offline/unreachable ({failures}/{i} failed): {exc}"
                 )
 
             self.sbcli_utils.wait_for_storage_node_status(
@@ -1103,6 +1110,7 @@ class _MassCreateDeleteMixin:
                 "online_time_iso": online_ts.isoformat(),
                 "stop_to_online_sec": stop_to_online,
                 "cooldown_sec": cooldown,
+                "offline_detected": offline_ok,
             })
 
             # Cooldown — no waiting for migration, just a short pause
@@ -1110,8 +1118,23 @@ class _MassCreateDeleteMixin:
 
         total_dur = sum(r["stop_to_online_sec"] for r in results)
         self._phase_durations[label] = round(total_dur, 1)
+
+        # Require >70% of iterations to successfully detect node offline
+        successful = sum(
+            1 for r in results if r.get("offline_detected", True)
+        )
+        min_required = math.ceil(iterations * 0.7)
+        if successful < min_required:
+            raise RuntimeError(
+                f"[{label}] Only {successful}/{iterations} iterations "
+                f"detected node going offline (required {min_required}). "
+                f"{failures} iterations timed out — "
+                f"kill/restart mechanism is broken"
+            )
+
         self.logger.info(
-            f"[{label}] Completed {iterations} restart cycles, "
+            f"[{label}] Completed {iterations} restart cycles "
+            f"({successful}/{iterations} detected offline), "
             f"cumulative stop-to-online: {total_dur}s"
         )
         return results
@@ -1126,6 +1149,9 @@ class _MassCreateDeleteMixin:
         for both phases (60 entries total).
         """
         self._init_mixin_state()
+        # Enable extended API recovery: wait up to 30 min for transient
+        # API outages (e.g. Docker Swarm restarts) instead of failing fast.
+        self.sbcli_utils.api_recovery_timeout = 1800
         self._rapid_restart_results = {
             "lvol_snapshot": [],
             "snapshot_clone": [],
@@ -3004,7 +3030,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     def _wait_lvols_deleted(
         self, names: list, label: str, timeout: int = 1800,
-        stall_timeout: int = 1800,
+        stall_timeout: int = 600,
     ):
         """Wait for lvols/clones to disappear from the API.
 
@@ -3159,7 +3185,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     # Maximum wall-clock time for the entire cleanup phase.
     # Prevents stuck in_deletion lvols from blocking the test indefinitely.
-    CLEANUP_TIMEOUT = 1800  # 30 minutes
+    CLEANUP_TIMEOUT = 600  # 10 minutes — cleanup should not delay failure reporting
 
     def _phase_cleanup(self):
         timeout = self.CLEANUP_TIMEOUT
@@ -3167,10 +3193,20 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
         def _run_cleanup():
             deadline = time.time() + timeout
+            # Per-step stall timeout: give up quickly if cluster is
+            # unresponsive (e.g. SUSPENDED / in_activation).
+            stall = min(120, timeout // 4)
+
             steps = [
-                ("delete_all_clones", self.sbcli_utils.delete_all_clones),
+                ("delete_all_clones", lambda: self.sbcli_utils.delete_all_clones(
+                    timeout=max(60, int(deadline - time.time())),
+                    stall_timeout=stall,
+                )),
                 ("delete_all_snapshots", self.sbcli_utils.delete_all_snapshots),
-                ("delete_all_lvols", self.sbcli_utils.delete_all_lvols),
+                ("delete_all_lvols", lambda: self.sbcli_utils.delete_all_lvols(
+                    timeout=max(60, int(deadline - time.time())),
+                    stall_timeout=stall,
+                )),
                 ("delete_all_storage_pools", self.sbcli_utils.delete_all_storage_pools),
             ]
             for label, fn in steps:
@@ -5142,17 +5178,33 @@ class MassCreateDeleteRestart_300x10_10Snap_K8s(_MassCreateDeleteK8s):
 
 
 class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
-    """12000 entity cap, 1:3 ratio (3 snaps/lvol → 3000 lvols + 9000 snaps),
+    """6000 entity cap, 1:3 ratio (3 snaps/lvol → 1500 lvols + 4500 snaps),
     30 rapid container stop/restart cycles per phase."""
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 12000
-    NUM_SUBSYSTEMS = 40
-    NS_PER_SUBSYSTEM = 75
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 30
+    NS_PER_SUBSYSTEM = 50
     SNAPSHOTS_PER_LVOL = 3
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60
 
+    # Redundant WebAppAPI replicas to remove before test to free memory.
+    _REMOVE_API_SERVICES: ClassVar[list] = ["app_WebAppAPI2", "app_WebAppAPI3", "app_WebAppAPI4"]
+
     def run(self):
+        # Free memory on mgmt node by removing redundant API replicas.
+        mgmt_ip = self.mgmt_nodes[0]
+        for svc in self._REMOVE_API_SERVICES:
+            try:
+                self.ssh_obj.exec_command(
+                    node=mgmt_ip,
+                    command=f"docker service rm {svc}",
+                    timeout=30,
+                )
+                self.logger.info(f"Removed Docker service {svc} to free memory")
+            except Exception as exc:
+                self.logger.warning(f"Could not remove {svc} (may not exist): {exc}")
+
         actual_pool = self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
         )
@@ -5172,8 +5224,8 @@ class MassCreateRapidRestart_6k_3Snap_K8s(_MassCreateDeleteK8s):
     30 rapid pod delete/restart cycles per phase."""
     PERSISTENT_RETRY = True
     MAX_ENTITY_COUNT = 12000
-    NUM_SUBSYSTEMS = 40
-    NS_PER_SUBSYSTEM = 75
+    NUM_SUBSYSTEMS = 60
+    NS_PER_SUBSYSTEM = 50
     SNAPSHOTS_PER_LVOL = 3
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60

@@ -44,7 +44,7 @@ on:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
         default: 'br-ex:enp2s0f0'
-      max_lvol:
+      max_subsys:
         description: 'Max logical volume count per storage node'
         required: false
         default: '30'
@@ -114,6 +114,14 @@ on:
         required: false
         default: true
         type: boolean
+      cluster_security:
+        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled when testname contains 'backup'."
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - backup
 
 jobs:
   stress-test:
@@ -452,6 +460,173 @@ jobs:
             pod-security.kubernetes.io/audit=privileged \
             --overwrite
 
+      # ── Deploy MinIO for backup tests (conditional) ────────────────────────
+
+      - name: Setup MinIO for backup tests
+        if: >-
+          ${{
+            github.event.inputs.use_existing_cluster != 'true' &&
+            (github.event.inputs.cluster_security == 'backup' ||
+             contains(github.event.inputs.testname, 'Backup') ||
+             contains(github.event.inputs.testname, 'backup'))
+          }}
+        run: |
+          set -euxo pipefail
+          NAMESPACE=simplyblock
+          EXTERNAL_MINIO="http://192.168.10.164:9000"
+          MINIO_ACCESS_KEY="minioadmin"
+          MINIO_SECRET_KEY="minioadmin"
+
+          # Check if external MinIO is reachable FROM INSIDE the cluster
+          if kubectl run minio-check --rm -i --restart=Never --image=busybox:latest \
+              --timeout=30s -- wget -q -O /dev/null -T 5 "${EXTERNAL_MINIO}/minio/health/live" >/dev/null 2>&1; then
+            echo "=== External MinIO at ${EXTERNAL_MINIO} is reachable from cluster ==="
+            MINIO_ENDPOINT="${EXTERNAL_MINIO}"
+            echo "MINIO_SOURCE=external" >> "$GITHUB_ENV"
+          else
+            echo "=== External MinIO unreachable, deploying in-cluster MinIO ==="
+            kubectl create namespace minio --dry-run=client -o yaml | kubectl apply -f -
+            kubectl label namespace minio \
+              pod-security.kubernetes.io/enforce=privileged \
+              pod-security.kubernetes.io/warn=privileged \
+              pod-security.kubernetes.io/audit=privileged \
+              --overwrite
+
+            # On OpenShift, grant the default SA the anyuid SCC so MinIO can run
+            if kubectl api-resources | grep -q securitycontextconstraints; then
+              oc adm policy add-scc-to-user anyuid -z default -n minio 2>/dev/null || true
+            fi
+
+            cat <<'MINIOYAML' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: minio
+            template:
+              metadata:
+                labels:
+                  app: minio
+              spec:
+                containers:
+                - name: minio
+                  image: minio/minio:latest
+                  args: ["server", "/data"]
+                  ports:
+                  - containerPort: 9000
+                  env:
+                  - name: MINIO_ROOT_USER
+                    value: minioadmin
+                  - name: MINIO_ROOT_PASSWORD
+                    value: minioadmin
+                  volumeMounts:
+                  - name: data
+                    mountPath: /data
+                volumes:
+                - name: data
+                  emptyDir: {}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            selector:
+              app: minio
+            ports:
+            - port: 9000
+              targetPort: 9000
+          MINIOYAML
+
+            echo "Waiting for MinIO pod to appear..."
+            for i in $(seq 1 30); do
+              if kubectl get pod -l app=minio -n minio --no-headers 2>/dev/null | grep -q .; then
+                echo "MinIO pod found"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "ERROR: MinIO pod never appeared. Deployment status:"
+                kubectl -n minio describe deployment minio
+                kubectl -n minio get events --sort-by='.lastTimestamp' | tail -20
+                exit 1
+              fi
+              echo "  Waiting for pod ($i/30)..."
+              sleep 5
+            done
+            echo "Waiting for MinIO pod to be ready..."
+            kubectl wait --for=condition=ready pod -l app=minio -n minio --timeout=120s
+
+            # Port-forward to make MinIO accessible from the runner
+            kubectl port-forward -n minio svc/minio 9000:9000 &
+            echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+            sleep 3
+
+            MINIO_ENDPOINT="http://minio.minio.svc.cluster.local:9000"
+            echo "MINIO_SOURCE=in-cluster" >> "$GITHUB_ENV"
+          fi
+
+          echo "MINIO_ENDPOINT=${MINIO_ENDPOINT}" >> "$GITHUB_ENV"
+
+          # Create backup-credentials K8s Secret in cluster namespace
+          cat <<CREDEOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: backup-credentials
+            namespace: ${NAMESPACE}
+          type: Opaque
+          stringData:
+            access_key_id: ${MINIO_ACCESS_KEY}
+            secret_access_key: ${MINIO_SECRET_KEY}
+          CREDEOF
+
+          echo "=== MinIO setup complete (source=${MINIO_SOURCE:-external}, endpoint=${MINIO_ENDPOINT}) ==="
+
+      - name: Start MinIO trace logging
+        if: >-
+          ${{
+            github.event.inputs.use_existing_cluster != 'true' &&
+            (github.event.inputs.cluster_security == 'backup' ||
+             contains(github.event.inputs.testname, 'Backup') ||
+             contains(github.event.inputs.testname, 'backup'))
+          }}
+        run: |
+          set -euxo pipefail
+
+          # This VM hosts multiple parallel runners, so every path/alias/
+          # process used here MUST be scoped to this run — a shared
+          # /tmp/mc or a pattern-matching pkill would race with, corrupt,
+          # or kill another job's in-flight mc install/trace.
+          MC_BIN="/tmp/mc-${GITHUB_RUN_ID}"
+          MC_ALIAS="myminio-${GITHUB_RUN_ID}"
+          echo "MC_BIN=${MC_BIN}" >> "$GITHUB_ENV"
+          echo "MC_ALIAS=${MC_ALIAS}" >> "$GITHUB_ENV"
+
+          # 1. Install mc (MinIO Client) to our own per-run path
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "${MC_BIN}"
+          chmod +x "${MC_BIN}"
+
+          # 2. Configure our own mc alias — for in-cluster MinIO use localhost (port-forward)
+          if [ "${MINIO_SOURCE:-external}" = "in-cluster" ]; then
+            "${MC_BIN}" alias set "${MC_ALIAS}" http://localhost:9000 minioadmin minioadmin
+          else
+            "${MC_BIN}" alias set "${MC_ALIAS}" http://192.168.10.164:9000 minioadmin minioadmin
+          fi
+
+          # 3. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup "${MC_BIN}" admin trace -v --all "${MC_ALIAS}" > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
       - name: Create Docker registry secret
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
@@ -690,7 +865,7 @@ jobs:
           IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
-          MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
+          MAX_SUBSYS="${{ github.event.inputs.max_subsys || '30' }}"
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
@@ -701,6 +876,36 @@ jobs:
           SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
+          ENABLE_CPU_TOPOLOGY="true"
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          if [ "$CLUSTER_ENV" = "local" ]; then
+            ENABLE_CPU_TOPOLOGY="false"
+          fi
+
+          # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
+          if [ "${PARTITIONS}" = "0" ]; then
+            ENABLE_JOURNAL_DEVICE="true"
+          else
+            ENABLE_JOURNAL_DEVICE="false"
+          fi
+
+          # Calculate vcpuCount from CORE_PERCENTAGE by querying actual CPU count on a worker node
+          FIRST_WORKER="${{ github.event.inputs.worker_nodes }}"
+          FIRST_WORKER="${FIRST_WORKER%%,*}"
+          if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
+            TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
+          else
+            TOTAL_CPUS=$(kubectl get node "${FIRST_WORKER}" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null || echo "0")
+          fi
+          TOTAL_CPUS=$(echo "${TOTAL_CPUS}" | tr -d '[:space:]')
+          if [ "${TOTAL_CPUS}" -gt 0 ] 2>/dev/null; then
+            VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
+            [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
+          else
+            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
+            VCPU_COUNT=4
+          fi
+          echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
 
           RESERVED_CPU_YAML=""
           if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
@@ -719,6 +924,22 @@ jobs:
           for NODE in "${NODES[@]}"; do
             WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
           done
+
+          # Conditionally build backup spec block
+          BACKUP_SPEC=""
+          CLUSTER_SEC="${{ github.event.inputs.cluster_security || 'none' }}"
+          TESTNAME_INPUT="${{ github.event.inputs.testname || '' }}"
+          TESTNAME_LOWER="$(echo "$TESTNAME_INPUT" | tr '[:upper:]' '[:lower:]')"
+          if [ "$CLUSTER_SEC" = "backup" ] || echo "$TESTNAME_LOWER" | grep -q "backup"; then
+            BACKUP_SPEC="  backup:
+              credentialsSecretRef:
+                name: backup-credentials
+              localEndpoint: ${MINIO_ENDPOINT}
+              localTesting: true
+              secondaryTarget: 0
+              snapshotBackups: true
+              withCompression: false"
+          fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)
           VAULT_SETTINGS=""
@@ -747,9 +968,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
-            isSingleNode: false
             enableNodeAffinity: true
-            strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
@@ -759,7 +978,11 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
+          ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
+            maxSubsystemCount: ${MAX_SUBSYS}
+            vcpuCount: ${VCPU_COUNT}
+
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -785,15 +1008,13 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
-            partitions: ${PARTITIONS}
-            corePercentage: ${CORE_PERCENTAGE}
+            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: true
+            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
             openShiftCluster: ${OPENSHIFT_CLUSTER}
             ubuntuHost: false
             forceFormat4K: ${FORCE_FORMAT_4K}
@@ -810,9 +1031,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
-            isSingleNode: false
             enableNodeAffinity: true
-            strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
@@ -822,7 +1041,11 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
+          ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
+            maxSubsystemCount: ${MAX_SUBSYS}
+            vcpuCount: ${VCPU_COUNT}
+
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -848,15 +1071,13 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
-            partitions: ${PARTITIONS}
-            corePercentage: ${CORE_PERCENTAGE}
+            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: true
+            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
             openShiftCluster: ${OPENSHIFT_CLUSTER}
             ubuntuHost: false
             forceFormat4K: ${FORCE_FORMAT_4K}

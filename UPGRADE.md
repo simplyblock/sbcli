@@ -174,6 +174,15 @@ kubectl apply -f storageclass.yaml
 kubectl apply -f volumesnapshotclass.yaml
 ```
 
+> **Also create an XFS StorageClass on the same pool** (`fs_type: xfs` — set via the CSI
+> driver's mount options / StorageClass parameters) and use it for any PVC you plan to keep
+> mounted across the upgrade. **Why**: R25's CSI container ships a newer `mkfs.ext4` that
+> creates filesystems with the `FEATURE_C12` feature flag. After the upgrade, `NodeStageVolume`
+> runs `e2fsck`/`tune2fs` from the **host OS**, which on RHCOS ships e2fsprogs 1.46.5 — too old
+> to recognize `FEATURE_C12`. The mount then fails with `unsupported feature(s): FEATURE_C12`
+> and the volume is left inaccessible (`input/output error`). XFS has no such feature-flag
+> mismatch and is unaffected. This is tracked as an open product bug — see Operational Note 7.
+
 ### 2.3 Create PVCs (One Per Storage Node)
 
 Create one PVC per storage node to spread data across the cluster:
@@ -300,7 +309,8 @@ Record the following before starting the upgrade:
 
 ### Step 1 — Ensure FDB Resources Have `helm.sh/resource-policy: keep` in Chart
 
-There are 8 FDB resources that must survive `helm uninstall`:
+There are 9 resources that must survive `helm uninstall`: 8 FDB resources, plus the old
+prometheus configmap (needed in Step 6.0.1 below):
 
 | Kind | Name |
 |------|------|
@@ -312,11 +322,19 @@ There are 8 FDB resources that must survive `helm uninstall`:
 | ClusterRoleBinding | simplyblock-fdb-manager-clusterrolebinding |
 | FoundationDBCluster | simplyblock-fdb-cluster |
 | ConfigMap | simplyblock-fdb-cluster-config |
+| ConfigMap | `<sbcli-release-name>`-simplyblock-prometheus-config |
 
 > **Why the ConfigMap?** The `simplyblock-fdb-cluster-config` ConfigMap contains the FDB
 > cluster connection file. Admin pods mount it as volume `fdb-cluster-file`. If this
 > ConfigMap is deleted during `helm uninstall sbcli`, admin pods will be stuck in
 > `ContainerCreating` and all `sbcli`/`sbctl` commands will fail.
+
+> **Why the prometheus ConfigMap?** The R25 `sbcli` chart's prometheus configmap
+> (e.g. `sbcli-simplyblock-prometheus-config`) holds the cluster's monitoring `basic_auth`
+> credentials. The R26 operator chart creates its own fresh configmap
+> (`simplyblock-prometheus-config`) with empty username/password. If the old configmap is
+> deleted on `helm uninstall`, there is nowhere left to read the old credentials from, and
+> Step 6.0.1 (migrate them into the new configmap) has nothing to migrate.
 
 > **IMPORTANT: `kubectl annotate` on live resources is NOT effective for `helm uninstall`.**
 > Helm reads annotations from its stored release manifest (in `sh.helm.release.v1.*`
@@ -575,9 +593,32 @@ kubectl create secret generic simplyblock-simplyblock-cluster-upgrade \
 > # Check if cert-manager CRDs exist
 > kubectl get crd certificates.cert-manager.io 2>/dev/null
 >
-> # If missing, install cert-manager
-> kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-> kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=120s
+> # If missing, install cert-manager via the Jetstack Helm chart (pinned version — the
+> # automated test uses this path, not the raw upstream manifest, to avoid drift from
+> # an unpinned "latest" release)
+> helm repo add jetstack https://charts.jetstack.io
+> helm repo update
+> helm upgrade --install cert-manager jetstack/cert-manager \
+>   --namespace cert-manager --create-namespace \
+>   --version v1.13.0 --set installCRDs=true
+> kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=120s
+> ```
+>
+> If cert-manager was left in a broken state by a previous failed attempt, `helm uninstall
+> cert-manager -n cert-manager --no-hooks --timeout 60s` and retry — a stale release can make
+> the install above fail silently.
+
+> **IMPORTANT — Apply CRDs explicitly before `helm upgrade --install` on a reused cluster.**
+> Helm v3 only installs CRDs from a chart's `crds/` directory on a fresh `helm install`.
+> If a `simplyblock-operator` release already exists on this cluster (e.g. a previous failed
+> upgrade attempt), `helm upgrade --install` performs an **upgrade**, and Helm **silently skips
+> all CRD installation** — any CRD added to the chart since the original install (e.g.
+> `StoragePool`) is never registered. The operator then has nothing to reconcile, no
+> `StorageNodeSet` DaemonSet is created, and every node restart in Step 10 fails waiting for an
+> agent that was never scheduled. Apply the CRDs directly first, regardless of install vs. upgrade:
+>
+> ```bash
+> kubectl apply --server-side --force-conflicts -f ./charts/simplyblock-operator/crds/
 > ```
 
 Install the new operator chart with FDB creation disabled (FDB is already running):
@@ -604,6 +645,36 @@ kubectl wait --for=condition=Ready pods --all -n simplyblock \
   --timeout=300s --field-selector=status.phase!=Succeeded
 ```
 
+### Step 6.0.1 — Migrate Prometheus Credentials to the New ConfigMap
+
+> **Why**: The new operator chart's prometheus configmap is created fresh with an empty
+> `basic_auth` username/password, while the old `sbcli` chart's configmap (kept in Step 1)
+> still has the real credentials. The new chart also switches prometheus to HTTPS with mTLS,
+> so the configmaps can't simply be swapped — the credentials must be copied across. Skipping
+> this step leaves prometheus running with empty auth post-upgrade.
+
+```bash
+OLD_CM=sbcli-simplyblock-prometheus-config   # <sbcli-release-name>-simplyblock-prometheus-config
+NEW_CM=simplyblock-prometheus-config
+
+# 1. Extract username/password from the old configmap's basic_auth block
+kubectl get configmap "$OLD_CM" -n simplyblock \
+  -o jsonpath='{.data.prometheus\.yml}' > /tmp/old-prometheus.yml
+# Parse `basic_auth: { username: ..., password: ... }` out of /tmp/old-prometheus.yml
+
+# 2. Inject those values into the new configmap's prometheus.yml (empty username/password
+#    fields), then re-apply it
+kubectl get configmap "$NEW_CM" -n simplyblock -o json > /tmp/new-cm.json
+# Edit /tmp/new-cm.json: set data."prometheus.yml" username/password to the extracted values
+kubectl replace -f /tmp/new-cm.json -n simplyblock
+
+# 3. Restart prometheus to pick up the new config
+kubectl delete pod simplyblock-prometheus-0 -n simplyblock --ignore-not-found
+```
+
+**Expected**: The prometheus pod restarts and scrapes successfully using the migrated
+credentials — check `kubectl logs simplyblock-prometheus-0 -n simplyblock` for auth errors.
+
 ### Step 6.1 — Shut Down Nodes Again (Prevent Auto-Restart)
 
 After the operator installs, it may try to auto-restart nodes. Shut them down again
@@ -626,6 +697,27 @@ secret and adopts the existing cluster.
 >   Pool CR must use `name: testing1`). This allows the operator to adopt the existing pool.
 > - The **StorageCluster CR** `metadata.name` must be consistent with the upgrade secret
 >   name from Step 5 (`simplyblock-<CR_NAME>-upgrade`).
+>
+> **IMPORTANT — CR schema drift between releases.** The operator's CRD schema has changed
+> shape across releases — fields get moved or dropped with strict decoding, so a CR generated
+> against an older schema is rejected outright:
+> - `StorageCluster`: does **not** accept `isSingleNode` or `strictNodeAntiAffinity`; **does**
+>   accept `maxSubsystemCount` (moved here from `StorageNodeSet`).
+> - `StorageNodeSet`: no longer accepts `maxSubsystemCount`.
+>
+> A field mismatch fails with `strict decoding error: unknown field "spec.xxx"` — confirm your
+> CR YAML against the CRD actually installed on the target release before applying, don't reuse
+> a template from a previous version's docs.
+>
+> **IMPORTANT — verify CR application without merging stderr into stdout.** If your automation
+> checks "does this CR exist" via `kubectl get ... 2>&1` and a substring match on the CR name,
+> it will get a **false positive**: a `NotFound` error message contains the CR name as a
+> substring (`storageclusters.storage.simplyblock.io "simplyblock-cluster" not found`), so the
+> check passes even though the CR was never created. Keep stdout and stderr separate and check
+> stderr explicitly for `not found` / `could not find the requested resource`, and fail fast on
+> `BadRequest` / `strict decoding error` rather than logging a warning and continuing — a CR
+> that silently failed to apply here surfaces much later, as an inexplicable node-restart
+> timeout in Step 10 with no obvious connection back to this step.
 
 ```yaml
 # storagecluster.yaml
@@ -636,9 +728,7 @@ metadata:
   namespace: simplyblock
 spec:
   fabricType: tcp
-  isSingleNode: false
   enableNodeAffinity: true
-  strictNodeAntiAffinity: false
   stripe:
     dataChunks: 1
     parityChunks: 0
@@ -648,6 +738,8 @@ spec:
   criticalThreshold:
     capacity: 96
     provisionedCapacity: 98
+  maxSubsystemCount: 30          # a.k.a. max_lvol — moved here from StorageNodeSet
+  vcpuCount: 16                  # SPDK vCPUs to allocate per node (see note below)
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -670,13 +762,19 @@ spec:
   mgmtIfname: ens18
   dataIfname:
     - enp1s0
-  maxSubsystemCount: 30
-  enableCpuTopology: true
+  skipKubeletConfiguration: false   # true on Talos — the operator can't edit kubelet config there
+  enableCpuTopology: true           # false on Talos, for the same reason
   workerNodes:
     - <worker-node-1>
     - <worker-node-2>
     - <worker-node-3>
 ```
+
+> **`vcpuCount`**: computed as a percentage of each node's CPU count (e.g. 50% on OpenShift),
+> not a fixed value — pick a number the operator's CRD will accept for your node sizing rather
+> than copying `16` verbatim. **`skipKubeletConfiguration` / `enableCpuTopology`**: on Talos
+> nodes the operator cannot modify kubelet configuration directly, so these flip relative to a
+> standard OpenShift/vanilla K8s install — detect Talos before deciding the values.
 
 ```bash
 kubectl apply -f storagecluster.yaml -n simplyblock
@@ -774,6 +872,12 @@ for NODE_ID in $(sbctl sn list | grep -E "offline|in_creation" | awk '{print $2}
 done
 ```
 
+> **Provisional**: the test code carries a TODO that `cr_plural` may need to change from
+> `storagenodesets` to `storagenodes` (with `cr_name` set to the individual `StorageNode` CR
+> name, not the shared `StorageNodeSet` name) pending confirmation from the operator team.
+> Treat the values above as current, not final — check the operator's actual CR structure on
+> the target release before relying on this in a scripted upgrade.
+
 ### Step 9.1 — Cancel Stale Restart Tasks (If Needed)
 
 > **Status**: With the R26 operator fix (see Step 2.1), stale tasks should not
@@ -835,6 +939,16 @@ done
 > ADMIN_POD=$(kubectl get pods -n simplyblock -l app=simplyblock-admin-control \
 >   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 > ```
+
+> **Watch for — restart repeatedly using the wrong SPDK image.** A run on 2026-08-26 saw a
+> node cycle `offline -> in_restart -> offline` seven times over 43 minutes here: `sn restart`
+> was called with `--spdk-image <TARGET>`, but the tasks-runner's `spdk_process_start` call used
+> the node's old, stored R25 image instead. The R25 SPDK is incompatible with the already-running
+> R26 control plane, so the process never came up and every attempt timed out after 300s. If a
+> node won't come online in this step, check `tasks-runner-restart.log` for the `spdk_image`
+> value actually sent to `spdk_process_start` and confirm it matches `--spdk-image`, not the
+> node's pre-upgrade value — don't assume repeated identical timeouts here are a transient
+> infra issue.
 
 ### Step 10.1 — Wait for Cluster Active and Health Checks
 
@@ -1104,6 +1218,78 @@ When an upgrade test fails, avoid cleaning up PVCs, pools, and lvols in the
 teardown. Use `--preserve_resources_on_failure true` in the test runner to keep
 all K8s resources intact for post-mortem analysis.
 
+### 7. ext4 `FEATURE_C12` incompatibility (open product bug)
+
+R25's CSI container ships a newer `mkfs.ext4` (e2fsprogs >= 1.47.0) that formats volumes
+with the `FEATURE_C12` flag (`orphan_file`). After the upgrade, `NodeStageVolume` runs
+`e2fsck`/`tune2fs` from the **host OS** — RHCOS ships e2fsprogs 1.46.5, which doesn't
+recognize `FEATURE_C12`. Every ext4 volume formatted pre-upgrade fails to remount:
+
+```
+/dev/nvme1n1 has unsupported feature(s): FEATURE_C12
+e2fsck: Get a newer version of e2fsck!
+tune2fs: Filesystem has unsupported read-only feature(s)
+```
+
+Confirmed across 5+ runs (Aug 15, 16, 24, 25). It affects **all** ext4 volumes, originals and
+clones alike, since they were all formatted by the same CSI.
+
+**Mitigation (test-side, in place)**: create both an ext4 and an XFS StorageClass on the same
+pool (Phase 2.2) and use the XFS one for volumes that must survive the upgrade — XFS has no
+equivalent feature-flag mismatch.
+
+> **Known gap**: `_create_pvcs_with_fio()` in `k8s_major_upgrade.py` still calls
+> `random.choice()` between the ext4 and XFS StorageClasses for each PVC (see the Aug 25 run,
+> where PVC index 1 randomly drew ext4 and failed). For the `r25-to-r2x` maintenance-window
+> path specifically, this should be forced to XFS-only rather than randomized — flagged here,
+> not yet fixed as of this writing.
+
+**Real fix (product team, still open)**: pin `mkfs.ext4` to skip `orphan_file`, bundle a
+compatible `e2fsck`/`tune2fs` in the CSI container, or skip the fsck/tune2fs pass entirely
+when re-staging a volume the same CSI previously formatted.
+
+### 8. Helm v3 skips CRD installation on `helm upgrade`
+
+`helm install` installs everything under a chart's `crds/` directory; `helm upgrade`
+(including the upgrade half of `--install`) does not touch CRDs at all. On a cluster that
+still has a stale `simplyblock-operator` release from a previous failed upgrade attempt,
+`helm upgrade --install` takes the upgrade path and any CRD added to the chart since the
+original install (e.g. `StoragePool`) is never registered. The operator then has nothing to
+reconcile, no `StorageNodeSet` DaemonSet is created, and Step 10 hangs waiting for node
+agents that were never scheduled — with no error anywhere pointing back at the missing CRD.
+
+**Fix (in the test)**: apply the chart's CRDs explicitly and unconditionally before the helm
+install/upgrade (see the callout in Step 6): `kubectl apply --server-side --force-conflicts
+-f {crds_dir}/`.
+
+### 9. CR-existence checks must not merge stderr into stdout
+
+A `kubectl get <cr> ... 2>&1` followed by a substring match on the CR name will false-positive
+on a `NotFound` error, because the error message itself contains the CR name:
+`storageclusters.storage.simplyblock.io "simplyblock-cluster" not found`. A check written this
+way logs "Verified ... exists" for a CR that was never created — see the callout in Step 7.
+Keep stdout/stderr separate, and fail fast on `strict decoding error` / `NotFound` /
+`BadRequest` rather than warning and continuing.
+
+### 10. User lvol NVMe-oF listeners missing after restart (historical)
+
+Confirmed on 2026-08-11: after the maintenance-window restart, the storage-node-controller
+recreated user lvol NVMe-oF subsystems and namespaces but never called
+`nvmf_subsystem_add_listener` for them — only device, JM, and hublvol subsystems got a
+listener. Every pre-upgrade PVC then failed to reconnect (`connection refused` /
+`invalid arguments/configuration`) even though the cluster and all nodes reported healthy.
+Not reproduced in any run since (Aug 24 onward) — appears fixed upstream, but worth
+re-confirming if PVC reconnect ever silently regresses after a restart step.
+
+### 11. `sn restart --spdk-image` not honored (fixed)
+
+Confirmed on 2026-08-26: a node cycled `offline -> in_restart -> offline` seven times because
+`spdk_process_start` used the node's old, stored SPDK image instead of the `--spdk-image`
+value passed to `sn restart`. Fixed — `snode.spdk_image` is now set from the passed
+`--spdk-image` before `spdk_process_start` is called. If Step 10 ever times out repeatedly on
+the same node again, check `tasks-runner-restart.log` for the actual `spdk_image` used first,
+rather than assuming it's an infra flake.
+
 ---
 
 ## Automated Test
@@ -1112,3 +1298,27 @@ The E2E test `K8sNativeMajorUpgrade` in
 [k8s_major_upgrade.py](e2e/e2e_tests/upgrade_tests/k8s_major_upgrade.py)
 automates all four phases. It is triggered by the `k8s-native-upgrade.yaml` workflow
 with `UPGRADE_TYPE=r25-to-r2x`.
+
+### Test-side issues fixed since initial automation
+
+- Sequential PVC verification serialized 12 FIO jobs behind a 600s timeout each, adding up
+  to ~2h of dead time on any real failure — verification now runs in parallel
+  (`ThreadPoolExecutor`) (Note above, run history Aug 16).
+- CRDs are now applied explicitly before the operator chart install/upgrade, instead of
+  relying on Helm's install-only CRD semantics (Note 8).
+- CR-existence checks no longer merge stderr into stdout, and now fail fast on
+  `strict decoding error` / `NotFound` / `BadRequest` instead of logging a warning and
+  continuing (Note 9).
+- CR YAML kept in sync with CRD schema drift (`isSingleNode`/`strictNodeAntiAffinity` removed,
+  `maxSubsystemCount` moved to `StorageCluster`) (Step 7 callout).
+- Worker-node NVMe/mount cleanup shell command fixed (was silently a no-op due to a nested
+  quoting bug — `nvme disconnect-all` never actually ran on any worker).
+- `sn restart` in Step 10 now also passes `--spdk-proxy-image` alongside `--spdk-image`, so
+  the proxy is upgraded together with SPDK rather than staying on the old version.
+
+### Known gaps / open items for dev
+
+- **Open product bug**: ext4 `FEATURE_C12` incompatibility (Note 7) — mitigated in the test
+  via an XFS StorageClass, but PVC-to-StorageClass assignment is still randomized rather than
+  forced to XFS-only for this upgrade path, so ext4-formatted PVCs can still fail Phase 4.1
+  intermittently.

@@ -58,7 +58,7 @@ on:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
         default: 'br-ex:enp2s0f0'
-      max_lvol:
+      max_subsys:
         description: 'Max logical volume count per storage node'
         required: false
         default: '30'
@@ -315,73 +315,29 @@ jobs:
 
       # ── Cleanup old deployments (BOTH namespaces) ───────────────────────
 
-      - name: Cleanup old CSI deployment (both namespaces)
+      - name: Cleanup old deployment (full 12-phase cleanup)
         run: |
           set +e
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+
+          # Run the operator's own cleanup script first if available
           for NAMESPACE in ${NS_C1} ${NS_C2}; do
-            echo "=== Cleaning namespace: ${NAMESPACE} ==="
             if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
               bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
             fi
-            bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
           done
 
-          echo "=== Delete Released PVs ==="
-          for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
-            kubectl delete pv "$pv" --ignore-not-found 2>/dev/null || true
-          done
-
-          echo "=== Delete CRDs ==="
-          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
-            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
-            for cr in $(kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null); do
-              IFS=' ' read -r ns name <<< "$cr"
-              kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            done
-            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-          done
-          kubectl delete -f $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
-          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
-            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
-            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
-          done
-
-          echo "=== Reset hugepages on ALL worker nodes ==="
-          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
-          IFS=',' read -ra NODES <<< "${ALL_WORKERS}"
-          for NODE in "${NODES[@]}"; do
-            echo "Resetting hugepages on $NODE..."
-            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
-              oc debug node/"$NODE" -- chroot /host bash -c \
-                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
-              oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
-            else
-              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
-              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "systemctl restart kubelet" 2>/dev/null || true
-            fi
-          done
-          echo "=== Cleanup complete ==="
-
-      - name: Cleanup old cert-manager
-        run: |
-          set +e
-          helm uninstall cert-manager -n cert-manager 2>/dev/null || true
-          kubectl delete namespace cert-manager --wait=false 2>/dev/null || true
-          kubectl wait --for=delete namespace/cert-manager --timeout=120s 2>/dev/null || true
-          kubectl delete crd certificaterequests.cert-manager.io certificates.cert-manager.io \
-            challenges.acme.cert-manager.io clusterissuers.cert-manager.io \
-            issuers.cert-manager.io orders.acme.cert-manager.io --ignore-not-found 2>/dev/null || true
-
-      # ── Remove stale labels from ALL workers ────────────────────────────
-
-      - name: Remove stale storagenodeset labels
-        run: |
-          IFS=',' read -ra NODES <<< "${ALL_WORKERS}"
-          for NODE in "${NODES[@]}"; do
-            kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
+          # Run full 12-phase cleanup for each namespace.
+          # Handles Helm R25+R26, CRs, CRDs, cert-manager, kube-system,
+          # snapshots, PVCs/PVs, node cleanup, labels, CSI hostpath, namespace finalization.
+          # Auto-detects Talos and skips node debug operations.
+          for NAMESPACE in ${NS_C1} ${NS_C2}; do
+            echo "=== Running full cleanup for namespace: ${NAMESPACE} ==="
+            bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_upgrade_test.sh \
+              -n "$NAMESPACE" \
+              -e "$CLUSTER_ENV" \
+              -w "${ALL_WORKERS}" \
+              -c "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/"
           done
 
       # ── Label worker nodes ──────────────────────────────────────────────
@@ -426,12 +382,35 @@ jobs:
 
       # ── Deploy MinIO (shared) ───────────────────────────────────────────
 
-      - name: Deploy MinIO for backup tests (shared by both clusters)
+      - name: Create backup credentials (external MinIO with in-cluster fallback)
         run: |
           set -euxo pipefail
-          echo "=== Setting up MinIO ==="
+          EXTERNAL_MINIO="http://192.168.10.164:9000"
+          MINIO_ACCESS_KEY="minioadmin"
+          MINIO_SECRET_KEY="minioadmin"
 
-          cat <<'MINIO_EOF' | kubectl apply -f -
+          # Check if external MinIO is reachable FROM INSIDE the cluster
+          # (runner can always reach it, but cluster nodes/pods may not)
+          if kubectl run minio-check --rm -i --restart=Never --image=busybox:latest \
+              --timeout=30s -- wget -q -O /dev/null -T 5 "${EXTERNAL_MINIO}/minio/health/live" >/dev/null 2>&1; then
+            echo "=== External MinIO at ${EXTERNAL_MINIO} is reachable from cluster ==="
+            MINIO_ENDPOINT="${EXTERNAL_MINIO}"
+            echo "MINIO_SOURCE=external" >> "$GITHUB_ENV"
+          else
+            echo "=== External MinIO unreachable, deploying in-cluster MinIO ==="
+            kubectl create namespace minio --dry-run=client -o yaml | kubectl apply -f -
+            kubectl label namespace minio \
+              pod-security.kubernetes.io/enforce=privileged \
+              pod-security.kubernetes.io/warn=privileged \
+              pod-security.kubernetes.io/audit=privileged \
+              --overwrite
+
+            # On OpenShift, grant the default SA the anyuid SCC so MinIO can run
+            if kubectl api-resources | grep -q securitycontextconstraints; then
+              oc adm policy add-scc-to-user anyuid -z default -n minio 2>/dev/null || true
+            fi
+
+            cat <<'MINIOYAML' | kubectl apply -f -
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -449,27 +428,63 @@ jobs:
               spec:
                 containers:
                 - name: minio
-                  image: minio/minio
-                  command: ["/bin/sh", "-c", "minio server /data --console-address :9001"]
+                  image: minio/minio:latest
+                  args: ["server", "/data"]
+                  ports:
+                  - containerPort: 9000
                   env:
                   - name: MINIO_ROOT_USER
                     value: minioadmin
                   - name: MINIO_ROOT_PASSWORD
-                    value: minioadmin123
-                  ports:
-                  - containerPort: 9000
-                  - containerPort: 9001
-          MINIO_EOF
+                    value: minioadmin
+                  volumeMounts:
+                  - name: data
+                    mountPath: /data
+                volumes:
+                - name: data
+                  emptyDir: {}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            selector:
+              app: minio
+            ports:
+            - port: 9000
+              targetPort: 9000
+          MINIOYAML
 
-          kubectl -n minio expose deploy/minio --port 9000 \
-            --dry-run=client -o yaml | kubectl apply -f -
+            echo "Waiting for MinIO pod to appear..."
+            for i in $(seq 1 30); do
+              if kubectl get pod -l app=minio -n minio --no-headers 2>/dev/null | grep -q .; then
+                echo "MinIO pod found"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "ERROR: MinIO pod never appeared. Deployment status:"
+                kubectl -n minio describe deployment minio
+                kubectl -n minio get events --sort-by='.lastTimestamp' | tail -20
+                exit 1
+              fi
+              echo "  Waiting for pod ($i/30)..."
+              sleep 5
+            done
+            echo "Waiting for MinIO pod to be ready..."
+            kubectl wait --for=condition=ready pod -l app=minio -n minio --timeout=120s
 
-          echo "Waiting for MinIO pod..."
-          for i in $(seq 1 30); do
-            READY=$(kubectl -n minio get pods --no-headers 2>/dev/null | grep -c "Running" || true)
-            if [ "$READY" -ge 1 ]; then echo "MinIO is running"; break; fi
-            echo "MinIO not ready ($i/30)..."; sleep 10
-          done
+            # Port-forward to make MinIO accessible from the runner
+            kubectl port-forward -n minio svc/minio 9000:9000 &
+            echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+            sleep 3
+
+            MINIO_ENDPOINT="http://minio.minio.svc.cluster.local:9000"
+            echo "MINIO_SOURCE=in-cluster" >> "$GITHUB_ENV"
+          fi
+
+          echo "MINIO_ENDPOINT=${MINIO_ENDPOINT}" >> "$GITHUB_ENV"
 
           # Create backup-credentials in BOTH namespaces
           for NS in ${NS_C1} ${NS_C2}; do
@@ -481,26 +496,44 @@ jobs:
             namespace: ${NS}
           type: Opaque
           stringData:
-            access_key_id: minioadmin
-            secret_access_key: minioadmin123
+            access_key_id: ${MINIO_ACCESS_KEY}
+            secret_access_key: ${MINIO_SECRET_KEY}
           CREDEOF
           done
-          echo "=== MinIO and backup credentials ready ==="
+
+          echo "=== MinIO setup complete (source=${MINIO_SOURCE:-external}, endpoint=${MINIO_ENDPOINT}) ==="
 
       - name: Start MinIO trace logging
         run: |
           set -euxo pipefail
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
-          chmod +x /tmp/mc
-          export PATH="/tmp:$PATH"
-          kubectl -n minio port-forward svc/minio 9000:9000 &
-          echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
-          sleep 3
-          mc alias set myminio http://localhost:9000 minioadmin minioadmin123 2>/dev/null || true
-          MINIO_TRACE_LOG="/tmp/minio-trace-${{ github.run_id }}.log"
+
+          # This VM hosts multiple parallel runners, so every path/alias/
+          # process used here MUST be scoped to this run — a shared
+          # /tmp/mc or a pattern-matching pkill would race with, corrupt,
+          # or kill another job's in-flight mc install/trace.
+          MC_BIN="/tmp/mc-${GITHUB_RUN_ID}"
+          MC_ALIAS="myminio-${GITHUB_RUN_ID}"
+          echo "MC_BIN=${MC_BIN}" >> "$GITHUB_ENV"
+          echo "MC_ALIAS=${MC_ALIAS}" >> "$GITHUB_ENV"
+
+          # 1. Install mc (MinIO Client) to our own per-run path
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "${MC_BIN}"
+          chmod +x "${MC_BIN}"
+
+          # 2. Configure our own mc alias — for in-cluster MinIO use localhost (port-forward)
+          if [ "${MINIO_SOURCE:-external}" = "in-cluster" ]; then
+            "${MC_BIN}" alias set "${MC_ALIAS}" http://localhost:9000 minioadmin minioadmin
+          else
+            "${MC_BIN}" alias set "${MC_ALIAS}" http://192.168.10.164:9000 minioadmin minioadmin
+          fi
+
+          # 3. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
           echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
-          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          nohup "${MC_BIN}" admin trace -v --all "${MC_ALIAS}" > "${MINIO_TRACE_LOG}" 2>&1 &
           echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
 
       # ── Install cert-manager (TLS) ─────────────────────────────────────
 
@@ -640,7 +673,7 @@ jobs:
           IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
-          MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
+          MAX_SUBSYS="${{ github.event.inputs.max_subsys || '30' }}"
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
@@ -649,6 +682,35 @@ jobs:
           SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
+          ENABLE_CPU_TOPOLOGY="true"
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          if [ "$CLUSTER_ENV" = "local" ]; then
+            ENABLE_CPU_TOPOLOGY="false"
+          fi
+
+          # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
+          if [ "${PARTITIONS}" = "0" ]; then
+            ENABLE_JOURNAL_DEVICE="true"
+          else
+            ENABLE_JOURNAL_DEVICE="false"
+          fi
+
+          # Calculate vcpuCount from CORE_PERCENTAGE by querying actual CPU count on a worker node
+          FIRST_WORKER="${C1_WORKERS%%,*}"
+          if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
+            TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
+          else
+            TOTAL_CPUS=$(kubectl get node "${FIRST_WORKER}" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null || echo "0")
+          fi
+          TOTAL_CPUS=$(echo "${TOTAL_CPUS}" | tr -d '[:space:]')
+          if [ "${TOTAL_CPUS}" -gt 0 ] 2>/dev/null; then
+            VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
+            [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
+          else
+            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
+            VCPU_COUNT=4
+          fi
+          echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
 
           # Build C1 worker nodes YAML
           WORKER_YAML=""
@@ -660,7 +722,7 @@ jobs:
           BACKUP_SPEC="  backup:
               credentialsSecretRef:
                 name: backup-credentials
-              localEndpoint: http://minio.minio.svc.cluster.local:9000
+              localEndpoint: ${MINIO_ENDPOINT}
               localTesting: true
               secondaryTarget: 0
               snapshotBackups: true
@@ -675,9 +737,7 @@ jobs:
             namespace: ${NS_C1}
           spec:
             fabricType: tcp
-            isSingleNode: false
             enableNodeAffinity: true
-            strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
@@ -688,6 +748,9 @@ jobs:
               capacity: 96
               provisionedCapacity: 98
           ${BACKUP_SPEC}
+            maxSubsystemCount: ${MAX_SUBSYS}
+            vcpuCount: ${VCPU_COUNT}
+
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -711,14 +774,12 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxSubsystemCount: ${MAX_LVOL}
-            partitions: ${PARTITIONS}
-            corePercentage: ${CORE_PERCENTAGE}
+            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: true
+            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
             openShiftCluster: ${OPENSHIFT_CLUSTER}
             ubuntuHost: false
             forceFormat4K: ${FORCE_FORMAT_4K}
@@ -735,7 +796,7 @@ jobs:
           IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
-          MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
+          MAX_SUBSYS="${{ github.event.inputs.max_subsys || '30' }}"
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
@@ -744,6 +805,35 @@ jobs:
           SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
+          ENABLE_CPU_TOPOLOGY="true"
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          if [ "$CLUSTER_ENV" = "local" ]; then
+            ENABLE_CPU_TOPOLOGY="false"
+          fi
+
+          # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
+          if [ "${PARTITIONS}" = "0" ]; then
+            ENABLE_JOURNAL_DEVICE="true"
+          else
+            ENABLE_JOURNAL_DEVICE="false"
+          fi
+
+          # Calculate vcpuCount from CORE_PERCENTAGE by querying actual CPU count on a worker node
+          FIRST_WORKER="${C2_WORKERS%%,*}"
+          if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
+            TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
+          else
+            TOTAL_CPUS=$(kubectl get node "${FIRST_WORKER}" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null || echo "0")
+          fi
+          TOTAL_CPUS=$(echo "${TOTAL_CPUS}" | tr -d '[:space:]')
+          if [ "${TOTAL_CPUS}" -gt 0 ] 2>/dev/null; then
+            VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
+            [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
+          else
+            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
+            VCPU_COUNT=4
+          fi
+          echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
 
           # Build C2 worker nodes YAML
           WORKER_YAML=""
@@ -755,7 +845,7 @@ jobs:
           BACKUP_SPEC="  backup:
               credentialsSecretRef:
                 name: backup-credentials
-              localEndpoint: http://minio.minio.svc.cluster.local:9000
+              localEndpoint: ${MINIO_ENDPOINT}
               localTesting: true
               secondaryTarget: 0
               snapshotBackups: true
@@ -770,9 +860,7 @@ jobs:
             namespace: ${NS_C2}
           spec:
             fabricType: tcp
-            isSingleNode: false
             enableNodeAffinity: true
-            strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
@@ -783,6 +871,9 @@ jobs:
               capacity: 96
               provisionedCapacity: 98
           ${BACKUP_SPEC}
+            maxSubsystemCount: ${MAX_SUBSYS}
+            vcpuCount: ${VCPU_COUNT}
+
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -806,14 +897,12 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxSubsystemCount: ${MAX_LVOL}
-            partitions: ${PARTITIONS}
-            corePercentage: ${CORE_PERCENTAGE}
+            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: true
+            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
             openShiftCluster: ${OPENSHIFT_CLUSTER}
             ubuntuHost: false
             forceFormat4K: ${FORCE_FORMAT_4K}
@@ -1191,9 +1280,11 @@ jobs:
           if [ -f "${MINIO_TRACE_LOG:-}" ]; then
             cp "${MINIO_TRACE_LOG}" $GITHUB_WORKSPACE/e2e/minio-trace.log 2>/dev/null || true
           fi
-          # Cleanup: delete trace logs and kill any orphaned mc trace processes
-          rm -f /tmp/minio-trace-*.log 2>/dev/null || true
-          pkill -f "mc admin trace" 2>/dev/null || true
+          # Cleanup: only our own per-run trace log + mc binary — never a
+          # glob/pkill that could hit another parallel job's files or
+          # processes on this shared VM.
+          rm -f "${MINIO_TRACE_LOG:-}" 2>/dev/null || true
+          rm -f "${MC_BIN:-}" 2>/dev/null || true
 
       - name: Upload MinIO trace log
         if: always()
@@ -1203,7 +1294,50 @@ jobs:
           path: e2e/minio-trace.log
           if-no-files-found: ignore
 
-      - name: Cleanup MinIO namespace
+      - name: Cleanup MinIO backup bucket on success
+        if: success()
+        run: |
+          set +e
+          export PATH="/tmp:$PATH"
+
+          if [ "${MINIO_SOURCE:-external}" = "in-cluster" ]; then
+            MC_ENDPOINT="http://localhost:9000"
+          else
+            MC_ENDPOINT="http://192.168.10.164:9000"
+          fi
+          mc alias set myminio "${MC_ENDPOINT}" minioadmin minioadmin 2>/dev/null || true
+
+          # Cleanup C1 bucket
+          C1_ID="${C1_CLUSTER_ID:-}"
+          if [ -n "$C1_ID" ]; then
+            BUCKET="simplyblock-backup-${C1_ID}"
+            if mc ls "myminio/${BUCKET}" >/dev/null 2>&1; then
+              echo "=== Cleaning up MinIO backup bucket (C1): ${BUCKET} ==="
+              mc rb --force "myminio/${BUCKET}" 2>/dev/null || true
+              echo "=== C1 bucket cleanup complete ==="
+            else
+              echo "C1 bucket ${BUCKET} does not exist, nothing to clean"
+            fi
+          else
+            echo "No C1_CLUSTER_ID set, skipping C1 MinIO bucket cleanup"
+          fi
+
+          # Cleanup C2 bucket
+          C2_ID="${C2_CLUSTER_ID:-}"
+          if [ -n "$C2_ID" ]; then
+            BUCKET="simplyblock-backup-${C2_ID}"
+            if mc ls "myminio/${BUCKET}" >/dev/null 2>&1; then
+              echo "=== Cleaning up MinIO backup bucket (C2): ${BUCKET} ==="
+              mc rb --force "myminio/${BUCKET}" 2>/dev/null || true
+              echo "=== C2 bucket cleanup complete ==="
+            else
+              echo "C2 bucket ${BUCKET} does not exist, nothing to clean"
+            fi
+          else
+            echo "No C2_CLUSTER_ID set, skipping C2 MinIO bucket cleanup"
+          fi
+
+      - name: Cleanup MinIO namespace (if deployed)
         if: always()
         run: kubectl delete namespace minio --wait=false 2>/dev/null || true
 

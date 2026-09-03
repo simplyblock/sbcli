@@ -29,17 +29,20 @@ class TestMigrationLifecycle(TestClusterBase):
     def _find_other_node(self, current_node_id):
         """Return a node_id different from current_node_id."""
         nodes = self.sbcli_utils.get_storage_nodes()
-        for nid in nodes:
+        sn_results = nodes.get("results", nodes) if isinstance(nodes, dict) else nodes
+        for node in sn_results:
+            nid = node.get("uuid") or node.get("id") if isinstance(node, dict) else node
             if nid != current_node_id:
-                details = self.sbcli_utils.get_storage_node_details(nid)
-                if details and details.get("status") in ("online", "active"):
+                status = node.get("status", "") if isinstance(node, dict) else ""
+                if status in ("online", "active"):
                     return nid
         return None
 
     def run(self):
         self.logger.info("=== TC-MIG: Migration Lifecycle ===")
 
-        nodes = self.sbcli_utils.get_storage_nodes()
+        _nodes_raw = self.sbcli_utils.get_storage_nodes()
+        nodes = _nodes_raw.get("results", _nodes_raw) if isinstance(_nodes_raw, dict) else _nodes_raw
         if len(nodes) < 2:
             self.logger.warning(
                 "Migration tests require at least 2 storage nodes, skipping"
@@ -62,14 +65,14 @@ class TestMigrationLifecycle(TestClusterBase):
             pool_name=self.pool_name,
             size="1G",
         )
-        lvol_id_1 = self.sbcli_utils.get_lvol_id(lvol_name_1)
+        lvol_id_1 = self._get_lvol_id_dual(lvol_name_1)
         assert lvol_id_1, f"Could not get lvol_id for {lvol_name_1}"
 
         original_node = self._get_lvol_node(lvol_id_1)
         target_node = self._find_other_node(original_node)
         if not target_node:
             self.logger.warning("Could not find alternate node, skipping migration")
-            self.sbcli_utils.delete_lvol(lvol_name_1)
+            self._delete_lvol_dual(lvol_name_1)
             return
 
         self.logger.info(
@@ -95,7 +98,7 @@ class TestMigrationLifecycle(TestClusterBase):
             pool_name=self.pool_name,
             size="2G",
         )
-        lvol_id_2 = self.sbcli_utils.get_lvol_id(lvol_name_2)
+        lvol_id_2 = self._get_lvol_id_dual(lvol_name_2)
         assert lvol_id_2, f"Could not get lvol_id for {lvol_name_2}"
 
         # Connect and start FIO
@@ -153,9 +156,6 @@ class TestMigrationLifecycle(TestClusterBase):
             self._disconnect_and_cleanup_dual(lvol_name_2)
 
         for name in [lvol_name_1, lvol_name_2]:
-            try:
-                self.sbcli_utils.delete_lvol(name)
-            except Exception as exc:
-                self.logger.warning(f"Cleanup delete {name}: {exc}")
+            self._delete_lvol_dual(name)
 
         self.logger.info("=== TestMigrationLifecycle: ALL PASSED ===")

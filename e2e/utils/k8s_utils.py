@@ -193,7 +193,12 @@ class K8sUtils:
         return [n.strip() for n in out.strip().splitlines() if n.strip()]
 
     def detect_openshift(self) -> bool:
-        """Return True if the cluster is OpenShift (``oc`` CLI available).
+        """Return True if the cluster is OpenShift.
+
+        Checks for the ``openshift-apiserver`` namespace which only
+        exists on OpenShift clusters.  This avoids false positives on
+        machines where the ``oc`` CLI is installed but the target
+        cluster is not OpenShift (e.g. Talos).
 
         The result is cached after the first call.
         """
@@ -201,16 +206,38 @@ class K8sUtils:
             return self._is_openshift
         try:
             out, _ = self._exec_kubectl(
-                "oc version --client 2>/dev/null && echo OC_OK || echo OC_NO",
+                "kubectl get namespace openshift-apiserver "
+                "--no-headers 2>/dev/null && echo OCP_YES || echo OCP_NO",
                 supress_logs=True,
             )
-            self._is_openshift = "OC_OK" in out
+            self._is_openshift = "OCP_YES" in out
         except Exception:
             self._is_openshift = False
         self.logger.info(
             f"[K8sUtils] Platform detection: openshift={self._is_openshift}"
         )
         return self._is_openshift
+
+    def detect_talos(self) -> bool:
+        """Return True if the cluster nodes run Talos Linux.
+
+        Checks the ``osImage`` field of the first node.  The result is
+        cached after the first call.
+        """
+        if hasattr(self, "_is_talos"):
+            return self._is_talos
+        try:
+            out, _ = self._exec_kubectl(
+                "kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.osImage}'",
+                supress_logs=True,
+            )
+            self._is_talos = "Talos" in (out or "")
+        except Exception:
+            self._is_talos = False
+        self.logger.info(
+            f"[K8sUtils] Platform detection: talos={self._is_talos}"
+        )
+        return self._is_talos
 
     # ── SPDK pod operations ──────────────────────────────────────────────────
 
@@ -353,7 +380,7 @@ class K8sUtils:
             kexec = (
                 f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} --"
             )
-            rpc_base = f"{kexec} python spdk/scripts/rpc.py -s {sock}"
+            rpc_base = f"{kexec} sudo python spdk/scripts/rpc.py -s {sock}"
 
             # 1. Get bdevs
             bdev_out, _ = self._exec_kubectl(f"{rpc_base} bdev_get_bdevs", supress_logs=True)
@@ -1615,6 +1642,44 @@ class K8sUtils:
         raise TimeoutError(
             f"[K8sUtils] VolumeSnapshot '{name}' not ready within {timeout}s"
         )
+
+    def get_volume_snapshot_handle(self, name: str, namespace: str = None) -> str:
+        """Return the backend snapshot UUID for a VolumeSnapshot, or ''.
+
+        Resolves VolumeSnapshot → boundVolumeSnapshotContent →
+        VolumeSnapshotContent.status.snapshotHandle.  The CSI snapshotHandle
+        may be a composite ``cluster:node:snap_uuid``; the bare UUID (last
+        ``:``-separated segment) is returned so it matches ``sbcli snapshot
+        list``.
+        """
+        ns = namespace or self.namespace
+        content, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshot {name} -n {ns} -o jsonpath="
+            f"'{{.status.boundVolumeSnapshotContentName}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        content = content.strip()
+        if not content:
+            return ""
+        handle, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshotcontent {content} -o jsonpath="
+            f"'{{.status.snapshotHandle}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        handle = handle.strip()
+        if not handle:
+            return ""
+        return handle.rsplit(":", 1)[-1] if ":" in handle else handle
+
+    def get_volume_snapshot_phase(self, name: str, namespace: str = None) -> str:
+        """Return VolumeSnapshot readyToUse status string ('' if absent)."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshot {name} -n {ns} "
+            f"-o jsonpath='{{.status.readyToUse}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out.strip()
 
     def delete_volume_snapshot(self, name: str, namespace: str = None,
                                wait: bool = False):
@@ -2930,6 +2995,9 @@ class K8sUtils:
             f"spec:\n"
             f"{affinity_block}"
             f"{tolerations_block}"
+            f"  securityContext:\n"
+            f"    seLinuxOptions:\n"
+            f"      type: spc_t\n"
             f"  containers:\n"
             f"  - name: alpine\n"
             f"    image: alpine:3\n"
@@ -3193,6 +3261,31 @@ class K8sSbcliUtils:
             self.logger.warning(f"[_run_json] JSON parse error from: {cmd}\n  raw={raw[:200]}\n  error={e}")
             return []
 
+    @staticmethod
+    def _cli_output_is_error(stdout: str, stderr: str) -> bool:
+        """Return True if a sbcli/kubectl-exec result indicates a failure.
+
+        ``exec_sbcli`` discards the exit code, so failures surface either as a
+        non-empty stderr (``command terminated with exit code N`` from kubectl,
+        or the sbcli ``Error:`` line) or as an ``Error``/``Traceback`` string
+        printed to stdout.  Mirrors how the REST ``SbcliUtils`` raises on a
+        non-2xx response.
+        """
+        blob = f"{stdout or ''}\n{stderr or ''}"
+        markers = (
+            "command terminated with exit code",
+            "Error:",
+            "Traceback (most recent call last)",
+            "usage:",  # argparse rejected the arguments
+        )
+        return any(m in blob for m in markers)
+
+    def _raise_if_cli_error(self, stdout: str, stderr: str, context: str = ""):
+        """Raise RuntimeError when a CLI result indicates failure."""
+        if self._cli_output_is_error(stdout, stderr):
+            detail = (stderr or "").strip() or (stdout or "").strip()
+            raise RuntimeError(f"sbcli command failed ({context}): {detail}")
+
     # ── lvol methods ──────────────────────────────────────────────────────────
 
     def list_lvols(self):
@@ -3255,8 +3348,20 @@ class K8sSbcliUtils:
             cmd += f" --fabric {shlex.quote(fabric)}"
         if crypto:
             cmd += " --encrypt"
+        # Namespace packing flags (parity with SbcliUtils REST body):
+        #   max_namespace_per_subsys -> --max-namespace-per-subsys <N>
+        #   namespace=True           -> --namespaced true
+        # Without these the CLI creates an independent subsystem per lvol
+        # (distinct NQN) instead of packing namespaces into a shared one.
+        if max_namespace_per_subsys is not None:
+            cmd += f" --max-namespace-per-subsys {int(max_namespace_per_subsys)}"
+        if namespace:
+            cmd += " --namespaced true"
 
-        self.k8s.exec_sbcli(cmd)
+        out, err = self.k8s.exec_sbcli(cmd)
+        # CLI write ops do not raise on failure the way the REST client does;
+        # surface an error so negative tests observe the expected exception.
+        self._raise_if_cli_error(out, err, context=f"lvol add {lvol_name}")
 
     def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
         """Delete lvol by name, retrying the delete command periodically
@@ -3320,7 +3425,8 @@ class K8sSbcliUtils:
             self.delete_lvol(lvol_name=name)
 
     def resize_lvol(self, lvol_id, new_size):
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol resize {lvol_id} {new_size}")
+        out, err = self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol resize {lvol_id} {new_size}")
+        self._raise_if_cli_error(out, err, context=f"lvol resize {lvol_id}")
 
     # ── storage node methods ──────────────────────────────────────────────────
 
@@ -3446,7 +3552,7 @@ class K8sSbcliUtils:
         return self.list_storage_pools().get(pool_name)
 
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
-                         max_r_mbytes=0, max_w_mbytes=0):
+                         max_r_mbytes=0, max_w_mbytes=0, dhchap=False, allowed_nodes=None):
         """Use an existing pool if any exist; only create via kubectl if none exist.
 
         Returns the actual pool name to use (may differ from *pool_name* if an
@@ -3473,6 +3579,79 @@ class K8sSbcliUtils:
             f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
         existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
+
+        # 2b. If CRDs exist, check if they're stuck in Terminating.
+        #     Previous test runs may have initiated deletion but finalizers
+        #     blocked completion.  Wait up to 120s for them to disappear,
+        #     then force-remove finalizers if still stuck.
+        if existing_crds:
+            term_out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepools -n {ns} --no-headers "
+                f"-o custom-columns="
+                f"NAME:.metadata.name,DEL:.metadata.deletionTimestamp "
+                f"2>/dev/null || true"
+            )
+            terminating = []
+            for line in (term_out or "").strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] != "<none>":
+                    terminating.append(parts[0])
+
+            if terminating:
+                self.logger.warning(
+                    f"[pool] Found Terminating StoragePool CRDs: "
+                    f"{terminating} — waiting for deletion to complete"
+                )
+                deadline = time.time() + 120
+                while time.time() < deadline:
+                    check_out, _ = self.k8s._exec_kubectl(
+                        f"kubectl get storagepools -n {ns} --no-headers "
+                        f"-o custom-columns=NAME:.metadata.name "
+                        f"2>/dev/null || true"
+                    )
+                    remaining = [
+                        r.strip() for r in
+                        (check_out or "").strip().splitlines()
+                        if r.strip()
+                    ]
+                    if not remaining:
+                        self.logger.info(
+                            "[pool] All Terminating CRDs deleted")
+                        break
+                    sleep_n_sec(5)
+                else:
+                    # Force-remove finalizers on stuck CRDs
+                    self.logger.warning(
+                        "[pool] CRDs still stuck after 120s — "
+                        "removing finalizers to unblock deletion"
+                    )
+                    for crd_name in terminating:
+                        try:
+                            self.k8s._exec_kubectl(
+                                f"kubectl patch storagepool {crd_name} "
+                                f"-n {ns} --type merge "
+                                f"-p '{{\"metadata\":{{\"finalizers\":[]}}}}'"
+                            )
+                            self.logger.info(
+                                f"[pool] Removed finalizers from "
+                                f"{crd_name}")
+                        except Exception as e:
+                            self.logger.warning(
+                                f"[pool] Failed to patch {crd_name}: "
+                                f"{e}")
+                    sleep_n_sec(10)
+
+                # Re-check — CRDs should be gone now
+                re_out, _ = self.k8s._exec_kubectl(
+                    f"kubectl get storagepools -n {ns} --no-headers "
+                    f"-o custom-columns=NAME:.metadata.name "
+                    f"2>/dev/null || true"
+                )
+                existing_crds = [
+                    r.strip() for r in
+                    (re_out or "").strip().splitlines()
+                    if r.strip()
+                ]
 
         if not existing_crds:
             # 3. No pools at all — create one via kubectl apply
@@ -3515,6 +3694,12 @@ class K8sSbcliUtils:
                 f"spec:\n"
                 f"  clusterName: {cluster_name}\n"
             )
+            if dhchap:
+                yaml_content += "  dhchap: true\n"
+            if allowed_nodes:
+                yaml_content += "  allowedNodes:\n"
+                for node_name in allowed_nodes:
+                    yaml_content += f"    - {node_name}\n"
 
             self.logger.info(
                 f"[pool] No pools found — creating '{pool_name}' "
@@ -3721,6 +3906,26 @@ class K8sSbcliUtils:
         """Run ``pool remove-host <pool_id> <nqn>`` via kubectl exec."""
         out = self._run(f"{self.sbcli_cmd} pool remove-host {pool_id} {host_nqn}")
         self.logger.info(f"[remove_host_from_pool] pool={pool_id} nqn={host_nqn}: {out}")
+        return out
+
+    def disable_storage_pool(self, pool_name):
+        """Set a pool's status to Inactive via ``pool disable <pool_id>``."""
+        pool_id = self.get_storage_pool_id(pool_name)
+        if not pool_id:
+            raise RuntimeError(f"Pool {pool_name} not found; cannot disable")
+        out, err = self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool disable {pool_id}")
+        self._raise_if_cli_error(out, err, context=f"pool disable {pool_name}")
+        self.logger.info(f"[pool] Disabled pool '{pool_name}' ({pool_id})")
+        return out
+
+    def enable_storage_pool(self, pool_name):
+        """Set a pool's status to Active via ``pool enable <pool_id>``."""
+        pool_id = self.get_storage_pool_id(pool_name)
+        if not pool_id:
+            raise RuntimeError(f"Pool {pool_name} not found; cannot enable")
+        out, err = self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool enable {pool_id}")
+        self._raise_if_cli_error(out, err, context=f"pool enable {pool_name}")
+        self.logger.info(f"[pool] Enabled pool '{pool_name}' ({pool_id})")
         return out
 
     def delete_storage_pool(self, pool_name):
@@ -3990,9 +4195,10 @@ class K8sSbcliUtils:
     # ── snapshot methods ──────────────────────────────────────────────────────
 
     def add_snapshot(self, lvol_id: str, snapshot_name: str, retry: int = 10):
-        self.k8s.exec_sbcli(
+        out, err = self.k8s.exec_sbcli(
             f"{self.sbcli_cmd} -d snapshot add {lvol_id} {shlex.quote(snapshot_name)}"
         )
+        self._raise_if_cli_error(out, err, context=f"snapshot add {snapshot_name}")
         self.wait_for_snapshot(snapshot_name, present=True, timeout=60)
 
     def list_snapshots(self):
@@ -4085,6 +4291,7 @@ class K8sSbcliUtils:
         out, err = self.k8s.exec_sbcli(
             f"{self.sbcli_cmd} -d snapshot clone {snapshot_id} {shlex.quote(clone_name)}"
         )
+        self._raise_if_cli_error(out, err, context=f"snapshot clone {clone_name}")
         # Poll until the clone appears in lvol list
         deadline = time.time() + 60
         while time.time() < deadline:

@@ -72,7 +72,7 @@ on:
       # Bootstrap params
       # =========================
       BOOTSTRAP_MAX_LVOL:
-        description: "bootstrap: --max-lvol"
+        description: "bootstrap: --max-subsys (cluster-wide max subsystems per node)"
         required: true
         default: "75"
       BOOTSTRAP_DATA_CHUNKS:
@@ -546,7 +546,7 @@ jobs:
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
-            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            --max-subsys "${BOOTSTRAP_MAX_LVOL}" \
             --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
@@ -618,19 +618,26 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # 1. Install mc (MinIO Client)
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
-          chmod +x /tmp/mc
-          export PATH="/tmp:$PATH"
-          echo "/tmp" >> "$GITHUB_PATH"
+          # This VM hosts multiple parallel runners, so every path/alias/
+          # process used here MUST be scoped to this run — a shared
+          # /tmp/mc or a pattern-matching pkill would race with, corrupt,
+          # or kill another job's in-flight mc install/trace.
+          MC_BIN="/tmp/mc-${GITHUB_RUN_ID}"
+          MC_ALIAS="myminio-${GITHUB_RUN_ID}"
+          echo "MC_BIN=${MC_BIN}" >> "$GITHUB_ENV"
+          echo "MC_ALIAS=${MC_ALIAS}" >> "$GITHUB_ENV"
 
-          # 2. Configure mc alias to external MinIO
-          mc alias set myminio http://192.168.10.164:9000 "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
+          # 1. Install mc (MinIO Client) to our own per-run path
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o "${MC_BIN}"
+          chmod +x "${MC_BIN}"
+
+          # 2. Configure our own mc alias to external MinIO
+          "${MC_BIN}" alias set "${MC_ALIAS}" http://192.168.10.164:9000 "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
 
           # 3. Start admin trace in background
           MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
           echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
-          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          nohup "${MC_BIN}" admin trace -v --all "${MC_ALIAS}" > "${MINIO_TRACE_LOG}" 2>&1 &
           echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
 
           echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
@@ -1030,9 +1037,11 @@ jobs:
           else
             echo "No MinIO trace log found (backup tests may not have run)"
           fi
-          # Cleanup: delete trace logs and kill any orphaned mc trace processes
-          rm -f /tmp/minio-trace-*.log 2>/dev/null || true
-          pkill -f "mc admin trace" 2>/dev/null || true
+          # Cleanup: only our own per-run trace log + mc binary — never a
+          # glob/pkill that could hit another parallel job's files or
+          # processes on this shared VM.
+          rm -f "${MINIO_TRACE_LOG:-}" 2>/dev/null || true
+          rm -f "${MC_BIN:-}" 2>/dev/null || true
 
       - name: Upload bootstrap + test logs
         if: always()

@@ -143,7 +143,7 @@ class TestLvolConnectLifecycle(TestClusterBase):
             pool_name=self.pool_name,
             size="1G",
         )
-        resize_id = self.sbcli_utils.get_lvol_id(resize_lvol)
+        resize_id = self._get_lvol_id_dual(resize_lvol)
         assert resize_id, f"Could not get lvol_id for {resize_lvol}"
 
         device, mount = self._connect_and_mount_dual(
@@ -204,7 +204,7 @@ class TestLvolConnectLifecycle(TestClusterBase):
         all_lvols = [lvol_name, resize_lvol, idle_lvol] + multi_lvols
         for name in all_lvols:
             try:
-                self.sbcli_utils.delete_lvol(name)
+                self._delete_lvol_dual(name)
             except Exception as exc:
                 self.logger.warning(f"Cleanup delete {name}: {exc}")
 

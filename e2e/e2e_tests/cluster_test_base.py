@@ -99,6 +99,7 @@ class TestClusterBase:
         self._k8s_storage_class_name = "simplyblock-csi-sc"
         self._k8s_snapshot_class_name = "simplyblock-csi-snapshotclass"
         self._volume_registry = {}  # lvol_name -> {pvc_name, lvol_id, device, mount}
+        self._snapshot_registry = {}  # snapshot_name -> {vs_name, snap_id}
 
     def _validate_storage_node_health(self, timeout=300):
         """Validate all storage nodes are online and healthy before starting test.
@@ -405,13 +406,16 @@ class TestClusterBase:
         """
         pool_name = pool_name or self.pool_name
         result = self.sbcli_utils.add_storage_pool(pool_name=pool_name, **kwargs)
-        if self.k8s_test and result:
-            if result != self.pool_name:
-                self.logger.info(
-                    f"[dual] Pool name adjusted: '{self.pool_name}' -> '{result}'"
-                )
-            self.pool_name = result
-        return self.pool_name
+        # K8s: the operator may reconcile to a pool whose name differs from the
+        # requested one (add_storage_pool returns it). Docker: the REST client
+        # returns None, so the actual name is exactly what we requested.
+        actual = result if (self.k8s_test and result) else pool_name
+        if actual != self.pool_name:
+            self.logger.info(
+                f"[dual] Pool name: '{self.pool_name}' -> '{actual}'"
+            )
+        self.pool_name = actual
+        return actual
 
     def _verify_pool_exists_dual(self, pool_name=None):
         """Assert that a pool exists. In K8s mode checks the StoragePool CRD;
@@ -642,6 +646,93 @@ class TestClusterBase:
             )
         return self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
 
+    def _delete_lvol_dual(self, lvol_name, skip_error=True):
+        """Delete an lvol (Docker) or its backing PVC (K8s).
+
+        In K8s mode the CSI driver names the backend lvol after the PV, so a
+        name-based ``delete_lvol`` would fail.  Delete the PVC recorded in the
+        volume registry instead and let the CSI driver reclaim the lvol.
+        """
+        if self.k8s_test:
+            reg = self._volume_registry.get(lvol_name)
+            k8s = self._ensure_k8s_utils()
+            pvc_name = (reg or {}).get("pvc_name", self._k8s_normalize_name(lvol_name))
+            try:
+                k8s.delete_pvc(pvc_name)
+            except Exception as exc:
+                if not skip_error:
+                    raise
+                self.logger.warning(f"[k8s] delete PVC {pvc_name} failed: {exc}")
+            if pvc_name in self._k8s_pvcs:
+                self._k8s_pvcs.remove(pvc_name)
+            self._volume_registry.pop(lvol_name, None)
+            return
+        try:
+            self.sbcli_utils.delete_lvol(lvol_name)
+        except Exception as exc:
+            if not skip_error:
+                raise
+            self.logger.warning(f"delete lvol {lvol_name} failed: {exc}")
+        self._volume_registry.pop(lvol_name, None)
+
+    def _verify_lvol_absent_dual(self, lvol_name):
+        """Assert an lvol no longer exists after deletion.
+
+        Docker: checks the name is gone from ``sbcli lvol list``.
+        K8s: the backend name is the PV name, so verify by lvol_id (from the
+        registry snapshot captured before delete) or by PVC absence.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            phase = (k8s.get_pvc_status(pvc_name) or {}).get("phase", "")
+            assert not phase, (
+                f"PVC {pvc_name} (for '{lvol_name}') still present after delete "
+                f"(phase={phase})"
+            )
+        else:
+            lvols = self.sbcli_utils.list_lvols()
+            assert lvol_name not in list(lvols.keys()), \
+                f"Lvol {lvol_name} still present after delete: {list(lvols.keys())}"
+
+    def _disable_pool_dual(self, pool_name=None):
+        """Disable a storage pool (set status to Inactive).
+
+        Docker: SSH exec ``sbcli pool disable <pool_id>`` on a management node.
+        K8s: ``K8sSbcliUtils.disable_storage_pool()`` which execs the CLI
+        inside the admin pod.
+        """
+        pool_name = pool_name or self.pool_name
+        if self.k8s_test:
+            self.sbcli_utils.disable_storage_pool(pool_name)
+        else:
+            pool_id = self.sbcli_utils.get_storage_pool_id(pool_name)
+            assert pool_id, f"Pool {pool_name} not found; cannot disable"
+            out, _ = self.ssh_obj.exec_command(
+                self.mgmt_nodes[0],
+                f"{self.base_cmd} pool disable {pool_id}",
+            )
+            self.logger.info(f"[dual] Pool disabled: {pool_name} ({pool_id})")
+
+    def _enable_pool_dual(self, pool_name=None):
+        """Enable a storage pool (set status to Active).
+
+        Docker: SSH exec ``sbcli pool enable <pool_id>`` on a management node.
+        K8s: ``K8sSbcliUtils.enable_storage_pool()`` which execs the CLI
+        inside the admin pod.
+        """
+        pool_name = pool_name or self.pool_name
+        if self.k8s_test:
+            self.sbcli_utils.enable_storage_pool(pool_name)
+        else:
+            pool_id = self.sbcli_utils.get_storage_pool_id(pool_name)
+            assert pool_id, f"Pool {pool_name} not found; cannot enable"
+            out, _ = self.ssh_obj.exec_command(
+                self.mgmt_nodes[0],
+                f"{self.base_cmd} pool enable {pool_id}",
+            )
+            self.logger.info(f"[dual] Pool enabled: {pool_name} ({pool_id})")
+
     def _connect_and_mount_dual(self, lvol_name, mount_path=None,
                                 format_disk=True, fs_type="ext4"):
         """NVMe connect + mount (Docker) or no-op (K8s). Returns (device, mount).
@@ -802,7 +893,12 @@ class TestClusterBase:
                 )
 
     def _create_snapshot_dual(self, lvol_name, snapshot_name):
-        """Create a snapshot. Returns snapshot_id (Docker) or snap_name (K8s)."""
+        """Create a snapshot. Returns snapshot_id (Docker) or snap_name (K8s).
+
+        In K8s mode the snapshot is a VolumeSnapshot CRD; the backend snap UUID
+        (from its snapshotHandle) is cached in ``_snapshot_registry`` keyed by
+        the *logical* snapshot_name so ``_get_snapshot_id_dual`` can resolve it.
+        """
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             reg = self._volume_registry.get(lvol_name, {})
@@ -812,11 +908,72 @@ class TestClusterBase:
                                        snapshot_class=self._k8s_snapshot_class_name)
             k8s.wait_volume_snapshot_ready(snap_name)
             self._k8s_volume_snapshots.append(snap_name)
+            snap_id = k8s.get_volume_snapshot_handle(snap_name)
+            self._snapshot_registry[snapshot_name] = {
+                "vs_name": snap_name, "snap_id": snap_id,
+            }
+            # Return the VolumeSnapshot NAME (not the backend UUID): the K8s
+            # clone path (_create_clone_dual) creates a clone PVC whose
+            # dataSource references the VolumeSnapshot by name.
             return snap_name
         else:
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
             self.sbcli_utils.add_snapshot(lvol_id=lvol_id, snapshot_name=snapshot_name)
-            return self.sbcli_utils.get_snapshot_id(snap_name=snapshot_name)
+            snap_id = self.sbcli_utils.get_snapshot_id(snap_name=snapshot_name)
+            self._snapshot_registry[snapshot_name] = {"snap_id": snap_id}
+            return snap_id
+
+    def _get_snapshot_id_dual(self, snapshot_name):
+        """Return the backend snapshot UUID for *snapshot_name* (dual-mode)."""
+        reg = self._snapshot_registry.get(snapshot_name, {})
+        snap_id = reg.get("snap_id")
+        if snap_id:
+            return snap_id
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            vs_name = reg.get("vs_name", self._k8s_normalize_name(snapshot_name))
+            return k8s.get_volume_snapshot_handle(vs_name)
+        return self.sbcli_utils.get_snapshot_id(snap_name=snapshot_name)
+
+    def _verify_snapshot_exists_dual(self, snapshot_name):
+        """Assert a snapshot exists after creation (dual-mode)."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._snapshot_registry.get(snapshot_name, {})
+            vs_name = reg.get("vs_name", self._k8s_normalize_name(snapshot_name))
+            phase = k8s.get_volume_snapshot_phase(vs_name)
+            assert phase == "true", (
+                f"VolumeSnapshot {vs_name} (for '{snapshot_name}') not ready "
+                f"(readyToUse={phase!r})"
+            )
+        else:
+            snapshots = self.sbcli_utils.list_snapshots()
+            assert snapshot_name in snapshots, \
+                f"Snapshot {snapshot_name} not found in list: {list(snapshots.keys())}"
+
+    def _delete_snapshot_dual(self, snapshot_name, skip_error=True):
+        """Delete a snapshot (Docker: sbcli; K8s: VolumeSnapshot CRD)."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._snapshot_registry.get(snapshot_name, {})
+            vs_name = reg.get("vs_name", self._k8s_normalize_name(snapshot_name))
+            try:
+                k8s.delete_volume_snapshot(vs_name, wait=True)
+            except Exception as exc:
+                if not skip_error:
+                    raise
+                self.logger.warning(f"[k8s] delete VolumeSnapshot {vs_name} failed: {exc}")
+            if vs_name in self._k8s_volume_snapshots:
+                self._k8s_volume_snapshots.remove(vs_name)
+            self._snapshot_registry.pop(snapshot_name, None)
+        else:
+            try:
+                self.sbcli_utils.delete_snapshot(snapshot_name)
+            except Exception as exc:
+                if not skip_error:
+                    raise
+                self.logger.warning(f"delete snapshot {snapshot_name} failed: {exc}")
+            self._snapshot_registry.pop(snapshot_name, None)
 
     def _create_clone_dual(self, snapshot_id, clone_name, size="10Gi",
                            mount_path=None, format_disk=False):
@@ -3070,7 +3227,7 @@ class TestClusterBase:
             k8s = self.sbcli_utils.k8s
             pod_name = k8s.get_spdk_pod_name(ip)
             sock = k8s._find_spdk_sock(pod_name)
-            rpc_cmd = f"python spdk/scripts/rpc.py -s {sock} {method}"
+            rpc_cmd = f"sudo python spdk/scripts/rpc.py -s {sock} {method}"
             kubectl_cmd = (
                 f"kubectl exec {pod_name} -c spdk-container "
                 f"-n {k8s.namespace} -- bash -c {shlex.quote(rpc_cmd)}"

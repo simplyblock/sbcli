@@ -32,7 +32,7 @@ class TestLvolCapacityIOStats(TestClusterBase):
             size="5G",
         )
 
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        lvol_id = self._get_lvol_id_dual(lvol_name)
         assert lvol_id, f"Could not get lvol_id for {lvol_name}"
 
         device, mount = self._connect_and_mount_dual(
