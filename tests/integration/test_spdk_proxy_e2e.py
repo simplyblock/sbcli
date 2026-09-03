@@ -23,6 +23,7 @@ import unittest
 
 import requests
 import uvicorn
+from tenacity import Retrying, stop_after_delay, wait_fixed, retry_if_exception_type, retry_if_result, RetryError
 
 if sys.platform == "win32":
     raise unittest.SkipTest("AF_UNIX not available on Windows")
@@ -146,15 +147,14 @@ class RunningProxy:
         self._thread.join(timeout=10)
 
     def wait_until_serving(self, timeout=15):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                if self.post("spdk_get_version").status_code == 200:
-                    return True
-            except requests.RequestException:
-                pass
-            time.sleep(0.1)
-        return False
+        try:
+            return Retrying(
+                stop=stop_after_delay(timeout),
+                wait=wait_fixed(0.1),
+                retry=(retry_if_exception_type(requests.RequestException) | retry_if_result(lambda success: not success)),
+            )(lambda: self.post("spdk_get_version").status_code == 200)
+        except RetryError:
+            return False
 
     def is_refusing_connections(self):
         try:
