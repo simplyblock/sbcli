@@ -285,8 +285,6 @@ def _run_restart_in_thread(env, node_idx=RESTART_NODE):
     """
     result_holder = {"result": None, "node": None, "error": None}
     patches = patch_externals()
-    for p in patches:
-        p.start()
 
     def _do():
         try:
@@ -334,8 +332,7 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
             stress.run_for()
             restart_thread.join(timeout=30)
 
-            for p in _patches:
-                p.stop()
+            _patches.close()
 
         auditor.assert_no_proceed_during_blocked()
         assert stress.total_ops >= stress.num_threads, (
@@ -357,8 +354,7 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
             stress.run_for()
             restart_thread.join(timeout=30)
 
-            for p in _patches:
-                p.stop()
+            _patches.close()
 
         auditor.assert_no_proceed_during_blocked()
 
@@ -381,8 +377,7 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
             stress.run_for()
             restart_thread.join(timeout=30)
 
-            for p in _patches:
-                p.stop()
+            _patches.close()
 
         auditor.assert_no_proceed_during_blocked()
 
@@ -404,8 +399,7 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
             stress.run_for()
             restart_thread.join(timeout=30)
 
-            for p in _patches:
-                p.stop()
+            _patches.close()
 
         auditor.assert_no_proceed_during_blocked()
         # This used to read "only a handful of ops land inside the window,
@@ -434,8 +428,7 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
             stress.run_for()
             restart_thread.join(timeout=60)
 
-            for p in _patches:
-                p.stop()
+            _patches.close()
 
         auditor.assert_no_proceed_during_blocked()
         delayed = auditor.assert_delayed_ops_after_unblock()
@@ -460,8 +453,7 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
             stress.run_for()
             restart_thread.join(timeout=30)
 
-            for p in _patches:
-                p.stop()
+            _patches.close()
 
         # Check that delayed events are in timestamp order
         delayed = [e for e in auditor.events if e.result == "delay"]
@@ -494,8 +486,6 @@ class TestConcurrentOpsOnTertiaryDuringSecondaryRestart:
                           side_effect=auditor):
             node = env['nodes'][1]
             patches = patch_externals()
-            for p in patches:
-                p.start()
 
             restart_thread = threading.Thread(
                 target=lambda: storage_node_ops.restart_storage_node(node.uuid),
@@ -507,8 +497,7 @@ class TestConcurrentOpsOnTertiaryDuringSecondaryRestart:
             stress.run_for()
             restart_thread.join(timeout=30)
 
-            for p in patches:
-                p.stop()
+            patches.close()
 
         auditor.assert_no_proceed_during_blocked()
 
@@ -525,8 +514,6 @@ class TestConcurrentOpsOnTertiaryDuringSecondaryRestart:
                           side_effect=auditor):
             node = env['nodes'][1]
             patches = patch_externals()
-            for p in patches:
-                p.start()
 
             restart_thread = threading.Thread(
                 target=lambda: storage_node_ops.restart_storage_node(node.uuid),
@@ -538,8 +525,7 @@ class TestConcurrentOpsOnTertiaryDuringSecondaryRestart:
             stress.run_for()
             restart_thread.join(timeout=60)
 
-            for p in patches:
-                p.stop()
+            patches.close()
 
         auditor.assert_no_proceed_during_blocked()
 
@@ -568,8 +554,6 @@ class TestConcurrentOpsOnPrimaryDuringNonLeaderRestart:
                           side_effect=auditor):
             node = env['nodes'][1]
             patches = patch_externals()
-            for p in patches:
-                p.start()
 
             restart_thread = threading.Thread(
                 target=lambda: storage_node_ops.restart_storage_node(node.uuid),
@@ -581,8 +565,7 @@ class TestConcurrentOpsOnPrimaryDuringNonLeaderRestart:
             stress.run_for()
             restart_thread.join(timeout=30)
 
-            for p in patches:
-                p.stop()
+            patches.close()
 
         auditor.assert_no_proceed_during_blocked()
 
@@ -599,8 +582,6 @@ class TestConcurrentOpsOnPrimaryDuringNonLeaderRestart:
                           side_effect=auditor):
             node = env['nodes'][1]
             patches = patch_externals()
-            for p in patches:
-                p.start()
 
             restart_thread = threading.Thread(
                 target=lambda: storage_node_ops.restart_storage_node(node.uuid),
@@ -612,8 +593,7 @@ class TestConcurrentOpsOnPrimaryDuringNonLeaderRestart:
             stress.run_for()
             restart_thread.join(timeout=30)
 
-            for p in patches:
-                p.stop()
+            patches.close()
 
         auditor.assert_no_proceed_during_blocked()
 
@@ -630,8 +610,6 @@ class TestConcurrentOpsOnPrimaryDuringNonLeaderRestart:
                           side_effect=auditor):
             node = env['nodes'][2]
             patches = patch_externals()
-            for p in patches:
-                p.start()
 
             restart_thread = threading.Thread(
                 target=lambda: storage_node_ops.restart_storage_node(node.uuid),
@@ -643,8 +621,7 @@ class TestConcurrentOpsOnPrimaryDuringNonLeaderRestart:
             stress.run_for()
             restart_thread.join(timeout=60)
 
-            for p in patches:
-                p.stop()
+            patches.close()
 
         auditor.assert_no_proceed_during_blocked()
         delayed = auditor.assert_delayed_ops_after_unblock()
