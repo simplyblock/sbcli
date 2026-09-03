@@ -5695,6 +5695,23 @@ def _restart_storage_node_impl(
     if not max_prov and cluster_hp_mem:
         max_prov = cluster_hp_mem
 
+    if max_lvol and max_lvol != snode.max_lvol:
+        # Occupancy guard: never adopt a subsystem limit below what the node
+        # already serves. Restart recreates every existing subsystem
+        # record-driven, so a smaller max_lvol would size huge pages and
+        # iobuf pools for fewer subsystems than actually come back
+        # (undersized SPDK). Typical trigger: `cluster update --max-subsys`
+        # on an upgraded cluster whose legacy nodes carry larger, divergent
+        # per-node values from before the setting became cluster-wide.
+        current_subsys = lvol_controller.count_lvol_subsystems(snode)
+        if max_lvol < current_subsys:
+            logger.error(
+                f"Refusing max_lvol {max_lvol} on node {snode.get_id()}: the "
+                f"node already serves {current_subsys} subsystems; the lowest "
+                f"adoptable value is {current_subsys}. Existing subsystems "
+                f"are never torn down by a limit change.")
+            return False
+
     if not utils.vcpu_requirement_met(snode.cpu, cluster_vcpu_count):
         # Same rule as add-node: refuse rather than run SPDK on fewer cores
         # than the cluster asks for, and keep one core for the system.
