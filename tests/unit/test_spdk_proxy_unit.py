@@ -774,16 +774,29 @@ class TestClientDisconnect(MetricsReader, unittest.IsolatedAsyncioTestCase):
 
 
 class TestIntervalReport(unittest.TestCase):
-    """The periodic log line, computed from a histogram's own totals."""
+    """The periodic log line, and the histogram it observes alongside it."""
 
     def setUp(self):
-        registry = CollectorRegistry()
+        self.registry = CollectorRegistry()
         self.report = proxy_mod.IntervalReport('spdk', Histogram(
             'test_duration_seconds', 'test', ['method'],
-            buckets=(0.01, 0.1, 1, float("inf")), registry=registry))
+            buckets=(0.01, 0.1, 1, float("inf")), registry=self.registry))
 
     def test_first_tick_without_observations_reports_nothing(self):
         self.assertIsNone(self.report.report())
+
+    def test_observations_reach_the_histogram_as_well_as_the_log_line(self):
+        self.report.observe(0.5, method="a")
+        self.report.report()
+
+        # Reporting resets the log-line totals; the histogram is cumulative
+        # and must still carry the observation for the exposition.
+        self.assertEqual(
+            self.registry.get_sample_value(
+                'test_duration_seconds_count', {'method': 'a'}), 1)
+        self.assertEqual(
+            self.registry.get_sample_value(
+                'test_duration_seconds_sum', {'method': 'a'}), 0.5)
 
     def test_interval_average_covers_only_the_new_observations(self):
         self.report.observe(1.0, method="a")
@@ -835,26 +848,6 @@ class TestIntervalReport(unittest.TestCase):
         self.report.observe(0.5, method="other")
         self.assertIn("slowest=other", self.report.report())
 
-    def test_p99_lands_in_the_bucket_holding_the_tail(self):
-        for _ in range(95):
-            self.report.observe(0.005, method="a")
-        for _ in range(5):
-            self.report.observe(0.5, method="a")
-
-        self.assertIn("p99<=1.00s", self.report.report())
-
-    def test_p99_ignores_a_tail_thinner_than_one_percent(self):
-        for _ in range(99):
-            self.report.observe(0.005, method="a")
-        self.report.observe(0.5, method="a")
-
-        self.assertIn("p99<=10.0ms", self.report.report())
-
-    def test_p99_beyond_the_last_finite_bucket_is_marked_open_ended(self):
-        self.report.observe(30.0, method="a")
-
-        self.assertIn("p99>1.00s", self.report.report())
-
     def test_unlabelled_histogram_reports_without_a_slowest_field(self):
         registry = CollectorRegistry()
         report = proxy_mod.IntervalReport('body', Histogram(
@@ -865,22 +858,6 @@ class TestIntervalReport(unittest.TestCase):
 
         self.assertIn("n=1", summary)
         self.assertNotIn("slowest=", summary)
-
-
-class TestBucketQuantile(unittest.TestCase):
-
-    def test_empty_buckets_have_no_quantile(self):
-        self.assertIsNone(proxy_mod._bucket_quantile({}, 0.99))
-
-    def test_all_zero_buckets_have_no_quantile(self):
-        self.assertIsNone(proxy_mod._bucket_quantile({0.1: 0.0, float("inf"): 0.0}, 0.99))
-
-    def test_quantile_is_the_bound_of_the_bucket_it_falls_in(self):
-        buckets = {0.1: 90.0, 1.0: 99.0, float("inf"): 100.0}
-
-        self.assertEqual(proxy_mod._bucket_quantile(buckets, 0.5), 0.1)
-        self.assertEqual(proxy_mod._bucket_quantile(buckets, 0.99), 1.0)
-        self.assertEqual(proxy_mod._bucket_quantile(buckets, 1.0), float("inf"))
 
 
 class TestMethodLabelCardinality(unittest.TestCase):
