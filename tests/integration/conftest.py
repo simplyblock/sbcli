@@ -207,8 +207,8 @@ def _no_kubernetes():
     then falls back to the developer's ``~/.kube/config``. Unpatched, control
     paths that touch k8s (cluster activation calls
     ``set_storage_mcp_max_unavailable``; the event controllers call
-    ``patch_cr_node_status``) issue REAL, untimed HTTPS requests to whatever
-    cluster that file names.
+    ``patch_cr_status`` and ``patch_cr_lvol_status``) issue REAL, untimed HTTPS
+    requests to whatever cluster that file names.
 
     That made the tier's runtime a function of the developer's kubeconfig:
     ``test_dual_ft_e2e`` ran in 9.8s the day the configured API server refused

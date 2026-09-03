@@ -103,17 +103,6 @@ def _lvol_event(lvol, message, caused_by, event):
                 remove=True,
             )
         
-        lvs = db_controller.get_lvols_by_node_id(snode.get_id()) or []
-        utils.patch_cr_node_status(
-            group=constants.CR_GROUP,
-            version=constants.CR_VERSION,
-            plural=snode.cr_plural,
-            namespace=snode.cr_namespace,
-            name=snode.cr_name,
-            node_uuid=snode.get_id(),
-            node_mgmt_ip=snode.mgmt_ip,
-            updates={"volumes": len(lvs)},
-        )
 
 def lvol_create(lvol, caused_by=ec.CAUSED_BY_CLI):
     _lvol_event(lvol, f"LVol created, {lvol.lvol_bdev}", caused_by, ec.EVENT_OBJ_CREATED)
