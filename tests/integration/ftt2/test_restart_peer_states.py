@@ -46,8 +46,6 @@ def _run_restart(env):
     from simplyblock_core.db_controller import DBController
     node = env['nodes'][RESTART_NODE]
     patches = patch_externals()
-    for p in patches:
-        p.start()
     try:
         db = DBController()
         snode = db.get_storage_node_by_id(node.uuid)
@@ -61,8 +59,7 @@ def _run_restart(env):
         updated = db.get_storage_node_by_id(node.uuid)
         return result, updated
     finally:
-        for p in patches:
-            p.stop()
+        patches.close()
 
 
 def _get_rpc_log(env, node_idx):
