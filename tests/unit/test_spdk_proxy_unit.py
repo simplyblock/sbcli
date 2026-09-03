@@ -7,7 +7,9 @@ effects.
 """
 
 import asyncio
+import contextlib
 import json
+import logging
 import os
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -113,6 +115,30 @@ def patch_connect(fake):
 
 def rpc_response(**kwargs):
     return json.dumps({"jsonrpc": "2.0", "id": 1, **kwargs}).encode('ascii')
+
+
+@contextlib.contextmanager
+def captured_records(logger):
+    """Collect what a logger emits, including nothing at all.
+
+    ``assertLogs`` fails a test that logs nothing, and ``assertNoLogs`` needs
+    python 3.10; the access logger has to be asserted both ways.
+    """
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = Capture()
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
 
 
 class TestProxySettings(unittest.TestCase):
@@ -598,6 +624,90 @@ class TestEndpoint(unittest.TestCase):
             self._post()
 
         self.assertEqual(self.proxy.active_requests, 0)
+
+
+class TestAccessLog(unittest.TestCase):
+    """The line that replaces uvicorn's access log.
+
+    Asserted on the record rather than on rendered text: the formatter is
+    installed by ``_configure_logging``, which only ``main`` calls, and the
+    fields are what a different formatter would render anyway.
+    """
+
+    def setUp(self):
+        self.app = proxy_mod.create_app(make_settings())
+        self.proxy = self.app.state.proxy
+        self.proxy.spdk_ready = True
+        self.client = TestClient(self.app)
+        self.body = json.dumps({"id": 1, "method": "bdev_get_bdevs"})
+
+    def _serve(self, path="/", auth=("test", "secret")):
+        """POST one RPC that SPDK answers, returning the access records."""
+        fake = FakeSpdkSocket([rpc_response(result=True)])
+        with captured_records(proxy_mod.access_logger) as records:
+            with patch_connect(fake):
+                self.client.post(path, content=self.body, auth=auth)
+        return records
+
+    def test_one_line_per_request(self):
+        self.assertEqual(len(self._serve()), 1)
+
+    def test_line_names_the_rpc_method(self):
+        record, = self._serve()
+
+        self.assertEqual(record.rpc_method, "bdev_get_bdevs")
+        self.assertEqual(record.getMessage(), "POST /")
+        self.assertEqual(record.status_code, 200)
+        self.assertEqual(record.client, "testclient")
+
+    def test_line_carries_sizes_and_a_duration(self):
+        record, = self._serve()
+
+        self.assertEqual(record.request_size, str(len(self.body)))
+        self.assertEqual(record.response_size, str(len(rpc_response(result=True))))
+        self.assertGreater(record.duration_ms, 0)
+
+    def test_query_string_is_not_logged(self):
+        record, = self._serve(path="/?token=hunter2")
+
+        self.assertEqual(record.getMessage(), "POST /")
+        self.assertNotIn("hunter2", str(record.__dict__))
+
+    def test_id_ties_the_line_to_the_request_it_logged(self):
+        """The params live on the request line, the outcome on the access
+        line; one id is what makes them one request."""
+        fake = FakeSpdkSocket([rpc_response(result=True)])
+        with captured_records(proxy_mod.access_logger) as access:
+            with self.assertLogs(proxy_mod.logger, "INFO") as request_lines:
+                with patch_connect(fake):
+                    self.client.post("/", content=self.body, auth=("test", "secret"))
+
+        record, = access
+        self.assertIn(f"Request:{record.request_id}", "\n".join(request_lines.output))
+
+    def test_a_rejected_request_is_logged_without_an_rpc_method(self):
+        record, = self._serve(auth=("test", "wrong"))
+
+        self.assertEqual(record.status_code, 401)
+        self.assertEqual(record.rpc_method, "-")
+
+    def test_the_configured_format_renders_the_line(self):
+        """LOG_FORMAT names fields the middleware has to supply, and a
+        mismatch would raise on the first served request in production."""
+        record, = self._serve()
+
+        line = logging.Formatter(proxy_mod.AccessLogMiddleware.LOG_FORMAT).format(record)
+
+        self.assertIn('"POST /" rpc=bdev_get_bdevs 200', line)
+        self.assertIn(f"id={record.request_id}", line)
+
+    def test_scrapes_are_not_logged(self):
+        with captured_records(proxy_mod.access_logger) as records:
+            response = self.client.get(
+                proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(records, [])
 
 
 class TestClientDisconnect(unittest.IsolatedAsyncioTestCase):

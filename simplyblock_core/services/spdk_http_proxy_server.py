@@ -12,6 +12,7 @@ Importing this module has no side effects: configuration is read by
 
 import asyncio
 import base64
+import dataclasses
 import functools
 import hmac
 import json
@@ -21,7 +22,7 @@ import ssl
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, AsyncGenerator, Dict, Optional, Set, Tuple
+from typing import Annotated, Any, AsyncGenerator, ClassVar, Dict, Optional, Set, Tuple
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -29,6 +30,7 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import ClientDisconnect
 
 from simplyblock_core.settings import Settings
@@ -36,6 +38,9 @@ from simplyblock_core.utils.secrets import redact_rpc_params
 
 
 logger = logging.getLogger(__name__)
+#: Carries the access log alone, so its extra fields can be rendered by name.
+#: The handler is attached by ``_configure_logging``.
+access_logger = logging.getLogger(f'{__name__}.access')
 
 #: How often the periodic timing report is emitted, and hence the interval
 #: every figure in it covers.
@@ -380,6 +385,75 @@ class ProxyMetrics:
         return (self.body_read, self.spdk_response)
 
 
+@dataclasses.dataclass
+class RequestLog:
+    """What one request contributes to its own log lines.
+
+    Threaded through the call rather than logged where each field becomes
+    known. Every RPC is a POST to the same path, so an access line that cannot
+    name the JSON-RPC method cannot tell two requests apart -- and the method
+    is only known once ``rpc_call`` has parsed the body, well inside the
+    request. Carrying the id here too gives the pre-flight line (the only
+    place the params appear) and the access line one identifier in common.
+    """
+
+    request_id: int = dataclasses.field(default_factory=time.time_ns)
+    rpc_method: str = '-'
+
+
+class AccessLogMiddleware(BaseHTTPMiddleware):
+    """One line per served request, in place of uvicorn's access log.
+
+    Modelled on ``simplyblock_web.app.AccessLogMiddleware``: uvicorn's own
+    line is switched off in ``main`` and this replaces it, so the fields this
+    server cares about land on the same record as the status code and the
+    duration instead of in log lines of their own.
+    """
+
+    #: How ``_configure_logging`` renders the fields ``dispatch`` attaches to
+    #: the record. Prefix matches the other lines this process emits; the rest
+    #: follows ``simplyblock_web.app``, plus the two fields that are the point
+    #: of having our own access log here (the JSON-RPC method, and the id
+    #: shared with the request's own log line).
+    LOG_FORMAT: ClassVar[str] = (
+        '%(asctime)s: %(levelname)s: %(client)s "%(message)s" rpc=%(rpc_method)s'
+        ' %(status_code)s req=%(request_size)s resp=%(response_size)s'
+        ' %(duration_ms).2fms id=%(request_id)s'
+    )
+
+    async def dispatch(
+            self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        request.state.request_log = log = RequestLog()
+
+        start = time.monotonic()
+        response = await call_next(request)
+        duration_ms = (time.monotonic() - start) * 1000
+
+        # A scrape is not traffic: Prometheus polls this endpoint for the life
+        # of the process, and the exposition it gets back is its own record
+        # that it happened.
+        if request.url.path == METRICS_ENDPOINT:
+            return response
+
+        access_logger.info(
+            '%s %s',
+            request.method,
+            # Query strings can carry credentials and have no type info to
+            # mask by, so log the path only.
+            request.url.path,
+            extra={
+                'client': request.client.host if request.client is not None else '-',
+                'request_size': request.headers.get('content-length', '-'),
+                'status_code': response.status_code,
+                'response_size': response.headers.get('content-length', '-'),
+                'duration_ms': duration_ms,
+                'rpc_method': log.rpc_method,
+                'request_id': log.request_id,
+            },
+        )
+        return response
+
+
 class InvalidRequest(Exception):
     """The request body is not a JSON-RPC request object.
 
@@ -513,24 +587,34 @@ class SpdkProxy:
             return self.settings.timeout
         return min(ct * self.settings.spdk_timeout_margin, self.settings.timeout)
 
-    async def rpc_call(self, req: bytes, client_timeout: Optional[str] = None) -> Optional[str]:
+    async def rpc_call(
+        self,
+        req: bytes,
+        client_timeout: Optional[str] = None,
+        log: Optional[RequestLog] = None,
+    ) -> Optional[str]:
         """Forward one JSON-RPC request, returning SPDK's raw response.
 
         Returns ``None`` for a request without an ``id`` (a notification, which
         SPDK does not answer).
+
+        ``log`` is filled in as the request is understood, so the access line
+        can name what this call turned out to be. A caller that serves no HTTP
+        request leaves it out and gets one of its own.
         """
+        log = RequestLog() if log is None else log
         # Parsed before the slot is taken, so a malformed request neither
         # occupies one nor gets counted as an SPDK-side failure.
         req_data = _parse_request(req)
-        method = str(req_data['method'])
-        req_time = time.time_ns()
+        log.rpc_method = str(req_data['method'])
         params = str(redact_rpc_params(req_data['params'])) if 'params' in req_data else ""
-        logger.info(f"Request:{req_time} function: {method}, params: {params}")
+        logger.info(
+            f"Request:{log.request_id} function: {log.rpc_method}, params: {params}")
         sock_timeout = self._resolve_sock_timeout(client_timeout)
         async with self.slots:
             self.metrics.slots_in_use.inc()
             try:
-                return await self._rpc_call_inner(req, req_data, method, req_time, sock_timeout)
+                return await self._rpc_call_inner(req, req_data, log, sock_timeout)
             finally:
                 self.metrics.slots_in_use.dec()
 
@@ -538,28 +622,25 @@ class SpdkProxy:
         self,
         req: bytes,
         req_data: dict,
-        method: str,
-        req_time: int,
+        log: RequestLog,
         sock_timeout: float,
     ) -> Optional[str]:
         try:
-            return await asyncio.wait_for(
-                self._exchange(req, req_data, method, req_time), sock_timeout)
+            return await asyncio.wait_for(self._exchange(req, req_data, log), sock_timeout)
         except asyncio.TimeoutError as e:
             logger.error(
-                f"Socket timeout waiting for SPDK response (request {req_time}, "
-                f"function: {method})")
-            self.metrics.record_failure(method, 'timeout')
+                f"Socket timeout waiting for SPDK response (request {log.request_id}, "
+                f"function: {log.rpc_method})")
+            self.metrics.record_failure(log.rpc_method, 'timeout')
             raise ValueError('SPDK response timeout') from e
         except OSError:
-            self.metrics.record_failure(method, 'unreachable')
+            self.metrics.record_failure(log.rpc_method, 'unreachable')
             raise
         except ValueError:
-            self.metrics.record_failure(method, 'invalid_response')
+            self.metrics.record_failure(log.rpc_method, 'invalid_response')
             raise
 
-    async def _exchange(
-            self, req: bytes, req_data: dict, method: str, req_time: int) -> Optional[str]:
+    async def _exchange(self, req: bytes, req_data: dict, log: RequestLog) -> Optional[str]:
         self.open_connections += 1
         self.metrics.unix_connections.inc()
         try:
@@ -589,12 +670,10 @@ class SpdkProxy:
                             break
                         continue
                     break
-                self.metrics.observe_response(method, time.monotonic() - recv_start)
+                self.metrics.observe_response(log.rpc_method, time.monotonic() - recv_start)
 
                 if not response and len(buf) > 0:
                     raise ValueError('Invalid response')
-
-                logger.info(f"Response:{req_time}")
 
                 return buf.decode('ascii')
             finally:
@@ -640,8 +719,9 @@ def require_authorization(request: Request) -> None:
             authorization.encode('utf-8'),
             settings.authorization.encode('utf-8'),
     ):
-        # The only trace a rejected request leaves: it never reaches the route,
-        # which is what logs every other request.
+        # The access line records the 401 too, but at INFO and among every
+        # other request; a credential that does not match is worth a level
+        # something greps for.
         client = request.client.host if request.client is not None else 'unknown'
         logger.warning(f"rejected an unauthorized request from {client}")
         raise HTTPException(status_code=401, headers={'WWW-Authenticate': 'Basic'})
@@ -693,11 +773,12 @@ def create_app(settings: ProxySettings) -> FastAPI:
         dependencies=[Depends(require_authorization)],
     )
 
+    app.add_middleware(AccessLogMiddleware)
+
     @app.post('/{path:path}', dependencies=[Depends(require_authorization)])
     async def rpc(request: Request) -> Response:
-        req_time = time.time_ns()
+        log: RequestLog = request.state.request_log
         proxy.active_requests += 1
-        logger.info(f"incoming request at: {req_time}")
         try:
             read_start = time.monotonic()
             try:
@@ -708,14 +789,16 @@ def create_app(settings: ProxySettings) -> FastAPI:
             # `wfile.write` cannot reach here.
             except ClientDisconnect:
                 logger.warning(
-                    f"client disconnected before the request body arrived (request {req_time})")
+                    "client disconnected before the request body arrived "
+                    f"(request {log.request_id})")
                 return Response(status_code=400)
             proxy.metrics.observe_body_read(time.monotonic() - read_start)
 
             try:
-                response = await proxy.rpc_call(body, request.headers.get('X-RPC-Timeout'))
+                response = await proxy.rpc_call(
+                    body, request.headers.get('X-RPC-Timeout'), log)
             except InvalidRequest as e:
-                logger.warning(f"rejected a malformed request (request {req_time}): {e}")
+                logger.warning(f"rejected a malformed request (request {log.request_id}): {e}")
                 return Response(status_code=400)
             except ValueError:
                 return Response(status_code=500)
@@ -743,6 +826,15 @@ def _configure_logging() -> None:
     root.addHandler(handler)
     root.setLevel(logging.INFO)
 
+    # The access log needs a format of its own to render the fields the
+    # middleware attaches, and must not propagate, or the root handler would
+    # print the same line again without them. Wired here rather than at import
+    # time, which the module docstring promises stays free of side effects.
+    access_handler = logging.StreamHandler(stream=sys.stdout)
+    access_handler.setFormatter(logging.Formatter(AccessLogMiddleware.LOG_FORMAT))
+    access_logger.addHandler(access_handler)
+    access_logger.propagate = False
+
 
 def main() -> None:
     _configure_logging()
@@ -755,6 +847,8 @@ def main() -> None:
         host=settings.server_ip,
         port=settings.rpc_port,
         log_level='info',
+        # Replaced by AccessLogMiddleware, not dropped.
+        access_log=False,
         limit_concurrency=settings.max_concurrent_connections,
         timeout_keep_alive=settings.keepalive_timeout,
         ssl_certfile=tls.tls_certificate if tls.tls_serve else None,
