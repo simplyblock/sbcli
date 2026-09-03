@@ -25,6 +25,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.snapshot import SnapShot
+from tests._mocks import unique_ip
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +68,7 @@ def _node(uuid, cluster_id="cluster-1", lvstore="LVS_100",
     n.lvstore = lvstore
     n.secondary_node_id = secondary_node_id
     n.tertiary_node_id = ""
-    n.mgmt_ip = f"10.0.0.{hash(uuid) % 254 + 1}"
+    n.mgmt_ip = unique_ip(uuid)
     n.rpc_port = 8080
     n.rpc_username = "user"
     n.rpc_password = "pass"
@@ -92,7 +93,7 @@ def _node(uuid, cluster_id="cluster-1", lvstore="LVS_100",
     n.nvme_devices = []
     n.health_check = True
     nic = IFace()
-    nic.ip4_address = f"10.10.10.{hash(uuid) % 254 + 1}"
+    nic.ip4_address = unique_ip(f"{uuid}-nic")
     nic.trtype = "TCP"
     nic.if_name = "eth0"
     n.data_nics = [nic]

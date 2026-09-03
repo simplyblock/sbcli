@@ -16,6 +16,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.lvol_model import LVol
+from tests._mocks import unique_ip
 
 
 def _node(uuid, lvstore="", secondary_node_id="", tertiary_node_id="",
@@ -33,7 +34,7 @@ def _node(uuid, lvstore="", secondary_node_id="", tertiary_node_id="",
     n.lvstore_stack = list(lvstore_stack) if lvstore_stack else []
     n.lvstore_stack_secondary = lvstore_stack_secondary
     n.lvstore_stack_tertiary = lvstore_stack_tertiary
-    n.mgmt_ip = mgmt_ip or f"10.0.0.{abs(hash(uuid)) % 254 + 1}"
+    n.mgmt_ip = mgmt_ip or unique_ip(uuid)
     n.rpc_port = 8080
     n.rpc_username = "user"
     n.rpc_password = SecretStr("pass")
