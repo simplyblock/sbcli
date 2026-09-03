@@ -9442,6 +9442,26 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
         return False, new_leader, f"Operation failed on new leader: {e}"
 
 
+#: Mgmt statuses that make a peer unusable as a routing, port-block, or
+#: failover target, without consulting the data plane at all. Each one means
+#: mgmt has already observed the peer leaving the cluster and is not expecting
+#: it back, so the peer's mgmt API and SPDK are gone (or going).
+#:
+#: IN_SHUTDOWN / RESTARTING are deliberately absent: those are transient states
+#: the runner owns, and preempting another node's leadership during its own
+#: restart would be incorrect.
+#:
+#: PENDING_REMOVAL is also deliberately absent. node_removal_orchestrate sets
+#: it *before* phase 1 shuts the node down, so the node is still up and serving
+#: then; treating it as gone would skip a port-block it still needs.
+_PEER_DISCONNECTED_STATUSES = (
+    StorageNode.STATUS_OFFLINE,
+    StorageNode.STATUS_REMOVED,
+    StorageNode.STATUS_UNREACHABLE,
+    StorageNode.STATUS_IN_REMOVAL,
+)
+
+
 def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
     """Check if a peer node should be treated as disconnected for the purpose
     of routing (takeover vs. non-leader path) and peer-port-block decisions.
@@ -9450,15 +9470,25 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
 
     Two signals, first match wins:
 
-      1. Mgmt ground truth (FDB status). If FDB already says the peer is
-         OFFLINE / REMOVED / UNREACHABLE, trust it immediately — mgmt has
-         observed the peer leaving the cluster. Attempting to port-block
+      1. Mgmt ground truth (FDB status). If FDB already says the peer is in
+         one of ``_PEER_DISCONNECTED_STATUSES``, trust it immediately — mgmt
+         has observed the peer leaving the cluster. Attempting to port-block
          such a peer's mgmt API will only hit ECONNREFUSED and, after 5×
          retries, abort the entire restart with a misleading "LVStore
-         recovery failed" event. IN_SHUTDOWN / RESTARTING are deliberately
-         NOT in this list — those are transient states the runner owns;
-         preempting another node's leadership during its own restart
-         would be incorrect.
+         recovery failed" event.
+
+         IN_REMOVAL is in that list on the same grounds as OFFLINE: phase 1 of
+         node_removal_orchestrate has already killed the node's SPDK and mgmt
+         API by the time the status is set, and unlike IN_SHUTDOWN it is never
+         coming back. Without it this check falls through to the JM-quorum
+         path, which votes "connected" on `0/0 peers report disconnected`
+         exactly when peers have already torn down their controllers for the
+         departing node — the abstain-from-all case described below. Callers
+         then route to, or pre-warm a failover path towards, a node the
+         control plane is in the middle of deleting (live 2026-09-03: a
+         tertiary spent its deferred hublvol attach on the node being removed,
+         "Failed to add deferred hublvol failover path to <removed> …
+         for LVS_21").
 
       2. Data-plane JM quorum (legacy path). Only reached if mgmt says
          the peer is in an "alive" state. Useful to detect fabric
@@ -9487,9 +9517,7 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
         # Peer has been fully removed from the cluster — definitely disconnected.
         return True
 
-    if peer_node.status in (StorageNode.STATUS_OFFLINE,
-                            StorageNode.STATUS_REMOVED,
-                            StorageNode.STATUS_UNREACHABLE):
+    if peer_node.status in _PEER_DISCONNECTED_STATUSES:
         logger.info("Peer %s mgmt status is %s — treating as disconnected",
                     peer_node.get_id(), peer_node.status)
         return True

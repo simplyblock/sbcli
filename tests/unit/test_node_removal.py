@@ -3408,5 +3408,103 @@ class TestJcRemoveJmClient(unittest.TestCase):
         self.assertEqual(ctx.exception.code, -12)
 
 
+class TestCheckPeerDisconnectedMgmtStatus(unittest.TestCase):
+    """The mgmt-status short-circuit of _check_peer_disconnected.
+
+    Regression for live 2026-09-03: while removing 2vk79, its peer hxmr8 was
+    rebuilding as the tertiary of another primary (s7457/LVS_21) and picked
+    its deferred hublvol failover target by asking whether LVS_21's secondary
+    was alive. That secondary *was* 2vk79 — already shut down by phase 1 and
+    in IN_REMOVAL — but IN_REMOVAL was missing from the short-circuit, so the
+    check fell through to the JM-quorum path, which abstained ("0/0 peers
+    report disconnected") and voted "connected". The attach then failed with
+    -5 against a dead SPDK:
+
+        Failed to add deferred hublvol failover path to ddbf964e... for LVS_21
+
+    The verdict has to come from the control plane's own intent, not from a
+    data-plane probe that cannot tell "gone" from "nobody voted".
+    """
+
+    def _probe(self, peer_status, quorum_verdict=False):
+        """Run the check against a single peer, returning (verdict, probed).
+
+        The peer id embeds the status so that cases sharing one test method
+        (subTest loops) get distinct quorum-cache keys — the cache is cleared
+        per test, not per subTest, so a reused id would serve the first case's
+        cached verdict to the second and leave its mock uncalled.
+        """
+        peer = _node(f"PEER-{peer_status}", status=peer_status)
+        db = FakeDB(_cluster(), [peer])
+        quorum = MagicMock(return_value=quorum_verdict)
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+                patch("simplyblock_core.services.storage_node_monitor"
+                      ".is_node_data_plane_disconnected_quorum", quorum):
+            verdict = storage_node_ops._check_peer_disconnected(peer)
+        return verdict, quorum.called
+
+    def test_in_removal_is_disconnected_without_probing_the_data_plane(self):
+        # The exact bug: quorum would have voted "connected" (False).
+        verdict, probed = self._probe(StorageNode.STATUS_IN_REMOVAL,
+                                      quorum_verdict=False)
+        self.assertTrue(verdict)
+        self.assertFalse(probed, "IN_REMOVAL must not reach the quorum probe")
+
+    def test_the_states_mgmt_has_given_up_on_all_short_circuit(self):
+        for status in (StorageNode.STATUS_OFFLINE,
+                       StorageNode.STATUS_REMOVED,
+                       StorageNode.STATUS_UNREACHABLE,
+                       StorageNode.STATUS_IN_REMOVAL):
+            with self.subTest(status=status):
+                verdict, probed = self._probe(status, quorum_verdict=False)
+                self.assertTrue(verdict)
+                self.assertFalse(probed)
+
+    def test_pending_removal_still_consults_the_data_plane(self):
+        # Deliberately NOT short-circuited: the task runner sets
+        # PENDING_REMOVAL before phase 1 shuts the node down, so it is still
+        # up and serving and still needs its port-block.
+        verdict, probed = self._probe(StorageNode.STATUS_PENDING_REMOVAL,
+                                      quorum_verdict=False)
+        self.assertFalse(verdict)
+        self.assertTrue(probed, "PENDING_REMOVAL must fall through to the probe")
+
+    def test_transient_runner_owned_states_still_consult_the_data_plane(self):
+        # Preempting another node's leadership during its own restart would
+        # be incorrect, so these keep asking the data plane.
+        for status in (StorageNode.STATUS_IN_SHUTDOWN,
+                       StorageNode.STATUS_RESTARTING):
+            with self.subTest(status=status):
+                verdict, probed = self._probe(status, quorum_verdict=False)
+                self.assertFalse(verdict)
+                self.assertTrue(probed)
+
+    def test_the_data_plane_can_still_condemn_an_online_peer(self):
+        verdict, probed = self._probe(StorageNode.STATUS_ONLINE,
+                                      quorum_verdict=True)
+        self.assertTrue(verdict)
+        self.assertTrue(probed)
+
+    def test_a_peer_gone_from_fdb_is_disconnected(self):
+        db = FakeDB(_cluster(), [])
+        quorum = MagicMock(return_value=False)
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+                patch("simplyblock_core.services.storage_node_monitor"
+                      ".is_node_data_plane_disconnected_quorum", quorum):
+            self.assertTrue(storage_node_ops._check_peer_disconnected(
+                _node("PEER")))
+        self.assertFalse(quorum.called)
+
+    def test_a_node_in_removal_is_not_fabric_connected(self):
+        # _is_fabric_connected / _count_fabric_disconnected_nodes are the two
+        # wrappers callers use to pick targets; both must inherit the fix.
+        peer = _node("PEER", status=StorageNode.STATUS_IN_REMOVAL)
+        db = FakeDB(_cluster(), [peer])
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            self.assertFalse(storage_node_ops._is_fabric_connected(peer))
+            self.assertEqual(
+                storage_node_ops._count_fabric_disconnected_nodes([peer]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
