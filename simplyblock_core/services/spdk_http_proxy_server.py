@@ -89,11 +89,6 @@ def _rpc_port_or_default(value: Any) -> Any:
 
 class ProxySettings(BaseSettings):
     """Environment configuration of the proxy.
-
-    The variable names carry no ``SB_`` prefix — they are baked into the
-    deployed manifests (``simplyblock_web/templates/storage_deploy_spdk.yaml.j2``)
-    and into the docker launch path
-    (``simplyblock_web/api/internal/storage_node/docker.py``).
     """
 
     model_config = SettingsConfigDict(case_sensitive=False)
@@ -403,11 +398,6 @@ class RequestLog:
 
 class AccessLogMiddleware(BaseHTTPMiddleware):
     """One line per served request, in place of uvicorn's access log.
-
-    Modelled on ``simplyblock_web.app.AccessLogMiddleware``: uvicorn's own
-    line is switched off in ``main`` and this replaces it, so the fields this
-    server cares about land on the same record as the status code and the
-    duration instead of in log lines of their own.
     """
 
     #: How ``_configure_logging`` renders the fields ``dispatch`` attaches to
