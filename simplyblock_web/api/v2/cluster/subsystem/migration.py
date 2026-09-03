@@ -96,7 +96,15 @@ def create_migration(
                 ctrl_loss_tmo=parameters.ctrl_loss_tmo,
                 host_nqn=parameters.host_nqn,
             )
-    except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
+    except (MigrationConflictError, PreconditionError) as e:
+        # Conflicting/not-yet-satisfiable state (e.g. a migration already
+        # active for this subsystem, or -- for a fallback-source migration --
+        # the chosen target is the node currently serving as the fallback
+        # source itself) -- matches the 409 convention used for the same
+        # shape of error elsewhere in v2 (storage_node shutdown, pool/volume
+        # already-exists, in-flight replication cutover).
+        raise HTTPException(409, str(e))
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
     def get_full(id):
@@ -149,7 +157,15 @@ def continue_migration(migration: SubsystemMigration, parameters: _ContinueParam
                 max_retries=parameters.max_retries,
                 deadline_seconds=parameters.deadline_seconds,
             )
-    except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
+    except (MigrationConflictError, PreconditionError) as e:
+        # Conflicting/not-yet-satisfiable state (e.g. a migration already
+        # active for this subsystem, or -- for a fallback-source migration --
+        # the chosen target is the node currently serving as the fallback
+        # source itself) -- matches the 409 convention used for the same
+        # shape of error elsewhere in v2 (storage_node shutdown, pool/volume
+        # already-exists, in-flight replication cutover).
+        raise HTTPException(409, str(e))
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
     return {"migration_id": result_id}
 
