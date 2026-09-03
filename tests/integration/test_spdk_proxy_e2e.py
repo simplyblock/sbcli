@@ -244,10 +244,10 @@ class TestProxyE2E(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    def test_malformed_body_returns_500(self):
+    def test_malformed_body_returns_400(self):
         response = self._proxy.request("not json")
 
-        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.status_code, 400)
 
     def test_keep_alive_serves_several_requests_on_one_connection(self):
         """The HTTP/1.0 server this replaced closed after every response, so
