@@ -92,7 +92,7 @@ _response_validator = jsonschema.validators.validator_for(_response_schema)(_res
 
 # bdev_distrib_create is answered only after the distrib's journal state is
 # far enough along; with a large JM journal that is minutes, not seconds.
-DISTRIB_CREATE_TIMEOUT_SEC = 180
+DISTRIB_CREATE_TIMEOUT_SEC = 360
 
 
 class RPCClient:
