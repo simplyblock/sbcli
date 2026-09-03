@@ -16,6 +16,7 @@ All data-plane RPCs / device-controller / DB access is mocked — these are
 pure control-flow + bookkeeping tests.
 """
 
+import logging
 import unittest
 from unittest.mock import DEFAULT, MagicMock, call, patch
 
@@ -3406,6 +3407,103 @@ class TestJcRemoveJmClient(unittest.TestCase):
         with self.assertRaises(RPCRemoteError) as ctx:
             c.jc_remove_jm("remote_jm_xn1")
         self.assertEqual(ctx.exception.code, -12)
+
+
+class TestDecommissionSkipsTheNodeBeingRemoved(unittest.TestCase):
+    """The node being removed must never become a jc_* patch target itself.
+
+    Regression for live 2026-09-03, removing s25dl. ``live_nodes`` filtered
+    STATUS_REMOVED, but at phase 2 the node is IN_REMOVAL, so it stayed in the
+    sweep. Phase 3b had not yet relocated the replicas it hosts *for other
+    primaries*, so its lvstore_stack_* backrefs still pointed at live primaries
+    and Pass 2 adopted it as a target for a hosted primary's vuid:
+
+        no recorded bdev name for removed JM 601dae11...; cannot call
+        jc_replace_jm -- affected targets=[(1, 'a91a2d46...')]
+
+    It stayed harmless only by accident: a node's OWN JM never appears in its
+    own remote_jm_devices, so the name lookup failed and short-circuited the
+    call. With a name recorded it would have issued jc_replace_jm against the
+    pod phase 1 had already killed -- exactly what the REMOVED filter exists
+    to prevent.
+    """
+
+    def _run(self):
+        cl = _cluster()
+        # 'dead' is mid-removal and still hosts 'other''s replica: phase 3a
+        # clears a node's own secondary/tertiary pointers, not the backrefs
+        # recording what it hosts. Phase 3b does that, and runs after phase 2.
+        removed = _node("dead", status=StorageNode.STATUS_IN_REMOVAL,
+                        with_jm=True, jm_vuid=9, lvstore="LVS_9",
+                        failure_domain=1, stack_secondary="other")
+        other = _node("other", with_jm=True, jm_vuid=1, lvstore="LVS_1",
+                      failure_domain=2)
+        spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41",
+                      failure_domain=3)
+        other.jm_ids = ["jm-dead", "jm-other"]
+        removed.jm_ids = ["jm-dead"]
+        spare.jm_ids = ["jm-spare"]
+
+        rd = RemoteJMDevice()
+        rd.uuid, rd.remote_bdev = "jm-dead", "remote_jm_deadn1"
+        other.remote_jm_devices = [rd]
+        # The removed node carries no remote entry for its OWN jm -- the shape
+        # that made the live failure log an error instead of issuing an RPC.
+        removed.remote_jm_devices = []
+
+        dead_rpc = MagicMock()
+        other_rpc = MagicMock()
+        for r in (dead_rpc, other_rpc):
+            r.jc_replace_jm = MagicMock(return_value=True)
+            r.jc_remove_jm = MagicMock(return_value=True)
+            r.bdev_nvme_detach_controller = MagicMock(return_value=True)
+            r.get_bdevs = MagicMock(return_value=[])
+        removed.rpc_client = MagicMock(return_value=dead_rpc)
+        other.rpc_client = MagicMock(return_value=other_rpc)
+
+        db = FakeDB(cl, [removed, other, spare])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                   "jm-other": other.jm_device,
+                                   "jm-spare": spare.jm_device}.get(i))
+        new_rd = RemoteJMDevice()
+        new_rd.uuid, new_rd.remote_bdev = "jm-spare", "remote_jm_sparen1"
+
+        # Capture the module's log records: the live symptom was an ERROR, not
+        # a stray RPC. Sweeping the removed node only failed to issue one
+        # because a node's own JM is absent from its own remote_jm_devices, so
+        # asserting "no RPC" alone passes with the bug still in place.
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        cap = _Capture()
+        storage_node_ops.logger.addHandler(cap)
+        try:
+            with patch.object(storage_node_ops, "DBController", return_value=db), \
+                 patch.object(storage_node_ops, "device_controller"), \
+                 patch.object(storage_node_ops, "get_sorted_ha_jms",
+                              return_value=["jm-spare"]), \
+                 patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                              return_value=[new_rd]):
+                storage_node_ops._decommission_node_jm(removed, replica_peer_ids=())
+        finally:
+            storage_node_ops.logger.removeHandler(cap)
+        return dead_rpc, other_rpc, records
+
+    def test_the_node_being_removed_is_never_adopted_as_a_target(self):
+        dead_rpc, _, records = self._run()
+        errors = [r.getMessage() for r in records if r.levelno >= logging.ERROR]
+        self.assertEqual(errors, [], "phase 2 tried to patch the node it is removing")
+        dead_rpc.jc_replace_jm.assert_not_called()
+        dead_rpc.jc_remove_jm.assert_not_called()
+
+    def test_a_surviving_consumer_is_still_patched(self):
+        # The exclusion must not cost the live peer its replacement.
+        _, other_rpc, _ = self._run()
+        other_rpc.jc_replace_jm.assert_called_once()
 
 
 class TestCheckPeerDisconnectedMgmtStatus(unittest.TestCase):

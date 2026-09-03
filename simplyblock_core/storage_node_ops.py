@@ -5481,8 +5481,26 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         # never resolve/connect (2026-08-11 incident: a prior removal's
         # leftover jm_ids on 7b8hf sent a later removal's phase 5 chasing
         # a permanently-dead hostname).
+        # ...and removed_node itself, by identity. Its status here is
+        # IN_REMOVAL, not REMOVED, so the status filter alone lets it through
+        # (and the function is called twice, so its status differs between
+        # calls -- identity is the only stable guard). Phase 1 has already
+        # shut it down, but phase 3b has NOT yet relocated the replicas it
+        # hosts for other primaries, so its lvstore_stack_secondary/_tertiary
+        # still point at live primaries. Pass 2 therefore picked it up as a
+        # patch target for a hosted primary's vuid and went looking for the
+        # dying JM's bdev name in its own remote_jm_devices -- where a node's
+        # OWN JM never appears. Found live 2026-09-03 removing s25dl:
+        # "no recorded bdev name for removed JM 601dae11...,
+        #  affected targets=[(1, 'a91a2d46...')]". Harmless only because the
+        # missing name short-circuited the call; with a name recorded it would
+        # have issued jc_replace_jm at the dead pod this filter exists to
+        # avoid. IN_REMOVAL is listed too, on the same grounds as REMOVED:
+        # such a node is down and its rpc_client cannot resolve.
         live_nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
-                      if n.status != StorageNode.STATUS_REMOVED]
+                      if n.status not in (StorageNode.STATUS_REMOVED,
+                                          StorageNode.STATUS_IN_REMOVAL)
+                      and n.get_id() != removed_node.get_id()]
 
         def _pick_replacement(primary):
             # get_sorted_ha_jms ranks candidates by host-disjoint (hard) +
@@ -5525,12 +5543,14 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         # Deliberately NOT stored in `decisions`. Every `decisions` entry means
         # "this primary's OWN redundancy set lists the dead JM", and Pass 2
         # relies on that: it keys the node's own-vuid target off membership,
-        # and both jm_ids.remove() calls below assume it. removed_node is
-        # itself in live_nodes (status in_removal, not removed), so putting it
-        # in `decisions` made Pass 2 treat it as a normal consumer and then
-        # remove an id its jm_ids never held -- ValueError, phase 2 aborted
-        # mid-flight, and NO peer got its jc_replace_jm at all (found live
-        # 2026-09-02: strictly worse than the gap it was meant to close).
+        # and both jm_ids.remove() calls below assume it. Storing removed_node
+        # there made Pass 2 treat it as a normal consumer and then remove an id
+        # its jm_ids never held -- ValueError, phase 2 aborted mid-flight, and
+        # NO peer got its jc_replace_jm at all (found live 2026-09-02: strictly
+        # worse than the gap it was meant to close). removed_node is now also
+        # excluded from live_nodes outright, so Pass 1 and Pass 2 cannot reach
+        # it by any route; this stays as the statement of intent for the entry
+        # Pass 1 would otherwise be tempted to add back.
         # removed_node's OWN lvstore group lives on as a "leftover" on its
         # secondary and tertiary: no live primary, no back-reference, and by
         # phase 2 no lvstore, raid or distribs either. It deliberately gets no
