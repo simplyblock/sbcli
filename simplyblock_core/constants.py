@@ -147,7 +147,12 @@ INSTANCE_STORAGE_DATA = {
 
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
-SPDK_PROXY_TIMEOUT=60*5
+# Must stay ABOVE the largest per-request RPC timeout a client may use
+# (rpc_client.DISTRIB_CREATE_TIMEOUT_SEC = 360): if the proxy gives up first,
+# it closes its unix socket to SPDK while the RPC is still outstanding, and
+# SPDK's deferred response then lands on a dead connection (2026-09-03,
+# bdev_distrib_create during large-journal activation). Client < proxy, always.
+SPDK_PROXY_TIMEOUT=60*7
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
 LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=1
