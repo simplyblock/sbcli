@@ -38,7 +38,7 @@ from simplyblock_core.utils.secrets import redact_rpc_params
 
 
 logger = logging.getLogger(__name__)
-#: The access log. Its handler is attached by ``_configure_logging``.
+#: Handler and format are installed by ``_configure_logging``.
 access_logger = logging.getLogger(f'{__name__}.access')
 
 #: How often the periodic timing report is emitted, and hence the interval
@@ -70,7 +70,7 @@ OTHER_METHOD_LABEL = 'other'
 #: Per-attempt bound on the readiness probe, and the pause between attempts.
 SPDK_READY_PROBE_TIMEOUT_SEC = 5
 SPDK_READY_POLL_INTERVAL_SEC = 1
-#: SPDK responses are read in one shot; matches the pre-FastAPI recv() size.
+#: SPDK responses are read in one shot.
 SPDK_RECV_SIZE = 1024 * 1024 * 1024
 
 
@@ -87,9 +87,6 @@ def _rpc_port_or_default(value: Any) -> Any:
 
 
 class ProxySettings(BaseSettings):
-    """Environment configuration of the proxy.
-    """
-
     model_config = SettingsConfigDict(case_sensitive=False)
 
     server_ip: Annotated[str, Field(description="Address the HTTP server binds to")]
@@ -115,8 +112,8 @@ class ProxySettings(BaseSettings):
             description=(
                 "Cap on concurrent HTTP connections. Above max_concurrent_spdk since a "
                 "kept-alive connection can sit idle, not doing SPDK work, most of the time. "
-                "Enforced by uvicorn, which answers 503 past the cap rather than waiting for "
-                "a slot the way the ThreadingHTTPServer this replaced blocked in accept()."
+                "Enforced by uvicorn, which answers 503 past the cap rather than waiting "
+                "for a slot."
             ),
         ),
     ] = 64
@@ -125,13 +122,11 @@ class ProxySettings(BaseSettings):
         Field(
             gt=0,
             description=(
-                "Seconds an idle HTTP connection is kept open. The server this replaced spoke "
-                "HTTP/1.0 and closed after every response, so a connection could never be "
-                "dropped underneath a client about to reuse it. RPCClient deliberately keeps "
-                "POST out of its urllib3 retry set, so such a drop surfaces as a failed RPC "
-                "rather than a retry - hence a window far longer than the gap between RPCs to "
-                "a node, at the cost of idle connections holding a max_concurrent_connections "
-                "slot for that long. Was 60s before the move to uvicorn."
+                "Seconds an idle HTTP connection is kept open. RPCClient deliberately keeps "
+                "POST out of its urllib3 retry set, so a connection dropped underneath a "
+                "client about to reuse it surfaces as a failed RPC rather than a retry - "
+                "hence a window far longer than the gap between RPCs to a node, at the cost "
+                "of idle connections holding a max_concurrent_connections slot for that long."
             ),
         ),
     ] = 300
@@ -152,8 +147,7 @@ class ProxySettings(BaseSettings):
         bool,
         Field(
             description=(
-                "Serve RPCs concurrently. When false the proxy forwards one RPC at a time, "
-                "matching the single-threaded HTTPServer this used to run on."
+                "Serve RPCs concurrently. When false the proxy forwards one RPC at a time."
             )
         ),
     ] = False
@@ -386,8 +380,7 @@ class RequestLog:
 
 
 class AccessLogMiddleware(BaseHTTPMiddleware):
-    """One line per served request, in place of uvicorn's access log.
-    """
+    """One line per served request, in place of uvicorn's access log."""
 
     #: Rendered by the handler ``_configure_logging`` installs, out of the
     #: fields ``dispatch`` attaches to the record.
@@ -456,13 +449,9 @@ class SpdkProxy:
 
     def __init__(self, settings: ProxySettings) -> None:
         self.settings = settings
-        #: Requests currently being served, and unix sockets currently open
-        #: towards SPDK.
         self.active_requests = 0
         self.open_connections = 0
         self.metrics = ProxyMetrics()
-        # Without MULTI_THREADING_ENABLED the proxy used to run on a
-        # non-threading HTTPServer, i.e. one request at a time.
         self.concurrency_limit = (
             settings.max_concurrent_spdk if settings.multi_threading_enabled else 1)
         self._slots: Optional[asyncio.Semaphore] = None
@@ -546,8 +535,8 @@ class SpdkProxy:
         reach SPDK and time out at the caller. Holding the slot only
         ~``spdk_timeout_margin``x longer than the caller waits lets slots
         recycle promptly. Capped at the global ``timeout`` so genuinely long
-        operations keep today's budget; falls back to ``timeout`` when the
-        caller sends no hint (backward compatible).
+        operations keep the full budget; falls back to ``timeout`` when the
+        caller sends no hint.
         """
         if client_timeout is None:
             return self.settings.timeout
@@ -625,8 +614,6 @@ class SpdkProxy:
                 # bytearray grows in place, where `bytes +=` copies.
                 buf = bytearray()
                 response = None
-                # Monotonic: a duration must not be measured against a clock
-                # that can step backwards under NTP.
                 recv_start = time.monotonic()
                 while True:
                     newdata = await reader.read(SPDK_RECV_SIZE)
@@ -696,9 +683,8 @@ def create_app(settings: ProxySettings) -> FastAPI:
     """Build the proxy application.
 
     Startup blocks until SPDK answers on its unix socket. uvicorn runs the
-    lifespan before it binds the listening socket, so — as with the
-    ``HTTPServer`` this replaced — the port stays closed until SPDK is up,
-    rather than accepting requests that could only fail.
+    lifespan before it binds the listening socket, so the port stays closed
+    until SPDK is up, rather than accepting requests that could only fail.
     """
     proxy = SpdkProxy(settings)
 
@@ -723,10 +709,7 @@ def create_app(settings: ProxySettings) -> FastAPI:
     # themselves: `expose` forwards kwargs to the route decorator.
     # Ungrouped status codes: the default folds every client-side rejection
     # into one `4xx` series, which cannot tell a malformed body (400) from bad
-    # credentials (401). Only a handful of codes are reachable here, so the
-    # cardinality is negligible. `spdk_proxy_rpc_failures_total` deliberately
-    # does not duplicate any of this -- it exists for what a status code cannot
-    # say, namely which SPDK method failed and why a 500 was a 500.
+    # credentials (401), and only a handful of codes are reachable here.
     Instrumentator(
         registry=proxy.metrics.registry,
         should_group_status_codes=False,
@@ -764,8 +747,6 @@ def create_app(settings: ProxySettings) -> FastAPI:
                 return Response(status_code=500)
             except OSError as e:
                 # SPDK is gone (crashed, or never came back after a restart).
-                # The pre-FastAPI server let this escape the handler and dropped
-                # the connection; a 500 says the same thing legibly.
                 logger.error(f"Could not reach SPDK on {proxy.settings.rpc_sock}: {e}")
                 return Response(status_code=500)
 
@@ -805,7 +786,7 @@ def main() -> None:
         host=settings.server_ip,
         port=settings.rpc_port,
         log_level='info',
-        # Replaced by AccessLogMiddleware, not dropped.
+        # uvicorn's access log would duplicate AccessLogMiddleware.
         access_log=False,
         limit_concurrency=settings.max_concurrent_connections,
         timeout_keep_alive=settings.keepalive_timeout,
