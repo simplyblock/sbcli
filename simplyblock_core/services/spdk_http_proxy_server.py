@@ -338,6 +338,11 @@ class ProxyMetrics:
             'Unix-socket connections currently open towards SPDK',
             registry=self.registry,
         )
+        self.requests_in_flight = Gauge(
+            'spdk_proxy_requests_in_flight',
+            'HTTP requests currently being served',
+            registry=self.registry,
+        )
         self.failures = Counter(
             'spdk_proxy_rpc_failures_total',
             'RPCs that reached SPDK and did not come back',
@@ -449,8 +454,6 @@ class SpdkProxy:
 
     def __init__(self, settings: ProxySettings) -> None:
         self.settings = settings
-        self.active_requests = 0
-        self.open_connections = 0
         self.metrics = ProxyMetrics()
         self.concurrency_limit = (
             settings.max_concurrent_spdk if settings.multi_threading_enabled else 1)
@@ -600,7 +603,6 @@ class SpdkProxy:
             raise
 
     async def _exchange(self, req: bytes, req_data: dict, log: RequestLog) -> Optional[str]:
-        self.open_connections += 1
         self.metrics.unix_connections.inc()
         try:
             reader, writer = await asyncio.open_unix_connection(self.settings.rpc_sock)
@@ -637,7 +639,6 @@ class SpdkProxy:
             finally:
                 _close(writer)
         finally:
-            self.open_connections -= 1
             self.metrics.unix_connections.dec()
 
 
@@ -712,9 +713,12 @@ def create_app(settings: ProxySettings) -> FastAPI:
     # Ungrouped status codes: the default folds every client-side rejection
     # into one `4xx` series, which cannot tell a malformed body (400) from bad
     # credentials (401), and only a handful of codes are reachable here.
+    # Scrapes are excluded for the same reason the access log skips them: they
+    # are not traffic, and counting them makes every rate include the scraper.
     Instrumentator(
         registry=proxy.metrics.registry,
         should_group_status_codes=False,
+        excluded_handlers=[METRICS_ENDPOINT],
     ).instrument(app).expose(
         app,
         endpoint=METRICS_ENDPOINT,
@@ -727,7 +731,7 @@ def create_app(settings: ProxySettings) -> FastAPI:
     @app.post('/{path:path}', dependencies=[Depends(require_authorization)])
     async def rpc(request: Request) -> Response:
         log: RequestLog = request.state.request_log
-        proxy.active_requests += 1
+        proxy.metrics.requests_in_flight.inc()
         try:
             read_start = time.monotonic()
             try:
@@ -757,7 +761,7 @@ def create_app(settings: ProxySettings) -> FastAPI:
 
             return Response(content=response, media_type='application/json')
         finally:
-            proxy.active_requests -= 1
+            proxy.metrics.requests_in_flight.dec()
 
     return app
 
