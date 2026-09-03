@@ -320,7 +320,7 @@ class SecurityTestBase(TestClusterBase):
         Returns list of (node_name, nqn) tuples.
         """
         k8s = self._ensure_k8s_utils()
-        out, _ = k8s.k8s._exec_kubectl(
+        out, _ = k8s._exec_kubectl(
             "kubectl get nodes "
             "-l node-role.kubernetes.io/control-plane!= "
             "--no-headers "
@@ -335,7 +335,7 @@ class SecurityTestBase(TestClusterBase):
             node_name = parts[0]
             node_uid = parts[1] if len(parts) > 1 else None
             if not node_uid:
-                uid_out, _ = k8s.k8s._exec_kubectl(
+                uid_out, _ = k8s._exec_kubectl(
                     f"kubectl get node {node_name} "
                     f"-o jsonpath='{{{{.metadata.uid}}}}'")
                 node_uid = uid_out.strip()
