@@ -616,6 +616,9 @@ class CLIWrapperBase:
         cluster_ops.set_(args.cluster_id, args.attr_name, args.attr_value)
         return True
 
+    def cluster__switch_write_protection(self, sub_command, args):
+        return cluster_ops.switch_write_protection(args.cluster_id)
+
     def cluster__set_shared_placement(self, sub_command, args):
         # Default action is enable (False -> True). --disable runs the
         # debug-only reverse transition and requires --force.

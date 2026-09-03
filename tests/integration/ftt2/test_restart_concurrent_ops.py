@@ -136,7 +136,19 @@ class StressRunner:
         NOTE: patches must be started by the caller BEFORE spawning threads."""
         from simplyblock_core.db_controller import DBController
 
-        DBController()
+        # Inside the guard, and catching BaseException: this used to sit
+        # outside the try, so anything raised here (including SystemExit from
+        # a stray patch elsewhere in the session) killed the daemon thread
+        # silently. The test then failed with "0 operations" and no clue as to
+        # why -- which is exactly how test_delete_during_port_block failed
+        # repeatedly in CI with no diagnosable cause. Record the death so the
+        # next failure names itself.
+        try:
+            DBController()
+        except BaseException as e:            # noqa: BLE001 - diagnostic only
+            self._record("worker-init", False, time.time(), time.time(),
+                         f"{type(e).__name__}: {e}")
+            return
         created_lvols = []
 
         while not self._stop.is_set():
@@ -165,6 +177,12 @@ class StressRunner:
 
             except Exception as e:
                 self._record(op, False, t0, time.time(), str(e))
+            except BaseException as e:        # noqa: BLE001 - diagnostic only
+                # SystemExit/KeyboardInterrupt would otherwise kill this
+                # daemon thread without recording anything.
+                self._record(op, False, t0, time.time(),
+                             f"{type(e).__name__}: {e}")
+                return
 
             time.sleep(self.interval + rng.uniform(0, self.interval))
 
@@ -276,7 +294,9 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
                 p.stop()
 
         auditor.assert_no_proceed_during_blocked()
-        assert stress.total_ops > 0, "Stress runner should have executed operations"
+        assert stress.total_ops > 0, (
+            "Stress runner executed no operations; worker records: "
+            f"{stress.results[:3]}")
 
     def test_create_during_port_block(self, ftt2_env):
         """High frequency creates while ports are blocked during restart."""

@@ -388,6 +388,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__set_shared_placement(subparser)
+        self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
         self.init_cluster__replication_target_add(subparser)
@@ -620,6 +621,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
         subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
+
+    def init_cluster__switch_write_protection(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'switch-write-protection', 'Activate v2 distrib write protection cluster-wide.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__change_name(self, subparser):
         subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
@@ -1485,6 +1490,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['set-shared-placement']:
                     ret = self.cluster__set_shared_placement(sub_command, args)
+                elif sub_command in ['switch-write-protection']:
+                    ret = self.cluster__switch_write_protection(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:

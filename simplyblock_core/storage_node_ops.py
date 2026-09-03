@@ -26,6 +26,8 @@ from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core import jm_raid
 from simplyblock_core.utils import port_block
+from simplyblock_core.utils import rpc_budget
+from simplyblock_core.utils import hublvol_reconnect
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
@@ -631,6 +633,18 @@ def prune_duplicate_paths(rpc_client, name, ctrlr_list, nvmf_port, tr_type):
     duplicated" race, so a prune helper that also re-attached would risk
     recreating the very duplicate it just removed.
     """
+    if not name:
+        # An empty controller name makes bdev_nvme_controller_list() return
+        # EVERY controller on the node, so duplicate_attached_paths() then
+        # aggregates unrelated controllers and reports the same target IP
+        # "duplicated" across them. Detaching on that is destructive and
+        # wrong. Observed 2026-09-02 12:16 during activation: 10 false
+        # duplicates on one node, and the detach ran.
+        logger.warning(
+            "prune_duplicate_paths called with an empty controller name; "
+            "refusing to prune (the controller list would cover all "
+            "controllers)")
+        return False
     duplicates = duplicate_attached_paths(ctrlr_list)
     if not duplicates:
         return False
@@ -9657,6 +9671,14 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     finally:
         # Idempotent; the in-flow release above is the normal path.
         _release_block_gate()
+        # An unbounded fence is bad; a fence budget leaking onto this thread's
+        # later work would be worse. Every exit path clears it.
+        rpc_budget.clear_budget()
+        try:
+            # this function never arms the gate; just release it
+            hublvol_reconnect.clear_defer_gate()
+        except Exception:
+            pass
 
 
 def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
@@ -10085,6 +10107,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
     # 6.2-8.9s true block->unblock from spdk logs). The 6s nvmf ack-timeout
     # reject applies to THIS number, per port.
     _block_started: dict = {}
+    #: Fired once every fenced port is released, so deferred redundant-path
+    #: hublvol attaches run outside the client-visible window.
+    _defer_gate_event = threading.Event()
     _block_longest = {"sec": 0.0}
 
     # #3: port deny/allow event emission (FDB+graylog write, ~190ms measured
@@ -10103,11 +10128,44 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 logger.warning("Deferred port event emit failed: %s", _ev_e)
         del _deferred_port_events[:]
 
+    def _warn_if_unblocking_a_non_leader(peer):
+        """Read-only: warn when a peer is being returned to service demoted.
+
+        Leadership can move WHILE the fence is held. On 2026-09-01 it did: the
+        fence went on LVS_10's primary at 16:28:25, the secondary took
+        leadership at 16:28:31, and the control plane unblocked the old primary
+        at 16:28:37 regardless. The client reconnected within milliseconds to a
+        node that was no longer leader, that node could not redirect, and the
+        IO came back as a generic INTERNAL DEVICE ERROR -- which
+        nvme-multipath does not retry on another path. Client EIO, fio rc=4.
+
+        Deliberately does NOT repair here. Wiring a hublvol inside the fence is
+        exactly the kind of extra in-window work that made the fence 12.2s in
+        the first place, and on the abort path it would delay the release we
+        want immediate. One bounded probe (0.5s via the ambient fence budget)
+        buys the diagnosis; the fix belongs to the post-unblock repair, and to
+        keeping the fence short enough that leadership does not move inside it.
+        """
+        try:
+            ret = peer.rpc_client().bdev_lvol_get_lvstores(lvs_name)
+        except Exception:
+            return                      # never let a probe delay the release
+        if not ret or ret[0].get("lvs leadership"):
+            return
+        logger.error(
+            "[RESTART] Unblocking %s for %s while it is NO LONGER leader -- "
+            "the client will reconnect to a demoted node; if its hublvol "
+            "redirect path is missing, its next IO is failed outright. Fence "
+            "held %.3fs.",
+            peer.get_id()[:8], lvs_name, _fence_elapsed())
+
     def _unblock_peer_port(peer):
         """Remove the port block for snode_lvs_port on peer and drop
         the peer from blocked_peers. Safe to call if peer is not currently
         blocked (no-op). Tolerates RPC failure — logs and continues so
         other peers can still be unblocked."""
+        if peer in blocked_peers:
+            _warn_if_unblocking_a_non_leader(peer)
         try:
             port_block.set_port(peer, snode_lvs_port, block=False, timeout=0.5, retry=2)
             _deferred_port_events.append(("allow", peer, snode_lvs_port))
@@ -10127,6 +10185,11 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 blocked_peers.remove(peer)
             except ValueError:
                 pass
+            if not blocked_peers:
+                # Fence over: normal work must not inherit the 0.5s budget,
+                # and the deferred hublvol attaches may now run.
+                rpc_budget.clear_budget()
+                _defer_gate_event.set()
 
     def _kill_app():
         """Kill SPDK on snode and mark OFFLINE before peer ports unblock.
@@ -10226,6 +10289,56 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         _release_block_gate()
         _flush_port_events()
         raise Exception(f"Abort restart: {reason}")
+
+    def _fence_elapsed():
+        """Seconds since the first peer port was fenced (0.0 if none is)."""
+        if not _block_started:
+            return 0.0
+        return time.monotonic() - min(_block_started.values())
+
+    def _check_fence_deadline(where):
+        """Release and abort if the fence has run to FENCE_DEADLINE_SEC.
+
+        Called between steps and inside the in-window wait loops. The fence
+        must be lifted by us before SPDK converts the block to reject at
+        ack_timeout * 4 (8s): the conversion quiesces every qpair on the port,
+        so the client loses the path rather than merely waiting for it.
+        """
+        if not _block_started:
+            return
+        elapsed = _fence_elapsed()
+        if elapsed >= constants.FENCE_DEADLINE_SEC:
+            _abort_restart_and_unblock(
+                f"port fence held {elapsed:.3f}s at {where}, over the "
+                f"{constants.FENCE_DEADLINE_SEC}s deadline (reject threshold 8s)")
+
+    def _fenced(method, *args, budget=None, **kwargs):
+        """Run one RPC while a peer's client port is fenced.
+
+        ``method`` is the RPCClient method name. The client is built per call
+        so its timeout can be clamped to the time left on the fence -- a fixed
+        per-call timeout is not enough on its own, since a 6s call started late
+        in the window would still overrun the deadline.
+
+        Any failure, a timeout above all, releases the fence and aborts the
+        restart. The task runner re-queues an aborted restart; a quiesced
+        client path is not recoverable.
+        """
+        budget = constants.FENCE_RPC_TIMEOUT_SEC if budget is None else budget
+        timeout = budget
+        if _block_started:
+            remaining = constants.FENCE_DEADLINE_SEC - _fence_elapsed()
+            if remaining <= 0:
+                _check_fence_deadline(method)
+            timeout = min(budget, remaining)
+        try:
+            client = snode.rpc_client(timeout=timeout,
+                                      retry=constants.FENCE_RPC_RETRY)
+            return getattr(client, method)(*args, **kwargs)
+        except Exception as e:
+            _abort_restart_and_unblock(
+                f"{method} failed inside the port-fence window "
+                f"(budget {timeout:.2f}s, fence {_fence_elapsed():.3f}s): {e}")
 
     # #4: compute the examine-idempotency probes BEFORE the block window —
     # they only read snode's own fresh SPDK (raid built at ###1 pre-block),
@@ -10398,6 +10511,17 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                         blocked_peers.append(current_leader)
                         _block_started[current_leader.get_id()] = time.monotonic()
+                        # From here until the last port is released, every
+                        # rpc_client() built on this thread -- including the
+                        # ones inside hublvol/bdev-stack helpers we do not own
+                        # -- is bounded. Cleared in _unblock_peer_port once
+                        # blocked_peers empties, and in the outer finally.
+                        rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                              constants.FENCE_RPC_RETRY)
+                        # Redundant hublvol paths must land AFTER the fence,
+                        # not 3s after the foreground attach (which is still
+                        # inside it -- 2026-09-01 16:28:27.739, mid-block).
+                        hublvol_reconnect.set_defer_gate(_defer_gate_event)
                     except Exception as e:
                         # Failing to port-block the current leader means we cannot
                         # safely promote snode: the old leader may still be serving
@@ -10476,6 +10600,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
                     blocked_peers.append(sec_node)
                     _block_started[sec_node.get_id()] = time.monotonic()
+                    rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                          constants.FENCE_RPC_RETRY)
                 except Exception as e:
                     # Same rationale as the leader port-block: cannot safely
                     # decide "peer gone" vs "peer slow" before snode has
@@ -10526,6 +10652,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 deadline = time.time() + _DRAIN_BOUND_SEC
                 drained = False
                 while time.time() < deadline:
+                    _check_fence_deadline("inflight drain")
                     try:
                         still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
                     except Exception as e:
@@ -10564,13 +10691,13 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
             if disconnected_peers:
                 logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
-                rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
+                _fenced("jc_explicit_synchronization", lvs_jm_vuid)
 
         ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
         # #4: raid/lvstore probes were computed pre-block (see above the block
         # section) — they read snode's own fresh SPDK only, and
         # force_to_non_leader does not affect bdev/lvstore presence.
-        rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+        _fenced("bdev_distrib_force_to_non_leader", lvs_jm_vuid)
         if raid_already and lvstore_already:
             logger.info(
                 "Raid %s and lvstore %s already present on %s; skipping examine",
@@ -10596,7 +10723,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     "dropping raid for clean re-examine",
                     lvs_raid, lvs_name, snode.get_id())
                 try:
-                    rpc_client.bdev_raid_delete(lvs_raid)
+                    _fenced("bdev_raid_delete", lvs_raid)
                 except Exception as e:
                     logger.warning(
                         "bdev_raid_delete(%s) raised: %s — proceeding to "
@@ -10628,13 +10755,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # restart path: _create_bdev_stack leaves the raid in place but does
             # not examine it, so the lvstore never surfaces and the subsequent
             # bdev_lvol_get_lvstores validation fails every time.
-            rpc_client.bdev_examine(lvs_raid)
+            _fenced("bdev_examine", lvs_raid)
 
             ### 6- wait for examine
-            rpc_client.bdev_wait_for_examine()
+            _fenced("bdev_wait_for_examine",
+                    budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC)
 
         # Validate lvstore recovery
-        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+        ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
         if not ret:
             logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
             if activation_mode:
@@ -10684,18 +10812,22 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             _abort_restart_and_unblock(
                 f"snode {snode.get_id()} is not a registered peer of "
                 f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
-        ret = rpc_client.bdev_lvol_set_lvs_opts(
+        ret = _fenced(
+            "bdev_lvol_set_lvs_opts",
             lvs_name,
             groupid=lvs_jm_vuid,
             subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
             hublvol_port=lvs_node.get_hublvol_port(lvs_name),
             role=snode_lvs_role,
         )
-        ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
+        ret = _fenced("bdev_lvol_set_leader", lvs_name, leader=True)
         leader_restored = False
         for _ in range(10):
+            # 10 x 0.2s of sleep plus 10 RPCs is a large slice of the fence
+            # budget on its own; give up the fence rather than the deadline.
+            _check_fence_deadline("leader-restore poll")
             try:
-                ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+                ret = _fenced("bdev_lvol_get_lvstores", lvs_name)
                 if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
                     leader_restored = True
                     break
@@ -10931,6 +11063,14 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
     finally:
         # Idempotent; the in-flow release above is the normal path.
         _release_block_gate()
+        # An unbounded fence is bad; a fence budget leaking onto this thread's
+        # later work would be worse. Every exit path clears it.
+        rpc_budget.clear_budget()
+        try:
+            _defer_gate_event.set()
+            hublvol_reconnect.clear_defer_gate()
+        except Exception:
+            pass
 
 
 def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
@@ -11691,6 +11831,14 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     write_protection = False
     if ndcs > 1:
         write_protection = True
+    # Which generation of write protection to create these distribs with. New
+    # clusters are v2 from the start; a cluster upgraded from a release without
+    # v2 stays on v1 until `sbctl cluster switch-write-protection` has run the
+    # runtime RPC on every node (see cluster.write_protection_v2). Persisted on
+    # the stack entry like the other create flags, and re-normalised against
+    # the cluster on every replay by apply_write_protection_mode.
+    wp_key = ("write_protection_v2" if cluster.write_protection_v2
+              else "write_protection")
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
         while distrib_vuid in distrib_vuids:
@@ -11707,7 +11855,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
             "block_size": distr_bs,
             "chunk_size": distr_chunk_bs,
             "pba_page_size": distr_page_size,
-            "write_protection": write_protection,
+            wp_key: write_protection,
         }
         # Per-chunk placement is a cluster-wide opt-in. Persist it on each
         # stack entry so subsequent restarts re-create the bdev with the
@@ -11904,6 +12052,32 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
 _DISTR_RECREATE_RETRY_DELAY_SEC = 5
 
 
+def apply_write_protection_mode(params, use_v2):
+    """Normalise the write-protection generation in one distrib param dict.
+
+    A distrib carries write protection under one of two mutually exclusive
+    keys, ``write_protection`` (v1) or ``write_protection_v2``. Which one is
+    correct is a property of the CLUSTER, not of the stored params: the params
+    are persisted on the node's lvstore_stack at create time and replayed at
+    every restart, so a stack written before the cluster switched to v2 still
+    says v1 -- and replaying it verbatim would re-create the bdev on the old
+    generation while every other distrib in the cluster is on the new one.
+
+    So the stored value answers only "is write protection on at all?" (it is
+    off for ndcs == 1) and the cluster flag answers "under which key?".
+
+    Mutates and returns ``params``.
+    """
+    enabled = bool(params.get("write_protection") or
+                   params.get("write_protection_v2"))
+    params.pop("write_protection", None)
+    params.pop("write_protection_v2", None)
+    if enabled:
+        params["write_protection_v2" if use_v2 else "write_protection"] = True
+    return params
+
+
+
 def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None):
     # Per-distrib creation outcome, keyed by bdev name. Threads write their own
     # key (distinct keys -> GIL-safe), the main loop reads after join.
@@ -11984,6 +12158,10 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
 
             params['full_page_unmap'] = cluster.full_page_unmap
+            # The stack may have been written before this cluster switched
+            # write-protection generation; replay it under whichever key the
+            # cluster is on now, never the one that happens to be stored.
+            apply_write_protection_mode(params, cluster.write_protection_v2)
             t = threading.Thread(target=_create_distr, args=(snode, name, params,))
             thread_list.append(t)
             t.start()
