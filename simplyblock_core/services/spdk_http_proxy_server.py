@@ -628,8 +628,10 @@ class SpdkProxy:
                     break
                 self.metrics.observe_response(log.rpc_method, time.monotonic() - recv_start)
 
-                if not response and len(buf) > 0:
-                    raise ValueError('Invalid response')
+                if not response:
+                    raise ValueError(
+                        'Invalid response' if buf
+                        else 'SPDK closed the connection without responding')
 
                 return buf.decode('ascii')
             finally:
