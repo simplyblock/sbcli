@@ -675,14 +675,14 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'replication-policy-remove', 'Removes a replication policy. Refused while a volume still follows it.')
         subcommand.add_argument('policy_id', help='Replication policy id', type=str)
 
-    def init_cluster__replication_policy_snapshot(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'replication-policy-snapshot', "Takes ONE crash-consistent snapshot of every volume in the policy's consistency group, as a new group generation")
-        subcommand.add_argument('policy_id', help='Replication policy id (must be a consistency-group policy)', type=str)
-
     def init_cluster__replication_policy_failover(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-policy-failover', 'Fails over EVERY volume following this policy')
         subcommand.add_argument('policy_id', help='Replication policy id', type=str)
         subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__replication_policy_snapshot(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-snapshot', 'Takes ONE crash-consistent snapshot of every volume in the policy\'s consistency group, as a new group generation')
+        subcommand.add_argument('policy_id', help='Replication policy id (must be a consistency-group policy)', type=str)
 
 
     def init_volume(self):
@@ -1510,6 +1510,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__replication_policy_remove(sub_command, args)
                 elif sub_command in ['replication-policy-failover']:
                     ret = self.cluster__replication_policy_failover(sub_command, args)
+                elif sub_command in ['replication-policy-snapshot']:
+                    ret = self.cluster__replication_policy_snapshot(sub_command, args)
                 else:
                     self.parser.print_help()
 
