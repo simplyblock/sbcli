@@ -15,14 +15,17 @@ import base64
 import hmac
 import json
 import logging
+import math
 import ssl
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, AsyncGenerator, Dict, Optional
+from typing import Annotated, Any, AsyncGenerator, Dict, Optional, Set, Tuple
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.requests import ClientDisconnect
@@ -32,11 +35,32 @@ from simplyblock_core.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-#: How often the periodic timing report is emitted, and the window the
-#: ``last_Ns_avg`` figure covers.
+#: How often the periodic timing report is emitted, and hence the interval
+#: every figure in it covers.
 STATS_INTERVAL_SEC = 3
-#: Samples are dropped wholesale once a series grows past this.
-STATS_MAX_SAMPLES = 10000
+#: Path the Prometheus exposition is served on, matching ``simplyblock_web``.
+METRICS_ENDPOINT = '/_meta/metrics'
+#: SPDK round-trips span a warm ``bdev_get_bdevs`` (well under a millisecond)
+#: to ``ProxySettings.timeout``, 300s by default. Histogram's default buckets
+#: stop at 10s, which would collapse the whole interesting tail into ``+Inf``:
+#: RPCs issued under the port fence sit around 8s, and a slot starved by a
+#: stuck ``distr_status_events_update`` holds for minutes. Hence the extra
+#: resolution between 5s and 10s, and a ladder that reaches the timeout.
+SPDK_DURATION_BUCKETS = (
+    .001, .005, .01, .05, .1, .5, 1, 2.5, 5, 7.5, 10, 30, 60, 120, 300, math.inf)
+#: Reading a request body off a loopback socket; a different order of
+#: magnitude from anything SPDK does, so a separate, much finer ladder.
+BODY_READ_DURATION_BUCKETS = (
+    .0001, .0005, .001, .005, .01, .05, .1, .5, 1, math.inf)
+#: Ceiling on distinct ``method`` label values. The method is read out of the
+#: caller's JSON-RPC body, so a buggy or hostile client could otherwise mint
+#: series without bound. A cap rather than an allowlist: SPDK's RPC surface is
+#: hundreds of names and version-dependent, so an allowlist would silently
+#: drop methods added by an SPDK upgrade.
+MAX_METHOD_LABELS = 128
+MAX_METHOD_LABEL_LEN = 64
+#: Where methods past those limits are folded.
+OTHER_METHOD_LABEL = 'other'
 #: Per-attempt bound on the readiness probe, and the pause between attempts.
 SPDK_READY_PROBE_TIMEOUT_SEC = 5
 SPDK_READY_POLL_INTERVAL_SEC = 1
@@ -131,37 +155,201 @@ class ProxySettings(BaseSettings):
         return 'Basic ' + base64.b64encode(credentials.encode('ascii')).decode('ascii')
 
 
-class TimingStats:
-    """Rolling record of operation durations, reported periodically."""
+#: ``(count, sum)`` per ``method`` label, and cumulative bucket counts by
+#: upper bound, as read back off a histogram.
+HistogramSnapshot = Tuple[Dict[str, Tuple[float, float]], Dict[float, float]]
 
-    def __init__(self, name: str) -> None:
+
+def _histogram_snapshot(histogram: Histogram) -> HistogramSnapshot:
+    """Read a histogram's own totals back out of its samples."""
+    per_method: Dict[str, Tuple[float, float]] = {}
+    buckets: Dict[float, float] = {}
+    for metric in histogram.collect():
+        for sample in metric.samples:
+            method = sample.labels.get('method', '')
+            count, total = per_method.get(method, (0.0, 0.0))
+            if sample.name.endswith('_bucket'):
+                bound = float(sample.labels['le'])
+                buckets[bound] = buckets.get(bound, 0.0) + sample.value
+            elif sample.name.endswith('_count'):
+                per_method[method] = (count + sample.value, total)
+            elif sample.name.endswith('_sum'):
+                per_method[method] = (count, total + sample.value)
+    return per_method, buckets
+
+
+def _bucket_quantile(buckets: Dict[float, float], quantile: float) -> Optional[float]:
+    """Upper bound of the bucket a quantile falls into.
+
+    Buckets are cumulative, and the difference of two cumulative readings is
+    itself cumulative, so this works unchanged on an interval delta.
+    """
+    if not buckets:
+        return None
+    ordered = sorted(buckets.items())
+    total = ordered[-1][1]
+    if total <= 0:
+        return None
+    target = total * quantile
+    for bound, cumulative in ordered:
+        if cumulative >= target:
+            return bound
+    return ordered[-1][0]
+
+
+def _format_seconds(seconds: float) -> str:
+    return f"{seconds * 1000:.1f}ms" if seconds < 1 else f"{seconds:.2f}s"
+
+
+def _format_quantile(buckets: Dict[float, float], seconds: Optional[float]) -> str:
+    """Render a quantile as the comparison it actually is.
+
+    A histogram resolves a quantile only to a bucket bound, so the figure can
+    exceed the largest duration actually observed. Spelling the bound as
+    ``<=`` keeps that from reading as ``p99 > max``, which is otherwise the
+    obvious conclusion when both sit on the same line.
+    """
+    if seconds is None:
+        return '=-'
+    if not math.isinf(seconds):
+        return f"<={_format_seconds(seconds)}"
+    finite = [bound for bound in buckets if not math.isinf(bound)]
+    return f">{_format_seconds(max(finite))}" if finite else '=inf'
+
+
+class IntervalReport:
+    """The periodic log line for one histogram.
+
+    Everything reported comes from the histogram itself, so the log and the
+    Prometheus exposition can never disagree. Histograms are cumulative, so
+    interval figures are the difference between successive reads.
+
+    The exception is ``max``: a histogram knows only bucket boundaries, and
+    the Python client's Summary carries no quantiles, so the peak is kept here
+    as a plain float and reset every tick. Deliberately not a Gauge -- a gauge
+    reset every few seconds sawtooths and reads badly in Prometheus.
+    """
+
+    def __init__(self, name: str, histogram: Histogram) -> None:
         self.name = name
-        self.samples: Dict[int, int] = {}
+        self.histogram = histogram
+        self._prev_methods: Dict[str, Tuple[float, float]] = {}
+        self._prev_buckets: Dict[float, float] = {}
+        self._peak_seconds = 0.0
 
-    def record(self, start_ns: int, duration_ns: int) -> None:
-        self.samples[start_ns] = duration_ns
+    def observe(self, seconds: float, method: Optional[str] = None) -> None:
+        target = self.histogram if method is None else self.histogram.labels(method=method)
+        target.observe(seconds)
+        self._peak_seconds = max(self._peak_seconds, seconds)
 
-    def report(self, now_ns: int) -> Optional[str]:
-        """Summarize the collected samples, clearing them once they pile up."""
-        if not self.samples:
+    def _slowest_method(self, methods: Dict[str, Tuple[float, float]]) -> Optional[str]:
+        """The method with the highest mean duration over the interval."""
+        slowest, slowest_mean = None, 0.0
+        for method, (count, total) in methods.items():
+            prev_count, prev_total = self._prev_methods.get(method, (0.0, 0.0))
+            if (advanced := count - prev_count) <= 0:
+                continue
+            if (mean := (total - prev_total) / advanced) > slowest_mean:
+                slowest, slowest_mean = method, mean
+        return slowest or None
+
+    def report(self) -> Optional[str]:
+        """Summarize the interval, or ``None`` if nothing was observed in it."""
+        methods, buckets = _histogram_snapshot(self.histogram)
+        advanced = (
+            sum(count for count, _ in methods.values())
+            - sum(count for count, _ in self._prev_methods.values())
+        )
+        elapsed = (
+            sum(total for _, total in methods.values())
+            - sum(total for _, total in self._prev_methods.values())
+        )
+        interval_buckets = {
+            bound: value - self._prev_buckets.get(bound, 0.0)
+            for bound, value in buckets.items()
+        }
+        peak, slowest = self._peak_seconds, self._slowest_method(methods)
+
+        self._prev_methods, self._prev_buckets = methods, buckets
+        self._peak_seconds = 0.0
+
+        if advanced <= 0:
             return None
 
-        durations = list(self.samples.values())
-        window = [
-            duration
-            for start, duration in self.samples.items()
-            if start > now_ns - STATS_INTERVAL_SEC * 1000 * 1000 * 1000
-        ]
         summary = (
-            f"{self.name}: max={max(durations)} ns,"
-            f" avg={int(sum(durations) / len(durations))} ns,"
-            f" last_{STATS_INTERVAL_SEC}s_avg={int(sum(window) / len(window)) if window else 0} ns"
+            f"{self.name}:"
+            f" interval_avg={_format_seconds(elapsed / advanced)}"
+            f" p99{_format_quantile(interval_buckets, _bucket_quantile(interval_buckets, 0.99))}"
+            f" max={_format_seconds(peak)}"
+            f" n={int(advanced)}"
+        )
+        return summary if slowest is None else f"{summary} slowest={slowest}"
+
+
+class ProxyMetrics:
+    """Prometheus metrics for one proxy application.
+
+    Each application owns its registry rather than writing into the global
+    ``REGISTRY``. A storage node runs exactly one proxy per process so nothing
+    is lost, and the tests build several applications in one interpreter,
+    where module-level metrics would collide on the second ``create_app``.
+    """
+
+    def __init__(self) -> None:
+        self.registry = CollectorRegistry()
+        self._known_methods: Set[str] = set()
+
+        self.spdk_response = IntervalReport('recv_from_spdk', Histogram(
+            'spdk_proxy_response_duration_seconds',
+            'Time awaiting and reading one JSON-RPC response from SPDK',
+            ['method'],
+            buckets=SPDK_DURATION_BUCKETS,
+            registry=self.registry,
+        ))
+        self.body_read = IntervalReport('read_body', Histogram(
+            'spdk_proxy_body_read_duration_seconds',
+            'Time spent reading one HTTP request body',
+            buckets=BODY_READ_DURATION_BUCKETS,
+            registry=self.registry,
+        ))
+        self.slots_in_use = Gauge(
+            'spdk_proxy_rpc_slots_in_use',
+            'SPDK concurrency slots currently held',
+            registry=self.registry,
+        )
+        self.unix_connections = Gauge(
+            'spdk_proxy_unix_connections_open',
+            'Unix-socket connections currently open towards SPDK',
+            registry=self.registry,
+        )
+        self.failures = Counter(
+            'spdk_proxy_rpc_failures_total',
+            'RPCs that never returned a SPDK response',
+            ['method', 'reason'],
+            registry=self.registry,
         )
 
-        if len(self.samples) > STATS_MAX_SAMPLES:
-            self.samples.clear()
+    def method_label(self, method: str) -> str:
+        """Fold a caller-supplied method name into the bounded label set."""
+        if method in self._known_methods:
+            return method
+        if len(method) > MAX_METHOD_LABEL_LEN or len(self._known_methods) >= MAX_METHOD_LABELS:
+            return OTHER_METHOD_LABEL
+        self._known_methods.add(method)
+        return method
 
-        return summary
+    def observe_response(self, method: str, seconds: float) -> None:
+        self.spdk_response.observe(seconds, method=self.method_label(method))
+
+    def observe_body_read(self, seconds: float) -> None:
+        self.body_read.observe(seconds)
+
+    def record_failure(self, method: str, reason: str) -> None:
+        self.failures.labels(method=self.method_label(method), reason=reason).inc()
+
+    @property
+    def reports(self) -> Tuple[IntervalReport, ...]:
+        return (self.body_read, self.spdk_response)
 
 
 class SpdkProxy:
@@ -174,8 +362,7 @@ class SpdkProxy:
         #: towards SPDK. Both are logged per request and asserted on by tests.
         self.active_requests = 0
         self.open_connections = 0
-        self.read_body_stats = TimingStats('read_body_time')
-        self.recv_from_spdk_stats = TimingStats('recv_from_spdk_time')
+        self.metrics = ProxyMetrics()
         # Without MULTI_THREADING_ENABLED the proxy used to run on a
         # non-threading HTTPServer, i.e. one request at a time.
         self.concurrency_limit = (
@@ -196,16 +383,20 @@ class SpdkProxy:
         return self._slots
 
     async def report_stats(self) -> None:
-        """Log the collected timings every ``STATS_INTERVAL_SEC`` seconds."""
+        """Log the interval timings every ``STATS_INTERVAL_SEC`` seconds.
+
+        Read off the same metrics the Prometheus endpoint serves, so the two
+        can never disagree. A series with no observations in the interval
+        logs nothing rather than repeating a stale summary.
+        """
         while True:
             await asyncio.sleep(STATS_INTERVAL_SEC)
             try:
-                now = time.time_ns()
-                for stats in (self.read_body_stats, self.recv_from_spdk_stats):
-                    if (summary := stats.report(now)) is not None:
-                        logger.info("Periodic stats: %s: %s", now, summary)
-            except Exception as e:
-                logger.error(e)
+                for report in self.metrics.reports:
+                    if (summary := report.report()) is not None:
+                        logger.info("Periodic stats: %s", summary)
+            except (ValueError, KeyError, ZeroDivisionError) as e:
+                logger.error(f"Could not summarize proxy metrics: {e}")
 
     async def wait_for_spdk_ready(self) -> None:
         """Block until SPDK responds to spdk_get_version on the unix socket."""
@@ -283,7 +474,11 @@ class SpdkProxy:
         logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
         sock_timeout = self._resolve_sock_timeout(client_timeout)
         async with self.slots:
-            return await self._rpc_call_inner(req, req_data, req_time, sock_timeout)
+            self.metrics.slots_in_use.inc()
+            try:
+                return await self._rpc_call_inner(req, req_data, req_time, sock_timeout)
+            finally:
+                self.metrics.slots_in_use.dec()
 
     async def _rpc_call_inner(
         self,
@@ -292,16 +487,25 @@ class SpdkProxy:
         req_time: int,
         sock_timeout: float,
     ) -> Optional[str]:
+        method = str(req_data.get('method', 'unknown'))
         try:
             return await asyncio.wait_for(self._exchange(req, req_data, req_time), sock_timeout)
         except asyncio.TimeoutError as e:
             logger.error(
                 f"Socket timeout waiting for SPDK response (request {req_time}, "
-                f"function: {req_data.get('method', 'unknown')})")
+                f"function: {method})")
+            self.metrics.record_failure(method, 'timeout')
             raise ValueError('SPDK response timeout') from e
+        except OSError:
+            self.metrics.record_failure(method, 'unreachable')
+            raise
+        except ValueError:
+            self.metrics.record_failure(method, 'invalid_response')
+            raise
 
     async def _exchange(self, req: bytes, req_data: dict, req_time: int) -> Optional[str]:
         self.open_connections += 1
+        self.metrics.unix_connections.inc()
         try:
             reader, writer = await asyncio.open_unix_connection(self.settings.rpc_sock)
             try:
@@ -313,7 +517,9 @@ class SpdkProxy:
 
                 buf = b''
                 response = None
-                recv_start = time.time_ns()
+                # Monotonic: a duration must not be measured against a clock
+                # that can step backwards under NTP.
+                recv_start = time.monotonic()
                 while True:
                     newdata = await reader.read(SPDK_RECV_SIZE)
                     closed = newdata == b''
@@ -325,9 +531,8 @@ class SpdkProxy:
                             break
                         continue
                     break
-                time_diff = time.time_ns() - recv_start
-                self.recv_from_spdk_stats.record(recv_start, time_diff)
-                logger.info(f"recv_from_spdk_time_diff: {time_diff}")
+                self.metrics.observe_response(
+                    str(req_data.get('method', 'unknown')), time.monotonic() - recv_start)
 
                 if not response and len(buf) > 0:
                     raise ValueError('Invalid response')
@@ -339,6 +544,7 @@ class SpdkProxy:
                 _close(writer)
         finally:
             self.open_connections -= 1
+            self.metrics.unix_connections.dec()
 
 
 def _close(writer: asyncio.StreamWriter) -> None:
@@ -392,6 +598,15 @@ def create_app(settings: ProxySettings) -> FastAPI:
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.proxy = proxy
 
+    # Served on the RPC port behind the same credentials as the RPCs
+    # themselves: `expose` forwards kwargs to the route decorator.
+    Instrumentator(registry=proxy.metrics.registry).instrument(app).expose(
+        app,
+        endpoint=METRICS_ENDPOINT,
+        include_in_schema=False,
+        dependencies=[Depends(require_authorization)],
+    )
+
     @app.post('/{path:path}', dependencies=[Depends(require_authorization)])
     async def rpc(request: Request) -> Response:
         req_time = time.time_ns()
@@ -399,16 +614,14 @@ def create_app(settings: ProxySettings) -> FastAPI:
         logger.info(f"incoming request at: {req_time}")
         logger.info(f"active server session: {proxy.active_requests}")
         try:
-            read_start = time.time_ns()
+            read_start = time.monotonic()
             try:
                 body = await request.body()
             except ClientDisconnect:
                 logger.warning(
                     f"client disconnected before the request body arrived (request {req_time})")
                 return Response(status_code=400)
-            time_diff = time.time_ns() - read_start
-            proxy.read_body_stats.record(read_start, time_diff)
-            logger.info(f"read_body_time_diff: {time_diff}")
+            proxy.metrics.observe_body_read(time.monotonic() - read_start)
 
             try:
                 response = await proxy.rpc_call(body, request.headers.get('X-RPC-Timeout'))
