@@ -1351,7 +1351,13 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         # zero on a cluster whose collector has not yet reported any device --
         # skip the check rather than dividing by it.
         rec = records[0]
-        cluster_size_prov_util = int(((rec.size_prov+size) / rec.size_total) * 100)
+        # rec.size_prov is lvol-only; snapshots hold ACTUAL bytes on top of it
+        # (see pool_controller.get_cluster_snapshot_utilization).
+        if not all_snaps:
+            all_snaps = db_controller.get_mini_snapshots()
+        snap_used = pool_controller.get_cluster_snapshot_utilization(
+            cluster.get_id(), all_snaps=all_snaps)
+        cluster_size_prov_util = int(((rec.size_prov + snap_used + size) / rec.size_total) * 100)
 
         if cluster.prov_cap_crit and cluster.prov_cap_crit < cluster_size_prov_util:
             msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_crit}"

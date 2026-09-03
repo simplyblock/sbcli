@@ -530,6 +530,25 @@ def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
     return total
 
 
+def get_cluster_snapshot_utilization(cluster_id, all_snaps=None):
+    """Actual (used) bytes held by every snapshot in the cluster, in
+    effective (client-visible) units.
+
+    Snapshots occupy real capacity that provisioned-lvol accounting does not
+    cover: a 100T cluster with 80T provisioned and 15T of snapshot
+    utilisation has 5T of admissible headroom, not 20T. Admission checks
+    must add this on top of the provisioned sum (the pool-level
+    get_pool_total_capacity above already follows the same model), or a
+    cluster can run out of physical space without any overprovisioning.
+    """
+    db_controller = DBController()
+    pool_ids = {p.get_id() for p in db_controller.get_pools()
+                if p.cluster_id == cluster_id}
+    if all_snaps is None:
+        all_snaps = db_controller.get_mini_snapshots()
+    return sum(s.used_size for s in all_snaps if s.lvol.pool_uuid in pool_ids)
+
+
 def get_pool_total_rw_iops(pool_id):
     db_controller = DBController()
     try:

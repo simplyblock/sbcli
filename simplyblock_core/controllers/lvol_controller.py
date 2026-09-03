@@ -508,6 +508,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # Effective (client-visible) bytes: LVol.size is the logical size the client
     # sees, never the raw cost of storing it.
     cluster_size_prov = sum([lv.size for lv in all_lvols])
+    # Snapshots hold ACTUAL bytes that provisioned sizes do not cover; admit
+    # against provisioned + snapshot utilisation, the same model as the
+    # pool-level check (see pool_controller.get_cluster_snapshot_utilization).
+    cluster_size_prov += pool_controller.get_cluster_snapshot_utilization(
+        cl.get_id(), all_snaps=all_snaps)
 
     dev_count = 0
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
