@@ -164,3 +164,67 @@ def test_snode_response_body_hidden_when_flag_off(snode_client, caplog, monkeypa
     with caplog.at_level(logging.DEBUG):
         snode_client._request("GET", "info")
     assert "RESPVAL" not in _captured_logs_text(caplog)
+
+
+def test_snode_write_key_file_masks_pool_key(snode_client, caplog):
+    """The pool path passes the model's ``SecretStr`` through rather than unwrapping it."""
+    from simplyblock_core.controllers import host_auth
+
+    pool = MagicMock()
+    pool.get_id.return_value = "pool-1"
+    pool.dhchap_key = SecretStr("DHHC-1:00:POOLKEY:")
+    pool.dhchap_ctrlr_key = SecretStr("")
+
+    snode = MagicMock()
+    snode.get_id.return_value = "node-1"
+    snode.client.return_value = snode_client
+    snode_client._fake_session.request.return_value = _make_json_response(
+        {"results": "/etc/simplyblock/dhchap/pool_key"})
+
+    rpc_client = MagicMock()
+    rpc_client._request2.return_value = ({"ok": True}, None)
+
+    with caplog.at_level(logging.DEBUG):
+        key_names = host_auth._register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
+
+    assert key_names == {"dhchap_key": "pool_pool_1_dhchap_key"}
+
+    posted_body = snode_client._fake_session.request.call_args.kwargs["data"]
+    assert json.loads(posted_body)["content"] == "DHHC-1:00:POOLKEY:"
+
+    logs = _captured_logs_text(caplog)
+    assert "POOLKEY" not in logs
+    assert "pool_pool_1_dhchap_key" in logs
+
+
+def test_snode_write_key_file_masks_per_host_key(snode_client, caplog):
+    """The per-host path reads key material out of ``lvol.allowed_hosts``, a list of
+    plain dicts, so nothing wraps it for us — ``host_auth`` has to."""
+    from simplyblock_core.controllers import host_auth
+
+    snode = MagicMock()
+    snode.get_id.return_value = "node-1"
+    snode.client.return_value = snode_client
+    snode_client._fake_session.request.return_value = _make_json_response(
+        {"results": "/etc/simplyblock/dhchap/host_key"})
+
+    rpc_client = MagicMock()
+    rpc_client._request2.return_value = ({"ok": True}, None)
+
+    with caplog.at_level(logging.DEBUG):
+        key_names = host_auth._register_dhchap_keys_on_node(
+            snode, "nqn.2014-08.org.nvmexpress:uuid:host1",
+            {"dhchap_key": "DHHC-1:00:HOSTKEY:", "psk": "NVMeTLSkey-1:01:PSKPLAIN:"},
+            rpc_client,
+        )
+
+    assert set(key_names) == {"dhchap_key", "psk"}
+
+    posted = [json.loads(call.kwargs["data"])
+              for call in snode_client._fake_session.request.call_args_list]
+    assert {entry["content"] for entry in posted} == {
+        "DHHC-1:00:HOSTKEY:", "NVMeTLSkey-1:01:PSKPLAIN:"}
+
+    logs = _captured_logs_text(caplog)
+    assert "HOSTKEY" not in logs
+    assert "PSKPLAIN" not in logs
