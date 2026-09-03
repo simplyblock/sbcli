@@ -342,6 +342,18 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.proxy.open_connections, 0)
 
+    async def test_close_without_a_response_is_rejected(self):
+        """SPDK dying mid-RPC leaves an empty buffer, which is not an answer."""
+        fake = FakeSpdkSocket([])
+
+        with patch_connect(fake):
+            with self.assertRaises(ValueError) as ctx:
+                await self.proxy.rpc_call(self.req)
+
+        self.assertIn("closed the connection", str(ctx.exception))
+        self.assertTrue(fake.writers[0].closed)
+        self.assertEqual(self.proxy.open_connections, 0)
+
     async def test_caller_timeout_bounds_the_socket_wait(self):
         fake = FakeSpdkSocket([rpc_response(result=True)])
         proxy = make_proxy(timeout=300, spdk_timeout_margin=2)
@@ -1009,6 +1021,18 @@ class TestMetricsObservation(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self._value("spdk_proxy_rpc_failures_total"))
         self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
+
+    async def test_close_without_a_response_is_counted_as_a_failure(self):
+        with patch_connect(FakeSpdkSocket([])):
+            with self.assertRaises(ValueError):
+                await self.proxy.rpc_call(self.req)
+
+        self.assertEqual(
+            self._value(
+                "spdk_proxy_rpc_failures_total",
+                method="bdev_get_bdevs", reason="invalid_response"), 1)
+        self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
     async def test_unreachable_spdk_is_counted_as_a_failure(self):
         with patch_connect(FakeSpdkSocket(ConnectionRefusedError("refused"))):
