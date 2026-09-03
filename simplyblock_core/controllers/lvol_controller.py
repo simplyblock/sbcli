@@ -4417,6 +4417,54 @@ def resolve_replication_destination(db_controller, lvol, target_node, source_nod
     return target_cluster, ""
 
 
+def _retire_source_data_path(db_controller, lvol):
+    """Fence and unpublish the SOURCE volume's data path after a fail-over.
+
+    The source is only ASSUMED dead. When it is in fact alive (administrative
+    or test fail-over), leaving its path published breaks everything
+    downstream: the client keeps writing to the superseded original (all of
+    it discarded at fail-back), and a namespaced volume's restage re-attaches
+    to the ORIGINAL device — the shared subsystem's controllers survive the
+    unstage, the stale device matches the same model/nsid glob, and the DR
+    clone's namespace is rejected against the original-identity head ("IDs
+    don't match for shared namespace N") — so pods never actually reach the
+    DR cluster (run 2026-09-03 ~09:00: all three namespaced pods remounted
+    on the originals after fail-over; fail-back's eviction then shut down
+    all three filesystems mid-IO).
+
+    Best-effort: an unreachable source (a genuine DR event) changes nothing
+    here, and a source that recovers later comes back without the namespace
+    registered — fenced by absence. The DB record stays (it is the fail-back
+    delta base); its from_source=False marks it retired so the lvol monitor
+    and the non-leader repair do not register the namespace back.
+    """
+    try:
+        if not suspend_lvol(lvol.get_id()):
+            logger.warning("Fail-over: could not fence the source listeners "
+                           "of %s", lvol.get_id())
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning("Fail-over: fencing the source of %s failed: %s",
+                       lvol.get_id(), e)
+
+    for node_id in (lvol.nodes or [lvol.node_id]):
+        if not node_id:
+            continue
+        try:
+            snode = db_controller.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            if not _remove_lvol_subsys_from_node(
+                    lvol, snode.rpc_client(timeout=5, retry=1)):
+                logger.warning("Fail-over: source namespace of %s not removed "
+                               "on %s", lvol.get_id(), node_id)
+        except Exception as e:                               # noqa: BLE001
+            logger.warning("Fail-over: removing the source namespace of %s "
+                           "on %s failed: %s", lvol.get_id(), node_id, e)
+
+
 def replicate_lvol_on_target_cluster(lvol_id, generation=0):
     db_controller = DBController()
     try:
@@ -4521,6 +4569,12 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0):
     lvol_replication.write_to_db(db_controller.kv_store)
 
     lvol_events.lvol_replicated(lvol, new_lvol)
+
+    # The relationship is durable and the DR copy is online: retire the
+    # source's data path NOW (fence + namespace removal, best-effort) so a
+    # still-alive source cannot keep serving superseded data. See
+    # _retire_source_data_path for the failure chain this closes.
+    _retire_source_data_path(db_controller, lvol)
 
     # Provide the new connection paths (primary/secondary/tertiary) — identical
     # NQN, different IP/port — so the client can fail over to the target cluster.

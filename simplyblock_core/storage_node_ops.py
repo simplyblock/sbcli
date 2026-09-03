@@ -11235,6 +11235,12 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
     if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
         return False, (f"LVol {lvol.get_id()} status is {lvol.status}, "
                        f"not repairing registration")
+    if not getattr(lvol, "from_source", True):
+        # Retired fail-over source: its namespace was removed deliberately
+        # (_retire_source_data_path). Registering it back republishes the
+        # superseded data path the fail-over just fenced.
+        return False, (f"LVol {lvol.get_id()} is the retired source of a "
+                       f"fail-over, not re-registering its namespace")
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
     if rpc_client.subsystem_get(lvol.nqn) is None:

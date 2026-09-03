@@ -609,6 +609,14 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
         if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
             continue
 
+        if not getattr(lvol, "from_source", True):
+            # The retired SOURCE of a fail-over: its namespace was removed
+            # deliberately (_retire_source_data_path) and the record only
+            # survives as the fail-back delta base. Checking it always fails,
+            # and the self-heal below would register the namespace back —
+            # resurrecting the stale device the retirement removed.
+            continue
+
         if snode.lvstore_status != "ready":
             continue
 
