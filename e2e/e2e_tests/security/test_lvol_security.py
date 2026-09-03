@@ -16,6 +16,7 @@ All sbcli CLI wrappers live in ssh_utils.SshUtils:
   ssh_obj.get_client_host_nqn(node)
 """
 
+import json
 import threading
 import time
 import random
@@ -297,18 +298,51 @@ class SecurityTestBase(TestClusterBase):
                 f"[pool] Requested '{self.pool_name}' but using '{actual}'")
             self.pool_name = actual
         self._dhchap_node_label = (
-            self._k8s_pool_node_label() if dhchap else None
+            self._k8s_pool_node_label(allowed_nodes) if dhchap else None
         )
         self._k8s_setup_storage_class()
 
-    def _k8s_pool_node_label(self):
+    def _k8s_pool_node_label(self, allowed_nodes=None):
         """Return the operator's node label key for the current pool.
 
-        Shape is ``simplyblock.io/pool.<namespace>.<StorageCluster CR name>.<pool>``.
-        The operator applies this (value ``allowed``) to every node in the
-        pool's allowedNodes, and it is what a StorageClass must reference via
-        ``dhchap_node_label`` for enforcement to reach the volume.
+        Read it off an allowed node rather than rebuilding the string. The
+        operator derives the key from the StoragePool CRD's metadata.name,
+        while ``self.pool_name`` holds the *backend* pool name — those have
+        matched so far but nothing guarantees it, and a wrong key means the
+        StorageClass silently carries no enforcement at all (the exact
+        failure this whole change is fixing). Falls back to the computed
+        shape ``simplyblock.io/pool.<ns>.<StorageCluster CR>.<pool>`` only if
+        no label can be found, and says so loudly.
         """
+        k8s = self._ensure_k8s_utils()
+        for node in (allowed_nodes or []):
+            out, _ = k8s._exec_kubectl(
+                f"kubectl get node {node} -o jsonpath='{{.metadata.labels}}' "
+                f"2>/dev/null || true"
+            )
+            try:
+                labels = json.loads(out) if out.strip().startswith("{") else {}
+            except (json.JSONDecodeError, AttributeError):
+                labels = {}
+            found = [
+                key for key, val in labels.items()
+                if key.startswith("simplyblock.io/pool.") and val == "allowed"
+                and key.rsplit(".", 1)[-1] == self.pool_name
+            ]
+            if found:
+                self.logger.info(
+                    f"[dhchap] pool node label (read from {node}): {found[0]}")
+                return found[0]
+
+        label = self._k8s_pool_node_label_computed()
+        self.logger.warning(
+            f"[dhchap] Could not read the pool label off any allowed node "
+            f"{allowed_nodes} — falling back to computed {label!r}. If "
+            f"enforcement does not apply, this is the first thing to check.")
+        return label
+
+    def _k8s_pool_node_label_computed(self):
+        """Best-effort construction of the pool label key (fallback only)."""
         k8s = self._ensure_k8s_utils()
         out, _ = k8s._exec_kubectl(
             f"kubectl get storageclusters -n {k8s.namespace} --no-headers "
