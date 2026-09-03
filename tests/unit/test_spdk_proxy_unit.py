@@ -600,6 +600,66 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(self.proxy.active_requests, 0)
 
 
+class TestClientDisconnect(unittest.IsolatedAsyncioTestCase):
+    """A caller that vanishes mid-request must not cost anything.
+
+    Driven as a raw ASGI call: ``TestClient`` always delivers a complete body,
+    so the ``http.disconnect`` message cannot be produced through it.
+    """
+
+    def setUp(self):
+        self.app = proxy_mod.create_app(make_settings())
+        self.proxy = self.app.state.proxy
+        self.proxy.spdk_ready = True
+
+    async def _disconnect_before_body(self):
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.1"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"authorization", self.proxy.settings.authorization.encode("ascii")),
+                (b"content-type", b"application/json"),
+                (b"content-length", b"42"),
+            ],
+            "client": ("127.0.0.1", 45678),
+            "server": ("testserver", 80),
+        }
+        sent = []
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        await self.app(scope, receive, send)
+        return sent
+
+    async def test_disconnect_before_the_body_gets_400(self):
+        sent = await self._disconnect_before_body()
+
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        self.assertEqual(start["status"], 400)
+
+    async def test_disconnect_reaches_neither_spdk_nor_a_concurrency_slot(self):
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock()) as rpc_call:
+            await self._disconnect_before_body()
+
+        rpc_call.assert_not_called()
+        self.assertEqual(self.proxy.active_requests, 0)
+        self.assertEqual(self.proxy.open_connections, 0)
+        self.assertEqual(
+            self.proxy.metrics.registry.get_sample_value("spdk_proxy_rpc_slots_in_use"), 0)
+
+
 class TestIntervalReport(unittest.TestCase):
     """The periodic log line, computed from a histogram's own totals."""
 
