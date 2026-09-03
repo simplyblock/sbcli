@@ -1,5 +1,6 @@
 # coding=utf-8
 import glob
+import hashlib
 import json
 import logging
 import math
@@ -28,7 +29,7 @@ from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
 import tempfile
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
@@ -61,6 +62,11 @@ NQN_PATTERN = re.compile(
 
 ALERT_RESOURCES_FILE = "alert_resources.yaml"
 ALERTS_TEMPLATE_FOLDER = "simplyblock_core/scripts/alerting/"
+SCRIPTS_FOLDER = "simplyblock_core/scripts/"
+
+# Provisioning files for the cluster event log alerts (`cluster event-alerts`).
+EVENT_ALERT_RULES_FILE = "event_alert_rules.yaml"
+EVENT_ALERT_DATASOURCE_FILE = "datasource-events.yml"
 
 def get_env_var(name, default=None, is_required=False):
     if not name:
@@ -2567,6 +2573,10 @@ def _alerts_template_folder() -> str:
     return os.path.join(_top_dir(), ALERTS_TEMPLATE_FOLDER)
 
 
+def _scripts_folder() -> str:
+    return os.path.join(_top_dir(), SCRIPTS_FOLDER)
+
+
 def _top_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
@@ -2606,6 +2616,45 @@ def render_configfile_alerting(alert_config: Dict[str, Any]) -> str:
     template = env.get_template(f'{ALERT_RESOURCES_FILE}.j2')
 
     return template.render(alert_config)
+
+
+def render_event_alert_configs(settings: Dict[str, Any],
+                               clusters: Iterable[Tuple[str, str]]) -> Dict[str, str]:
+    """Render the Grafana provisioning files for the cluster event log alerts.
+
+    Returns {filename: content} for both files, always, so that disabling the
+    alerts overwrites what enabling them wrote. A cluster missing either its id
+    or its secret is skipped: the API checks that the two agree, so a
+    half-configured data source fails every evaluation with a 401. Both uids
+    are derived from the cluster id so the two files agree on them and a re-run
+    updates the same objects instead of adding a second set.
+
+    StrictUndefined because a missing value would reach Grafana as empty YAML,
+    which it answers by refusing to start.
+    """
+    entries = []
+    if settings.get('enabled'):
+        for cluster_id, secret in clusters:
+            if not cluster_id or not secret:
+                continue
+            digest = hashlib.sha256(cluster_id.encode('utf-8')).hexdigest()
+            entries.append({'id': cluster_id, 'secret': secret,
+                            'ds_uid': f'sbev-{digest[:12]}', 'uid_prefix': digest[:8]})
+
+    values = {
+        'EVENT_ALERTS': settings,
+        'EVENT_ALERT_CLUSTERS': entries,
+        'CONTROL_PLANE_ADDR': constants.MONITORING_CONTROL_PLANE_ADDR,
+    }
+
+    rendered = {}
+    for folder, filename in ((_alerts_template_folder(), EVENT_ALERT_RULES_FILE),
+                             (_scripts_folder(), EVENT_ALERT_DATASOURCE_FILE)):
+        env = Environment(loader=FileSystemLoader(folder), trim_blocks=True, lstrip_blocks=True,
+                          undefined=StrictUndefined)
+        rendered[filename] = env.get_template(f'{filename}.j2').render(values)
+
+    return rendered
 
 
 def render_and_deploy_alerting_configs(alert_config: Optional[Dict[str, Any]], contact_point: Optional[str],

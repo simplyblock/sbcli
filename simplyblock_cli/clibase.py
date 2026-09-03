@@ -472,6 +472,22 @@ class CLIWrapperBase:
             return False
         return True
 
+    def cluster__event_alerts(self, sub_command, args):
+        cluster_ops.set_event_alerts(
+            args.cluster_id,
+            enabled=not args.disable,
+            log_limit=args.log_limit,
+            interval=args.interval,
+            pending_period=args.pending_period,
+            plugin_url=args.plugin_url,
+            plugin_preinstalled=args.plugin_preinstalled,
+        )
+        if args.disable:
+            return "Event log alert rules removed from Grafana."
+        return ("Event log alert rules provisioned. Grafana was restarted; the rules start "
+                "evaluating once the data source plugin has loaded, which takes a minute or two "
+                "the first time.")
+
     def cluster__op_stop(self, sub_command, args):
         return cluster_ops.set_object_ops(args.cluster_id, True)
 

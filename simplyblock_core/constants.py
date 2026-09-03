@@ -588,6 +588,20 @@ LVO_MAX_NAMESPACES_PER_SUBSYS=32
 CR_GROUP = "storage.simplyblock.io"
 CR_VERSION  = "v1alpha1"
 
+# Grafana alert rules read from the cluster event log rather than from Thanos,
+# provisioned by `sbctl cluster event-alerts`. The plugin id is both the folder
+# Grafana installs the plugin into and the data source `type` the rules use.
+# 2.12.2 is the last Infinity release compatible with Grafana 10.0.12.
+GRAFANA_EVENT_ALERTS_PLUGIN_ID = "yesoreyeram-infinity-datasource"
+GRAFANA_EVENT_ALERTS_PLUGIN_URL = (
+    "https://grafana.com/api/plugins/yesoreyeram-infinity-datasource/versions/2.12.2/download")
+
+# The control plane as reached from the monitoring stack. HAProxy's default
+# backend is the web API, so /api/v2 needs no route of its own; the same host
+# prometheus.yml.j2 scrapes /cluster/metrics from.
+MONITORING_CONTROL_PLANE_ADDR = "http://HAProxy"
+MONITORING_GRAFANA_SERVICE = "monitoring_grafana"
+
 GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
 GRAYLOG_K8S_ENDPOINT = "http://simplyblock-graylog:9000"
 OS_K8S_ENDPOINT = "http://opensearch-cluster-master:9200"
