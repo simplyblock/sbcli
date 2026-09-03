@@ -11,6 +11,10 @@ on:
         type: string
         required: true
         description: "sbcli branch / version tag to bootstrap the cluster with (e.g. R25.10-Hotfix)"
+      SIMPLYBLOCK_DEPLOY_BRANCH:
+        type: string
+        default: "main"
+        description: "Branch of simplyblock-io/simplyBlockDeploy to clone bootstrap-cluster.sh from"
       CUSTOM_IMAGES:
         type: string
         default: 'base_spdk="" target_spdk="" base_docker="" target_docker=""'
@@ -46,21 +50,15 @@ on:
       NFS_MOUNTPOINT:
         type: string
         default: "/mnt/nfs_share"
-      BOOTSTRAP_MAX_SUBSYS:
+      BOOTSTRAP_PARAMS:
         type: string
-        default: "75"
-      BOOTSTRAP_DATA_CHUNKS:
-        type: string
-        default: "1"
-      BOOTSTRAP_PARITY_CHUNKS:
-        type: string
-        default: "2"
-      BOOTSTRAP_JOURNAL_PARTITION:
-        type: string
-        default: "1"
-      BOOTSTRAP_HA_JM_COUNT:
-        type: string
-        default: "4"
+        default: "max-subsys=75,data-chunks-per-stripe=1,parity-chunks-per-stripe=2,journal-partition=1,ha-jm-count=4"
+      BOOTSTRAP_CONFIGURE_MAX_LVOL:
+        type: boolean
+        default: false
+      BOOTSTRAP_CONFIGURE_MAX_SUBSYS:
+        type: boolean
+        default: false
       BOOTSTRAP_HA_TYPE:
         type: string
         default: "ha"
@@ -96,6 +94,10 @@ on:
       BASE_SBCLI_BRANCH:
         description: "sbcli branch / version tag to bootstrap the cluster with (e.g. R25.10-Hotfix)"
         required: true
+      SIMPLYBLOCK_DEPLOY_BRANCH:
+        description: "Branch of simplyblock-io/simplyBlockDeploy to clone bootstrap-cluster.sh from"
+        required: false
+        default: "main"
       CUSTOM_IMAGES:
         description: "Image overrides: set base_spdk, target_spdk, base_docker and/or target_docker values, leave as \"\" to skip."
         required: false
@@ -139,26 +141,20 @@ on:
         description: "NFS mountpoint to unmount everywhere"
         required: true
         default: "/mnt/nfs_share"
-      BOOTSTRAP_MAX_SUBSYS:
-        description: "bootstrap: --max-subsys"
+      BOOTSTRAP_PARAMS:
+        description: "Comma-separated key=value bootstrap params: max-subsys, data-chunks-per-stripe, parity-chunks-per-stripe, journal-partition, ha-jm-count"
         required: true
-        default: "75"
-      BOOTSTRAP_DATA_CHUNKS:
-        description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
-        required: true
-        default: "1"
-      BOOTSTRAP_PARITY_CHUNKS:
-        description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
-        required: true
-        default: "2"
-      BOOTSTRAP_JOURNAL_PARTITION:
-        description: "bootstrap: --journal-partition"
-        required: true
-        default: "1"
-      BOOTSTRAP_HA_JM_COUNT:
-        description: "bootstrap: --ha-jm-count"
-        required: true
-        default: "4"
+        default: "max-subsys=75,data-chunks-per-stripe=1,parity-chunks-per-stripe=2,journal-partition=1,ha-jm-count=4"
+      BOOTSTRAP_CONFIGURE_MAX_LVOL:
+        description: "Old base version: pass --max-lvol to storage-node configure (pre-2026-06 sbcli). Leave unchecked unless you know the base version needs it."
+        type: boolean
+        required: false
+        default: false
+      BOOTSTRAP_CONFIGURE_MAX_SUBSYS:
+        description: "Mid-era base version: pass --max-subsys to storage-node configure (2026-06 to 2026-08 sbcli). Leave unchecked unless you know the base version needs it."
+        type: boolean
+        required: false
+        default: false
       BOOTSTRAP_HA_TYPE:
         description: "bootstrap: --ha-type"
         required: true
@@ -218,6 +214,7 @@ jobs:
       BASE_SBCLI_BRANCH:   ${{ inputs.BASE_SBCLI_BRANCH }}
       SBCLI_BRANCH:   ${{ inputs.BASE_SBCLI_BRANCH }}
       TARGET_SBCLI_BRANCH: ${{ inputs.TARGET_SBCLI_BRANCH }}
+      SIMPLYBLOCK_DEPLOY_BRANCH: ${{ inputs.SIMPLYBLOCK_DEPLOY_BRANCH || 'main' }}
       CUSTOM_IMAGES:       ${{ inputs.CUSTOM_IMAGES || 'base_spdk="" target_spdk="" base_docker="" target_docker=""' }}
 
       # Cluster/lab env
@@ -240,12 +237,16 @@ jobs:
       # Cleanup
       NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
 
-      # Bootstrap params
-      BOOTSTRAP_MAX_SUBSYS:          ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '75' }}
-      BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
-      BOOTSTRAP_PARITY_CHUNKS:     ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
-      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
-      BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '4' }}
+      # Bootstrap params — comma-separated key=value string, parsed into
+      # BOOTSTRAP_MAX_SUBSYS/BOOTSTRAP_DATA_CHUNKS/etc. by the "Parse
+      # BOOTSTRAP_PARAMS" step below.
+      BOOTSTRAP_PARAMS: ${{ inputs.BOOTSTRAP_PARAMS || 'max-subsys=75,data-chunks-per-stripe=1,parity-chunks-per-stripe=2,journal-partition=1,ha-jm-count=4' }}
+      # Old/mid-era base version support: when set, the bootstrap step routes
+      # the max-subsys value to `storage-node configure` (via --extra-sn-args)
+      # instead of `cluster create`, since which command accepts it depends
+      # on the base sbcli version and isn't inferable from branch name alone.
+      BOOTSTRAP_CONFIGURE_MAX_LVOL:   ${{ inputs.BOOTSTRAP_CONFIGURE_MAX_LVOL || false }}
+      BOOTSTRAP_CONFIGURE_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_CONFIGURE_MAX_SUBSYS || false }}
       BOOTSTRAP_HA_TYPE:           ${{ inputs.BOOTSTRAP_HA_TYPE || 'ha' }}
       BOOTSTRAP_DATA_NIC:          ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
       EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
@@ -279,6 +280,24 @@ jobs:
           pwd
           python3 --version || true
           git --version
+
+      - name: Parse BOOTSTRAP_PARAMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A bp
+          IFS=',' read -ra pairs <<< "${BOOTSTRAP_PARAMS}"
+          for pair in "${pairs[@]}"; do
+            key="${pair%%=*}"; val="${pair#*=}"
+            bp["$key"]="$val"
+          done
+          {
+            echo "BOOTSTRAP_MAX_SUBSYS=${bp[max-subsys]:-75}"
+            echo "BOOTSTRAP_DATA_CHUNKS=${bp[data-chunks-per-stripe]:-1}"
+            echo "BOOTSTRAP_PARITY_CHUNKS=${bp[parity-chunks-per-stripe]:-2}"
+            echo "BOOTSTRAP_JOURNAL_PARTITION=${bp[journal-partition]:-1}"
+            echo "BOOTSTRAP_HA_JM_COUNT=${bp[ha-jm-count]:-4}"
+          } >> "$GITHUB_ENV"
 
       - name: Clear stale test artifacts from previous run
         shell: bash
@@ -576,7 +595,8 @@ jobs:
         run: |
           set -euxo pipefail
           rm -rf simplyBlockDeploy
-          git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
+          echo "Cloning simplyBlockDeploy @ branch '${SIMPLYBLOCK_DEPLOY_BRANCH}'"
+          git clone --branch "${SIMPLYBLOCK_DEPLOY_BRANCH}" https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
 
       - name: Write cluster security/backup config to mgmt node
@@ -640,14 +660,40 @@ jobs:
           if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
             extra_args+=( --extra-cluster-args "${EXTRA_CLUSTER_ARGS}" )
           fi
-          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
-            extra_args+=( --extra-sn-args "${EXTRA_SN_ARGS}" )
+
+          # Whether storage-node configure needs --max-lvol, --max-subsys, or
+          # neither depends on the base sbcli version and can't be inferred
+          # from BASE_SBCLI_BRANCH's name — hence the two explicit checkboxes.
+          # The value goes to exactly one destination: cluster create by
+          # default (today's behavior), or storage-node configure (via
+          # --extra-sn-args) when one of the checkboxes is set — never both,
+          # since cluster create's --max-subsys is itself only valid on base
+          # versions newer than the ones that need it on configure.
+          cluster_max_subsys_args=( --max-subsys "${BOOTSTRAP_MAX_SUBSYS}" )
+          configure_extra_flag=""
+          if [[ "${BOOTSTRAP_CONFIGURE_MAX_LVOL}" == "true" ]]; then
+            configure_extra_flag="--max-lvol ${BOOTSTRAP_MAX_SUBSYS}"
+            cluster_max_subsys_args=()
+            echo "BOOTSTRAP_CONFIGURE_MAX_LVOL set: routing max-subsys value to 'storage-node configure --max-lvol' instead of 'cluster create --max-subsys'"
+          elif [[ "${BOOTSTRAP_CONFIGURE_MAX_SUBSYS}" == "true" ]]; then
+            configure_extra_flag="--max-subsys ${BOOTSTRAP_MAX_SUBSYS}"
+            cluster_max_subsys_args=()
+            echo "BOOTSTRAP_CONFIGURE_MAX_SUBSYS set: routing max-subsys value to 'storage-node configure --max-subsys' instead of 'cluster create --max-subsys'"
+          fi
+
+          combined_extra_sn_args="${EXTRA_SN_ARGS:-}"
+          if [[ -n "${configure_extra_flag}" ]]; then
+            combined_extra_sn_args="${combined_extra_sn_args} ${configure_extra_flag}"
+          fi
+          combined_extra_sn_args="$(echo "${combined_extra_sn_args}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [[ -n "${combined_extra_sn_args}" ]]; then
+            extra_args+=( --extra-sn-args "${combined_extra_sn_args}" )
           fi
 
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
-            --max-subsys "${BOOTSTRAP_MAX_SUBSYS}" \
+            "${cluster_max_subsys_args[@]}" \
             --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
