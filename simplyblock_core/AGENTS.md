@@ -50,6 +50,8 @@ Clients in `rpc_client.py`, `snode_client.py`, and `fw_api_client.py` accept `Se
 
 Response-body logging is gated by `Settings().log_response_bodies` (default `False`). When off, only status code and content-length are logged.
 
+The request-side `logger.debug` in `_request2` / `_request3` masks by type for the params that are `SecretStr`, and passes every params dict through `redact_rpc_params` (`utils/secrets.py`) to cover the ones that arrive as plain `str` — the v1 API hands controllers raw JSON. The SPDK proxy applies the same redactor, since by the time a body reaches it the wrappers are gone.
+
 ## Tests
 
 ```bash
