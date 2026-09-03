@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncGenerator, Dict, Optional
 
 import uvicorn
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.requests import ClientDisconnect
@@ -195,14 +195,6 @@ class SpdkProxy:
             self._slots = asyncio.Semaphore(self.concurrency_limit)
         return self._slots
 
-    def authenticate(self, authorization: Optional[str]) -> bool:
-        # Compared as bytes: compare_digest rejects non-ASCII str outright, and
-        # the header is attacker-controlled.
-        return authorization is not None and hmac.compare_digest(
-            authorization.encode('utf-8'),
-            self.settings.authorization.encode('utf-8'),
-        )
-
     async def report_stats(self) -> None:
         """Log the collected timings every ``STATS_INTERVAL_SEC`` seconds."""
         while True:
@@ -356,6 +348,27 @@ def _close(writer: asyncio.StreamWriter) -> None:
         pass
 
 
+def require_authorization(request: Request) -> None:
+    """Gate a request on the configured basic-auth credentials.
+
+    Reads the proxy off the request's own application rather than a module
+    global, so apps built by separate ``create_app`` calls stay independent.
+    """
+    settings: ProxySettings = request.app.state.proxy.settings
+    authorization = request.headers.get('Authorization')
+    # Compared as bytes: compare_digest rejects non-ASCII str outright, and
+    # the header is attacker-controlled.
+    if authorization is None or not hmac.compare_digest(
+            authorization.encode('utf-8'),
+            settings.authorization.encode('utf-8'),
+    ):
+        # The only trace a rejected request leaves: it never reaches the route,
+        # which is what logs every other request.
+        client = request.client.host if request.client is not None else 'unknown'
+        logger.warning(f"rejected an unauthorized request from {client}")
+        raise HTTPException(status_code=401, headers={'WWW-Authenticate': 'Basic'})
+
+
 def create_app(settings: ProxySettings) -> FastAPI:
     """Build the proxy application.
 
@@ -379,16 +392,13 @@ def create_app(settings: ProxySettings) -> FastAPI:
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.proxy = proxy
 
-    @app.post('/{path:path}')
+    @app.post('/{path:path}', dependencies=[Depends(require_authorization)])
     async def rpc(request: Request) -> Response:
         req_time = time.time_ns()
         proxy.active_requests += 1
         logger.info(f"incoming request at: {req_time}")
         logger.info(f"active server session: {proxy.active_requests}")
         try:
-            if not proxy.authenticate(request.headers.get('Authorization')):
-                return Response(status_code=401, headers={'WWW-Authenticate': 'Basic'})
-
             read_start = time.time_ns()
             try:
                 body = await request.body()
