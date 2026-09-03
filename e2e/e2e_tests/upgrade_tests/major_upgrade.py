@@ -1064,7 +1064,7 @@ print("done")
             self.logger.info(f"[SN {snode}] TEMP: restarting node {node_id} (post-switch)")
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
-                f"{self.sbctl_cmd} --dev -d sn restart {node_id}",
+                f"{self.sbctl_cmd} --dev -d sn restart {node_id} --force",
                 raise_on_error=True,
             )
             try:
