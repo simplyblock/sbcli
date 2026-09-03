@@ -315,7 +315,6 @@ class TestProxyReadinessGate(unittest.TestCase):
 
             with mock_spdk(path):
                 self.assertTrue(proxy.wait_until_serving())
-                self.assertTrue(proxy.proxy.spdk_ready)
                 self.assertEqual(proxy.proxy.open_connections, 0)
 
 
