@@ -31,12 +31,20 @@ def _node(status=StorageNode.STATUS_ONLINE):
     return node
 
 
+def _record(bucket, value):
+    """Append and report success — a lambda-safe stand-in for the patched
+    call sites, which must return truthy."""
+    bucket.append(value)
+    return True
+
+
 def test_retire_fences_then_removes_on_every_online_node(monkeypatch):
-    fenced, removed = [], []
+    fenced: list = []
+    removed: list = []
     monkeypatch.setattr(lc, "suspend_lvol",
-                        lambda lvol_id: fenced.append(lvol_id) or True)
+                        lambda lvol_id: _record(fenced, lvol_id))
     monkeypatch.setattr(lc, "_remove_lvol_subsys_from_node",
-                        lambda lvol, rpc: removed.append(lvol.get_id()) or True)
+                        lambda lvol, rpc: _record(removed, lvol.get_id()))
     db = MagicMock()
     db.get_storage_node_by_id.side_effect = \
         lambda nid: {"N1": _node(), "N2": _node()}[nid]
@@ -46,10 +54,10 @@ def test_retire_fences_then_removes_on_every_online_node(monkeypatch):
 
 
 def test_retire_skips_offline_nodes(monkeypatch):
-    removed = []
+    removed: list = []
     monkeypatch.setattr(lc, "suspend_lvol", lambda lvol_id: True)
     monkeypatch.setattr(lc, "_remove_lvol_subsys_from_node",
-                        lambda lvol, rpc: removed.append(rpc) or True)
+                        lambda lvol, rpc: _record(removed, rpc))
     db = MagicMock()
     db.get_storage_node_by_id.side_effect = lambda nid: {
         "N1": _node(), "N2": _node(status=StorageNode.STATUS_OFFLINE)}[nid]

@@ -164,7 +164,7 @@ def _lvs_transfer_hold(task, snapshot):
     """
     own_lvol = getattr(snapshot, "lvol", None)
     lvs_name = getattr(own_lvol, "lvs_name", "") if own_lvol else ""
-    if not lvs_name:
+    if own_lvol is None or not lvs_name:
         return ""
     own_id = own_lvol.get_id()
     own_group = _group_id_for_lvol(own_lvol)

@@ -21,7 +21,7 @@ fine). Lines look like:
 import argparse
 import re
 import sys
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 
 LINE = re.compile(r"XFER-TIMING\s+(.*)$")
 KV = re.compile(r"(\w+)=(\S+)")
@@ -143,7 +143,7 @@ def report(events, csv_path=None):
     if envelope > 0:
         unaccounted = envelope - measured
         pct = 100.0 * unaccounted / envelope
-        print("")
+        print()
         print("round envelopes    %8.1fs" % (envelope / 1000.0))
         print("measured phases    %8.1fs" % (measured / 1000.0))
         print("UNACCOUNTED        %8.1fs  (%.1f%% of the envelope)"

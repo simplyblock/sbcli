@@ -10,7 +10,7 @@ the ``cluster_id/uuid`` composite id.
 from typing import ClassVar
 import datetime
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class ReplicationTarget(BaseModel):
@@ -117,7 +117,7 @@ class ConsistencyGroup(BaseModel):
     #: monotonically increasing generation counter; group snapshot N stamps
     #: every member snapshot it takes with group_seq = N.
     last_group_seq: int = 0
-    members: dict = {}
+    members: dict = default_factory(dict)
     status: str = "active"
 
     def get_id(self):

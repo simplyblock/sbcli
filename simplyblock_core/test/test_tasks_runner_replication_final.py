@@ -97,7 +97,13 @@ def test_happy_path_marks_done_and_updates_state(monkeypatch):
     assert rep.state == LVolReplication.STATE_CUTOVER_DONE
 
 
-def test_failure_suspends_and_retries(monkeypatch):
+def test_failure_enters_hub_cooldown_without_burning_a_retry(monkeypatch):
+    """With the clone already prepared (tgt_lvol_composite set), a run_cutover
+    failure is treated as likely connectivity trouble: the task suspends
+    behind a cooldown and task.retry stays intact for the first
+    REPL_CUTOVER_MAX_HUB_ATTEMPTS attempts — burning retries at the poll
+    interval would exhaust the ceiling long before a restarting node
+    recovers."""
     rep = LVolReplication()
     rep.cutover_proceed = True
     nodes = {"S1": _node("S1"), "T1": _node("T1")}
@@ -108,8 +114,30 @@ def test_failure_suspends_and_retries(monkeypatch):
 
     assert res is False
     assert task.status == JobSchedule.STATUS_SUSPENDED
-    assert task.retry == 1
     assert task.function_result == "boom"
+    assert task.retry == 0, "a transient hub attempt must not burn task.retry"
+    assert task.function_params["cutover_hub_attempts"] == 1
+    assert task.function_params["cutover_retry_after"] > 0
+
+
+def test_failure_burns_a_retry_once_hub_attempts_are_exhausted(monkeypatch):
+    """Past the hub-attempt cap with the target node online, the failure is
+    real: the cooldown state resets and one retry is burned, so the ceiling
+    in task_runner can eventually end a cutover that keeps failing."""
+    from simplyblock_core import constants
+    rep = LVolReplication()
+    rep.cutover_proceed = True
+    nodes = {"S1": _node("S1"), "T1": _node("T1")}
+    _install(monkeypatch, nodes, rep, (False, "boom"))
+
+    task = _task(cutover_hub_attempts=constants.REPL_CUTOVER_MAX_HUB_ATTEMPTS)
+    res = runner.task_runner(task)
+
+    assert res is False
+    assert task.status == JobSchedule.STATUS_SUSPENDED
+    assert task.retry == 1
+    assert "cutover_hub_attempts" not in task.function_params
+    assert "cutover_retry_after" not in task.function_params
 
 
 def test_max_retry_marks_done_without_cutover(monkeypatch):
@@ -281,9 +309,14 @@ def test_shrink_hands_over_when_it_cannot_converge(monkeypatch):
     assert "not converged" in task.function_result
 
 
-def test_shrink_deadline_aborts(monkeypatch):
+def test_shrink_deadline_proceeds_to_cutover(monkeypatch):
+    """An expired deadline stops adding rounds and hands straight over to the
+    freeze: the residual delta is slightly larger than a converged one, but
+    proceeding always beats failing the task and waiting out another
+    900-second shrink window."""
     runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=False)},
                        {"shrink_round": 1, "shrink_snap_id": "S1",
                         "shrink_deadline": 1})
     done, err = runner._shrink_step(task, _ShrinkLvol())
-    assert done is False and err and "timed out" in err
+    assert (done, err) == (True, None), \
+        "the deadline must hand over to the freeze, not fail the cutover"

@@ -289,9 +289,9 @@ def _transfer_params(**kwargs):
 
     class _C(RPCClient):
         def __init__(self):
-            self.sent = None
+            self.sent: tuple = ()
 
-        def _request(self, method, params):
+        def _request(self, method, params=None, request_timeout=None):
             self.sent = (method, params)
             return True
 
@@ -304,13 +304,16 @@ def _transfer_params(**kwargs):
     return params
 
 
-def test_allow_partial_is_sent_only_when_requested():
-    # opted in
-    assert _transfer_params(allow_partial=True)["allow_partial"] is True
-    # opted out -- the key is absent, so every pre-existing caller keeps its
-    # exact current wire form and the fork's default (full) applies
+def test_allow_partial_is_never_sent_while_the_fork_workaround_holds():
+    """The delta path is DISABLED: bdev_lvol_transfer never emits allow_partial,
+    so every transfer is a full one regardless of what the caller requests
+    (commit 52e75afb2, 2026-08-31 — the SPDK fork's fragment write path
+    corrupts partial transfers). When the fork is fixed and the emission in
+    rpc_client.bdev_lvol_transfer is re-enabled, restore the opt-in
+    assertions: allow_partial=True must put the key on the wire, and
+    False/default must keep it absent."""
+    assert "allow_partial" not in _transfer_params(allow_partial=True)
     assert "allow_partial" not in _transfer_params(allow_partial=False)
-    # and the default is opted out
     assert "allow_partial" not in _transfer_params()
 
 

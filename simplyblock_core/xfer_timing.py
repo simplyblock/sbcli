@@ -78,7 +78,7 @@ def phase(name, lvol=None, snap=None, round=None, **extra):
             ph["bytes"] = n          # optional, folded into the line
     """
     started = time.time()
-    box = {}
+    box: dict = {}
     ok = 1
     try:
         yield box

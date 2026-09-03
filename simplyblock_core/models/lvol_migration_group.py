@@ -102,17 +102,6 @@ class LVolMigrationGroup(BaseModel):
     # triggers another synchronized round for every member.
     intermediate_more_needed: List[str] = default_factory(list)
 
-    # Which intermediate round is currently in flight (0-indexed; round 0 is
-    # always taken unconditionally). Incremented when the orchestrator starts
-    # another synchronized round.
-    intermediate_round: int = 0
-
-    # migration_ids that reported their dirty delta still exceeded the
-    # threshold after finishing intermediate_round. Cleared when a new round
-    # starts. Non-empty at the end of a round (and under the round cap)
-    # triggers another synchronized round for every member.
-    intermediate_more_needed: List[str] = []
-
     # migration_ids that have completed CLEANUP_SOURCE.
     cleanup_source_done: List[str] = default_factory(list)
 

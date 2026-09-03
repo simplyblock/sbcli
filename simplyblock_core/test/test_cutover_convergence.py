@@ -30,6 +30,8 @@ class _Task:
         self.function_result = ""
         self.status = ""
         self.retry = 0
+        self.max_retry = 0
+        self.canceled = False
         self.cluster_id = "CL"
 
     def write_to_db(self, *a, **kw):
@@ -95,7 +97,7 @@ class TestConvergence(unittest.TestCase):
             task_.function_params["shrink_started_at"] = clock.now
             return "S%d" % state["i"], None
 
-        patches = [
+        patches: list = [
             patch.object(runner.time, "time", clock),
             patch.object(runner.time, "sleep", clock.sleep),
             patch.object(runner, "_shrink_round_done", side_effect=_done),
@@ -179,12 +181,15 @@ class TestConvergence(unittest.TestCase):
         self.assertIn("disappeared", err)
 
     def test_the_deadline_still_bounds_the_phase(self):
+        """The deadline bounds the phase by handing over to the freeze, not by
+        failing: proceeding with a slightly larger residual always beats
+        burning a retry on another 900-second shrink window."""
         task = _Task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=0, lvol_id="LV1")
         with patch.object(runner, "_shrink_round_done", return_value=False):
             done, err = runner._shrink_step(task, _lvol())
-        self.assertFalse(done)
-        self.assertIn("timed out", err)
+        self.assertTrue(done)
+        self.assertIsNone(err)
 
     def test_it_yields_the_pass_when_the_budget_runs_out(self):
         """A very slow transfer must not hog the runner forever."""
@@ -222,9 +227,12 @@ class TestProceedGate(unittest.TestCase):
         import inspect
         src = inspect.getsource(runner.task_runner)
         self.assertIn("constants.REPL_CUTOVER_PROCEED_REQUIRED", src)
+        # Compare against the actual freeze CALL SITE, not the first "run_cutover"
+        # occurrence — the string also appears earlier in a comment about the
+        # retry path, which is not the freeze.
         self.assertLess(
             src.index("REPL_CUTOVER_PROCEED_REQUIRED"),
-            src.index("run_cutover"),
+            src.index("replication_final_step.run_cutover"),
             "the gate must be evaluated before the freeze")
 
 
@@ -247,7 +255,7 @@ class TestLvsAdmission(unittest.TestCase):
         patcher = patch.object(sr, "db")
         self.db = patcher.start()
         self.addCleanup(patcher.stop)
-        self.groups = {}                     # lvol id -> group id
+        self.groups: dict = {}                     # lvol id -> group id
         gp = patch.object(sr, "_group_id_for_lvol",
                           side_effect=lambda lv: self.groups.get(lv.get_id(), ""))
         gp.start()

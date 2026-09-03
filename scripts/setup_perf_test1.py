@@ -687,7 +687,7 @@ def main():
         if flag in sys.argv:
             env += f"{var}={sys.argv[sys.argv.index(flag) + 1]} "
     start_soak(mgmt_ip, env_prefix=env)
-    print("")
+    print()
     print("Soak running on mgmt. Follow it with:")
     print(f"  ssh -i {KEY_PATH} ec2-user@{mgmt_ip} "
           "\"tail -f ~/soak_base_$(cat ~/soak_ts).out\"")

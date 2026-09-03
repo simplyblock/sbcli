@@ -33,8 +33,7 @@ from simplyblock_core import db_controller as db_mod
 from simplyblock_core import utils
 from simplyblock_core.controllers import snapshot_events, tasks_controller
 from simplyblock_core.controllers.snapshot_controller import (
-    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock,
-    object_mutation_lock)
+    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock)
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
@@ -305,15 +304,19 @@ def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True
         return None, (f"Group snapshot RPC failed on {primary_node.get_id()}; "
                       f"SPDK rolled the partial group back")
 
+    # Bound outside the closure: mypy does not carry the ``group is None``
+    # guard's narrowing into nested functions.
+    group_lvs_name = group.lvs_name
+
     def _rollback_all():
         for p in plan:
-            _rollback_snapshot_bdev(pool.cluster_id, group.lvs_name,
+            _rollback_snapshot_bdev(pool.cluster_id, group_lvs_name,
                                     primary_node, p["snap_bdev_name"],
                                     all_nodes, lock=lock)
 
     # Everything below mirrors snapshot_controller.add's tail per member:
     # read back uuid/blobid, register on the HA peers, then the record.
-    created_ids = []
+    created_ids: list = []
     for p in plan:
         lvol = p["lvol"]
         snap_bdev = rpc_client.get_bdevs(f"{group.lvs_name}/{p['snap_bdev_name']}")

@@ -4242,10 +4242,17 @@ def _evict_stale_namespace(new_lvol, target_node, superseded=None):
     # that still holds the old namespace at this nsid also fails with -32602.
     peer_ids = [target_node.secondary_node_id, target_node.tertiary_node_id]
     db = DBController()
-    nodes_to_evict = [target_node] + [
-        db.get_storage_node_by_id(pid)
-        for pid in peer_ids if pid
-    ]
+    nodes_to_evict = [target_node]
+    for pid in peer_ids:
+        if not pid:
+            continue
+        try:
+            nodes_to_evict.append(db.get_storage_node_by_id(pid))
+        except KeyError:
+            # A peer id with no record holds no stale namespace to evict, and
+            # this eviction is best-effort — it must not abort the fail-over.
+            logger.warning("Stale-namespace eviction: peer node %s of %s not "
+                           "found; skipping it", pid, target_node.get_id())
     for node in nodes_to_evict:
         try:
             rpc = node.rpc_client()
