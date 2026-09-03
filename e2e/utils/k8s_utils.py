@@ -3604,18 +3604,74 @@ class K8sSbcliUtils:
         # 1. Check if sbcli already sees a pool
         existing = self.list_storage_pools()
         self.logger.info(f"[pool] existing pools (sbcli): {list(existing.keys())}")
-        if existing:
+        ns = self.k8s.namespace
+        if existing and not dhchap and not allowed_nodes:
             actual = next(iter(existing))
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
-        # 2. Check if StoragePool CRDs exist (operator may still be reconciling)
-        ns = self.k8s.namespace
-        out, _ = self.k8s._exec_kubectl(
-            f"kubectl get storagepools -n {ns} --no-headers "
-            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
-        )
-        existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
+        dedicated = bool(dhchap or allowed_nodes)
+        if existing and dedicated:
+            # A caller with a specific dhchap/allowedNodes requirement must
+            # NOT get an arbitrary existing pool handed back — reuse is only
+            # safe here if that pool's own StoragePool CRD already has the
+            # exact same dhchap + allowedNodes config. Other, non-DHCHAP
+            # tests share pools freely via the blind-reuse path above; this
+            # only narrows behavior for callers that actually asked for
+            # security enforcement.
+            wanted_nodes = sorted(allowed_nodes or [])
+            crd_json, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepools -n {ns} -o json 2>/dev/null || true"
+            )
+            try:
+                crds = json.loads(crd_json).get("items", []) if crd_json.strip() else []
+            except (json.JSONDecodeError, AttributeError):
+                crds = []
+            matched = False
+            for crd in crds:
+                spec = crd.get("spec", {})
+                if (bool(spec.get("dhchap")) == bool(dhchap)
+                        and sorted(spec.get("allowedNodes", []) or []) == wanted_nodes):
+                    actual = next(iter(existing))
+                    self.logger.info(
+                        f"[pool] Existing CRD '{crd['metadata']['name']}' "
+                        f"already matches requested dhchap={dhchap} "
+                        f"allowedNodes={wanted_nodes} — reusing pool "
+                        f"'{actual}'")
+                    return actual
+            if not matched:
+                # No existing pool's CRD matches — give this one a name that
+                # can't collide with (or shadow) whatever pool other tests
+                # are sharing.
+                pool_name = f"{pool_name}-{int(time.time() * 1000) % 1000000}"
+                self.logger.info(
+                    f"[pool] No existing pool matches dhchap={dhchap} "
+                    f"allowedNodes={wanted_nodes} — creating dedicated pool "
+                    f"'{pool_name}'")
+
+        k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+
+        # 2. Check whether the CRD this call actually wants already exists.
+        #    For a dedicated (dhchap/allowedNodes) request this MUST be
+        #    scoped to our own resource name — checking "does any StoragePool
+        #    CRD exist in the namespace" would find an unrelated leftover
+        #    pool's CRD and skip creating ours entirely, then step 4 below
+        #    would hand back whichever pool the operator lists first (often
+        #    the unrelated one), silently dropping the dhchap/allowedNodes
+        #    request. Non-dedicated calls keep the original "any CRD" check.
+        if dedicated:
+            crd_out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepool {k8s_resource_name} -n {ns} "
+                f"--no-headers -o custom-columns=NAME:.metadata.name "
+                f"2>/dev/null || true"
+            )
+            existing_crds = [k8s_resource_name] if crd_out.strip() else []
+        else:
+            out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepools -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+            )
+            existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
 
         # 2b. If CRDs exist, check if they're stuck in Terminating.
         #     Previous test runs may have initiated deletion but finalizers
@@ -3631,7 +3687,7 @@ class K8sSbcliUtils:
             terminating = []
             for line in (term_out or "").strip().splitlines():
                 parts = line.split()
-                if len(parts) >= 2 and parts[1] != "<none>":
+                if len(parts) >= 2 and parts[1] != "<none>" and parts[0] in existing_crds:
                     terminating.append(parts[0])
 
             if terminating:
@@ -3649,7 +3705,7 @@ class K8sSbcliUtils:
                     remaining = [
                         r.strip() for r in
                         (check_out or "").strip().splitlines()
-                        if r.strip()
+                        if r.strip() and r.strip() in existing_crds
                     ]
                     if not remaining:
                         self.logger.info(
@@ -3678,20 +3734,10 @@ class K8sSbcliUtils:
                                 f"{e}")
                     sleep_n_sec(10)
 
-                # Re-check — CRDs should be gone now
-                re_out, _ = self.k8s._exec_kubectl(
-                    f"kubectl get storagepools -n {ns} --no-headers "
-                    f"-o custom-columns=NAME:.metadata.name "
-                    f"2>/dev/null || true"
-                )
-                existing_crds = [
-                    r.strip() for r in
-                    (re_out or "").strip().splitlines()
-                    if r.strip()
-                ]
+                existing_crds = [c for c in existing_crds if c not in terminating]
 
         if not existing_crds:
-            # 3. No pools at all — create one via kubectl apply
+            # 3. Create the CRD via kubectl apply.
             cid = cluster_id or self.cluster_id
             cluster_details = self.get_cluster_details(cluster_id=cid)
             # sbcli cluster get returns "cluster_name" (not "name")
@@ -3720,8 +3766,6 @@ class K8sSbcliUtils:
                     f"falling back to cluster_name='{cluster_name}' from sbcli"
                 )
 
-            k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
-
             yaml_content = (
                 f"apiVersion: storage.simplyblock.io/v1alpha1\n"
                 f"kind: StoragePool\n"
@@ -3739,7 +3783,7 @@ class K8sSbcliUtils:
                     yaml_content += f"    - {node_name}\n"
 
             self.logger.info(
-                f"[pool] No pools found — creating '{pool_name}' "
+                f"[pool] Creating '{pool_name}' "
                 f"(CRD={k8s_resource_name}, cluster={cluster_name}) via kubectl apply"
             )
             yaml_escaped = yaml_content.replace("'", "'\\''")
@@ -3751,12 +3795,26 @@ class K8sSbcliUtils:
                 f"waiting for operator to reconcile"
             )
 
-        # 4. Wait for operator to reconcile the StoragePool CRD into an actual pool
-        #    visible via sbcli pool list.  Use 300s timeout to handle slow
-        #    reconciliation after pool deletion/recreation cycles.
+        # 4. Wait for operator to reconcile the StoragePool CRD into an actual
+        #    pool visible via sbcli pool list. For a dedicated request, wait
+        #    specifically for a pool name that wasn't already in `existing`
+        #    at the start of this call — an unrelated pool that was already
+        #    there is never a valid answer here, no matter how the dict
+        #    orders. Use 300s timeout to handle slow reconciliation after
+        #    pool deletion/recreation cycles.
+        already_seen = set(existing.keys())
         for attempt in range(60):  # up to 300s
             pools = self.list_storage_pools()
-            if pools:
+            if dedicated:
+                new_pools = [p for p in pools if p not in already_seen]
+                if new_pools:
+                    actual = new_pools[0]
+                    self.logger.info(
+                        f"[pool] Operator reconciled dedicated pool '{actual}' "
+                        f"(attempt {attempt})"
+                    )
+                    return actual
+            elif pools:
                 actual = next(iter(pools))
                 self.logger.info(
                     f"[pool] Operator reconciled pool '{actual}' "
