@@ -539,25 +539,41 @@ class TestEndpoint(unittest.TestCase):
 
         self.assertEqual(response.status_code, 500)
 
-    def test_malformed_request_body_gets_500(self):
+    def test_malformed_request_body_gets_400(self):
+        """The caller sent junk; nothing reached SPDK, so a 500 would put the
+        blame on the wrong side of the socket."""
         response = self.client.post("/", content="not json", auth=("test", "secret"))
 
-        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.status_code, 400)
 
-    def test_json_body_without_a_method_gets_500(self):
+    def test_json_body_without_a_method_gets_400(self):
         """Valid JSON that is not a JSON-RPC request used to raise KeyError out
-        of the handler, bypassing the 500 path and the failure counter."""
+        of the handler, bypassing the error path and the failure counter."""
         response = self.client.post(
             "/", content=json.dumps({"id": 1}), auth=("test", "secret"))
 
-        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.status_code, 400)
 
-    def test_json_body_that_is_not_an_object_gets_500(self):
+    def test_json_body_that_is_not_an_object_gets_400(self):
         for body in ("5", "[]", '"a string"', "null"):
             with self.subTest(body=body):
                 response = self.client.post("/", content=body, auth=("test", "secret"))
 
-                self.assertEqual(response.status_code, 500)
+                self.assertEqual(response.status_code, 400)
+
+    def test_non_ascii_body_gets_400(self):
+        response = self.client.post(
+            "/", content='{"id": 1, "method": "\u00e9"}'.encode("utf-8"),
+            auth=("test", "secret"))
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_a_rejected_request_never_reaches_spdk(self):
+        with patch.object(proxy_mod.asyncio, 'open_unix_connection') as connect:
+            response = self.client.post("/", content="not json", auth=("test", "secret"))
+
+        self.assertEqual(response.status_code, 400)
+        connect.assert_not_called()
 
     def test_caller_timeout_header_is_forwarded(self):
         payload = rpc_response(result=True).decode()
@@ -749,6 +765,24 @@ class TestMetricsEndpoint(unittest.TestCase):
 
         self.assertIn('method="bdev_get_bdevs"', response.text)
 
+    def test_client_and_server_errors_are_separate_series(self):
+        """Status codes are exposed ungrouped, so an operator can tell a
+        malformed body from bad credentials from a broken SPDK."""
+        self.client.post("/", content="not json", auth=("test", "secret"))
+        self.client.post("/", content="not json", auth=("wrong", "creds"))
+        with patch.object(
+                self.proxy, 'rpc_call', new=AsyncMock(side_effect=ValueError("bad"))):
+            self.client.post("/", content="{}", auth=("test", "secret"))
+
+        for status in ("400", "401", "500"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    self.proxy.metrics.registry.get_sample_value(
+                        "http_requests_total",
+                        {"handler": "/{path:path}", "method": "POST", "status": status}),
+                    1,
+                )
+
     def test_credentials_never_appear_in_the_exposition(self):
         response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
 
@@ -810,6 +844,15 @@ class TestMetricsObservation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self._value(
                 "spdk_proxy_rpc_failures_total", method="bdev_get_bdevs", reason="timeout"), 1)
+        self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
+
+    async def test_a_malformed_request_is_not_counted_as_an_spdk_failure(self):
+        """The counter is about SPDK; a rejected body is the caller's fault and
+        shows up as a 400 in ``http_requests_total``."""
+        with self.assertRaises(proxy_mod.InvalidRequest):
+            await self.proxy.rpc_call(b"not json")
+
+        self.assertIsNone(self._value("spdk_proxy_rpc_failures_total"))
         self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
 
     async def test_unreachable_spdk_is_counted_as_a_failure(self):

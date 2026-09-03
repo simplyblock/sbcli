@@ -337,7 +337,7 @@ class ProxyMetrics:
         )
         self.failures = Counter(
             'spdk_proxy_rpc_failures_total',
-            'RPCs that never returned a SPDK response',
+            'RPCs that reached SPDK and did not come back',
             ['method', 'reason'],
             registry=self.registry,
         )
@@ -363,6 +363,29 @@ class ProxyMetrics:
     @property
     def reports(self) -> Tuple[IntervalReport, ...]:
         return (self.body_read, self.spdk_response)
+
+
+class InvalidRequest(Exception):
+    """The request body is not a JSON-RPC request object.
+
+    A caller-side fault, kept distinct from the ``ValueError`` a failed SPDK
+    round-trip raises: nothing was sent to SPDK, so it earns a 400 and a
+    ``bad_request`` failure rather than a 500 that would read as "SPDK is
+    broken" on a status-code or failure-rate dashboard.
+    """
+
+
+def _parse_request(req: bytes) -> Dict[str, Any]:
+    """Decode a request body, or reject it as the caller's fault."""
+    try:
+        req_data = json.loads(req.decode('ascii'))
+    except ValueError as e:
+        raise InvalidRequest(f"body is not ASCII JSON: {e}") from e
+
+    if not isinstance(req_data, dict) or 'method' not in req_data:
+        raise InvalidRequest('body is not a JSON-RPC request object')
+
+    return req_data
 
 
 class SpdkProxy:
@@ -481,11 +504,9 @@ class SpdkProxy:
         """
         logger.info(f"active requests: {self.active_requests}")
         logger.info(f"active unix sockets: {self.open_connections}")
-        req_data = json.loads(req.decode('ascii'))
-        # Raised before the slot is taken, so a malformed request cannot be
-        # counted as an SPDK-side failure by _rpc_call_inner.
-        if not isinstance(req_data, dict) or 'method' not in req_data:
-            raise ValueError('Not a JSON-RPC request object')
+        # Parsed before the slot is taken, so a malformed request neither
+        # occupies one nor gets counted as an SPDK-side failure.
+        req_data = _parse_request(req)
         method = str(req_data['method'])
         req_time = time.time_ns()
         params = str(redact_rpc_params(req_data['params'])) if 'params' in req_data else ""
@@ -619,7 +640,16 @@ def create_app(settings: ProxySettings) -> FastAPI:
 
     # Served on the RPC port behind the same credentials as the RPCs
     # themselves: `expose` forwards kwargs to the route decorator.
-    Instrumentator(registry=proxy.metrics.registry).instrument(app).expose(
+    # Ungrouped status codes: the default folds every client-side rejection
+    # into one `4xx` series, which cannot tell a malformed body (400) from bad
+    # credentials (401). Only a handful of codes are reachable here, so the
+    # cardinality is negligible. `spdk_proxy_rpc_failures_total` deliberately
+    # does not duplicate any of this -- it exists for what a status code cannot
+    # say, namely which SPDK method failed and why a 500 was a 500.
+    Instrumentator(
+        registry=proxy.metrics.registry,
+        should_group_status_codes=False,
+    ).instrument(app).expose(
         app,
         endpoint=METRICS_ENDPOINT,
         include_in_schema=False,
@@ -644,6 +674,9 @@ def create_app(settings: ProxySettings) -> FastAPI:
 
             try:
                 response = await proxy.rpc_call(body, request.headers.get('X-RPC-Timeout'))
+            except InvalidRequest as e:
+                logger.warning(f"rejected a malformed request (request {req_time}): {e}")
+                return Response(status_code=400)
             except ValueError:
                 return Response(status_code=500)
             except OSError as e:
