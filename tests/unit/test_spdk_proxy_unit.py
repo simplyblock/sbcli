@@ -415,6 +415,21 @@ class TestEndpoint(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
+    def test_credentials_are_scoped_to_the_app_that_serves_the_request(self):
+        """The dependency resolves settings per request, so two apps built in
+        one process do not accept each other's credentials."""
+        other = proxy_mod.create_app(make_settings(rpc_password="other"))
+        other.state.proxy.spdk_ready = True
+
+        with patch.object(other.state.proxy, 'rpc_call', new=AsyncMock(return_value=None)):
+            accepted = TestClient(other).post(
+                "/", content=self.body, auth=("test", "other"))
+            rejected = TestClient(other).post(
+                "/", content=self.body, auth=("test", "secret"))
+
+        self.assertEqual(accepted.status_code, 204)
+        self.assertEqual(rejected.status_code, 401)
+
     def test_bad_spdk_response_gets_500(self):
         with patch.object(self.proxy, 'rpc_call', new=AsyncMock(side_effect=ValueError("bad"))):
             response = self._post()
