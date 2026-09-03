@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from prometheus_client import CollectorRegistry, Histogram
 from pydantic import ValidationError
 
 from simplyblock_core.services import spdk_http_proxy_server as proxy_mod
@@ -468,6 +469,249 @@ class TestEndpoint(unittest.TestCase):
             self._post()
 
         self.assertEqual(self.proxy.active_requests, 0)
+
+
+class TestIntervalReport(unittest.TestCase):
+    """The periodic log line, computed from a histogram's own totals."""
+
+    def setUp(self):
+        registry = CollectorRegistry()
+        self.report = proxy_mod.IntervalReport('spdk', Histogram(
+            'test_duration_seconds', 'test', ['method'],
+            buckets=(0.01, 0.1, 1, float("inf")), registry=registry))
+
+    def test_first_tick_without_observations_reports_nothing(self):
+        self.assertIsNone(self.report.report())
+
+    def test_interval_average_covers_only_the_new_observations(self):
+        self.report.observe(1.0, method="a")
+        self.report.report()
+
+        # A second interval an order of magnitude faster: a cumulative average
+        # would still read ~0.5s, an interval average must read 0.1s.
+        self.report.observe(0.1, method="a")
+        summary = self.report.report()
+
+        self.assertIn("interval_avg=100.0ms", summary)
+        self.assertIn("n=1", summary)
+
+    def test_quiet_interval_reports_nothing_rather_than_dividing_by_zero(self):
+        self.report.observe(1.0, method="a")
+        self.report.report()
+
+        self.assertIsNone(self.report.report())
+
+    def test_max_is_the_interval_peak_and_resets(self):
+        self.report.observe(0.5, method="a")
+        self.report.observe(0.02, method="a")
+
+        self.assertIn("max=500.0ms", self.report.report())
+
+        self.report.observe(0.02, method="a")
+
+        self.assertIn("max=20.0ms", self.report.report())
+
+    def test_totals_are_aggregated_across_methods(self):
+        self.report.observe(0.1, method="a")
+        self.report.observe(0.3, method="b")
+        summary = self.report.report()
+
+        self.assertIn("n=2", summary)
+        self.assertIn("interval_avg=200.0ms", summary)
+
+    def test_slowest_method_of_the_interval_is_named(self):
+        for _ in range(10):
+            self.report.observe(0.001, method="fast")
+        self.report.observe(0.9, method="slow")
+
+        self.assertIn("slowest=slow", self.report.report())
+
+    def test_slowest_reflects_the_interval_not_history(self):
+        self.report.observe(0.9, method="slow")
+        self.report.report()
+
+        self.report.observe(0.5, method="other")
+        self.assertIn("slowest=other", self.report.report())
+
+    def test_p99_lands_in_the_bucket_holding_the_tail(self):
+        for _ in range(95):
+            self.report.observe(0.005, method="a")
+        for _ in range(5):
+            self.report.observe(0.5, method="a")
+
+        self.assertIn("p99<=1.00s", self.report.report())
+
+    def test_p99_ignores_a_tail_thinner_than_one_percent(self):
+        for _ in range(99):
+            self.report.observe(0.005, method="a")
+        self.report.observe(0.5, method="a")
+
+        self.assertIn("p99<=10.0ms", self.report.report())
+
+    def test_p99_beyond_the_last_finite_bucket_is_marked_open_ended(self):
+        self.report.observe(30.0, method="a")
+
+        self.assertIn("p99>1.00s", self.report.report())
+
+    def test_unlabelled_histogram_reports_without_a_slowest_field(self):
+        registry = CollectorRegistry()
+        report = proxy_mod.IntervalReport('body', Histogram(
+            'test_body_seconds', 'test', buckets=(0.01, float("inf")), registry=registry))
+        report.observe(0.005)
+
+        summary = report.report()
+
+        self.assertIn("n=1", summary)
+        self.assertNotIn("slowest=", summary)
+
+
+class TestBucketQuantile(unittest.TestCase):
+
+    def test_empty_buckets_have_no_quantile(self):
+        self.assertIsNone(proxy_mod._bucket_quantile({}, 0.99))
+
+    def test_all_zero_buckets_have_no_quantile(self):
+        self.assertIsNone(proxy_mod._bucket_quantile({0.1: 0.0, float("inf"): 0.0}, 0.99))
+
+    def test_quantile_is_the_bound_of_the_bucket_it_falls_in(self):
+        buckets = {0.1: 90.0, 1.0: 99.0, float("inf"): 100.0}
+
+        self.assertEqual(proxy_mod._bucket_quantile(buckets, 0.5), 0.1)
+        self.assertEqual(proxy_mod._bucket_quantile(buckets, 0.99), 1.0)
+        self.assertEqual(proxy_mod._bucket_quantile(buckets, 1.0), float("inf"))
+
+
+class TestMethodLabelCardinality(unittest.TestCase):
+    """The method label is caller-supplied, so its value set must be bounded."""
+
+    def setUp(self):
+        self.metrics = proxy_mod.ProxyMetrics()
+
+    def test_known_methods_are_passed_through(self):
+        self.assertEqual(self.metrics.method_label("bdev_get_bdevs"), "bdev_get_bdevs")
+
+    def test_methods_past_the_cap_collapse(self):
+        for i in range(proxy_mod.MAX_METHOD_LABELS):
+            self.metrics.method_label(f"method_{i}")
+
+        self.assertEqual(
+            self.metrics.method_label("one_too_many"), proxy_mod.OTHER_METHOD_LABEL)
+
+    def test_a_method_already_seen_survives_the_cap(self):
+        self.metrics.method_label("early")
+        for i in range(proxy_mod.MAX_METHOD_LABELS):
+            self.metrics.method_label(f"method_{i}")
+
+        self.assertEqual(self.metrics.method_label("early"), "early")
+
+    def test_absurdly_long_methods_collapse(self):
+        overlong = "x" * (proxy_mod.MAX_METHOD_LABEL_LEN + 1)
+
+        self.assertEqual(self.metrics.method_label(overlong), proxy_mod.OTHER_METHOD_LABEL)
+
+
+class TestMetricsEndpoint(unittest.TestCase):
+
+    def setUp(self):
+        self.app = proxy_mod.create_app(make_settings())
+        self.proxy = self.app.state.proxy
+        self.proxy.spdk_ready = True
+        self.client = TestClient(self.app)
+
+    def test_metrics_require_credentials(self):
+        response = self.client.get(proxy_mod.METRICS_ENDPOINT)
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_metrics_are_served_to_an_authorized_caller(self):
+        response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("spdk_proxy_response_duration_seconds", response.text)
+        self.assertIn("spdk_proxy_body_read_duration_seconds", response.text)
+        self.assertIn("spdk_proxy_rpc_slots_in_use", response.text)
+        self.assertIn("spdk_proxy_unix_connections_open", response.text)
+
+    def test_observations_reach_the_exposition(self):
+        self.proxy.metrics.observe_response("bdev_get_bdevs", 0.25)
+
+        response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
+
+        self.assertIn('method="bdev_get_bdevs"', response.text)
+
+    def test_credentials_never_appear_in_the_exposition(self):
+        response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
+
+        self.assertNotIn("secret", response.text)
+
+    def test_two_apps_keep_separate_metrics(self):
+        """Each app owns its registry, so building a second one neither raises
+        nor lets observations bleed between them."""
+        other = proxy_mod.create_app(make_settings(rpc_password="other"))
+        other.state.proxy.spdk_ready = True
+        self.proxy.metrics.observe_response("only_in_the_first", 0.1)
+
+        mine = self.client.get(
+            proxy_mod.METRICS_ENDPOINT, auth=("test", "secret")).text
+        theirs = TestClient(other).get(
+            proxy_mod.METRICS_ENDPOINT, auth=("test", "other")).text
+
+        self.assertIn('method="only_in_the_first"', mine)
+        self.assertNotIn('method="only_in_the_first"', theirs)
+
+
+class TestMetricsObservation(unittest.IsolatedAsyncioTestCase):
+    """The gauges and counters have to settle back after every RPC."""
+
+    def setUp(self):
+        self.proxy = make_proxy()
+        self.req = json.dumps({"id": 1, "method": "bdev_get_bdevs"}).encode("ascii")
+
+    def _value(self, metric, **labels):
+        return self.proxy.metrics.registry.get_sample_value(metric, labels or None)
+
+    async def test_gauges_return_to_zero_after_a_successful_rpc(self):
+        fake = FakeSpdkSocket([rpc_response(result=True)])
+
+        with patch_connect(fake):
+            await self.proxy.rpc_call(self.req)
+
+        self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
+
+    async def test_response_duration_is_recorded_against_the_method(self):
+        fake = FakeSpdkSocket([rpc_response(result=True)])
+
+        with patch_connect(fake):
+            await self.proxy.rpc_call(self.req)
+
+        self.assertEqual(
+            self._value("spdk_proxy_response_duration_seconds_count", method="bdev_get_bdevs"), 1)
+
+    async def test_timeout_is_counted_as_a_failure(self):
+        async def never_answers(*args, **kwargs):
+            await asyncio.sleep(3600)
+
+        with patch_connect(FakeSpdkSocket([])), patch.object(
+                FakeReader, 'read', never_answers):
+            with self.assertRaises(ValueError):
+                await self.proxy.rpc_call(self.req, client_timeout="0.01")
+
+        self.assertEqual(
+            self._value(
+                "spdk_proxy_rpc_failures_total", method="bdev_get_bdevs", reason="timeout"), 1)
+        self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
+
+    async def test_unreachable_spdk_is_counted_as_a_failure(self):
+        with patch_connect(FakeSpdkSocket(ConnectionRefusedError("refused"))):
+            with self.assertRaises(ConnectionRefusedError):
+                await self.proxy.rpc_call(self.req)
+
+        self.assertEqual(
+            self._value(
+                "spdk_proxy_rpc_failures_total",
+                method="bdev_get_bdevs", reason="unreachable"), 1)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
 
 if __name__ == "__main__":
