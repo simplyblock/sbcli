@@ -449,6 +449,21 @@ class TestEndpoint(unittest.TestCase):
 
         self.assertEqual(response.status_code, 500)
 
+    def test_json_body_without_a_method_gets_500(self):
+        """Valid JSON that is not a JSON-RPC request used to raise KeyError out
+        of the handler, bypassing the 500 path and the failure counter."""
+        response = self.client.post(
+            "/", content=json.dumps({"id": 1}), auth=("test", "secret"))
+
+        self.assertEqual(response.status_code, 500)
+
+    def test_json_body_that_is_not_an_object_gets_500(self):
+        for body in ("5", "[]", '"a string"', "null"):
+            with self.subTest(body=body):
+                response = self.client.post("/", content=body, auth=("test", "secret"))
+
+                self.assertEqual(response.status_code, 500)
+
     def test_caller_timeout_header_is_forwarded(self):
         payload = rpc_response(result=True).decode()
         with patch.object(self.proxy, 'rpc_call', new=AsyncMock(return_value=payload)) as rpc_call:
