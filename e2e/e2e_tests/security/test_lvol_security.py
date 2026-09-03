@@ -357,7 +357,28 @@ class SecurityTestBase(TestClusterBase):
         return label
 
     def _k8s_setup_storage_class(self):
-        """In k8s mode, create StorageClass for security tests."""
+        """In k8s mode, create StorageClass for security tests.
+
+        HACK (undocumented deviation from the K8s security doc, 2026-09-04):
+        the documented flow is to consume the StorageClass the *operator*
+        generates for a DHCHAP pool (``simplyblock-<ns>-<cluster>-<pool>``).
+        We deliberately do NOT use it, because as shipped it provisions
+        nothing: it sets ``allowedTopologies`` on the pool label, but the CSI
+        node driver only snapshots node labels as topology keys at
+        registration time, so a pool created while the driver is running is
+        invisible to it and every PVC fails with
+        ``ProvisioningFailed ... is not in requisite``. Verified on both
+        Talos and OpenShift; verified to start working after
+        ``kubectl rollout restart daemonset simplyblock-csi-node``.
+
+        So we hand-roll an equivalent class that copies the one parameter
+        that actually drives enforcement (``dhchap_node_label`` -> CSI writes
+        a matching ``nodeAffinity`` onto the PV) while omitting
+        ``allowedTopologies`` and using ``Immediate`` binding. Remove this
+        hack and switch to the operator's class once the operator either
+        triggers a driver re-register after labelling nodes, or drops
+        allowedTopologies. See k8s_dhchap_enforcement_rca_20260904.md.
+        """
         if not self.k8s_test:
             return
         k8s = self._ensure_k8s_utils()
@@ -387,6 +408,18 @@ class SecurityTestBase(TestClusterBase):
         Raises ``DhchapUnsupportedByHost`` if the node's kernel has no
         in-band NVMe authentication — the connect then fails on an allowed
         node too, which is an environment limit rather than a test failure.
+
+        HACK (coupled to the hand-rolled StorageClass in
+        ``_k8s_setup_storage_class``): pinning with ``spec.nodeName``
+        bypasses the scheduler entirely, which is only sound because our
+        class uses ``Immediate`` binding. Against the operator's documented
+        ``WaitForFirstConsumer`` class this produces a FALSE NEGATIVE — the
+        claim sits at "waiting for first consumer" and the pod never runs
+        whether the node is allowed or not, so the negative assertion below
+        would pass vacuously. If this ever moves to the operator's class,
+        switch to ``nodeSelector`` so the scheduler participates, and expect
+        ``FailedScheduling ... didn't find available persistent volumes to
+        bind`` instead of ``FailedMount``.
         """
         k8s = self._ensure_k8s_utils()
         pod_name = f"{pod_prefix}-{_rand_suffix().lower()}"
@@ -507,6 +540,22 @@ class SecurityTestBase(TestClusterBase):
 
         Returns (pool_id, host_nqn).
         In K8s mode, registers the first worker node.
+
+        HACK (K8s path only, undocumented deviation): the K8s security doc
+        states plainly that "no host NQN has to be registered, and no key
+        has to be provisioned by hand" — the operator derives each allowed
+        node's NQN from its Kubernetes UID and reconciles the pool's allowed
+        hosts purely from ``spec.allowedNodes``. This method nonetheless
+        computes an NQN itself and calls ``_register_host_to_pool`` below in
+        K8s mode too, which is redundant at best and can diverge from what
+        the operator maintains. It is kept only because the older security
+        tests were written against it; the three DHCHAP tests
+        (Crypto/Bidirectional/PodScheduling) use
+        ``_k8s_setup_dhchap_pool_subset`` instead, which registers nothing.
+        Those older tests should migrate to the same helper.
+
+        Note also that this passes EVERY worker as an allowed node, so it
+        cannot exercise a disallowed-node rejection at all.
         """
         if self.k8s_test:
             workers = self._get_k8s_worker_nqns()

@@ -3658,9 +3658,14 @@ class K8sSbcliUtils:
                         f"'{actual}'")
                     return actual
             if not matched:
-                # No existing pool's CRD matches — give this one a name that
-                # can't collide with (or shadow) whatever pool other tests
-                # are sharing.
+                # HACK: suffix the pool name with a timestamp so it cannot
+                # collide with (or be shadowed by) the pool other tests are
+                # sharing. This exists only because the blind-reuse path
+                # above is load-bearing for every non-DHCHAP caller — they
+                # rely on being handed whatever pool already exists, so we
+                # cannot simply delete leftovers. A cleaner design would be
+                # one pool per test with no cross-test sharing at all; that
+                # is a bigger change than this fix.
                 pool_name = f"{pool_name}-{int(time.time() * 1000) % 1000000}"
                 self.logger.info(
                     f"[pool] No existing pool matches dhchap={dhchap} "
