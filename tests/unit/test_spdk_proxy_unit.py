@@ -30,6 +30,7 @@ REQUIRED_ENV = {
 OPTIONAL_ENV = {
     "TIMEOUT": "5",
     "MAX_CONCURRENT_SPDK": "4",
+    "MAX_CONCURRENT_CONNECTIONS": "8",
     "SPDK_TIMEOUT_MARGIN": "2",
     "MULTI_THREADING_ENABLED": "True",
 }
@@ -126,6 +127,7 @@ class TestProxySettings(unittest.TestCase):
         self.assertEqual(settings.rpc_password.get_secret_value(), "secret")
         self.assertEqual(settings.timeout, 5 * 60)
         self.assertEqual(settings.max_concurrent_spdk, 16)
+        self.assertEqual(settings.max_concurrent_connections, 64)
         self.assertEqual(settings.spdk_timeout_margin, 2.0)
         self.assertFalse(settings.multi_threading_enabled)
 
@@ -135,6 +137,7 @@ class TestProxySettings(unittest.TestCase):
 
         self.assertEqual(settings.timeout, 5)
         self.assertEqual(settings.max_concurrent_spdk, 4)
+        self.assertEqual(settings.max_concurrent_connections, 8)
         self.assertEqual(settings.spdk_timeout_margin, 2.0)
         self.assertTrue(settings.multi_threading_enabled)
 
@@ -148,6 +151,10 @@ class TestProxySettings(unittest.TestCase):
             with self.subTest(missing=name), patch.dict(os.environ, env, clear=True):
                 with self.assertRaises(ValidationError):
                     proxy_mod.ProxySettings()
+
+    def test_a_connection_cap_below_one_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            make_settings(max_concurrent_connections=0)
 
     def test_unparsable_rpc_port_falls_back_to_8080(self):
         with patch.dict(os.environ, {**REQUIRED_ENV, "RPC_PORT": "not-a-port"}, clear=True):

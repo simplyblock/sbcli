@@ -113,6 +113,18 @@ class ProxySettings(BaseSettings):
         int,
         Field(gt=0, description="Number of RPCs allowed to be in flight against SPDK at once"),
     ] = 16
+    max_concurrent_connections: Annotated[
+        int,
+        Field(
+            gt=0,
+            description=(
+                "Cap on concurrent HTTP connections. Above max_concurrent_spdk since a "
+                "kept-alive connection can sit idle, not doing SPDK work, most of the time. "
+                "Enforced by uvicorn, which answers 503 past the cap rather than waiting for "
+                "a slot the way the ThreadingHTTPServer this replaced blocked in accept()."
+            ),
+        ),
+    ] = 64
     spdk_timeout_margin: Annotated[
         float,
         Field(
@@ -669,6 +681,7 @@ def main() -> None:
         host=settings.server_ip,
         port=settings.rpc_port,
         log_level='info',
+        limit_concurrency=settings.max_concurrent_connections,
         timeout_keep_alive=KEEP_ALIVE_TIMEOUT_SEC,
         ssl_certfile=tls.tls_certificate if tls.tls_serve else None,
         ssl_keyfile=tls.tls_key if tls.tls_serve else None,
