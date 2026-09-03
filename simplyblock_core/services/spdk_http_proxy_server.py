@@ -38,8 +38,7 @@ from simplyblock_core.utils.secrets import redact_rpc_params
 
 
 logger = logging.getLogger(__name__)
-#: Carries the access log alone, so its extra fields can be rendered by name.
-#: The handler is attached by ``_configure_logging``.
+#: The access log. Its handler is attached by ``_configure_logging``.
 access_logger = logging.getLogger(f'{__name__}.access')
 
 #: How often the periodic timing report is emitted, and hence the interval
@@ -173,12 +172,7 @@ class ProxySettings(BaseSettings):
 
     @functools.cached_property
     def authorization(self) -> str:
-        """The ``Authorization`` header value clients have to present.
-
-        Cached: it is compared on every request, including the ones on the
-        data path, and neither the credentials nor their encoding change over
-        the process' life.
-        """
+        """The ``Authorization`` header value clients have to present."""
         credentials = f"{self.rpc_username}:{self.rpc_password.get_secret_value()}"
         return 'Basic ' + base64.b64encode(credentials.encode('ascii')).decode('ascii')
 
@@ -382,14 +376,9 @@ class ProxyMetrics:
 
 @dataclasses.dataclass
 class RequestLog:
-    """What one request contributes to its own log lines.
+    """The fields of a request's log lines that only the request knows.
 
-    Threaded through the call rather than logged where each field becomes
-    known. Every RPC is a POST to the same path, so an access line that cannot
-    name the JSON-RPC method cannot tell two requests apart -- and the method
-    is only known once ``rpc_call`` has parsed the body, well inside the
-    request. Carrying the id here too gives the pre-flight line (the only
-    place the params appear) and the access line one identifier in common.
+    ``rpc_method`` is filled in by ``rpc_call`` once it has parsed the body.
     """
 
     request_id: int = dataclasses.field(default_factory=time.time_ns)
@@ -400,11 +389,8 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
     """One line per served request, in place of uvicorn's access log.
     """
 
-    #: How ``_configure_logging`` renders the fields ``dispatch`` attaches to
-    #: the record. Prefix matches the other lines this process emits; the rest
-    #: follows ``simplyblock_web.app``, plus the two fields that are the point
-    #: of having our own access log here (the JSON-RPC method, and the id
-    #: shared with the request's own log line).
+    #: Rendered by the handler ``_configure_logging`` installs, out of the
+    #: fields ``dispatch`` attaches to the record.
     LOG_FORMAT: ClassVar[str] = (
         '%(asctime)s: %(levelname)s: %(client)s "%(message)s" rpc=%(rpc_method)s'
         ' %(status_code)s req=%(request_size)s resp=%(response_size)s'
@@ -419,9 +405,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         duration_ms = (time.monotonic() - start) * 1000
 
-        # A scrape is not traffic: Prometheus polls this endpoint for the life
-        # of the process, and the exposition it gets back is its own record
-        # that it happened.
+        # Scrapes are not traffic worth a line each.
         if request.url.path == METRICS_ENDPOINT:
             return response
 
@@ -472,11 +456,8 @@ class SpdkProxy:
 
     def __init__(self, settings: ProxySettings) -> None:
         self.settings = settings
-        self.spdk_ready = False
         #: Requests currently being served, and unix sockets currently open
-        #: towards SPDK. Asserted on by tests; the operator-facing view of
-        #: both is ``spdk_proxy_rpc_slots_in_use`` /
-        #: ``spdk_proxy_unix_connections_open``, not a log line.
+        #: towards SPDK.
         self.active_requests = 0
         self.open_connections = 0
         self.metrics = ProxyMetrics()
@@ -518,14 +499,15 @@ class SpdkProxy:
     async def wait_for_spdk_ready(self) -> None:
         """Block until SPDK responds to spdk_get_version on the unix socket."""
         payload = json.dumps({'id': 1, 'method': 'spdk_get_version'}).encode('ascii')
-        while not self.spdk_ready:
+        while True:
             try:
-                self.spdk_ready = await asyncio.wait_for(
+                ready = await asyncio.wait_for(
                     self._probe(payload), SPDK_READY_PROBE_TIMEOUT_SEC)
             except (OSError, asyncio.TimeoutError) as e:
                 logger.info(f"Waiting for SPDK to be ready: {e}")
+                ready = False
 
-            if self.spdk_ready:
+            if ready:
                 logger.info("SPDK is ready (spdk_get_version responded)")
                 return
 
@@ -588,9 +570,7 @@ class SpdkProxy:
         Returns ``None`` for a request without an ``id`` (a notification, which
         SPDK does not answer).
 
-        ``log`` is filled in as the request is understood, so the access line
-        can name what this call turned out to be. A caller that serves no HTTP
-        request leaves it out and gets one of its own.
+        A caller that serves no HTTP request may leave ``log`` out.
         """
         log = RequestLog() if log is None else log
         # Parsed before the slot is taken, so a malformed request neither
@@ -642,8 +622,7 @@ class SpdkProxy:
                 if 'id' not in req_data:
                     return None
 
-                # bytearray, not bytes: it grows in place, where `bytes +=
-                # bytes` copies the whole buffer on every chunk.
+                # bytearray grows in place, where `bytes +=` copies.
                 buf = bytearray()
                 response = None
                 # Monotonic: a duration must not be measured against a clock
@@ -676,9 +655,8 @@ class SpdkProxy:
 def _log_task_death(task: "asyncio.Task[None]") -> None:
     """Report a fire-and-forget task that ended on its own.
 
-    Nothing awaits the stats task, so an exception it did not anticipate would
-    otherwise surface only as asyncio's "exception was never retrieved"
-    warning, at garbage-collection time and detached from the failure.
+    Nothing awaits the stats task, so a failure would otherwise surface only
+    as asyncio's "exception was never retrieved" warning at collection time.
     """
     if task.cancelled():
         return
@@ -709,9 +687,6 @@ def require_authorization(request: Request) -> None:
             authorization.encode('utf-8'),
             settings.authorization.encode('utf-8'),
     ):
-        # The access line records the 401 too, but at INFO and among every
-        # other request; a credential that does not match is worth a level
-        # something greps for.
         client = request.client.host if request.client is not None else 'unknown'
         logger.warning(f"rejected an unauthorized request from {client}")
         raise HTTPException(status_code=401, headers={'WWW-Authenticate': 'Basic'})
@@ -737,9 +712,8 @@ def create_app(settings: ProxySettings) -> FastAPI:
             yield
         finally:
             stats_task.cancel()
-            # Awaited so shutdown does not race the cancellation ("Task was
-            # destroyed but it is pending"); gathered so neither the
-            # CancelledError nor an already-logged failure escapes here.
+            # Awaited so the task is really gone before shutdown continues;
+            # return_exceptions so its CancelledError does not escape.
             await asyncio.gather(stats_task, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -773,10 +747,6 @@ def create_app(settings: ProxySettings) -> FastAPI:
             read_start = time.monotonic()
             try:
                 body = await request.body()
-            # The only disconnect this handler can observe. Writing the
-            # response is uvicorn's, so the BrokenPipeError the
-            # BaseHTTPRequestHandler this replaced had to catch around
-            # `wfile.write` cannot reach here.
             except ClientDisconnect:
                 logger.warning(
                     "client disconnected before the request body arrived "
@@ -816,10 +786,8 @@ def _configure_logging() -> None:
     root.addHandler(handler)
     root.setLevel(logging.INFO)
 
-    # The access log needs a format of its own to render the fields the
-    # middleware attaches, and must not propagate, or the root handler would
-    # print the same line again without them. Wired here rather than at import
-    # time, which the module docstring promises stays free of side effects.
+    # Not propagated: the root handler would print the same line again,
+    # without the fields.
     access_handler = logging.StreamHandler(stream=sys.stdout)
     access_handler.setFormatter(logging.Formatter(AccessLogMiddleware.LOG_FORMAT))
     access_logger.addHandler(access_handler)
