@@ -59,6 +59,13 @@ def make_proxy(**overrides) -> proxy_mod.SpdkProxy:
     return proxy_mod.SpdkProxy(make_settings(**overrides))
 
 
+class MetricsReader:
+    """Reads samples out of the registry of the test's ``self.proxy``."""
+
+    def _value(self, metric, **labels):
+        return self.proxy.metrics.registry.get_sample_value(metric, labels or None)
+
+
 class FakeReader:
     def __init__(self, chunks):
         self._chunks = list(chunks)
@@ -271,7 +278,7 @@ class TestWaitForSpdkReady(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.attempt_count, 2)
 
 
-class TestRpcCall(unittest.IsolatedAsyncioTestCase):
+class TestRpcCall(MetricsReader, unittest.IsolatedAsyncioTestCase):
     """Every RPC must give its unix socket back, whichever way it ends."""
 
     def setUp(self):
@@ -288,7 +295,7 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, payload.decode("ascii"))
         self.assertEqual(fake.writers[0].buffer, self.req)
         self.assertTrue(fake.writers[0].closed)
-        self.assertEqual(self.proxy.open_connections, 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
     async def test_chunked_response_is_reassembled(self):
         payload = rpc_response(result={"a": 1, "b": 2})
@@ -311,7 +318,7 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("timeout", str(ctx.exception))
         self.assertTrue(fake.writers[0].closed)
-        self.assertEqual(self.proxy.open_connections, 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
     async def test_socket_released_on_connect_error(self):
         fake = FakeSpdkSocket(ConnectionRefusedError("refused"))
@@ -320,7 +327,7 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ConnectionRefusedError):
                 await self.proxy.rpc_call(self.req)
 
-        self.assertEqual(self.proxy.open_connections, 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
     async def test_request_without_id_gets_no_response(self):
         req = json.dumps({"method": "notification_only"}).encode("ascii")
@@ -331,7 +338,7 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         self.assertTrue(fake.writers[0].closed)
-        self.assertEqual(self.proxy.open_connections, 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
     async def test_truncated_response_is_rejected(self):
         fake = FakeSpdkSocket([b'{"jsonrpc": "2.0", "id"'])
@@ -340,7 +347,7 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await self.proxy.rpc_call(self.req)
 
-        self.assertEqual(self.proxy.open_connections, 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
     async def test_close_without_a_response_is_rejected(self):
         """SPDK dying mid-RPC leaves an empty buffer, which is not an answer."""
@@ -352,7 +359,7 @@ class TestRpcCall(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("closed the connection", str(ctx.exception))
         self.assertTrue(fake.writers[0].closed)
-        self.assertEqual(self.proxy.open_connections, 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
     async def test_caller_timeout_bounds_the_socket_wait(self):
         fake = FakeSpdkSocket([rpc_response(result=True)])
@@ -489,7 +496,7 @@ class TestConcurrencyLimit(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(proxy.slots.locked())
 
 
-class TestEndpoint(unittest.TestCase):
+class TestEndpoint(MetricsReader, unittest.TestCase):
     """HTTP contract seen by ``simplyblock_core.rpc_client.RPCClient``."""
 
     def setUp(self):
@@ -615,13 +622,13 @@ class TestEndpoint(unittest.TestCase):
             for _ in range(3):
                 self._post()
 
-        self.assertEqual(self.proxy.active_requests, 0)
+        self.assertEqual(self._value("spdk_proxy_requests_in_flight"), 0)
 
     def test_in_flight_count_returns_to_zero_after_failure(self):
         with patch.object(self.proxy, 'rpc_call', new=AsyncMock(side_effect=ValueError("bad"))):
             self._post()
 
-        self.assertEqual(self.proxy.active_requests, 0)
+        self.assertEqual(self._value("spdk_proxy_requests_in_flight"), 0)
 
 
 class TestAccessLog(unittest.TestCase):
@@ -707,7 +714,7 @@ class TestAccessLog(unittest.TestCase):
         self.assertEqual(records, [])
 
 
-class TestClientDisconnect(unittest.IsolatedAsyncioTestCase):
+class TestClientDisconnect(MetricsReader, unittest.IsolatedAsyncioTestCase):
     """A caller that vanishes mid-request must not cost anything.
 
     Driven as a raw ASGI call: ``TestClient`` always delivers a complete body,
@@ -760,8 +767,8 @@ class TestClientDisconnect(unittest.IsolatedAsyncioTestCase):
             await self._disconnect_before_body()
 
         rpc_call.assert_not_called()
-        self.assertEqual(self.proxy.active_requests, 0)
-        self.assertEqual(self.proxy.open_connections, 0)
+        self.assertEqual(self._value("spdk_proxy_requests_in_flight"), 0)
+        self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
         self.assertEqual(
             self.proxy.metrics.registry.get_sample_value("spdk_proxy_rpc_slots_in_use"), 0)
 
@@ -925,6 +932,7 @@ class TestMetricsEndpoint(unittest.TestCase):
         self.assertIn("spdk_proxy_body_read_duration_seconds", response.text)
         self.assertIn("spdk_proxy_rpc_slots_in_use", response.text)
         self.assertIn("spdk_proxy_unix_connections_open", response.text)
+        self.assertIn("spdk_proxy_requests_in_flight", response.text)
 
     def test_observations_reach_the_exposition(self):
         self.proxy.metrics.observe_response("bdev_get_bdevs", 0.25)
@@ -971,15 +979,12 @@ class TestMetricsEndpoint(unittest.TestCase):
         self.assertNotIn('method="only_in_the_first"', theirs)
 
 
-class TestMetricsObservation(unittest.IsolatedAsyncioTestCase):
+class TestMetricsObservation(MetricsReader, unittest.IsolatedAsyncioTestCase):
     """The gauges and counters have to settle back after every RPC."""
 
     def setUp(self):
         self.proxy = make_proxy()
         self.req = json.dumps({"id": 1, "method": "bdev_get_bdevs"}).encode("ascii")
-
-    def _value(self, metric, **labels):
-        return self.proxy.metrics.registry.get_sample_value(metric, labels or None)
 
     async def test_gauges_return_to_zero_after_a_successful_rpc(self):
         fake = FakeSpdkSocket([rpc_response(result=True)])
