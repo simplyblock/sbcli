@@ -186,8 +186,7 @@ class BackupTestBase(TestClusterBase):
 
         if self.k8s_test and (dhchap or allowed_nodes):
             # K8s mode with DHCHAP/allowedNodes: use StoragePool CRD
-            k8s = self._ensure_k8s_utils()
-            actual = k8s.add_storage_pool(
+            actual = self.sbcli_utils.add_storage_pool(
                 pool_name=target, dhchap=dhchap,
                 allowed_nodes=allowed_nodes)
         else:
@@ -5898,8 +5897,7 @@ class TestBackupSecurityLvol(BackupTestBase):
         pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
         assert pool_id, f"Could not find pool ID for {self.pool_name}"
         if self.k8s_test:
-            k8s = self._ensure_k8s_utils()
-            k8s.add_host_to_pool(pool_id, self._host_nqn)
+            self.sbcli_utils.add_host_to_pool(pool_id, self._host_nqn)
         else:
             self.ssh_obj.add_host_to_pool(
                 self.mgmt_nodes[0], pool_id, self._host_nqn)
