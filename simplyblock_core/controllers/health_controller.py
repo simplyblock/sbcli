@@ -1093,6 +1093,26 @@ def check_remote_device(device_id, target_node=None):
         logger.exception("node not found")
         return False
 
+    # The device's OWNER decides whether a remote connection to it is even
+    # expected. Skip the probe entirely when it is not -- same rule, and the
+    # same reason, as the remote-JM loop above: a missing connection to a
+    # departed owner is the expected consequence of its teardown.
+    #
+    # Gating only the verdict is not enough. The caller already discards the
+    # result for an irrelevant owner, but it calls this function first, so the
+    # two RPCs below still went out on every cycle for every surviving node.
+    # For a REMOVED node's devices that never stops: each miss makes SPDK log
+    # `*ERROR*: ctrlr 'remote_alceml_<uuid>' does not exist`, measured at
+    # 3-15 errors/min still climbing 35 minutes after the removal that made
+    # those devices failed_and_migrated (2026-09-03, devices 04fce724 /
+    # b0ada39d / ddf660f5 of the removed 2vk79, probed by 9 surviving nodes).
+    # Real faults then drown in a permanent error stream.
+    if not _peer_connections_relevant(snode):
+        logger.info(
+            "Remote device %s belongs to node %s (%s); not probing and not "
+            "failing health", device_id, device.node_id, snode.status)
+        return True
+
     result = True
     if target_node:
         nodes = [target_node]
