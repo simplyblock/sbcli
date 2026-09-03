@@ -6,9 +6,10 @@
     joins into legacy subsystems recorded with a larger max, and the value
     seeded into new subsystems inside the FDB claim transaction;
   - at most constants.MAX_SUBSYSTEMS_PER_NODE (75) subsystems per node —
-    applied as a ceiling over the node's configured max_lvol everywhere the
-    subsystem count is checked (placement, advisory pre-check, clone path,
-    and the authoritative claim transaction).
+    enforced at every surface that SETS max_lvol (configure, add, restart,
+    cluster update); admission honours the node's configured max_lvol so
+    legacy nodes from releases predating the cap keep provisioning as
+    configured (grandfathered).
 """
 
 import os
@@ -44,8 +45,13 @@ class TestMaxSubsystemsForNode(unittest.TestCase):
         self.assertEqual(NS_CAP, 50)
         self.assertEqual(SUBSYS_CAP, 75)
 
-    def test_configured_max_bounded_by_hard_cap(self):
-        self.assertEqual(max_subsystems_for_node(_node(max_lvol=100)), SUBSYS_CAP)
+    def test_legacy_over_cap_max_is_grandfathered(self):
+        # A max_lvol above the cap can only come from a record written by a
+        # release predating the cap (every configuration surface clamps new
+        # values). Such nodes were sized for their configured value and must
+        # keep provisioning as configured after an upgrade — the cap is
+        # enforced where values are SET, not at admission.
+        self.assertEqual(max_subsystems_for_node(_node(max_lvol=100)), 100)
         self.assertEqual(max_subsystems_for_node(_node(max_lvol=SUBSYS_CAP)), SUBSYS_CAP)
 
     def test_smaller_configured_max_kept(self):

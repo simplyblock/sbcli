@@ -192,11 +192,18 @@ def count_lvol_subsystems(node, all_lvols=None):
 
 
 def max_subsystems_for_node(node):
-    """Effective per-node subsystem limit: the node's configured ``max_lvol``
-    bounded by the hard cluster-wide cap MAX_SUBSYSTEMS_PER_NODE. min() keeps
-    the legacy semantics of a smaller (or zero) max_lvol while guaranteeing
-    no node ever serves more than the hard cap."""
-    return min(node.max_lvol, constants.MAX_SUBSYSTEMS_PER_NODE)
+    """Effective per-node subsystem limit: the node's configured ``max_lvol``.
+
+    ``max_lvol`` can only exceed MAX_SUBSYSTEMS_PER_NODE on a record written
+    by a release that predates the cap — every configuration surface that can
+    SET the value (sn configure, add-node, restart's explicit argument,
+    cluster update --max-subsys, the node-configure API) clamps new values to
+    the cap. Such legacy nodes were sized (huge pages, iobuf pools) for their
+    configured value and must keep operating AND provisioning as configured
+    after an upgrade; the previous min() against the cap retroactively froze
+    their growth at the cap while they legitimately serve more. The cap is
+    enforced where values are set, not where occupancy is admitted."""
+    return node.max_lvol
 
 
 def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False):
