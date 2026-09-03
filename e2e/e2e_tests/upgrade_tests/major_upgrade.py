@@ -1015,6 +1015,89 @@ print("done")
         sleep_n_sec(self.step_sleep)
 
         # ----------------------------------------------------------------
+        # TEMP STEP — one-off validation, remove after this run.
+        #
+        # An upgraded cluster's existing distribs are still on v1 write
+        # protection (new clusters are created on v2 already). Activate v2
+        # cluster-wide via the runtime RPC, then restart every storage
+        # node again to verify the v2 generation is correctly
+        # recorded/persisted and nodes come back online cleanly under it.
+        # Deliberately placed BEFORE Step 12 (which waits for FIO to
+        # finish) so FIO keeps running as I/O load through both the
+        # switch and the second round of restarts.
+        # ----------------------------------------------------------------
+        self.logger.info(
+            f"TEMP Step 11b: sbctl cluster switch-write-protection {self.cluster_id}")
+        if self.fio_during_upgrade:
+            for snode in self.storage_nodes:
+                for lvol_ctx in node_ctx[snode]["fio_lvols"]:
+                    cn = lvol_ctx["client_node"]
+                    for sess_key in ("lvol_fio_session", "clone_fio_session"):
+                        session = lvol_ctx[sess_key]
+                        assert self._is_tmux_running(cn, session), (
+                            f"FIO session {session} on {cn} is not running "
+                            f"before switch-write-protection!"
+                        )
+        self.ssh_obj.exec_command(
+            self.mgmt_nodes[0],
+            f"{self.sbctl_cmd} -d cluster switch-write-protection {self.cluster_id}",
+            raise_on_error=True,
+        )
+        sleep_n_sec(self.step_sleep)
+
+        self.logger.info(
+            "TEMP Step 11c: restarting all storage nodes again post-switch, "
+            "with FIO still running")
+        for snode in self.storage_nodes:
+            node_id = node_ctx[snode]["node_id"]
+
+            if self.fio_during_upgrade:
+                for lvol_ctx in node_ctx[snode]["fio_lvols"]:
+                    cn = lvol_ctx["client_node"]
+                    for sess_key in ("lvol_fio_session", "clone_fio_session"):
+                        session = lvol_ctx[sess_key]
+                        assert self._is_tmux_running(cn, session), (
+                            f"FIO session {session} on {cn} is not running "
+                            f"before post-switch restart of {snode}!"
+                        )
+
+            self.logger.info(f"[SN {snode}] TEMP: restarting node {node_id} (post-switch)")
+            self.ssh_obj.exec_command(
+                self.mgmt_nodes[0],
+                f"{self.sbctl_cmd} --dev -d sn restart {node_id}",
+                raise_on_error=True,
+            )
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(node_id, "online", timeout=1000)
+            except Exception:
+                self.logger.warning(f"[SN {snode}] TEMP: restart status check failed — continuing")
+            sleep_n_sec(self.step_sleep)
+
+            self.logger.info(f"[SN {snode}] TEMP: waiting for migration tasks post-switch restart")
+            migration_ts = int(time.time()) - 120
+            self.validate_migration_for_node(
+                timestamp=migration_ts,
+                timeout=1800,
+                node_id=None,
+                check_interval=30,
+                no_task_ok=(not self.fio_during_upgrade),
+            )
+            sleep_n_sec(self.step_sleep)
+
+            if self.fio_during_upgrade:
+                for lvol_ctx in node_ctx[snode]["fio_lvols"]:
+                    cn = lvol_ctx["client_node"]
+                    for sess_key in ("lvol_fio_session", "clone_fio_session"):
+                        session = lvol_ctx[sess_key]
+                        assert self._is_tmux_running(cn, session), (
+                            f"FIO session {session} on {cn} stopped running "
+                            f"after post-switch restart of {snode}!"
+                        )
+        # ----------------------------------------------------------------
+        # END TEMP STEP
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
         # Step 12: Verify fio still running on fio lvols+clones, wait for all to finish
         # ----------------------------------------------------------------
         if self.fio_during_upgrade:
