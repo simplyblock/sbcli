@@ -2812,6 +2812,26 @@ def cluster_grace_shutdown(cl_id) -> None:
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
+        # REMOVED is terminal and must survive a cluster shutdown. Without
+        # this filter the sweep force-shuts-down every record it can see,
+        # and shutdown_storage_node drives in_shutdown -> offline, so a node
+        # that was deliberately removed comes back as a plain offline member
+        # (live 2026-09-03: one graceful-shutdown resurrected all four nodes
+        # removed earlier that day). That is not cosmetic --
+        # failure_domain_host_map skips only STATUS_REMOVED, so those records
+        # start counting toward FD host balance again, and the next
+        # activation or startup acts on nodes whose devices are already
+        # failed_and_migrated and which own no lvstore.
+        #
+        # IN_REMOVAL is skipped because node_removal_orchestrate has already
+        # shut that node down and owns the rest of its lifecycle.
+        # PENDING_REMOVAL is deliberately NOT skipped -- the node is still up
+        # and serving at that point, so a full-cluster shutdown must stop it
+        # like any other member.
+        if node.status in (StorageNode.STATUS_REMOVED,
+                           StorageNode.STATUS_IN_REMOVAL):
+            logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
+            continue
         logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id(), force=True)
         logger.info(f"Shutting down node: {node.get_id()}")
