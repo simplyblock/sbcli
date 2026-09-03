@@ -29,7 +29,12 @@ node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 # 2026-06-25: ~2h11m hang). If the cluster has been IN_ACTIVATION longer than
 # this, revert it to SUSPENDED so the gated activation + auto-restart re-queue
 # paths run again. A healthy activation completes in well under a minute.
-CLUSTER_ACTIVATION_WATCHDOG_SEC = 600
+# 25 minutes, not 10: a post-suspension activation legitimately spends many
+# minutes per lvstore replaying the JM journal (2026-09-03: 38M/77M/46M records
+# on one node), and RPCs starve behind the replay. A watchdog shorter than one
+# honest replay reverts the cluster, re-queues auto-restart, and the kill
+# discards the replay -- a loop that can never converge.
+CLUSTER_ACTIVATION_WATCHDOG_SEC = 1500
 
 # In-flight suspend-recovery force-shutdowns, keyed by node_id. A force shutdown
 # (kill + ANA failover) can take many seconds; this keeps the monitor tick from

@@ -90,6 +90,11 @@ class RPCException(Exception):
 _response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
 
 
+# bdev_distrib_create is answered only after the distrib's journal state is
+# far enough along; with a large JM journal that is minutes, not seconds.
+DISTRIB_CREATE_TIMEOUT_SEC = 180
+
+
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
@@ -696,7 +701,14 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
-        return self._request("bdev_distrib_create", params)
+        # Creating a distrib can legitimately take minutes when the JM journal
+        # is large: the create is answered only once the JC map read gets far
+        # enough, and during a post-suspension activation those journals held
+        # 38-77M records (chess.com, 2026-09-03). Pin the per-request timeout
+        # explicitly so no caller-constructed client (several use timeout=5..60
+        # for other RPCs) can cut this one short.
+        return self._request("bdev_distrib_create", params,
+                             request_timeout=DISTRIB_CREATE_TIMEOUT_SEC)
 
     def distr_shared_placement(self, name=None, enable=True):
         """Flip the shared_placement (data placement-binding mode) of distrib
