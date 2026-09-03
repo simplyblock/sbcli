@@ -425,9 +425,9 @@ class InvalidRequest(Exception):
     """The request body is not a JSON-RPC request object.
 
     A caller-side fault, kept distinct from the ``ValueError`` a failed SPDK
-    round-trip raises: nothing was sent to SPDK, so it earns a 400 and a
-    ``bad_request`` failure rather than a 500 that would read as "SPDK is
-    broken" on a status-code or failure-rate dashboard.
+    round-trip raises: nothing was sent to SPDK, so it earns a 400 rather
+    than a 500 that would read as "SPDK is broken" on a status-code
+    dashboard.
     """
 
 
