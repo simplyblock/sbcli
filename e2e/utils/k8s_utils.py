@@ -1715,7 +1715,8 @@ class K8sUtils:
                        image: str = "dockerpinata/fio:2.1",
                        cleanup_before_fio: bool = False,
                        avoid_node: str = None,
-                       warmup_config: str = None):
+                       warmup_config: str = None,
+                       node_name: str = None):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
@@ -1732,6 +1733,10 @@ class K8sUtils:
                 bs, randseed, filenames, size as the main config) before the
                 main randrw test.  This ensures a later verify_only pass can
                 verify the entire file, not just the blocks randrw touched.
+            node_name: hard-pin the job's pod to this node via ``spec.nodeName``,
+                bypassing the scheduler (including StorageClass allowedTopologies).
+                Mutually exclusive with avoid_node / client-node affinity, which
+                are skipped when this is set.
         """
         ns = namespace or self.namespace
         # Indent fio_config for YAML embedding (each line indented by 8 spaces)
@@ -1774,7 +1779,8 @@ class K8sUtils:
             init_containers = "      initContainers:\n" + "".join(init_containers_list)
         node_affinity_block = ""
         tolerations_block = ""
-        client_nodes_exist = self.has_client_nodes()
+        node_name_line = f"      nodeName: {node_name}\n" if node_name else ""
+        client_nodes_exist = not node_name and self.has_client_nodes()
         if client_nodes_exist:
             # Hard-pin FIO pods to client-role nodes
             node_affinity_block = (
@@ -1797,7 +1803,7 @@ class K8sUtils:
                 f"[K8sUtils] Client nodes detected — FIO job '{job_name}' "
                 f"pinned to client nodes (with toleration)"
             )
-        elif avoid_node:
+        elif not node_name and avoid_node:
             # No client nodes — at least avoid the primary storage node
             node_affinity_block = (
                 f"        nodeAffinity:\n"
@@ -1839,6 +1845,7 @@ class K8sUtils:
             f"      labels:\n"
             f"        app: fio-benchmark\n"
             f"    spec:\n"
+            f"{node_name_line}"
             f"      affinity:\n"
             f"        podAntiAffinity:\n"
             f"          preferredDuringSchedulingIgnoredDuringExecution:\n"
@@ -1970,6 +1977,25 @@ class K8sUtils:
                 break
 
         return {"phase": phase, "reason": reason, "message": message}
+
+    def get_pod_events(self, pod_name: str, namespace: str = None) -> str:
+        """Return ``<reason>: <message>`` lines for events on a pod.
+
+        Catches things ``get_pod_status_detail`` can't see, like a
+        ``FailedMount`` warning event (kubelet's volume manager failing
+        ``NodeStageVolume``), which is a Pod event, not a container
+        waiting-state reason.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get events -n {ns} "
+            f"--field-selector involvedObject.name={pod_name} "
+            f"--sort-by=.lastTimestamp "
+            f"-o jsonpath='{{range .items[*]}}{{.reason}}: {{.message}}{{\"\\n\"}}{{end}}' "
+            f"2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out or ""
 
     def get_pod_logs(self, pod_name: str, namespace: str = None,
                      tail: int = 200) -> str:
@@ -2958,13 +2984,23 @@ class K8sUtils:
 
     def create_utility_pod(self, pod_name: str, pvc_name: str,
                            mount_path: str = "/spdkvol",
-                           namespace: str = None):
-        """Create an alpine utility pod that mounts a PVC for checksum operations."""
+                           namespace: str = None,
+                           node_name: str = None):
+        """Create an alpine utility pod that mounts a PVC for checksum operations.
+
+        node_name: hard-pin the pod to this node via ``spec.nodeName``, bypassing
+            the scheduler entirely (including any StorageClass allowedTopologies
+            restriction). Used to deliberately test scheduling a pod onto a node
+            outside a DHCHAP pool's allowedNodes. When set, the client-node
+            affinity/toleration block below is skipped — nodeName already forces
+            exact placement.
+        """
         ns = namespace or self.namespace
+        node_name_line = f"  nodeName: {node_name}\n" if node_name else ""
         # Build tolerations + nodeAffinity to match FIO job scheduling
         tolerations_block = ""
         node_affinity_block = ""
-        if self.has_client_nodes():
+        if not node_name and self.has_client_nodes():
             node_affinity_block = (
                 "    nodeAffinity:\n"
                 "      requiredDuringSchedulingIgnoredDuringExecution:\n"
@@ -2993,6 +3029,7 @@ class K8sUtils:
             f"  name: {pod_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
+            f"{node_name_line}"
             f"{affinity_block}"
             f"{tolerations_block}"
             f"  securityContext:\n"

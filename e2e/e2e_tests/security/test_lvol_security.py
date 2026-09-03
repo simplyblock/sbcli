@@ -273,8 +273,7 @@ class SecurityTestBase(TestClusterBase):
                 dhchap=dhchap)
             return
 
-        k8s = self._ensure_k8s_utils()
-        actual = k8s.add_storage_pool(
+        actual = self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name, dhchap=dhchap,
             allowed_nodes=allowed_nodes)
         if actual and actual != self.pool_name:
@@ -294,6 +293,66 @@ class SecurityTestBase(TestClusterBase):
             pool_name=self.pool_name,
         )
 
+    def _k8s_verify_pod_scheduling(self, pvc_name, node_name, expect_success,
+                                    pod_prefix="dhchap"):
+        """Pin a utility pod consuming *pvc_name* to *node_name* and verify
+        the DHCHAP allowedNodes outcome, the K8s-native way: no host NQN is
+        ever supplied by the test — the CSI node plugin derives it from the
+        node itself and the operator's StoragePool CRD enforces the rest.
+
+        expect_success=True: *node_name* is an allowed host — the pod must
+        reach Running.
+        expect_success=False: *node_name* is NOT an allowed host — the pod
+        must NOT reach Running, and kubelet must emit a FailedMount event
+        (NodeStageVolume rejected with "not found in allowed hosts").
+
+        Returns the (still-running) pod name on the success path, or None
+        on the expected-failure path (pod is cleaned up before returning).
+        """
+        k8s = self._ensure_k8s_utils()
+        pod_name = f"{pod_prefix}-{_rand_suffix().lower()}"
+        k8s.create_utility_pod(pod_name, pvc_name, node_name=node_name)
+
+        if expect_success:
+            # wait_pod_running raises TimeoutError/RuntimeError on failure —
+            # let it propagate; a pod that should mount fine failing to do
+            # so is a genuine test failure, not something to swallow.
+            running = k8s.wait_pod_running(pod_name, timeout=300)
+            assert running, (
+                f"Pod {pod_name} pinned to allowed node {node_name!r} did "
+                f"not reach Running — DHCHAP should have permitted this node")
+            self.logger.info(
+                f"[dhchap] Pod {pod_name} on allowed node {node_name!r} "
+                f"is Running")
+            return pod_name
+
+        # expect_success=False: wait_pod_running raises TimeoutError rather
+        # than returning False when the pod never reaches Running — that
+        # timeout IS the expected outcome here. A pod that unexpectedly
+        # reaches Running (no exception) is the real failure.
+        try:
+            k8s.wait_pod_running(pod_name, timeout=60)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError(
+                f"Pod {pod_name} pinned to DISALLOWED node {node_name!r} "
+                f"reached Running — DHCHAP allowedNodes restriction was "
+                f"not enforced")
+        events = k8s.get_pod_events(pod_name)
+        self.logger.info(
+            f"[dhchap] Events for {pod_name} on disallowed node "
+            f"{node_name!r}: {events!r}")
+        assert "failedmount" in events.lower() or "not found in allowed hosts" in events.lower(), (
+            f"Expected a FailedMount / 'not found in allowed hosts' event "
+            f"for pod {pod_name} on disallowed node {node_name!r}; "
+            f"got: {events!r}")
+        try:
+            k8s.delete_pod(pod_name, wait=False)
+        except Exception as e:
+            self.logger.warning(f"  cleanup {pod_name}: {e}")
+        return None
+
     def _get_pool_id(self):
         """Get pool UUID for host registration."""
         return self.sbcli_utils.get_storage_pool_id(self.pool_name)
@@ -301,16 +360,14 @@ class SecurityTestBase(TestClusterBase):
     def _register_host_to_pool(self, pool_id, host_nqn):
         """Register a host NQN at pool level. Works in both Docker and K8s."""
         if self.k8s_test:
-            k8s = self._ensure_k8s_utils()
-            k8s.add_host_to_pool(pool_id, host_nqn)
+            self.sbcli_utils.add_host_to_pool(pool_id, host_nqn)
         else:
             self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
 
     def _unregister_host_from_pool(self, pool_id, host_nqn):
         """Remove a host NQN from pool. Works in both Docker and K8s."""
         if self.k8s_test:
-            k8s = self._ensure_k8s_utils()
-            k8s.remove_host_from_pool(pool_id, host_nqn)
+            self.sbcli_utils.remove_host_from_pool(pool_id, host_nqn)
         else:
             self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
 
@@ -363,6 +420,26 @@ class SecurityTestBase(TestClusterBase):
         self._register_host_to_pool(pool_id, host_nqn)
         return pool_id, host_nqn
 
+    def _k8s_setup_dhchap_pool_subset(self):
+        """K8s-native: create a DHCHAP pool whose allowedNodes is a strict
+        subset of all worker nodes, guaranteeing at least one disallowed
+        node so the restriction can actually be exercised.
+
+        No host NQN is registered manually — the operator derives each
+        allowed node's NQN itself and reconciles allowed hosts purely from
+        the StoragePool's allowedNodes field.
+
+        Returns (allowed_node_names, disallowed_node_names).
+        """
+        workers = self._get_k8s_worker_nqns()  # [(node_name, nqn), ...]
+        all_names = [w[0] for w in workers]
+        if len(all_names) > 1:
+            allowed, disallowed = all_names[:-1], all_names[-1:]
+        else:
+            allowed, disallowed = all_names, []
+        self._ensure_pool_and_sc(dhchap=True, allowed_nodes=allowed)
+        return allowed, disallowed
+
     def _create_lvol_dual(self, name, size=None, encrypt=False):
         """Create an lvol. Docker: ssh_obj.create_sec_lvol(). K8s: PVC.
 
@@ -414,14 +491,13 @@ class SecurityTestBase(TestClusterBase):
         Returns (connect_lines, error_string).
         """
         if self.k8s_test:
-            k8s = self._ensure_k8s_utils()
             actual_id = lvol_id
             if ":" in str(lvol_id):
                 actual_id = str(lvol_id).rsplit(":", 1)[-1]
-            cmd = f"{k8s.sbcli_cmd} volume connect {actual_id}"
+            cmd = f"{self.sbcli_utils.sbcli_cmd} volume connect {actual_id}"
             if host_nqn:
                 cmd += f" --host-nqn {host_nqn} --ctrl-loss-tmo -1"
-            out = k8s._run(cmd)
+            out = self.sbcli_utils._run(cmd)
             connect_lines = [
                 ' '.join(line.split()) for line in out.strip().split('\n')
                 if line.strip() and 'nvme connect' in line
@@ -3210,9 +3286,17 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
     """
     Encryption + DHCHAP combined test.
 
-    TC-NEW-020  Create DHCHAP pool with host registered
-    TC-NEW-021  Create encrypted lvol in DHCHAP pool
-    TC-NEW-022  Connect with host-nqn, mount, FIO (randrw)
+    Docker:
+      TC-NEW-020  Create DHCHAP pool with host registered
+      TC-NEW-021  Create encrypted lvol in DHCHAP pool
+      TC-NEW-022  Connect with host-nqn, mount, FIO (randrw)
+
+    K8s (native — no manual connect/host-nqn; the operator enforces
+    allowedNodes at the control plane, a client never supplies its own NQN):
+      TC-NEW-020  Create DHCHAP pool with allowedNodes = subset of workers
+      TC-NEW-021  Create encrypted PVC in that pool
+      TC-NEW-022  Pod pinned to an allowed node mounts + runs FIO; a pod
+                  pinned to a disallowed node gets rejected (FailedMount)
     """
 
     def __init__(self, **kwargs):
@@ -3222,6 +3306,43 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolCryptoWithDhchap START ===")
         self.fio_node = self.fio_node[0] if isinstance(self.fio_node, list) else self.fio_node
+
+        if self.k8s_test:
+            allowed, disallowed = self._k8s_setup_dhchap_pool_subset()
+            self.logger.info(
+                f"TC-NEW-020: DHCHAP pool created — allowed={allowed} "
+                f"disallowed={disallowed}")
+
+            raw_name = f"seccryp{_rand_suffix()}"
+            pvc_name, lvol_id = self._create_lvol_dual(raw_name, encrypt=True)
+            self.lvol_mount_details[pvc_name] = {"ID": lvol_id, "Mount": None}
+            self.logger.info("TC-NEW-021: Encrypted PVC created PASSED")
+
+            pod_name = self._k8s_verify_pod_scheduling(
+                pvc_name, allowed[0], expect_success=True,
+                pod_prefix="dhcrypt-ok")
+            k8s = self._ensure_k8s_utils()
+            try:
+                k8s.delete_pod(pod_name, wait=True)
+            except Exception as e:
+                self.logger.warning(f"  cleanup {pod_name}: {e}")
+            self.logger.info(
+                "TC-NEW-022: Encrypted volume mounted on allowed node PASSED")
+
+            if disallowed:
+                self._k8s_verify_pod_scheduling(
+                    pvc_name, disallowed[0], expect_success=False,
+                    pod_prefix="dhcrypt-bad")
+                self.logger.info(
+                    "TC-NEW-022: Encrypted volume rejected on disallowed "
+                    "node PASSED")
+            else:
+                self.logger.info(
+                    "TC-NEW-022: Only 1 worker node available — cannot "
+                    "exercise disallowed-node rejection, skipping")
+
+            self.logger.info("=== TestLvolCryptoWithDhchap PASSED ===")
+            return
 
         # TC-NEW-020
         pool_id, host_nqn = self._setup_pool_and_host(dhchap=True)
@@ -3254,9 +3375,17 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
     """
     Verifies bidirectional DHCHAP – always the default mode now.
 
-    TC-NEW-030  Create DHCHAP pool + host
-    TC-NEW-031  Create lvol, connect with host-nqn
-    TC-NEW-033  FIO completes successfully
+    Docker:
+      TC-NEW-030  Create DHCHAP pool + host
+      TC-NEW-031  Create lvol, connect with host-nqn
+      TC-NEW-033  FIO completes successfully
+
+    K8s (native): DHCHAP on a StoragePool has no direction toggle — it's a
+    single ``dhchap: true`` boolean, bidirectional by construction. There is
+    nothing docker-mode's "ctrl-secret in connect string" check maps to
+    here, so the K8s branch verifies the same allowedNodes enforcement as
+    TestLvolCryptoWithDhchap (allowed node mounts + FIO, disallowed node
+    rejected), on a plain (non-encrypted) volume.
     """
 
     def __init__(self, **kwargs):
@@ -3266,6 +3395,41 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolDhchapBidirectional START ===")
         self.fio_node = self.fio_node[0] if isinstance(self.fio_node, list) else self.fio_node
+
+        if self.k8s_test:
+            allowed, disallowed = self._k8s_setup_dhchap_pool_subset()
+            self.logger.info(
+                f"TC-NEW-030: DHCHAP pool created — allowed={allowed} "
+                f"disallowed={disallowed}")
+
+            raw_name = f"secbidir{_rand_suffix()}"
+            pvc_name, lvol_id = self._create_lvol_dual(raw_name)
+            self.lvol_mount_details[pvc_name] = {"ID": lvol_id, "Mount": None}
+
+            pod_name = self._k8s_verify_pod_scheduling(
+                pvc_name, allowed[0], expect_success=True,
+                pod_prefix="dhbidir-ok")
+            k8s = self._ensure_k8s_utils()
+            try:
+                k8s.delete_pod(pod_name, wait=True)
+            except Exception as e:
+                self.logger.warning(f"  cleanup {pod_name}: {e}")
+            self.logger.info(
+                "TC-NEW-031/033: Volume mounted + FIO on allowed node PASSED")
+
+            if disallowed:
+                self._k8s_verify_pod_scheduling(
+                    pvc_name, disallowed[0], expect_success=False,
+                    pod_prefix="dhbidir-bad")
+                self.logger.info(
+                    "TC-NEW-031: Volume rejected on disallowed node PASSED")
+            else:
+                self.logger.info(
+                    "TC-NEW-031: Only 1 worker node available — cannot "
+                    "exercise disallowed-node rejection, skipping")
+
+            self.logger.info("=== TestLvolDhchapBidirectional PASSED ===")
+            return
 
         pool_id, host_nqn = self._setup_pool_and_host(dhchap=True)
         self.logger.info("TC-NEW-030: DHCHAP pool + host PASSED")
@@ -3341,8 +3505,7 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
         self.logger.info("TC-NEW-041: Removing non-registered NQN …")
         fake_nqn = f"nqn.2024-01.io.simplyblock:test:fake-{_rand_suffix()}"
         if self.k8s_test:
-            k8s = self._ensure_k8s_utils()
-            out = k8s.remove_host_from_pool(pool_id, fake_nqn)
+            out = self.sbcli_utils.remove_host_from_pool(pool_id, fake_nqn)
             err = ""
         else:
             out, err = self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, fake_nqn)
@@ -3978,8 +4141,7 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
         self.logger.info("TC-SEC-100: add-host with invalid NQN …")
         invalid_nqn = "not-a-valid-nqn-format-!@#$%"
         if self.k8s_test:
-            k8s = self._ensure_k8s_utils()
-            out = k8s.add_host_to_pool(pool_id, invalid_nqn)
+            out = self.sbcli_utils.add_host_to_pool(pool_id, invalid_nqn)
             err = ""
         else:
             out, err = self.ssh_obj.add_host_to_pool(
@@ -3990,7 +4152,7 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
         # TC-SEC-101: add-host with empty NQN
         self.logger.info("TC-SEC-101: add-host with empty NQN …")
         if self.k8s_test:
-            out = k8s.add_host_to_pool(pool_id, "")
+            out = self.sbcli_utils.add_host_to_pool(pool_id, "")
             err = ""
         else:
             out, err = self.ssh_obj.add_host_to_pool(
@@ -4002,7 +4164,7 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
         self.logger.info("TC-SEC-102: remove-host with non-existent NQN …")
         fake_nqn = f"nqn.2024-01.io.simplyblock:test:fake-{_rand_suffix()}"
         if self.k8s_test:
-            out = k8s.remove_host_from_pool(pool_id, fake_nqn)
+            out = self.sbcli_utils.remove_host_from_pool(pool_id, fake_nqn)
             err = ""
         else:
             out, err = self.ssh_obj.remove_host_from_pool(
@@ -4016,8 +4178,7 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
         self.logger.info("TC-SEC-103: Creating lvol in non-DHCHAP pool …")
         plain_pool = f"{self.pool_name}_nodhchap"
         if self.k8s_test:
-            k8s = self._ensure_k8s_utils()
-            k8s.add_storage_pool(pool_name=plain_pool, dhchap=False)
+            self.sbcli_utils.add_storage_pool(pool_name=plain_pool, dhchap=False)
         else:
             self.ssh_obj.add_storage_pool(
                 self.mgmt_nodes[0], plain_pool, self.cluster_id, dhchap=False)
@@ -4614,13 +4775,17 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
 
 class TestDhchapPodScheduling(SecurityTestBase):
     """
-    K8s-only: verifies that pods consuming PVCs from a DHCHAP pool with
-    ``allowedNodes`` are scheduled exclusively on the allowed nodes.
+    K8s-only: verifies that a pod consuming a PVC from a DHCHAP pool with
+    ``allowedNodes`` mounts successfully when pinned to an allowed node, is
+    rejected (FailedMount) when pinned to a disallowed node, and that a
+    second pod re-attaching the same PVC to a (possibly different) allowed
+    node still works.
 
-    TC-DHCHAP-SCHED-001  Create DHCHAP pool with allowedNodes, register hosts
+    TC-DHCHAP-SCHED-001  Create DHCHAP pool with allowedNodes = subset of workers
     TC-DHCHAP-SCHED-002  Create PVC from DHCHAP pool StorageClass
-    TC-DHCHAP-SCHED-003  Create Pod #1 → verify it runs on an allowed node
-    TC-DHCHAP-SCHED-004  Delete Pod #1, create Pod #2 on same PVC → verify
+    TC-DHCHAP-SCHED-003  Pod #1 pinned to an allowed node → mounts successfully
+    TC-DHCHAP-SCHED-004  Delete Pod #1, Pod #2 pinned to an allowed node → mounts
+    TC-DHCHAP-SCHED-006  Pod pinned to a disallowed node → FailedMount, rejected
     TC-DHCHAP-SCHED-005  Cleanup
     """
 
@@ -4646,30 +4811,14 @@ class TestDhchapPodScheduling(SecurityTestBase):
         # ── TC-DHCHAP-SCHED-001: pool + allowedNodes ─────────────────────
         self.logger.info(
             "TC-DHCHAP-SCHED-001: Creating DHCHAP pool with allowedNodes …")
-        workers = self._get_k8s_worker_nqns()  # [(node_name, nqn), …]
-        all_worker_names = [w[0] for w in workers]
-
-        # If >1 worker, use a strict subset so we can prove the constraint.
-        # If only 1, we still verify it lands on that node.
-        if len(workers) > 1:
-            allowed_workers = workers[:-1]
-        else:
-            allowed_workers = list(workers)
-
-        allowed_node_names = [w[0] for w in allowed_workers]
+        allowed_node_names, disallowed_node_names = \
+            self._k8s_setup_dhchap_pool_subset()
         self.logger.info(
-            f"  All workers: {all_worker_names}")
-        self.logger.info(
-            f"  Allowed nodes: {allowed_node_names}")
-
-        self._ensure_pool_and_sc(
-            dhchap=True, allowed_nodes=allowed_node_names)
+            f"  Allowed nodes: {allowed_node_names}; "
+            f"disallowed: {disallowed_node_names}")
         pool_id = self._get_pool_id()
         assert pool_id, f"Pool {self.pool_name} not found"
-
-        for _, nqn in allowed_workers:
-            self._register_host_to_pool(pool_id, nqn)
-        self.logger.info("TC-DHCHAP-SCHED-001: Pool + hosts PASSED")
+        self.logger.info("TC-DHCHAP-SCHED-001: Pool PASSED")
 
         # ── TC-DHCHAP-SCHED-002: create PVC ──────────────────────────────
         self.logger.info("TC-DHCHAP-SCHED-002: Creating PVC …")
@@ -4678,50 +4827,47 @@ class TestDhchapPodScheduling(SecurityTestBase):
         self.logger.info(
             f"TC-DHCHAP-SCHED-002: PVC {pvc_name} bound (lvol={lvol_id})")
 
-        # ── TC-DHCHAP-SCHED-003: Pod #1 — schedule + verify ─────────────
-        pod_name_1 = f"dhsched-pod1-{_rand_suffix().lower()}"
+        # ── TC-DHCHAP-SCHED-003: Pod #1 pinned to an allowed node ───────
         self.logger.info(
-            f"TC-DHCHAP-SCHED-003: Creating pod {pod_name_1} …")
-        k8s.create_utility_pod(pod_name_1, pvc_name)
-        running = k8s.wait_pod_running(pod_name_1, timeout=300)
-        assert running, (
-            f"TC-DHCHAP-SCHED-003: Pod {pod_name_1} did not reach Running")
-
-        node_1 = k8s.get_pod_node_name(pod_name_1)
-        self.logger.info(
-            f"TC-DHCHAP-SCHED-003: Pod {pod_name_1} scheduled on {node_1}")
-        assert node_1 in allowed_node_names, (
-            f"TC-DHCHAP-SCHED-003: Pod scheduled on {node_1} which is NOT "
-            f"in allowedNodes {allowed_node_names}")
+            f"TC-DHCHAP-SCHED-003: Pinning Pod #1 to allowed node "
+            f"{allowed_node_names[0]!r} …")
+        pod_name_1 = self._k8s_verify_pod_scheduling(
+            pvc_name, allowed_node_names[0], expect_success=True,
+            pod_prefix="dhsched-pod1")
         self.logger.info("TC-DHCHAP-SCHED-003: Pod #1 on allowed node PASSED")
 
-        # ── TC-DHCHAP-SCHED-004: Delete Pod #1, re-create Pod #2 ────────
-        self.logger.info(
-            f"TC-DHCHAP-SCHED-004: Deleting pod {pod_name_1} …")
+        # ── TC-DHCHAP-SCHED-004: Delete Pod #1, Pod #2 on allowed node ──
+        self.logger.info(f"TC-DHCHAP-SCHED-004: Deleting pod {pod_name_1} …")
         k8s.delete_pod(pod_name_1, wait=True)
 
-        pod_name_2 = f"dhsched-pod2-{_rand_suffix().lower()}"
+        pod_2_target = allowed_node_names[-1]
         self.logger.info(
-            f"TC-DHCHAP-SCHED-004: Creating pod {pod_name_2} on same PVC …")
-        k8s.create_utility_pod(pod_name_2, pvc_name)
-        running = k8s.wait_pod_running(pod_name_2, timeout=300)
-        assert running, (
-            f"TC-DHCHAP-SCHED-004: Pod {pod_name_2} did not reach Running")
+            f"TC-DHCHAP-SCHED-004: Pinning Pod #2 (same PVC) to allowed "
+            f"node {pod_2_target!r} …")
+        pod_name_2 = self._k8s_verify_pod_scheduling(
+            pvc_name, pod_2_target, expect_success=True,
+            pod_prefix="dhsched-pod2")
+        self.logger.info("TC-DHCHAP-SCHED-004: Pod #2 on allowed node PASSED")
 
-        node_2 = k8s.get_pod_node_name(pod_name_2)
-        self.logger.info(
-            f"TC-DHCHAP-SCHED-004: Pod {pod_name_2} scheduled on {node_2}")
-        assert node_2 in allowed_node_names, (
-            f"TC-DHCHAP-SCHED-004: Re-attached pod scheduled on {node_2} "
-            f"which is NOT in allowedNodes {allowed_node_names}")
-        self.logger.info(
-            "TC-DHCHAP-SCHED-004: Pod #2 on allowed node PASSED")
-
-        # ── TC-DHCHAP-SCHED-005: Cleanup ─────────────────────────────────
-        self.logger.info("TC-DHCHAP-SCHED-005: Cleanup …")
         try:
             k8s.delete_pod(pod_name_2, wait=True)
         except Exception as e:
             self.logger.warning(f"  pod2 cleanup: {e}")
+
+        # ── TC-DHCHAP-SCHED-006: Pod pinned to a disallowed node ────────
+        if disallowed_node_names:
+            self.logger.info(
+                f"TC-DHCHAP-SCHED-006: Pinning Pod #3 (same PVC) to "
+                f"DISALLOWED node {disallowed_node_names[0]!r} …")
+            self._k8s_verify_pod_scheduling(
+                pvc_name, disallowed_node_names[0], expect_success=False,
+                pod_prefix="dhsched-pod3-bad")
+            self.logger.info(
+                "TC-DHCHAP-SCHED-006: Pod on disallowed node correctly "
+                "rejected PASSED")
+        else:
+            self.logger.info(
+                "TC-DHCHAP-SCHED-006: Only 1 worker node available — "
+                "cannot exercise disallowed-node rejection, skipping")
 
         self.logger.info("=== TestDhchapPodScheduling PASSED ===")
