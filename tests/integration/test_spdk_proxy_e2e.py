@@ -31,10 +31,6 @@ if sys.platform == "win32":
 from simplyblock_core.services.spdk_http_proxy_server import ProxySettings, create_app
 
 
-# ---------------------------------------------------------------------------
-# Mock SPDK unix socket server
-# ---------------------------------------------------------------------------
-
 class MockSPDKHandler(socketserver.BaseRequestHandler):
     """Handles JSON-RPC 2.0 over a unix socket, mimicking SPDK."""
 
@@ -105,10 +101,6 @@ def mock_spdk(sock_path, **kwargs):
         with contextlib.suppress(OSError):
             os.unlink(sock_path)
 
-
-# ---------------------------------------------------------------------------
-# Proxy under test
-# ---------------------------------------------------------------------------
 
 def _free_port():
     with socket.socket() as s:
@@ -250,8 +242,6 @@ class TestProxyE2E(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_keep_alive_serves_several_requests_on_one_connection(self):
-        """The HTTP/1.0 server this replaced closed after every response, so
-        every RPC paid for a fresh TCP connection."""
         body = json.dumps({"id": 1, "method": "spdk_get_version"})
         headers = {"Authorization": "Basic " + base64.b64encode(b"test:test").decode("ascii")}
 
@@ -266,7 +256,7 @@ class TestProxyE2E(unittest.TestCase):
 
     def test_unauthorized_request_does_not_corrupt_the_connection(self):
         """A rejected request leaves its body unread; on a kept-alive
-        connection that body used to be parsed as the next request."""
+        connection it must not be parsed as the next request."""
         with requests.Session() as session:
             rejected = self._proxy.post(
                 "spdk_get_version", auth=("wrong", "creds"), session=session)

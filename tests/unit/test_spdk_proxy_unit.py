@@ -463,7 +463,6 @@ class TestConcurrencyLimit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._run_concurrently(proxy, 12), 4)
 
     async def test_without_multi_threading_rpcs_are_serialized(self):
-        # The pre-FastAPI server ran on a non-threading HTTPServer in this mode.
         proxy = make_proxy(max_concurrent_spdk=4, multi_threading_enabled=False)
         self.assertEqual(await self._run_concurrently(proxy, 12), 1)
 
@@ -563,8 +562,8 @@ class TestEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_json_body_without_a_method_gets_400(self):
-        """Valid JSON that is not a JSON-RPC request used to raise KeyError out
-        of the handler, bypassing the error path and the failure counter."""
+        """Valid JSON without a ``method`` never reaches SPDK, so it belongs on
+        the 400 path and its failure counter, not on the 500 one."""
         response = self.client.post(
             "/", content=json.dumps({"id": 1}), auth=("test", "secret"))
 
