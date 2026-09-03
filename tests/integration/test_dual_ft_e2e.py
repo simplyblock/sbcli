@@ -13,6 +13,7 @@ distr_controller) are patched out.
 Requires FoundationDB running.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -781,8 +782,21 @@ def _make_nic(ip: str) -> IFace:
 # ===========================================================================
 
 def _patch_externals():
-    """Return a list of context managers that mock external dependencies."""
-    patches = [
+    """Mock external dependencies.
+
+    Returns an already-started ``contextlib.ExitStack``; callers ``.close()``
+    it when done. Several targets below are ``<module>.time.sleep`` for
+    different modules that each did ``import time`` — those alias the one
+    stdlib ``time`` module, so more than one patch here targets the same
+    global attribute. Starting then stopping a plain list in the same
+    (declaration) order is exactly backwards for aliased targets: whichever
+    patch on a shared attribute stops last "restores" it to the previous
+    patch's Mock, not the real function, permanently breaking ``time.sleep``
+    for the rest of the test process. ExitStack always unwinds LIFO
+    regardless of where/when ``.close()`` runs, so this can't recur.
+    """
+    stack = contextlib.ExitStack()
+    for p in [
         # distr_controller: send_cluster_map_to_distr always succeeds
         patch('simplyblock_core.distr_controller.send_cluster_map_to_distr', return_value=True),
         patch('simplyblock_core.distr_controller.send_cluster_map_add_node', return_value=True),
@@ -844,8 +858,9 @@ def _patch_externals():
         patch('simplyblock_core.utils.hublvol_reconnect.time.sleep'),
         patch('simplyblock_core.cluster_ops.time.sleep'),
         patch('simplyblock_core.models.storage_node.time.sleep'),
-    ]
-    return patches
+    ]:
+        stack.enter_context(p)
+    return stack
 
 
 def _mock_get_secondary_nodes(current_node, exclude_ids=None):
@@ -923,8 +938,6 @@ class TestClusterActivation:
         cl = env['cluster']
 
         patches = _patch_externals()
-        for p in patches:
-            p.start()
 
         try:
             cluster_ops.cluster_activate(cl.uuid)
@@ -981,8 +994,7 @@ class TestClusterActivation:
                         f"Server {i} has no lvstores"
 
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
 
     def test_activate_compression_resumed(self, cluster_env):
         """Verify JC compression is resumed on all nodes after activation."""
@@ -991,8 +1003,6 @@ class TestClusterActivation:
         cl = env['cluster']
 
         patches = _patch_externals()
-        for p in patches:
-            p.start()
         try:
             # Run activation (each test gets fresh fixture)
             cluster_ops.cluster_activate(cl.uuid)
@@ -1004,8 +1014,7 @@ class TestClusterActivation:
                     assert not srv.state.compression_suspended, \
                         f"Primary server {i} compression still suspended after activation"
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
 
 
 # ===========================================================================
@@ -1028,8 +1037,6 @@ class TestNodeRestart:
         cl = env['cluster']
 
         patches = _patch_externals()
-        for p in patches:
-            p.start()
 
         try:
             # Activate cluster first
@@ -1080,8 +1087,7 @@ class TestNodeRestart:
                     "Secondary should have connected to primary's hublvol"
 
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
 
     def test_recreate_lvstore_secondary_2_min_cntlid(self, cluster_env):
         """
@@ -1096,8 +1102,6 @@ class TestNodeRestart:
         cl = env['cluster']
 
         patches = _patch_externals()
-        for p in patches:
-            p.start()
 
         try:
             # Activate cluster
@@ -1135,8 +1139,7 @@ class TestNodeRestart:
             assert cntlid_2 == 2000, "Secondary 2 should get min_cntlid=2000"
 
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
 
 
 # ===========================================================================
@@ -1164,13 +1167,10 @@ class TestHealthCheck:
 
         # Activate cluster first
         ext_patches = _patch_externals()
-        for p in ext_patches:
-            p.start()
         try:
             cluster_ops.cluster_activate(cl.uuid)
         finally:
-            for p in ext_patches:
-                p.stop()
+            ext_patches.close()
 
         cluster = db.get_cluster_by_id(cl.uuid)
         assert cluster.status == Cluster.STATUS_ACTIVE
@@ -1216,8 +1216,6 @@ class TestHealthCheck:
             return True
 
         patches = _patch_externals()
-        for p_item in patches:
-            p_item.start()
 
         try:
             with patch.object(health_controller, '_check_sec_node_hublvol',
@@ -1244,8 +1242,7 @@ class TestHealthCheck:
                     f"primary_node_id mismatch: {call['primary_node_id']} != {target_primary.uuid}"
 
         finally:
-            for p_item in patches:
-                p_item.stop()
+            patches.close()
 
     def test_health_check_port_checks_both_secondaries(self, cluster_env):
         """
@@ -1261,13 +1258,10 @@ class TestHealthCheck:
 
         # Activate cluster first
         ext_patches = _patch_externals()
-        for p in ext_patches:
-            p.start()
         try:
             cluster_ops.cluster_activate(cl.uuid)
         finally:
-            for p in ext_patches:
-                p.stop()
+            ext_patches.close()
 
         cluster = db.get_cluster_by_id(cl.uuid)
         assert cluster.status == Cluster.STATUS_ACTIVE
