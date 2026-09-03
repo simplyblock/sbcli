@@ -31,6 +31,19 @@ from exceptions.custom_exception import LvolNotConnectException
 # ───────────────────────────────────── helpers ──────────────────────────────
 
 
+class DhchapUnsupportedByHost(Exception):
+    """The node's kernel has no in-band NVMe authentication.
+
+    DH-HMAC-CHAP needs ``CONFIG_NVME_AUTH`` in the host kernel. Without it
+    the kernel's nvme-fabrics parser reports ``option "dhchap_secret"
+    ignored`` and refuses the controller, so a DHCHAP volume cannot be
+    mounted even from an allowed node. Confirmed on Talos v1.12.7
+    (6.18.24-talos); works on RHCOS 9.6 (5.14.0-570.el9_6). Treated as an
+    environment limit and skipped, matching how the RDMA security test skips
+    when RDMA is unavailable.
+    """
+
+
 def _rand_suffix(n=6):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
 
@@ -73,7 +86,10 @@ class SecurityTestBase(TestClusterBase):
         self.created_pvcs: list[str] = []
         self.created_fio_jobs: list[str] = []
         self.created_configmaps: list[str] = []
+        self.created_pods: list[str] = []
+        self.created_storage_classes: list[str] = []
         self._storage_class_name: str = "simplyblock-sec-sc"
+        self._dhchap_node_label: str = None
 
     # ── filesystem helper ────────────────────────────────────────────────────
 
@@ -280,7 +296,31 @@ class SecurityTestBase(TestClusterBase):
             self.logger.info(
                 f"[pool] Requested '{self.pool_name}' but using '{actual}'")
             self.pool_name = actual
+        self._dhchap_node_label = (
+            self._k8s_pool_node_label() if dhchap else None
+        )
         self._k8s_setup_storage_class()
+
+    def _k8s_pool_node_label(self):
+        """Return the operator's node label key for the current pool.
+
+        Shape is ``simplyblock.io/pool.<namespace>.<StorageCluster CR name>.<pool>``.
+        The operator applies this (value ``allowed``) to every node in the
+        pool's allowedNodes, and it is what a StorageClass must reference via
+        ``dhchap_node_label`` for enforcement to reach the volume.
+        """
+        k8s = self._ensure_k8s_utils()
+        out, _ = k8s._exec_kubectl(
+            f"kubectl get storageclusters -n {k8s.namespace} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+        )
+        names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
+        cluster_cr = names[0] if names else "simplyblock-cluster"
+        label = (
+            f"simplyblock.io/pool.{k8s.namespace}.{cluster_cr}.{self.pool_name}"
+        )
+        self.logger.info(f"[dhchap] pool node label: {label}")
+        return label
 
     def _k8s_setup_storage_class(self):
         """In k8s mode, create StorageClass for security tests."""
@@ -291,6 +331,7 @@ class SecurityTestBase(TestClusterBase):
             name=self._storage_class_name,
             cluster_id=self.cluster_id,
             pool_name=self.pool_name,
+            dhchap_node_label=getattr(self, "_dhchap_node_label", None),
         )
 
     def _k8s_verify_pod_scheduling(self, pvc_name, node_name, expect_success,
@@ -308,16 +349,33 @@ class SecurityTestBase(TestClusterBase):
 
         Returns the (still-running) pod name on the success path, or None
         on the expected-failure path (pod is cleaned up before returning).
+
+        Raises ``DhchapUnsupportedByHost`` if the node's kernel has no
+        in-band NVMe authentication — the connect then fails on an allowed
+        node too, which is an environment limit rather than a test failure.
         """
         k8s = self._ensure_k8s_utils()
         pod_name = f"{pod_prefix}-{_rand_suffix().lower()}"
+        # Track before creating: if anything below raises, teardown still
+        # deletes the pod. A surviving pod pins kubernetes.io/pvc-protection
+        # on its claim and leaves the PVC stuck Terminating for hours.
+        self.created_pods.append(pod_name)
         k8s.create_utility_pod(pod_name, pvc_name, node_name=node_name)
 
         if expect_success:
-            # wait_pod_running raises TimeoutError/RuntimeError on failure —
-            # let it propagate; a pod that should mount fine failing to do
-            # so is a genuine test failure, not something to swallow.
-            running = k8s.wait_pod_running(pod_name, timeout=300)
+            try:
+                running = k8s.wait_pod_running(pod_name, timeout=300)
+            except (TimeoutError, RuntimeError):
+                events = k8s.get_pod_events(pod_name)
+                self.logger.info(
+                    f"[dhchap] Events for {pod_name} on allowed node "
+                    f"{node_name!r}: {events!r}")
+                if 'dhchap_secret" ignored' in events or "dhchap_ctrl_secret\" ignored" in events:
+                    raise DhchapUnsupportedByHost(
+                        f"node {node_name!r} kernel ignored the DHCHAP "
+                        f"connect options (no in-band NVMe auth / "
+                        f"CONFIG_NVME_AUTH); events: {events!r}")
+                raise
             assert running, (
                 f"Pod {pod_name} pinned to allowed node {node_name!r} did "
                 f"not reach Running — DHCHAP should have permitted this node")
@@ -331,26 +389,34 @@ class SecurityTestBase(TestClusterBase):
         # timeout IS the expected outcome here. A pod that unexpectedly
         # reaches Running (no exception) is the real failure.
         try:
-            k8s.wait_pod_running(pod_name, timeout=60)
-        except TimeoutError:
-            pass
-        else:
-            raise AssertionError(
-                f"Pod {pod_name} pinned to DISALLOWED node {node_name!r} "
-                f"reached Running — DHCHAP allowedNodes restriction was "
-                f"not enforced")
-        events = k8s.get_pod_events(pod_name)
-        self.logger.info(
-            f"[dhchap] Events for {pod_name} on disallowed node "
-            f"{node_name!r}: {events!r}")
-        assert "failedmount" in events.lower() or "not found in allowed hosts" in events.lower(), (
-            f"Expected a FailedMount / 'not found in allowed hosts' event "
-            f"for pod {pod_name} on disallowed node {node_name!r}; "
-            f"got: {events!r}")
-        try:
-            k8s.delete_pod(pod_name, wait=False)
-        except Exception as e:
-            self.logger.warning(f"  cleanup {pod_name}: {e}")
+            try:
+                k8s.wait_pod_running(pod_name, timeout=60)
+            except TimeoutError:
+                pass
+            else:
+                raise AssertionError(
+                    f"Pod {pod_name} pinned to DISALLOWED node {node_name!r} "
+                    f"reached Running — DHCHAP allowedNodes restriction was "
+                    f"not enforced")
+            events = k8s.get_pod_events(pod_name)
+            self.logger.info(
+                f"[dhchap] Events for {pod_name} on disallowed node "
+                f"{node_name!r}: {events!r}")
+            low = events.lower()
+            assert (
+                "failedmount" in low
+                or "nodeaffinity check failed" in low
+                or "not found in allowed hosts" in low
+            ), (
+                f"Pod {pod_name} on disallowed node {node_name!r} never ran, "
+                f"but not for a DHCHAP reason — expected a FailedMount / "
+                f"NodeAffinity / not-in-allowed-hosts event; got: {events!r}")
+        finally:
+            try:
+                k8s.delete_pod(pod_name, wait=True)
+                self.created_pods.remove(pod_name)
+            except Exception as e:
+                self.logger.warning(f"  cleanup {pod_name}: {e}")
         return None
 
     def _get_pool_id(self):
@@ -452,9 +518,14 @@ class SecurityTestBase(TestClusterBase):
             sc_name = self._storage_class_name
             if encrypt:
                 sc_name = f"sc-{pvc_name}"
+                # Carry dhchap_node_label through to the crypto SC too, or an
+                # encrypted volume in a DHCHAP pool gets no nodeAffinity and
+                # any node can mount it.
                 k8s.create_storage_class(
                     name=sc_name, cluster_id=self.cluster_id,
-                    pool_name=self.pool_name, encryption=True)
+                    pool_name=self.pool_name, encryption=True,
+                    dhchap_node_label=getattr(self, "_dhchap_node_label", None))
+                self.created_storage_classes.append(sc_name)
             pvc_size = size if "Gi" in size else size.replace("G", "Gi")
             k8s.create_pvc(name=pvc_name, size=pvc_size,
                            storage_class=sc_name)
@@ -608,9 +679,22 @@ class SecurityTestBase(TestClusterBase):
                         k8s.delete_configmap(cm_name)
                     except Exception:
                         pass
+                # Pods MUST go before PVCs: a surviving pod holds the
+                # kubernetes.io/pvc-protection finalizer on its claim, which
+                # leaves the PVC stuck Terminating indefinitely.
+                for pod_name in list(self.created_pods):
+                    try:
+                        k8s.delete_pod(pod_name, wait=True)
+                    except Exception:
+                        pass
                 for pvc_name in list(self.created_pvcs):
                     try:
                         k8s.delete_pvc(pvc_name)
+                    except Exception:
+                        pass
+                for sc_name in list(self.created_storage_classes):
+                    try:
+                        k8s.delete_storage_class(sc_name)
                     except Exception:
                         pass
             except Exception as exc:
@@ -3318,12 +3402,20 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
             self.lvol_mount_details[pvc_name] = {"ID": lvol_id, "Mount": None}
             self.logger.info("TC-NEW-021: Encrypted PVC created PASSED")
 
-            pod_name = self._k8s_verify_pod_scheduling(
-                pvc_name, allowed[0], expect_success=True,
-                pod_prefix="dhcrypt-ok")
+            try:
+                pod_name = self._k8s_verify_pod_scheduling(
+                    pvc_name, allowed[0], expect_success=True,
+                    pod_prefix="dhcrypt-ok")
+            except DhchapUnsupportedByHost as exc:
+                self.logger.warning(f"TC-NEW-022: {exc}")
+                self.logger.info(
+                    "=== TestLvolCryptoWithDhchap SKIPPED "
+                    "(host kernel has no in-band NVMe auth) ===")
+                return
             k8s = self._ensure_k8s_utils()
             try:
                 k8s.delete_pod(pod_name, wait=True)
+                self.created_pods.remove(pod_name)
             except Exception as e:
                 self.logger.warning(f"  cleanup {pod_name}: {e}")
             self.logger.info(
@@ -3406,16 +3498,24 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
             pvc_name, lvol_id = self._create_lvol_dual(raw_name)
             self.lvol_mount_details[pvc_name] = {"ID": lvol_id, "Mount": None}
 
-            pod_name = self._k8s_verify_pod_scheduling(
-                pvc_name, allowed[0], expect_success=True,
-                pod_prefix="dhbidir-ok")
+            try:
+                pod_name = self._k8s_verify_pod_scheduling(
+                    pvc_name, allowed[0], expect_success=True,
+                    pod_prefix="dhbidir-ok")
+            except DhchapUnsupportedByHost as exc:
+                self.logger.warning(f"TC-NEW-031: {exc}")
+                self.logger.info(
+                    "=== TestLvolDhchapBidirectional SKIPPED "
+                    "(host kernel has no in-band NVMe auth) ===")
+                return
             k8s = self._ensure_k8s_utils()
             try:
                 k8s.delete_pod(pod_name, wait=True)
+                self.created_pods.remove(pod_name)
             except Exception as e:
                 self.logger.warning(f"  cleanup {pod_name}: {e}")
             self.logger.info(
-                "TC-NEW-031/033: Volume mounted + FIO on allowed node PASSED")
+                "TC-NEW-031/033: Volume mounted on allowed node PASSED")
 
             if disallowed:
                 self._k8s_verify_pod_scheduling(
@@ -4831,14 +4931,23 @@ class TestDhchapPodScheduling(SecurityTestBase):
         self.logger.info(
             f"TC-DHCHAP-SCHED-003: Pinning Pod #1 to allowed node "
             f"{allowed_node_names[0]!r} …")
-        pod_name_1 = self._k8s_verify_pod_scheduling(
-            pvc_name, allowed_node_names[0], expect_success=True,
-            pod_prefix="dhsched-pod1")
+        try:
+            pod_name_1 = self._k8s_verify_pod_scheduling(
+                pvc_name, allowed_node_names[0], expect_success=True,
+                pod_prefix="dhsched-pod1")
+        except DhchapUnsupportedByHost as exc:
+            self.logger.warning(f"TC-DHCHAP-SCHED-003: {exc}")
+            self.logger.info(
+                "=== TestDhchapPodScheduling SKIPPED "
+                "(host kernel has no in-band NVMe auth) ===")
+            return
         self.logger.info("TC-DHCHAP-SCHED-003: Pod #1 on allowed node PASSED")
 
         # ── TC-DHCHAP-SCHED-004: Delete Pod #1, Pod #2 on allowed node ──
         self.logger.info(f"TC-DHCHAP-SCHED-004: Deleting pod {pod_name_1} …")
         k8s.delete_pod(pod_name_1, wait=True)
+        if pod_name_1 in self.created_pods:
+            self.created_pods.remove(pod_name_1)
 
         pod_2_target = allowed_node_names[-1]
         self.logger.info(
@@ -4851,6 +4960,8 @@ class TestDhchapPodScheduling(SecurityTestBase):
 
         try:
             k8s.delete_pod(pod_name_2, wait=True)
+            if pod_name_2 in self.created_pods:
+                self.created_pods.remove(pod_name_2)
         except Exception as e:
             self.logger.warning(f"  pod2 cleanup: {e}")
 

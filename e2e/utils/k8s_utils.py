@@ -1262,8 +1262,25 @@ class K8sUtils:
                              ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
                              compression: bool = False, encryption: bool = False,
                              fabric: str = "tcp",
-                             max_namespace_per_subsys: int = 1):
-        """Create a simplyblock CSI StorageClass."""
+                             max_namespace_per_subsys: int = 1,
+                             dhchap_node_label: str = None):
+        """Create a simplyblock CSI StorageClass.
+
+        dhchap_node_label: the pool's node label key
+            (``simplyblock.io/pool.<ns>.<cluster>.<pool>``). Required for a
+            DHCHAP pool: without it the CSI driver provisions the volume with
+            no ``nodeAffinity``, so any node mounts it and allowedNodes is not
+            enforced at all. With it, the driver writes a matching
+            nodeAffinity onto the PV and a non-allowed node fails to mount.
+            Deliberately paired with ``volumeBindingMode: Immediate`` below and
+            NOT with ``allowedTopologies`` — the operator's own generated class
+            uses allowedTopologies, which only resolves once the CSI node
+            driver has re-registered and picked the label up as a topology key.
+        """
+        dhchap_param = (
+            f"  dhchap_node_label: {dhchap_node_label}\n"
+            if dhchap_node_label else ""
+        )
         yaml_content = (
             f"allowVolumeExpansion: true\n"
             f"apiVersion: storage.k8s.io/v1\n"
@@ -1274,6 +1291,7 @@ class K8sUtils:
             f"  cluster_id: \"{cluster_id}\"\n"
             f"  compression: \"{str(compression)}\"\n"
             f"  csi.storage.k8s.io/fstype: {fs_type}\n"
+            f"{dhchap_param}"
             f"  distr_ndcs: \"{ndcs}\"\n"
             f"  distr_npcs: \"{npcs}\"\n"
             f"  encryption: \"{str(encryption)}\"\n"

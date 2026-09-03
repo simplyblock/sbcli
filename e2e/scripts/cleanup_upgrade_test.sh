@@ -160,6 +160,11 @@ CR_TYPES=(
   "simplyblockstorageclusters.storage.simplyblock.io"
   "simplyblocksnapshotreplications.storage.simplyblock.io"
   "pool.storage.simplyblock.io"
+  # storagepools is the post-rename name (Pool -> StoragePool). Without it
+  # pools survive every cleanup, and the next run's add_storage_pool() finds
+  # and reuses a leftover pool instead of creating the one it asked for.
+  "storagepools.storage.simplyblock.io"
+  "storagepool.storage.simplyblock.io"
   "lvol.storage.simplyblock.io"
   "task.storage.simplyblock.io"
   "devices.storage.simplyblock.io"
@@ -288,7 +293,16 @@ echo ""
 # ══════════════════════════════════════════════════════════════════
 echo "=== Phase 6: Delete cluster-scoped resources ==="
 
-# StorageClasses
+# StorageClasses — select by PROVISIONER, not by name. Tests create classes
+# named sc-bck-*, sc-comp-*, sc-<pvc> etc., none of which contain
+# "simplyblock", so a name filter leaves them behind to accumulate (53 found
+# on one cluster, oldest 5 days).
+for SC in $(kubectl $KUBECTL_TIMEOUT get sc --no-headers \
+      -o custom-columns=:metadata.name,:provisioner 2>/dev/null \
+      | awk '$2 == "csi.simplyblock.io" { print $1 }' 2>/dev/null); do
+  kubectl $KUBECTL_TIMEOUT delete sc "$SC" --ignore-not-found 2>/dev/null || true
+done
+# Catch any simplyblock-named class whose provisioner differs (e.g. hostpath)
 for SC in $(kubectl $KUBECTL_TIMEOUT get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
   kubectl $KUBECTL_TIMEOUT delete sc "$SC" --ignore-not-found 2>/dev/null || true
 done
@@ -425,6 +439,32 @@ echo "=== Phase 10: Remove stale node labels ==="
 for NODE in "${NODES[@]}"; do
   kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
   kubectl label node "$NODE" io.simplyblock.node-type- 2>/dev/null || true
+  kubectl label node "$NODE" simplyblock.io/role- 2>/dev/null || true
+
+  # simplyblock.io/storage-node-uuid.<clusterUUID>.<idx> and
+  # simplyblock.io/pool.<ns>.<cluster>.<pool> carry a cluster/pool identifier
+  # in the key itself, so each deployment adds a NEW key and the old ones are
+  # never overwritten. Left behind they accumulate one set per cluster
+  # redeploy, and the CSI node driver — which snapshots the node's
+  # simplyblock.io/* labels as its topology keys at registration — then
+  # advertises topology for clusters that no longer exist. Strip every one by
+  # prefix rather than by name.
+  STALE_LABELS=$(kubectl get node "$NODE" -o json 2>/dev/null \
+    | python3 -c "
+import json,sys
+try:
+    labels = json.load(sys.stdin).get('metadata', {}).get('labels', {}) or {}
+except Exception:
+    labels = {}
+for k in labels:
+    if k.startswith('simplyblock.io/storage-node-uuid.') or k.startswith('simplyblock.io/pool.'):
+        print(k)
+" 2>/dev/null || true)
+
+  for LBL in $STALE_LABELS; do
+    kubectl label node "$NODE" "${LBL}-" 2>/dev/null || true
+    echo "    stripped $LBL"
+  done
   echo "  Removed labels from $NODE"
 done
 
