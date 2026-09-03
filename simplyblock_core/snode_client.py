@@ -114,7 +114,7 @@ class SNodeClient:
     def info(self):
         return self._request("GET", "info")
 
-    def write_key_file(self, name, content):
+    def write_key_file(self, name, content: SecretStr):
         """Write a DHCHAP key file on the storage node for SPDK keyring."""
         return self._request("POST", "write_key_file", {"name": name, "content": content})
 
