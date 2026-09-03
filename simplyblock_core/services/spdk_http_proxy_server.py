@@ -469,14 +469,19 @@ class SpdkProxy:
         logger.info(f"active requests: {self.active_requests}")
         logger.info(f"active unix sockets: {self.open_connections}")
         req_data = json.loads(req.decode('ascii'))
+        # Raised before the slot is taken, so a malformed request cannot be
+        # counted as an SPDK-side failure by _rpc_call_inner.
+        if not isinstance(req_data, dict) or 'method' not in req_data:
+            raise ValueError('Not a JSON-RPC request object')
+        method = str(req_data['method'])
         req_time = time.time_ns()
         params = str(req_data['params']) if 'params' in req_data else ""
-        logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
+        logger.info(f"Request:{req_time} function: {method}, params: {params}")
         sock_timeout = self._resolve_sock_timeout(client_timeout)
         async with self.slots:
             self.metrics.slots_in_use.inc()
             try:
-                return await self._rpc_call_inner(req, req_data, req_time, sock_timeout)
+                return await self._rpc_call_inner(req, req_data, method, req_time, sock_timeout)
             finally:
                 self.metrics.slots_in_use.dec()
 
@@ -484,12 +489,13 @@ class SpdkProxy:
         self,
         req: bytes,
         req_data: dict,
+        method: str,
         req_time: int,
         sock_timeout: float,
     ) -> Optional[str]:
-        method = str(req_data.get('method', 'unknown'))
         try:
-            return await asyncio.wait_for(self._exchange(req, req_data, req_time), sock_timeout)
+            return await asyncio.wait_for(
+                self._exchange(req, req_data, method, req_time), sock_timeout)
         except asyncio.TimeoutError as e:
             logger.error(
                 f"Socket timeout waiting for SPDK response (request {req_time}, "
@@ -503,7 +509,8 @@ class SpdkProxy:
             self.metrics.record_failure(method, 'invalid_response')
             raise
 
-    async def _exchange(self, req: bytes, req_data: dict, req_time: int) -> Optional[str]:
+    async def _exchange(
+            self, req: bytes, req_data: dict, method: str, req_time: int) -> Optional[str]:
         self.open_connections += 1
         self.metrics.unix_connections.inc()
         try:
@@ -531,8 +538,7 @@ class SpdkProxy:
                             break
                         continue
                     break
-                self.metrics.observe_response(
-                    str(req_data.get('method', 'unknown')), time.monotonic() - recv_start)
+                self.metrics.observe_response(method, time.monotonic() - recv_start)
 
                 if not response and len(buf) > 0:
                     raise ValueError('Invalid response')
