@@ -24,6 +24,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteJMDevice
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCConnectionError, RPCException, RPCRemoteError
+from tests._mocks import unique_ip
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     n.lvstore_stack_secondary = stack_secondary
     n.lvstore_stack_tertiary = stack_tertiary
     n.failure_domain = failure_domain
-    n.mgmt_ip = mgmt_ip or f"10.0.0.{abs(hash(node_id)) % 250 + 1}"
+    n.mgmt_ip = mgmt_ip or unique_ip(node_id)
     n.write_to_db = MagicMock()
     n.rpc_client = MagicMock(return_value=MagicMock())
     n.hublvol_nqn_for_lvstore = MagicMock(return_value=f"nqn:hub:{lvstore}")

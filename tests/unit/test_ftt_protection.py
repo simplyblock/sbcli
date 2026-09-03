@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
+from tests._mocks import unique_ip
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +49,7 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.tertiary_node_id = secondary_id_2
     n.jm_vuid = jm_vuid
     n.lvstore = lvstore
-    n.mgmt_ip = f"10.0.0.{hash(node_id) % 256}"
+    n.mgmt_ip = unique_ip(node_id)
     n.failure_domain = failure_domain
     # rpc_client mock: journal replication not active by default
     rpc = MagicMock()

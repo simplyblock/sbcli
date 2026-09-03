@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.iface import IFace
+from tests._mocks import unique_ip
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ def _node(uuid, cluster_id="cluster-1", mgmt_ip=None,
     n.cluster_id = cluster_id
     n.status = status
     n.hostname = f"host-{uuid}"
-    n.mgmt_ip = mgmt_ip if mgmt_ip is not None else f"10.0.0.{(hash(uuid) % 254) + 1}"
+    n.mgmt_ip = mgmt_ip if mgmt_ip is not None else unique_ip(uuid)
     n.rpc_port = rpc_port
     n.rpc_username = "user"
     n.rpc_password = "pass"
