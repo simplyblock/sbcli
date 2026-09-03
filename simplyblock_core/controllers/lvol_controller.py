@@ -2826,9 +2826,15 @@ def resize_lvol(id, new_size, lock=True) -> None:
         raise PreconditionError(f"New size {new_size} must not be larger than the pool max size {pool.lvol_max_size}")
 
     if pool.pool_max_size > 0:
+        # get_pool_total_capacity already includes THIS lvol's current
+        # provisioned size, so subtract it before adding the new size.
+        # `total + new_size` double-counted the volume (old + new) and
+        # rejected legal resizes: a single 4G volume in a 10G pool could
+        # not grow past 6G.
         total = pool_controller.get_pool_total_capacity(pool.get_id())
-        if total + new_size > pool.pool_max_size:
-            raise PreconditionError(f"Invalid LVol size: {new_size}, Pool max size has reached {total + new_size} of {pool.pool_max_size}")
+        total_after = total - lvol.size + new_size
+        if total_after > pool.pool_max_size:
+            raise PreconditionError(f"Invalid LVol size: {new_size}, Pool max size has reached {total_after} of {pool.pool_max_size}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
