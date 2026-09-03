@@ -26,7 +26,7 @@ from typing import Annotated, Any, AsyncGenerator, ClassVar, Dict, Optional, Set
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -230,53 +230,49 @@ class IntervalReport:
         return summary if slowest is None else f"{summary} slowest={slowest}"
 
 
-class ProxyMetrics:
-    """Prometheus metrics for one proxy application.
+SPDK_RESPONSE_DURATION = Histogram(
+    'spdk_proxy_response_duration_seconds',
+    'Time awaiting and reading one JSON-RPC response from SPDK',
+    ['method'],
+    buckets=SPDK_DURATION_BUCKETS,
+)
+BODY_READ_DURATION = Histogram(
+    'spdk_proxy_body_read_duration_seconds',
+    'Time spent reading one HTTP request body',
+    buckets=BODY_READ_DURATION_BUCKETS,
+)
+RPC_SLOTS_IN_USE = Gauge(
+    'spdk_proxy_rpc_slots_in_use',
+    'SPDK concurrency slots currently held',
+)
+UNIX_CONNECTIONS_OPEN = Gauge(
+    'spdk_proxy_unix_connections_open',
+    'Unix-socket connections currently open towards SPDK',
+)
+RPC_FAILURES = Counter(
+    'spdk_proxy_rpc_failures_total',
+    'RPCs that reached SPDK and did not come back',
+    ['method', 'reason'],
+)
 
-    Each application owns its registry rather than writing into the global
-    ``REGISTRY``. A storage node runs exactly one proxy per process so nothing
-    is lost, and the tests build several applications in one interpreter,
-    where module-level metrics would collide on the second ``create_app``.
+
+class ProxyMetrics:
+    """What one proxy accumulates on top of the module-level metrics.
+
+    Holds the interval reports and the seen-method set behind
+    ``method_label``; the metrics themselves live in the default registry,
+    which is also what ``Instrumentator`` and the standard process
+    collectors write into.
     """
 
     def __init__(self) -> None:
-        self.registry = CollectorRegistry()
         self._known_methods: Set[str] = set()
 
-        self.spdk_response = IntervalReport('recv_from_spdk', Histogram(
-            'spdk_proxy_response_duration_seconds',
-            'Time awaiting and reading one JSON-RPC response from SPDK',
-            ['method'],
-            buckets=SPDK_DURATION_BUCKETS,
-            registry=self.registry,
-        ))
-        self.body_read = IntervalReport('read_body', Histogram(
-            'spdk_proxy_body_read_duration_seconds',
-            'Time spent reading one HTTP request body',
-            buckets=BODY_READ_DURATION_BUCKETS,
-            registry=self.registry,
-        ))
-        self.slots_in_use = Gauge(
-            'spdk_proxy_rpc_slots_in_use',
-            'SPDK concurrency slots currently held',
-            registry=self.registry,
-        )
-        self.unix_connections = Gauge(
-            'spdk_proxy_unix_connections_open',
-            'Unix-socket connections currently open towards SPDK',
-            registry=self.registry,
-        )
-        self.requests_in_flight = Gauge(
-            'spdk_proxy_requests_in_flight',
-            'HTTP requests currently being served',
-            registry=self.registry,
-        )
-        self.failures = Counter(
-            'spdk_proxy_rpc_failures_total',
-            'RPCs that reached SPDK and did not come back',
-            ['method', 'reason'],
-            registry=self.registry,
-        )
+        self.spdk_response = IntervalReport('recv_from_spdk', SPDK_RESPONSE_DURATION)
+        self.body_read = IntervalReport('read_body', BODY_READ_DURATION)
+        self.slots_in_use = RPC_SLOTS_IN_USE
+        self.unix_connections = UNIX_CONNECTIONS_OPEN
+        self.failures = RPC_FAILURES
 
     def method_label(self, method: str) -> str:
         """Fold a caller-supplied method name into the bounded label set."""
@@ -640,8 +636,8 @@ def create_app(settings: ProxySettings) -> FastAPI:
     # Scrapes are excluded for the same reason the access log skips them: they
     # are not traffic, and counting them makes every rate include the scraper.
     Instrumentator(
-        registry=proxy.metrics.registry,
         should_group_status_codes=False,
+        should_instrument_requests_inprogress=True,
         excluded_handlers=[METRICS_ENDPOINT],
     ).instrument(app).expose(
         app,
@@ -655,37 +651,33 @@ def create_app(settings: ProxySettings) -> FastAPI:
     @app.post('/{path:path}', dependencies=[Depends(require_authorization)])
     async def rpc(request: Request) -> Response:
         log: RequestLog = request.state.request_log
-        proxy.metrics.requests_in_flight.inc()
+        read_start = time.monotonic()
         try:
-            read_start = time.monotonic()
-            try:
-                body = await request.body()
-            except ClientDisconnect:
-                logger.warning(
-                    "client disconnected before the request body arrived "
-                    f"(request {log.request_id})")
-                return Response(status_code=400)
-            proxy.metrics.observe_body_read(time.monotonic() - read_start)
+            body = await request.body()
+        except ClientDisconnect:
+            logger.warning(
+                "client disconnected before the request body arrived "
+                f"(request {log.request_id})")
+            return Response(status_code=400)
+        proxy.metrics.observe_body_read(time.monotonic() - read_start)
 
-            try:
-                response = await proxy.rpc_call(
-                    body, request.headers.get('X-RPC-Timeout'), log)
-            except InvalidRequest as e:
-                logger.warning(f"rejected a malformed request (request {log.request_id}): {e}")
-                return Response(status_code=400)
-            except ValueError:
-                return Response(status_code=500)
-            except OSError as e:
-                # SPDK is gone (crashed, or never came back after a restart).
-                logger.error(f"Could not reach SPDK on {proxy.settings.rpc_sock}: {e}")
-                return Response(status_code=500)
+        try:
+            response = await proxy.rpc_call(
+                body, request.headers.get('X-RPC-Timeout'), log)
+        except InvalidRequest as e:
+            logger.warning(f"rejected a malformed request (request {log.request_id}): {e}")
+            return Response(status_code=400)
+        except ValueError:
+            return Response(status_code=500)
+        except OSError as e:
+            # SPDK is gone (crashed, or never came back after a restart).
+            logger.error(f"Could not reach SPDK on {proxy.settings.rpc_sock}: {e}")
+            return Response(status_code=500)
 
-            if response is None:
-                return Response(status_code=204)
+        if response is None:
+            return Response(status_code=204)
 
-            return Response(content=response, media_type='application/json')
-        finally:
-            proxy.metrics.requests_in_flight.dec()
+        return Response(content=response, media_type='application/json')
 
     return app
 

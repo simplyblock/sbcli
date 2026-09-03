@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
-from prometheus_client import CollectorRegistry, Histogram
+from prometheus_client import REGISTRY, CollectorRegistry, Histogram
 from pydantic import ValidationError
 
 from simplyblock_core.services import spdk_http_proxy_server as proxy_mod
@@ -59,11 +59,45 @@ def make_proxy(**overrides) -> proxy_mod.SpdkProxy:
     return proxy_mod.SpdkProxy(make_settings(**overrides))
 
 
+def make_app(**overrides) -> "proxy_mod.FastAPI":
+    """Build an app, first clearing what a previous one left in the registry.
+
+    ``Instrumentator`` re-registers its metrics per application against the
+    default registry, which a process only survives once: the in-progress
+    gauge raises on the second app, and the rest are silently dropped, so a
+    later app would serve no ``http_*`` series at all. Only tests build more
+    than one, so they hand each a clean slate.
+    """
+    for name, collector in list(REGISTRY._names_to_collectors.items()):
+        if name.startswith("http_"):
+            with contextlib.suppress(KeyError):
+                REGISTRY.unregister(collector)
+    return proxy_mod.create_app(make_settings(**overrides))
+
+
 class MetricsReader:
-    """Reads samples out of the registry of the test's ``self.proxy``."""
+    """Reads samples out of the default registry, which every app shares.
+
+    Since the registry outlives each test, a count is only meaningful as the
+    change one action caused: ``_sample`` captures a series, and calling what
+    it returns gives the increment since.
+    """
 
     def _value(self, metric, **labels):
-        return self.proxy.metrics.registry.get_sample_value(metric, labels or None)
+        """One series, or every series of ``metric`` summed if unlabelled."""
+        if labels:
+            value = REGISTRY.get_sample_value(metric, labels)
+            return 0.0 if value is None else value
+        return sum(
+            sample.value
+            for family in REGISTRY.collect()
+            for sample in family.samples
+            if sample.name == metric
+        )
+
+    def _sample(self, metric, **labels):
+        before = self._value(metric, **labels)
+        return lambda: self._value(metric, **labels) - before
 
 
 class FakeReader:
@@ -500,7 +534,7 @@ class TestEndpoint(MetricsReader, unittest.TestCase):
     """HTTP contract seen by ``simplyblock_core.rpc_client.RPCClient``."""
 
     def setUp(self):
-        self.app = proxy_mod.create_app(make_settings())
+        self.app = make_app()
         self.proxy = self.app.state.proxy
         # Lifespan (and with it the readiness gate) is deliberately not run:
         # TestClient only starts it when used as a context manager.
@@ -549,7 +583,7 @@ class TestEndpoint(MetricsReader, unittest.TestCase):
     def test_credentials_are_scoped_to_the_app_that_serves_the_request(self):
         """The dependency resolves settings per request, so two apps built in
         one process do not accept each other's credentials."""
-        other = proxy_mod.create_app(make_settings(rpc_password="other"))
+        other = make_app(rpc_password="other")
 
         with patch.object(other.state.proxy, 'rpc_call', new=AsyncMock(return_value=None)):
             accepted = TestClient(other).post(
@@ -622,13 +656,13 @@ class TestEndpoint(MetricsReader, unittest.TestCase):
             for _ in range(3):
                 self._post()
 
-        self.assertEqual(self._value("spdk_proxy_requests_in_flight"), 0)
+        self.assertEqual(self._value("http_requests_inprogress"), 0)
 
     def test_in_flight_count_returns_to_zero_after_failure(self):
         with patch.object(self.proxy, 'rpc_call', new=AsyncMock(side_effect=ValueError("bad"))):
             self._post()
 
-        self.assertEqual(self._value("spdk_proxy_requests_in_flight"), 0)
+        self.assertEqual(self._value("http_requests_inprogress"), 0)
 
 
 class TestAccessLog(unittest.TestCase):
@@ -640,7 +674,7 @@ class TestAccessLog(unittest.TestCase):
     """
 
     def setUp(self):
-        self.app = proxy_mod.create_app(make_settings())
+        self.app = make_app()
         self.proxy = self.app.state.proxy
         self.client = TestClient(self.app)
         self.body = json.dumps({"id": 1, "method": "bdev_get_bdevs"})
@@ -722,7 +756,7 @@ class TestClientDisconnect(MetricsReader, unittest.IsolatedAsyncioTestCase):
     """
 
     def setUp(self):
-        self.app = proxy_mod.create_app(make_settings())
+        self.app = make_app()
         self.proxy = self.app.state.proxy
 
     async def _disconnect_before_body(self):
@@ -767,10 +801,10 @@ class TestClientDisconnect(MetricsReader, unittest.IsolatedAsyncioTestCase):
             await self._disconnect_before_body()
 
         rpc_call.assert_not_called()
-        self.assertEqual(self._value("spdk_proxy_requests_in_flight"), 0)
+        self.assertEqual(self._value("http_requests_inprogress"), 0)
         self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
         self.assertEqual(
-            self.proxy.metrics.registry.get_sample_value("spdk_proxy_rpc_slots_in_use"), 0)
+            self._value("spdk_proxy_rpc_slots_in_use"), 0)
 
 
 class TestIntervalReport(unittest.TestCase):
@@ -889,10 +923,10 @@ class TestMethodLabelCardinality(unittest.TestCase):
         self.assertEqual(self.metrics.method_label(overlong), proxy_mod.OTHER_METHOD_LABEL)
 
 
-class TestMetricsEndpoint(unittest.TestCase):
+class TestMetricsEndpoint(MetricsReader, unittest.TestCase):
 
     def setUp(self):
-        self.app = proxy_mod.create_app(make_settings())
+        self.app = make_app()
         self.proxy = self.app.state.proxy
         self.client = TestClient(self.app)
 
@@ -909,7 +943,8 @@ class TestMetricsEndpoint(unittest.TestCase):
         self.assertIn("spdk_proxy_body_read_duration_seconds", response.text)
         self.assertIn("spdk_proxy_rpc_slots_in_use", response.text)
         self.assertIn("spdk_proxy_unix_connections_open", response.text)
-        self.assertIn("spdk_proxy_requests_in_flight", response.text)
+        self.assertIn("http_requests_inprogress", response.text)
+        self.assertIn("process_open_fds", response.text)
 
     def test_observations_reach_the_exposition(self):
         self.proxy.metrics.observe_response("bdev_get_bdevs", 0.25)
@@ -921,6 +956,13 @@ class TestMetricsEndpoint(unittest.TestCase):
     def test_client_and_server_errors_are_separate_series(self):
         """Status codes are exposed ungrouped, so an operator can tell a
         malformed body from bad credentials from a broken SPDK."""
+        before = {
+            status: self._value(
+                "http_requests_total",
+                handler="/{path:path}", method="POST", status=status)
+            for status in ("400", "401", "500")
+        }
+
         self.client.post("/", content="not json", auth=("test", "secret"))
         self.client.post("/", content="not json", auth=("wrong", "creds"))
         with patch.object(
@@ -930,9 +972,10 @@ class TestMetricsEndpoint(unittest.TestCase):
         for status in ("400", "401", "500"):
             with self.subTest(status=status):
                 self.assertEqual(
-                    self.proxy.metrics.registry.get_sample_value(
+                    self._value(
                         "http_requests_total",
-                        {"handler": "/{path:path}", "method": "POST", "status": status}),
+                        handler="/{path:path}", method="POST", status=status)
+                    - before[status],
                     1,
                 )
 
@@ -940,20 +983,6 @@ class TestMetricsEndpoint(unittest.TestCase):
         response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
 
         self.assertNotIn("secret", response.text)
-
-    def test_two_apps_keep_separate_metrics(self):
-        """Each app owns its registry, so building a second one neither raises
-        nor lets observations bleed between them."""
-        other = proxy_mod.create_app(make_settings(rpc_password="other"))
-        self.proxy.metrics.observe_response("only_in_the_first", 0.1)
-
-        mine = self.client.get(
-            proxy_mod.METRICS_ENDPOINT, auth=("test", "secret")).text
-        theirs = TestClient(other).get(
-            proxy_mod.METRICS_ENDPOINT, auth=("test", "other")).text
-
-        self.assertIn('method="only_in_the_first"', mine)
-        self.assertNotIn('method="only_in_the_first"', theirs)
 
 
 class TestMetricsObservation(MetricsReader, unittest.IsolatedAsyncioTestCase):
@@ -974,57 +1003,63 @@ class TestMetricsObservation(MetricsReader, unittest.IsolatedAsyncioTestCase):
 
     async def test_response_duration_is_recorded_against_the_method(self):
         fake = FakeSpdkSocket([rpc_response(result=True)])
+        observed = self._sample(
+            "spdk_proxy_response_duration_seconds_count", method="bdev_get_bdevs")
 
         with patch_connect(fake):
             await self.proxy.rpc_call(self.req)
 
-        self.assertEqual(
-            self._value("spdk_proxy_response_duration_seconds_count", method="bdev_get_bdevs"), 1)
+        self.assertEqual(observed(), 1)
 
     async def test_timeout_is_counted_as_a_failure(self):
         async def never_answers(*args, **kwargs):
             await asyncio.sleep(3600)
+
+        failures = self._sample(
+            "spdk_proxy_rpc_failures_total", method="bdev_get_bdevs", reason="timeout")
 
         with patch_connect(FakeSpdkSocket([])), patch.object(
                 FakeReader, 'read', never_answers):
             with self.assertRaises(ValueError):
                 await self.proxy.rpc_call(self.req, client_timeout="0.01")
 
-        self.assertEqual(
-            self._value(
-                "spdk_proxy_rpc_failures_total", method="bdev_get_bdevs", reason="timeout"), 1)
+        self.assertEqual(failures(), 1)
         self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
 
     async def test_a_malformed_request_is_not_counted_as_an_spdk_failure(self):
         """The counter is about SPDK; a rejected body is the caller's fault and
         shows up as a 400 in ``http_requests_total``."""
+        failures = self._sample("spdk_proxy_rpc_failures_total")
+
         with self.assertRaises(proxy_mod.InvalidRequest):
             await self.proxy.rpc_call(b"not json")
 
-        self.assertIsNone(self._value("spdk_proxy_rpc_failures_total"))
+        self.assertEqual(failures(), 0)
         self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
 
     async def test_close_without_a_response_is_counted_as_a_failure(self):
+        failures = self._sample(
+            "spdk_proxy_rpc_failures_total",
+            method="bdev_get_bdevs", reason="invalid_response")
+
         with patch_connect(FakeSpdkSocket([])):
             with self.assertRaises(ValueError):
                 await self.proxy.rpc_call(self.req)
 
-        self.assertEqual(
-            self._value(
-                "spdk_proxy_rpc_failures_total",
-                method="bdev_get_bdevs", reason="invalid_response"), 1)
+        self.assertEqual(failures(), 1)
         self.assertEqual(self._value("spdk_proxy_rpc_slots_in_use"), 0)
         self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
     async def test_unreachable_spdk_is_counted_as_a_failure(self):
+        failures = self._sample(
+            "spdk_proxy_rpc_failures_total",
+            method="bdev_get_bdevs", reason="unreachable")
+
         with patch_connect(FakeSpdkSocket(ConnectionRefusedError("refused"))):
             with self.assertRaises(ConnectionRefusedError):
                 await self.proxy.rpc_call(self.req)
 
-        self.assertEqual(
-            self._value(
-                "spdk_proxy_rpc_failures_total",
-                method="bdev_get_bdevs", reason="unreachable"), 1)
+        self.assertEqual(failures(), 1)
         self.assertEqual(self._value("spdk_proxy_unix_connections_open"), 0)
 
 
