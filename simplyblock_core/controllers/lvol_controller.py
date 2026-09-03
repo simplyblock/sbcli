@@ -459,6 +459,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     cluster_size_prov = 0
     cluster_size_total = 0
     cluster_size_prov += sum([lv.size for lv in all_lvols])
+    # Snapshots hold ACTUAL bytes that provisioned lvol sizes do not cover:
+    # a 100T cluster with 80T provisioned and 15T of snapshot utilisation
+    # has 5T of admissible headroom, not 20T -- without this term a cluster
+    # can run out of physical space with no overprovisioning at all.
+    # all_snaps is cluster-scoped (db_controller.get_snapshots(cl.get_id())).
+    cluster_size_prov += sum(s.used_size for s in all_snaps)
 
     dev_count = 0
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
@@ -2018,9 +2024,15 @@ def resize_lvol(id, new_size):
         return False, msg
 
     if pool.pool_max_size > 0:
+        # get_pool_total_capacity already includes THIS lvol's current
+        # provisioned size, so subtract it before adding the new size.
+        # `total + new_size` double-counted the volume (old + new) and
+        # rejected legal resizes: a single 4G volume in a 10G pool could
+        # not grow past 6G.
         total = pool_controller.get_pool_total_capacity(pool.get_id())
-        if total + new_size > pool.pool_max_size:
-            msg =f"Invalid LVol size: {utils.humanbytes(new_size)}, Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}"
+        total_after = total - lvol.size + new_size
+        if total_after > pool.pool_max_size:
+            msg =f"Invalid LVol size: {utils.humanbytes(new_size)}, Pool max size has reached {utils.humanbytes(total_after)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
 
