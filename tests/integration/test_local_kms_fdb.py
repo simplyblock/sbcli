@@ -10,6 +10,7 @@ the result of ``Database.get(...)`` — but on a ``Database`` (as opposed to a
 import uuid
 
 import pytest
+from pydantic import SecretStr
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.kms import KMSException
@@ -30,11 +31,40 @@ def _unique_path() -> str:
 
 def test_round_trip_returns_stored_keys(local_kms):
     path = _unique_path()
-    key1, key2 = "deadbeef" * 8, "feedface" * 8
+    key1, key2 = SecretStr("deadbeef" * 8), SecretStr("feedface" * 8)
 
     local_kms.import_data_encryption_keys(path, "kek", (key1, key2))
     try:
         assert local_kms.get_data_encryption_keys(path, "kek") == (key1, key2)
+    finally:
+        local_kms.delete_data_encryption_keys(path)
+
+
+def test_stored_form_is_plaintext(local_kms):
+    """FDB holds plaintext hex, not a ``SecretStr`` repr.
+
+    ``import_data_encryption_keys`` is the persistence boundary, so a record
+    written by this version must stay readable by one that predates the
+    wrapper — and a masked ``**********`` would be silently unrecoverable.
+    """
+    path = _unique_path()
+    local_kms.import_data_encryption_keys(
+        path, "kek", (SecretStr("ab" * 32), SecretStr("cd" * 32)))
+    try:
+        assert b"ab" * 32 in local_kms._kv_store.get(local_kms._key(path))
+        assert b"*" not in local_kms._kv_store.get(local_kms._key(path))
+    finally:
+        local_kms.delete_data_encryption_keys(path)
+
+
+def test_keys_are_masked_in_representations(local_kms):
+    path = _unique_path()
+    local_kms.create_data_encryption_keys(path, "kek")
+    try:
+        keys = local_kms.get_data_encryption_keys(path, "kek")
+        for key in keys:
+            assert key.get_secret_value() not in repr(keys)
+            assert key.get_secret_value() not in str(key)
     finally:
         local_kms.delete_data_encryption_keys(path)
 
@@ -52,8 +82,8 @@ def test_create_then_get_works(local_kms):
     local_kms.create_data_encryption_keys(path, "kek")
     try:
         key1, key2 = local_kms.get_data_encryption_keys(path, "kek")
-        assert isinstance(key1, str) and len(key1) == 64
-        assert isinstance(key2, str) and len(key2) == 64
+        assert isinstance(key1, SecretStr) and len(key1.get_secret_value()) == 64
+        assert isinstance(key2, SecretStr) and len(key2.get_secret_value()) == 64
     finally:
         local_kms.delete_data_encryption_keys(path)
 
@@ -65,7 +95,8 @@ def test_get_missing_raises_kms_exception(local_kms):
 
 def test_delete_removes_keys(local_kms):
     path = _unique_path()
-    local_kms.import_data_encryption_keys(path, "kek", ("aa" * 32, "bb" * 32))
+    local_kms.import_data_encryption_keys(
+        path, "kek", (SecretStr("aa" * 32), SecretStr("bb" * 32)))
     local_kms.delete_data_encryption_keys(path)
 
     with pytest.raises(KMSException):

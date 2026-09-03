@@ -18,7 +18,7 @@ from urllib3 import Retry
 from simplyblock_core import utils, constants
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils.helpers import single_or_none
-from simplyblock_core.utils.secrets import unwrap_secrets_for_send
+from simplyblock_core.utils.secrets import redact_rpc_params, unwrap_secrets_for_send
 
 logger = utils.get_logger()
 
@@ -293,7 +293,8 @@ class RPCClient:
         # window, where a single attach has to land within hundreds of ms).
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
+            logger.debug("From: %s, Requesting method: %s, params: %s",
+                         self.host, method, redact_rpc_params(params))
             # Tell the SPDK proxy how long we are willing to wait, so it bounds
             # its own SPDK round-trip (and the semaphore slot it holds) to this
             # instead of the proxy-global timeout. Prevents an abandoned/stuck
@@ -336,7 +337,7 @@ class RPCClient:
         return None, None
 
     def _request3(self, method: str, **kwargs):
-        logger.debug("Requesting method: %s, params: %s", method, kwargs)
+        logger.debug("Requesting method: %s, params: %s", method, redact_rpc_params(kwargs))
         wire_payload = unwrap_secrets_for_send({
             'id': 1,
             'method': method,
@@ -826,8 +827,7 @@ class RPCClient:
         }
         return self._request("bdev_crypto_create", params)
 
-    def lvol_crypto_key_create(self, name, key, key2):
-        # todo: mask the keys so that they don't show up in logs
+    def lvol_crypto_key_create(self, name, key: SecretStr, key2: SecretStr):
         params = {
             "cipher": "AES_XTS",
             "key": key,
@@ -2143,7 +2143,7 @@ class RPCClient:
 
     def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
                        snapshot_backups=True, local_testing=False, local_endpoint="",
-                       access_key_id="", secret_access_key="",
+                       access_key_id="", secret_access_key: Optional[SecretStr] = None,
                        bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
         """Create the S3 bdev device.
         Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
