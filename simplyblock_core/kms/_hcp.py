@@ -4,6 +4,7 @@ from pathlib import Path
 
 import hvac
 import hvac.exceptions
+from pydantic import SecretStr
 
 from ._base import KMS
 from ._exceptions import KMSException
@@ -50,8 +51,9 @@ class HCPClient(KMS):
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
-    def _encrypt(self, kek_name: str, plaintext_hex: str) -> str:
-        plaintext_b64 = base64.b64encode(bytes.fromhex(plaintext_hex)).decode()
+    def _encrypt(self, kek_name: str, plaintext_hex: SecretStr) -> str:
+        plaintext_b64 = base64.b64encode(
+            bytes.fromhex(plaintext_hex.get_secret_value())).decode()
         try:
             return self.client.secrets.transit.encrypt_data(
                 name=kek_name, plaintext=plaintext_b64, mount_point=self.transit_mount,
@@ -59,14 +61,14 @@ class HCPClient(KMS):
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
-    def _decrypt(self, kek_name: str, ciphertext: str) -> str:
+    def _decrypt(self, kek_name: str, ciphertext: str) -> SecretStr:
         try:
             plaintext_b64 = self.client.secrets.transit.decrypt_data(
                 name=kek_name, ciphertext=ciphertext, mount_point=self.transit_mount,
             )['data']['plaintext']
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
-        return base64.b64decode(plaintext_b64).hex()
+        return SecretStr(base64.b64decode(plaintext_b64).hex())
 
     def create_data_encryption_keys(self, path: str, kek_name: str) -> None:
         try:
@@ -81,7 +83,9 @@ class HCPClient(KMS):
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
-    def import_data_encryption_keys(self, path: str, kek_name: str, keys: tuple[str, str]) -> None:
+    def import_data_encryption_keys(
+        self, path: str, kek_name: str, keys: tuple[SecretStr, SecretStr],
+    ) -> None:
         try:
             self.client.secrets.kv.v2.create_or_update_secret(
                 path=path,
@@ -94,7 +98,7 @@ class HCPClient(KMS):
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
-    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[str, str]:
+    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[SecretStr, SecretStr]:
         try:
             encrypted_key1, encrypted_key2 = self.client.secrets.kv.v2.read_secret_version(
                 path=path,
