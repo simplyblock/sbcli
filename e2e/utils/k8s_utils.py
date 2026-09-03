@@ -3622,8 +3622,8 @@ class K8sSbcliUtils:
                 else:
                     # Force-remove finalizers on stuck CRDs
                     self.logger.warning(
-                        f"[pool] CRDs still stuck after 120s — "
-                        f"removing finalizers to unblock deletion"
+                        "[pool] CRDs still stuck after 120s — "
+                        "removing finalizers to unblock deletion"
                     )
                     for crd_name in terminating:
                         try:
@@ -3695,9 +3695,9 @@ class K8sSbcliUtils:
                 f"  clusterName: {cluster_name}\n"
             )
             if dhchap:
-                yaml_content += f"  dhchap: true\n"
+                yaml_content += "  dhchap: true\n"
             if allowed_nodes:
-                yaml_content += f"  allowedNodes:\n"
+                yaml_content += "  allowedNodes:\n"
                 for node_name in allowed_nodes:
                     yaml_content += f"    - {node_name}\n"
 

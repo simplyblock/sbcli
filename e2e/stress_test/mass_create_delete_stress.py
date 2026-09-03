@@ -49,6 +49,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
@@ -3514,7 +3515,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
     # ── Overflow / capacity error verification ────────────────────────────
 
-    _CAPACITY_PATTERNS = [
+    _CAPACITY_PATTERNS: ClassVar[list] = [
         "max subsystems reached",
         "too many subsystems",
         "pool max size has reached",
@@ -5188,7 +5189,7 @@ class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
     RAPID_RESTART_COOLDOWN = 60
 
     # Redundant WebAppAPI replicas to remove before test to free memory.
-    _REMOVE_API_SERVICES = ["app_WebAppAPI2", "app_WebAppAPI3", "app_WebAppAPI4"]
+    _REMOVE_API_SERVICES: ClassVar[list] = ["app_WebAppAPI2", "app_WebAppAPI3", "app_WebAppAPI4"]
 
     def run(self):
         # Free memory on mgmt node by removing redundant API replicas.

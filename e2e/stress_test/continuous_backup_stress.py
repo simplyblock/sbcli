@@ -1221,7 +1221,7 @@ class BackupStressLargeScale(BackupStressBase):
             threads = []
             thread_results: dict[str, str] = {}
 
-            def _backup_one(label, info, idx):
+            def _backup_one(label, info, idx, thread_results=thread_results):
                 sn = f"sc_{label}_{idx}_{_rand_suffix()}"
                 try:
                     self._create_snapshot(info["id"], sn, backup=True)
@@ -2451,8 +2451,8 @@ class BackupStressComprehensive(BackupStressBase):
 
         self.logger.info(
             f"TC-BCK-STR-102: policies attached — "
-            f"tight on {sum(1 for l in all_labels if all_labels.index(l) % 2 == 0)} lvols, "
-            f"wide on {sum(1 for l in all_labels if all_labels.index(l) % 2 == 1)} lvols")
+            f"tight on {sum(1 for lbl in all_labels if all_labels.index(lbl) % 2 == 0)} lvols, "
+            f"wide on {sum(1 for lbl in all_labels if all_labels.index(lbl) % 2 == 1)} lvols")
 
         # ── Phase 3: Initial backup wave ───────────────────────────────
         self.logger.info("TC-BCK-STR-103: initial backup wave")
@@ -2553,25 +2553,25 @@ class BackupStressComprehensive(BackupStressBase):
             # to have completed S3 upload (avoids "Incomplete backups
             # in chain" errors from freshly-created backups).
             restorable = [
-                l for l in all_labels
-                if lvol_state[l]["backup_ids"]]
+                lbl for lbl in all_labels
+                if lvol_state[lbl]["backup_ids"]]
             num_restore = min(restores_per_round, len(restorable))
             if num_restore >= 1:
                 restore_labels = random.sample(restorable, num_restore)
                 restore_specs = []
-                for l in restore_labels:
-                    bk_list = lvol_state[l]["backup_ids"]
+                for lbl in restore_labels:
+                    bk_list = lvol_state[lbl]["backup_ids"]
                     # Pick from older backups (exclude most recent which
                     # may still be uploading to S3).  Fall back to the
                     # oldest if there's only one.
                     older = bk_list[:-1] if len(bk_list) > 1 else bk_list
                     bk_id, checksums = random.choice(older)
-                    restore_specs.append((l, bk_id, checksums))
+                    restore_specs.append((lbl, bk_id, checksums))
 
                 # Start FIO on non-restore lvols in background threads
                 # to generate I/O load while restores run
                 fio_candidates = [
-                    l for l in all_labels if l not in restore_labels]
+                    lbl for lbl in all_labels if lbl not in restore_labels]
                 fio_labels = random.sample(
                     fio_candidates,
                     min(4, len(fio_candidates)))
@@ -2647,9 +2647,9 @@ class BackupStressComprehensive(BackupStressBase):
         # ── Phase 5: Delete + restore integrity ────────────────────────
         self.logger.info("TC-BCK-STR-108: delete + restore integrity check")
         delete_labels = random.sample(
-            [l for l in all_labels if lvol_state[l]["backup_ids"]],
-            min(10, len([l for l in all_labels
-                         if lvol_state[l]["backup_ids"]])))
+            [lbl for lbl in all_labels if lvol_state[lbl]["backup_ids"]],
+            min(10, len([lbl for lbl in all_labels
+                         if lvol_state[lbl]["backup_ids"]])))
         delete_ok = 0
         for label in delete_labels:
             info = lvol_state[label]
@@ -2728,8 +2728,8 @@ class BackupStressComprehensive(BackupStressBase):
 
         # 4 restores
         restorable = [
-            l for l in all_labels
-            if l not in backup_burst and lvol_state[l]["backup_ids"]]
+            lbl for lbl in all_labels
+            if lbl not in backup_burst and lvol_state[lbl]["backup_ids"]]
         restore_burst = random.sample(
             restorable, min(4, len(restorable)))
         for label in restore_burst:
@@ -2764,8 +2764,8 @@ class BackupStressComprehensive(BackupStressBase):
 
         # 4 FIO writes
         remaining = [
-            l for l in all_labels
-            if l not in backup_burst and l not in restore_burst]
+            lbl for lbl in all_labels
+            if lbl not in backup_burst and lbl not in restore_burst]
         fio_burst = random.sample(
             remaining, min(4, len(remaining)))
         for label in fio_burst:
@@ -2893,19 +2893,19 @@ class BackupStressComprehensive(BackupStressBase):
         # Clones must be deleted before their source snapshots (SPDK
         # dependency).
         clones = [
-            l for l in all_labels
-            if lvol_state[l].get("is_clone")]
+            lbl for lbl in all_labels
+            if lvol_state[lbl].get("is_clone")]
         ns_children = [
-            l for l in all_labels
-            if lvol_state[l].get("parent_id")]
+            lbl for lbl in all_labels
+            if lvol_state[lbl].get("parent_id")]
         ns_parents = [
-            l for l in all_labels
-            if lvol_state[l].get("is_namespace")
-            and not lvol_state[l].get("parent_id")]
+            lbl for lbl in all_labels
+            if lvol_state[lbl].get("is_namespace")
+            and not lvol_state[lbl].get("parent_id")]
         regular = [
-            l for l in all_labels
-            if not lvol_state[l].get("is_namespace")
-            and not lvol_state[l].get("is_clone")]
+            lbl for lbl in all_labels
+            if not lvol_state[lbl].get("is_namespace")
+            and not lvol_state[lbl].get("is_clone")]
 
         for group_name, group in [
             ("clones", clones),
@@ -2923,7 +2923,7 @@ class BackupStressComprehensive(BackupStressBase):
         # Summary
         total_backups = initial_ok + marathon_backups
         clone_count = sum(
-            1 for l in all_labels if lvol_state[l].get("is_clone"))
+            1 for lbl in all_labels if lvol_state[lbl].get("is_clone"))
         self.logger.info(
             f"\n{'=' * 60}\n"
             f"  BackupStressComprehensive SUMMARY\n"
@@ -2938,10 +2938,10 @@ class BackupStressComprehensive(BackupStressBase):
             f"  Final restores:    {final_ok}/{final_total}\n"
             f"  Total backups:     {total_backups}\n"
             f"  FS breakdown:      "
-            f"ext4={sum(1 for l in all_labels if lvol_state[l]['fs_type'] == 'ext4')}, "
-            f"xfs={sum(1 for l in all_labels if lvol_state[l]['fs_type'] == 'xfs')}\n"
+            f"ext4={sum(1 for lbl in all_labels if lvol_state[lbl]['fs_type'] == 'ext4')}, "
+            f"xfs={sum(1 for lbl in all_labels if lvol_state[lbl]['fs_type'] == 'xfs')}\n"
             f"  Namespace lvols:   "
-            f"{sum(1 for l in all_labels if lvol_state[l].get('is_namespace'))}\n"
+            f"{sum(1 for lbl in all_labels if lvol_state[lbl].get('is_namespace'))}\n"
             f"  Clone lvols:       {clone_count}\n"
             f"{'=' * 60}")
 

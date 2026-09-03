@@ -81,6 +81,7 @@ import string
 import threading
 import time
 from pathlib import Path
+from typing import ClassVar
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
@@ -5255,7 +5256,7 @@ class TestBackupHighVolumeCombosSequential(BackupTestBase):
     anything about the resulting namespace/subsystem placement.
     """
 
-    COMBOS = [
+    COMBOS: ClassVar[list] = [
         ("ext4", False), ("ext4", True),
         ("xfs", False), ("xfs", True),
     ]
@@ -5817,7 +5818,7 @@ class TestBackupSecurityLvol(BackupTestBase):
                 "--no-headers "
                 "-o custom-columns=NAME:.metadata.name,UID:.metadata.uid"
             )
-            lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
+            lines = [ln.strip() for ln in out.strip().splitlines() if ln.strip()]
             assert lines, "No worker nodes found"
             parts = lines[0].split()
             self._worker_node_name = parts[0]
