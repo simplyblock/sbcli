@@ -75,7 +75,19 @@ class GateAuditor:
         return result
 
     def assert_no_proceed_during_blocked(self):
-        """Assert no operation was allowed to proceed while phase was blocked."""
+        """Assert no operation was allowed to proceed while phase was blocked.
+
+        NOTE: vacuous as things stand. ``wait_or_delay_for_restart_gate`` has a
+        single production caller (``snapshot_controller.py:783``, the snapshot
+        sync-delete path), and StressRunner fires only create/delete/resize --
+        so ``self.events`` is always empty and this assertion always holds. The
+        lvol paths gate on ``get_restart_phase`` from background services
+        (``tasks_runner_sync_lvol_del.py``, ``tasks_controller.py``) that this
+        tier does not run. Making it real means either firing snapshot/clone
+        ops from StressRunner or driving those services; until then, what these
+        tests actually cover is "concurrent CRUD during a restart does not
+        explode", which is `total_ops` plus the absence of exceptions.
+        """
         violations = [e for e in self.events
                       if e.phase == StorageNode.RESTART_PHASE_BLOCKED
                       and e.result == "proceed"]
@@ -109,6 +121,7 @@ class StressRunner:
         self.interval = interval_ms / 1000.0
         self.duration = duration_sec
         self._stop = threading.Event()
+        self._entered = threading.Barrier(num_threads + 1)
         self._threads: List[threading.Thread] = []
         self._results: List[dict] = []
         self._lock = threading.Lock()
@@ -148,8 +161,17 @@ class StressRunner:
         except BaseException as e:            # noqa: BLE001 - diagnostic only
             self._record("worker-init", False, time.time(), time.time(),
                          f"{type(e).__name__}: {e}")
+            self._entered.abort()
             return
         created_lvols = []
+
+        # Rendezvous with start(). Without it the window can close before this
+        # thread reaches the loop condition below, and the run records zero
+        # operations -- which is how test_delete_during_port_block failed in CI.
+        try:
+            self._entered.wait(timeout=10)
+        except threading.BrokenBarrierError:
+            return
 
         while not self._stop.is_set():
             op = rng.choice(["create", "delete", "resize", "create", "delete"])
@@ -184,10 +206,13 @@ class StressRunner:
                              f"{type(e).__name__}: {e}")
                 return
 
-            time.sleep(self.interval + rng.uniform(0, self.interval))
+            # Event.wait, not time.sleep: see run_for. Also makes stop()
+            # immediate instead of up to one interval late.
+            self._stop.wait(self.interval + rng.uniform(0, self.interval))
 
     def start(self):
         self._stop.clear()
+        self._entered = threading.Barrier(self.num_threads + 1)
         for i in range(self.num_threads):
             # Seed drawn here, in the spawning thread: this loop runs in a fixed
             # order, so each worker replays the same op sequence for a given
@@ -200,6 +225,13 @@ class StressRunner:
             t.start()
             self._threads.append(t)
 
+        try:
+            self._entered.wait(timeout=10)
+        except threading.BrokenBarrierError:
+            raise AssertionError(
+                f"stress workers failed to start; worker records: {self.results}"
+            ) from None
+
     def stop(self):
         self._stop.set()
         for t in self._threads:
@@ -208,9 +240,21 @@ class StressRunner:
 
     def run_for(self, duration: float = None):
         """Run stress ops for given duration then stop."""
+        window = duration or self.duration
         self.start()
-        time.sleep(duration or self.duration)
+        started = time.monotonic()
+        # NOT time.sleep. patch_externals() patches `<module>.time.sleep`, which
+        # is an attribute on the shared stdlib `time` module, so it nulls sleep
+        # for the whole process and every thread. That collapsed this window to
+        # microseconds, leaving total_ops to whatever the workers managed
+        # between start() and stop() -- a pure scheduling race. Event.wait is a
+        # timed lock acquire and cannot be patched out this way.
+        self._stop.wait(window)
+        elapsed = time.monotonic() - started
         self.stop()
+        assert elapsed >= window * 0.9, (
+            f"stress window collapsed: {elapsed:.3f}s of a nominal {window}s. "
+            "Something patched a timing primitive out from under this runner.")
 
     @property
     def results(self):
@@ -294,9 +338,9 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
                 p.stop()
 
         auditor.assert_no_proceed_during_blocked()
-        assert stress.total_ops > 0, (
-            "Stress runner executed no operations; worker records: "
-            f"{stress.results[:3]}")
+        assert stress.total_ops >= stress.num_threads, (
+            f"expected at least one op per worker, got {stress.total_ops}; "
+            f"worker records: {stress.results[:3]}")
 
     def test_create_during_port_block(self, ftt2_env):
         """High frequency creates while ports are blocked during restart."""
@@ -364,16 +408,13 @@ class TestConcurrentOpsOnPeersduringPrimaryRestart:
                 p.stop()
 
         auditor.assert_no_proceed_during_blocked()
-        # Throughput note: the integration tier runs against a single-process
-        # testcontainer FDB (`configure single ssd`). A full restart_storage_node
-        # runs hundreds of FDB reads/writes; concurrently the stress workers each
-        # write an lvol every ~10ms. On this single-node FDB those concurrent
-        # writes serialize behind the restart, so only a handful of ops land
-        # inside the window — a harness artifact, not a control-plane limit (a
-        # real multi-process cluster does not serialize like this). What matters
-        # is the invariant above (no op proceeded while the phase was blocked)
-        # and that operations ran at all.
-        assert stress.total_ops > 0, "Stress runner should have executed operations"
+        # This used to read "only a handful of ops land inside the window,
+        # because a single-node FDB serializes them behind the restart". That
+        # was wrong: the window itself was microseconds long (see run_for), so
+        # the count measured thread-start latency, not FDB throughput.
+        assert stress.total_ops >= stress.num_threads, (
+            f"expected at least one op per worker, got {stress.total_ops}; "
+            f"worker records: {stress.results[:3]}")
 
     def test_long_running_stress(self, ftt2_env):
         """10 second stress run with all operations."""

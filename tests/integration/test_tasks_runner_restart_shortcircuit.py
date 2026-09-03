@@ -23,18 +23,15 @@ never the right remedy for the auxiliary-check failures that flip
 FN_PORT_ALLOW, peer-side recreate_lvstore, health-service auto-fix).
 
 Note on import:
-  The module has a ``while True:`` at module level (the service main loop),
-  so a plain ``import`` hangs. We load it via ``importlib.util`` with
-  ``time.sleep`` patched to raise SystemExit after one tick — the exec
-  unwinds out of the loop and we get a usable module with all function
-  definitions intact. The same pattern is already used by other
-  service-module tests in the tree.
+  The module is loaded via ``importlib.util`` under a private name so the
+  test gets its own copy. Its service loop lives inside ``main()`` behind an
+  ``if __name__ == "__main__"`` guard, so executing the module runs only the
+  import-time side effects (a module-level ``DBController()``, which is why
+  that is patched); nothing needs to be interrupted.
 """
 
 import importlib.util
-import inspect
 import os
-import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -49,16 +46,20 @@ _RUNNER_PATH = os.path.join(
 )
 
 
-#: Captured before any patching so unrelated threads keep real sleeps.
-_real_sleep = time.sleep
-
-
 def _load_runner_module():
-    """Import tasks_runner_restart.py without entering its service loop.
+    """Import tasks_runner_restart.py under a private module name.
 
-    We patch ``time.sleep`` to raise SystemExit on first call so the
-    module-level ``while True`` unwinds out. The module dict (including
-    task_runner_node) is fully populated at that point.
+    No sleep patching: the service loop is inside ``main()``, called only
+    under ``if __name__ == "__main__"``, and ``exec_module`` runs the module
+    as ``tasks_runner_restart_under_test``, so the guard never fires.
+
+    This used to patch ``time.sleep`` to raise SystemExit "to unwind the
+    module-level ``while True``" -- a loop that does not exist. Because
+    ``patch("time.sleep")`` replaces the attribute on the shared stdlib
+    module, the SystemExit landed in whatever unrelated thread happened to be
+    sleeping (the spdk_http_proxy_server stats thread), killing it and
+    breaking later tests. A stack-walking guard was then added to aim the
+    exception; deleting the patch removes the need for both.
     """
     spec = importlib.util.spec_from_file_location(
         "tasks_runner_restart_under_test",
@@ -66,45 +67,11 @@ def _load_runner_module():
     )
     mod = importlib.util.module_from_spec(spec)
 
-    def _break(*_a, **_kw):
-        """Unwind the runner's `while True`, and ONLY the runner's.
-
-        This used to raise unconditionally, which made a global time.sleep
-        patch lethal to every other thread alive during the import. The
-        spdk_http_proxy_server stats thread calls time.sleep(3) in a loop, so
-        it caught the SystemExit and died -- surfacing later as
-        PytestUnhandledThreadExceptionWarning and leaving following tests
-        without a served RPC endpoint (2026-09-01 CI:
-        test_delete_during_port_block recorded 0 operations).
-
-        Raise only when the caller is the module being imported; for anyone
-        else behave as a no-op sleep, which is harmless for the milliseconds
-        this patch is installed.
-        """
-        # Walk the whole stack, not just f_back: this runs as a Mock
-        # side_effect, so mock's _mock_call/_execute_mock_call frames sit
-        # between here and the real caller.
-        frame = inspect.currentframe()
-        while frame is not None:
-            if os.path.basename(frame.f_code.co_filename) == "tasks_runner_restart.py":
-                raise SystemExit("test-bailout")
-            frame = frame.f_back
-        # Everyone else sleeps for real. Returning None instead turned their
-        # sleep into a no-op, so spdk_http_proxy_server's stats loop span hot
-        # -- which broke TestProxyReadinessGate. Neither killing those threads
-        # (the original behaviour) nor busy-spinning them is acceptable; they
-        # must be left exactly as they were.
-        return _real_sleep(*_a, **_kw)
-
-    with patch("simplyblock_core.db_controller.DBController") as mock_db_cls, \
-         patch("time.sleep", side_effect=_break):
+    with patch("simplyblock_core.db_controller.DBController") as mock_db_cls:
         mock_db = MagicMock()
         mock_db.get_clusters.return_value = []
         mock_db_cls.return_value = mock_db
-        try:
-            spec.loader.exec_module(mod)
-        except SystemExit:
-            pass
+        spec.loader.exec_module(mod)
     return mod
 
 
