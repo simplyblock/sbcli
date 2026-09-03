@@ -373,18 +373,6 @@ REPL_CUTOVER_SHRINK_TIMEOUT_SEC = 900
 # waiting for POST .../replication/cutover-proceed; this is the fallback deadline
 # if the operator is unavailable. Cutover proceeds regardless after this many seconds.
 REPL_CUTOVER_PROCEED_TIMEOUT_SEC = 120
-# delete-source coverage gate: how long the finalize step waits for every client
-# connected to the retiring SOURCE subsystem to show a controller on the TARGET
-# subsystem before deleting the source. On a SHARED subsystem the delete is an
-# nvmf_subsystem_remove_ns over a live connection — the client kernel drops the
-# path immediately, with none of the ~60s reconnect grace that masks the same
-# race on dedicated subsystems — so deleting before the client holds a target
-# path shuts its filesystem down (run 2026-09-02 ~19:40: path removed at t+0,
-# replacement attached t+2s, XFS dead in between). On timeout the delete is
-# SKIPPED, loudly: the source stays fenced (ANA inaccessible since cutover),
-# which is safe indefinitely, and can be deleted once the client is covered.
-REPL_DELETE_SOURCE_COVERAGE_TIMEOUT_SEC = 60
-REPL_DELETE_SOURCE_COVERAGE_POLL_SEC = 2
 
 # --- cutover delta convergence -------------------------------------------
 # The IO freeze copies everything written since the last replicated snapshot,

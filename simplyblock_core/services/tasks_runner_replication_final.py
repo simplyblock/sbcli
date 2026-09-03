@@ -100,86 +100,6 @@ def _release_lvs_claim(task):
         task.write_to_db(db.kv_store)
 
 
-def _subsystem_client_hosts(lvol):
-    """Host NQNs holding a controller on *lvol*'s subsystem, across its HA set.
-
-    Best-effort: an offline or unresponsive node contributes nothing. Every
-    controller on an lvol subsystem belongs to a client — internal fabric
-    connections (hublvol, transferhub, JM, devices) use their own NQNs.
-    """
-    hosts = set()
-    node_ids = getattr(lvol, "nodes", None) or [getattr(lvol, "node_id", "")]
-    for node_id in node_ids:
-        if not node_id:
-            continue
-        try:
-            snode = db.get_storage_node_by_id(node_id)
-        except KeyError:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-        try:
-            controllers = snode.rpc_client(timeout=3, retry=1) \
-                .nvmf_subsystem_get_controllers(lvol.nqn) or []
-        except Exception as e:                                # noqa: BLE001
-            logger.warning("Could not list controllers of %s on %s: %s",
-                           lvol.nqn, node_id, e)
-            continue
-        hosts.update(c.get("hostnqn") for c in controllers if c.get("hostnqn"))
-    return hosts
-
-
-def _await_delete_source_coverage(src_lvol, rep):
-    """Whether every client of the retiring SOURCE also reached the TARGET.
-
-    deleteSource on a SHARED subsystem is an nvmf_subsystem_remove_ns over a
-    live connection: the client kernel removes the path immediately and
-    administratively, so if the client has not yet attached the target path
-    (late or missed preconnect), its filesystem dies on the spot. A dedicated
-    subsystem only survives the same race by accident — its subsystem delete
-    masks the removal behind a connection loss and the ~60s reconnect grace.
-
-    The delete is therefore gated on evidence, not timing: every host NQN
-    connected to the source subsystem must hold a controller on the target
-    subsystem. Polls until covered or the deadline; the caller SKIPS the
-    delete on False — the source stays fenced (ANA inaccessible since the
-    cutover), which is safe indefinitely.
-    """
-    if rep is None or rep.target_lvol is None:
-        # Nothing to verify against; keep the pre-gate behavior rather than
-        # blocking a delete we cannot reason about.
-        logger.warning("delete-source coverage: no replication target to "
-                       "verify against for %s; deleting without the gate",
-                       src_lvol.get_id())
-        return True
-
-    deadline = time.time() + constants.REPL_DELETE_SOURCE_COVERAGE_TIMEOUT_SEC
-    while True:
-        src_hosts = _subsystem_client_hosts(src_lvol)
-        if not src_hosts:
-            # No client is connected to the source (or none of its nodes
-            # answered) — there is no path to yank from under anyone.
-            return True
-        try:
-            tgt_lvol = db.get_lvol_by_id(rep.target_lvol.get_id())
-        except KeyError:
-            logger.warning("delete-source coverage: target volume %s not "
-                           "found; deleting without the gate",
-                           rep.target_lvol.get_id())
-            return True
-        uncovered = src_hosts - _subsystem_client_hosts(tgt_lvol)
-        if not uncovered:
-            return True
-        if time.time() >= deadline:
-            logger.error(
-                "delete-source coverage: client(s) %s still hold no controller "
-                "on the target subsystem %s after %ss",
-                sorted(uncovered), tgt_lvol.nqn,
-                constants.REPL_DELETE_SOURCE_COVERAGE_TIMEOUT_SEC)
-            return False
-        time.sleep(constants.REPL_DELETE_SOURCE_COVERAGE_POLL_SEC)
-
-
 def _finalize(task, ok, err):
     if ok:
         replication_id = task.function_params.get("replication_id")
@@ -251,19 +171,9 @@ def _finalize(task, ok, err):
             try:
                 from simplyblock_core.controllers import lvol_controller
                 src_lvol = db.get_lvol_by_id(src_lvol_id)
-                if _await_delete_source_coverage(src_lvol, rep):
-                    logger.info(f"Cutover committed with --delete-source: deleting "
-                                f"source volume {src_lvol_id}")
-                    lvol_controller.delete_lvol(src_lvol)
-                else:
-                    # Deleting now would remove a connected client's only path
-                    # (namespace removal has no reconnect grace on shared
-                    # subsystems). The source is already fenced by the cutover,
-                    # so leaving it is safe; delete it manually once the client
-                    # holds target paths.
-                    logger.error(
-                        f"delete-source SKIPPED for {src_lvol_id}: client not "
-                        f"yet covered on the target; source stays fenced")
+                logger.info(f"Cutover committed with --delete-source: deleting "
+                            f"source volume {src_lvol_id}")
+                lvol_controller.delete_lvol(src_lvol)
             except Exception as e:
                 # The cutover itself succeeded; a failed source delete is
                 # reported loudly but does not un-succeed the task.
