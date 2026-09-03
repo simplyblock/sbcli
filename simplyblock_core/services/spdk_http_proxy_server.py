@@ -12,6 +12,7 @@ Importing this module has no side effects: configuration is read by
 
 import asyncio
 import base64
+import functools
 import hmac
 import json
 import logging
@@ -170,9 +171,14 @@ class ProxySettings(BaseSettings):
     def rpc_sock(self) -> str:
         return self.rpc_sock_path or f"/mnt/ramdisk/spdk_{self.rpc_port}/spdk.sock"
 
-    @property
+    @functools.cached_property
     def authorization(self) -> str:
-        """The ``Authorization`` header value clients have to present."""
+        """The ``Authorization`` header value clients have to present.
+
+        Cached: it is compared on every request, including the ones on the
+        data path, and neither the credentials nor their encoding change over
+        the process' life.
+        """
         credentials = f"{self.rpc_username}:{self.rpc_password.get_secret_value()}"
         return 'Basic ' + base64.b64encode(credentials.encode('ascii')).decode('ascii')
 
@@ -404,7 +410,9 @@ class SpdkProxy:
         self.settings = settings
         self.spdk_ready = False
         #: Requests currently being served, and unix sockets currently open
-        #: towards SPDK. Both are logged per request and asserted on by tests.
+        #: towards SPDK. Asserted on by tests; the operator-facing view of
+        #: both is ``spdk_proxy_rpc_slots_in_use`` /
+        #: ``spdk_proxy_unix_connections_open``, not a log line.
         self.active_requests = 0
         self.open_connections = 0
         self.metrics = ProxyMetrics()
@@ -465,7 +473,7 @@ class SpdkProxy:
             writer.write(payload)
             await writer.drain()
 
-            buf = b''
+            buf = bytearray()
             while (data := await reader.read(4096)) != b'':
                 buf += data
                 try:
@@ -511,8 +519,6 @@ class SpdkProxy:
         Returns ``None`` for a request without an ``id`` (a notification, which
         SPDK does not answer).
         """
-        logger.info(f"active requests: {self.active_requests}")
-        logger.info(f"active unix sockets: {self.open_connections}")
         # Parsed before the slot is taken, so a malformed request neither
         # occupies one nor gets counted as an SPDK-side failure.
         req_data = _parse_request(req)
@@ -565,7 +571,9 @@ class SpdkProxy:
                 if 'id' not in req_data:
                     return None
 
-                buf = b''
+                # bytearray, not bytes: it grows in place, where `bytes +=
+                # bytes` copies the whole buffer on every chunk.
+                buf = bytearray()
                 response = None
                 # Monotonic: a duration must not be measured against a clock
                 # that can step backwards under NTP.
@@ -594,6 +602,21 @@ class SpdkProxy:
         finally:
             self.open_connections -= 1
             self.metrics.unix_connections.dec()
+
+
+def _log_task_death(task: "asyncio.Task[None]") -> None:
+    """Report a fire-and-forget task that ended on its own.
+
+    Nothing awaits the stats task, so an exception it did not anticipate would
+    otherwise surface only as asyncio's "exception was never retrieved"
+    warning, at garbage-collection time and detached from the failure.
+    """
+    if task.cancelled():
+        return
+    if (error := task.exception()) is not None:
+        logger.error(f"Background task {task.get_name()} died: {error}", exc_info=error)
+    else:
+        logger.error(f"Background task {task.get_name()} returned unexpectedly")
 
 
 def _close(writer: asyncio.StreamWriter) -> None:
@@ -636,13 +659,18 @@ def create_app(settings: ProxySettings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        stats_task = asyncio.create_task(proxy.report_stats())
+        stats_task = asyncio.create_task(proxy.report_stats(), name='report_stats')
+        stats_task.add_done_callback(_log_task_death)
         try:
             await proxy.wait_for_spdk_ready()
             logger.info('Started RPC http proxy server')
             yield
         finally:
             stats_task.cancel()
+            # Awaited so shutdown does not race the cancellation ("Task was
+            # destroyed but it is pending"); gathered so neither the
+            # CancelledError nor an already-logged failure escapes here.
+            await asyncio.gather(stats_task, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.proxy = proxy
@@ -670,11 +698,14 @@ def create_app(settings: ProxySettings) -> FastAPI:
         req_time = time.time_ns()
         proxy.active_requests += 1
         logger.info(f"incoming request at: {req_time}")
-        logger.info(f"active server session: {proxy.active_requests}")
         try:
             read_start = time.monotonic()
             try:
                 body = await request.body()
+            # The only disconnect this handler can observe. Writing the
+            # response is uvicorn's, so the BrokenPipeError the
+            # BaseHTTPRequestHandler this replaced had to catch around
+            # `wfile.write` cannot reach here.
             except ClientDisconnect:
                 logger.warning(
                     f"client disconnected before the request body arrived (request {req_time})")
