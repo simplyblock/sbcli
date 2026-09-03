@@ -171,133 +171,61 @@ class ProxySettings(BaseSettings):
         return 'Basic ' + base64.b64encode(credentials.encode('ascii')).decode('ascii')
 
 
-#: ``(count, sum)`` per ``method`` label, and cumulative bucket counts by
-#: upper bound, as read back off a histogram.
-HistogramSnapshot = Tuple[Dict[str, Tuple[float, float]], Dict[float, float]]
-
-
-def _histogram_snapshot(histogram: Histogram) -> HistogramSnapshot:
-    """Read a histogram's own totals back out of its samples."""
-    per_method: Dict[str, Tuple[float, float]] = {}
-    buckets: Dict[float, float] = {}
-    for metric in histogram.collect():
-        for sample in metric.samples:
-            method = sample.labels.get('method', '')
-            count, total = per_method.get(method, (0.0, 0.0))
-            if sample.name.endswith('_bucket'):
-                bound = float(sample.labels['le'])
-                buckets[bound] = buckets.get(bound, 0.0) + sample.value
-            elif sample.name.endswith('_count'):
-                per_method[method] = (count + sample.value, total)
-            elif sample.name.endswith('_sum'):
-                per_method[method] = (count, total + sample.value)
-    return per_method, buckets
-
-
-def _bucket_quantile(buckets: Dict[float, float], quantile: float) -> Optional[float]:
-    """Upper bound of the bucket a quantile falls into.
-
-    Buckets are cumulative, and the difference of two cumulative readings is
-    itself cumulative, so this works unchanged on an interval delta.
-    """
-    if not buckets:
-        return None
-    ordered = sorted(buckets.items())
-    total = ordered[-1][1]
-    if total <= 0:
-        return None
-    target = total * quantile
-    for bound, cumulative in ordered:
-        if cumulative >= target:
-            return bound
-    return ordered[-1][0]
-
-
 def _format_seconds(seconds: float) -> str:
     return f"{seconds * 1000:.1f}ms" if seconds < 1 else f"{seconds:.2f}s"
-
-
-def _format_quantile(buckets: Dict[float, float], seconds: Optional[float]) -> str:
-    """Render a quantile as the comparison it actually is.
-
-    A histogram resolves a quantile only to a bucket bound, so the figure can
-    exceed the largest duration actually observed. Spelling the bound as
-    ``<=`` keeps that from reading as ``p99 > max``, which is otherwise the
-    obvious conclusion when both sit on the same line.
-    """
-    if seconds is None:
-        return '=-'
-    if not math.isinf(seconds):
-        return f"<={_format_seconds(seconds)}"
-    finite = [bound for bound in buckets if not math.isinf(bound)]
-    return f">{_format_seconds(max(finite))}" if finite else '=inf'
 
 
 class IntervalReport:
     """The periodic log line for one histogram.
 
-    Everything reported comes from the histogram itself, so the log and the
-    Prometheus exposition can never disagree. Histograms are cumulative, so
-    interval figures are the difference between successive reads.
+    Totals are kept here rather than derived from the histogram's own
+    samples: both are fed by the single ``observe`` below, and count, sum and
+    peak are cheaper to accumulate than to read back out of cumulative
+    buckets. Every figure covers the interval since the last report.
 
-    The exception is ``max``: a histogram knows only bucket boundaries, and
-    the Python client's Summary carries no quantiles, so the peak is kept here
-    as a plain float and reset every tick. Deliberately not a Gauge -- a gauge
-    reset every few seconds sawtooths and reads badly in Prometheus.
+    ``max`` stays out of the exposition entirely: a gauge reset every few
+    seconds sawtooths and reads badly in Prometheus.
     """
 
     def __init__(self, name: str, histogram: Histogram) -> None:
         self.name = name
         self.histogram = histogram
-        self._prev_methods: Dict[str, Tuple[float, float]] = {}
-        self._prev_buckets: Dict[float, float] = {}
-        self._peak_seconds = 0.0
+        self._count = 0
+        self._total = 0.0
+        self._peak = 0.0
+        self._methods: Dict[str, Tuple[int, float]] = {}
 
     def observe(self, seconds: float, method: Optional[str] = None) -> None:
         target = self.histogram if method is None else self.histogram.labels(method=method)
         target.observe(seconds)
-        self._peak_seconds = max(self._peak_seconds, seconds)
 
-    def _slowest_method(self, methods: Dict[str, Tuple[float, float]]) -> Optional[str]:
-        """The method with the highest mean duration over the interval."""
-        slowest, slowest_mean = None, 0.0
-        for method, (count, total) in methods.items():
-            prev_count, prev_total = self._prev_methods.get(method, (0.0, 0.0))
-            if (advanced := count - prev_count) <= 0:
-                continue
-            if (mean := (total - prev_total) / advanced) > slowest_mean:
-                slowest, slowest_mean = method, mean
-        return slowest or None
+        self._count += 1
+        self._total += seconds
+        self._peak = max(self._peak, seconds)
+        if method is not None:
+            count, total = self._methods.get(method, (0, 0.0))
+            self._methods[method] = (count + 1, total + seconds)
 
     def report(self) -> Optional[str]:
         """Summarize the interval, or ``None`` if nothing was observed in it."""
-        methods, buckets = _histogram_snapshot(self.histogram)
-        advanced = (
-            sum(count for count, _ in methods.values())
-            - sum(count for count, _ in self._prev_methods.values())
-        )
-        elapsed = (
-            sum(total for _, total in methods.values())
-            - sum(total for _, total in self._prev_methods.values())
-        )
-        interval_buckets = {
-            bound: value - self._prev_buckets.get(bound, 0.0)
-            for bound, value in buckets.items()
-        }
-        peak, slowest = self._peak_seconds, self._slowest_method(methods)
+        count, total, peak = self._count, self._total, self._peak
+        methods = self._methods
+        self._count, self._total, self._peak = 0, 0.0, 0.0
+        self._methods = {}
 
-        self._prev_methods, self._prev_buckets = methods, buckets
-        self._peak_seconds = 0.0
-
-        if advanced <= 0:
+        if count <= 0:
             return None
 
+        slowest = max(
+            methods,
+            key=lambda method: methods[method][1] / methods[method][0],
+            default=None,
+        )
         summary = (
             f"{self.name}:"
-            f" interval_avg={_format_seconds(elapsed / advanced)}"
-            f" p99{_format_quantile(interval_buckets, _bucket_quantile(interval_buckets, 0.99))}"
+            f" interval_avg={_format_seconds(total / count)}"
             f" max={_format_seconds(peak)}"
-            f" n={int(advanced)}"
+            f" n={count}"
         )
         return summary if slowest is None else f"{summary} slowest={slowest}"
 
@@ -475,18 +403,14 @@ class SpdkProxy:
     async def report_stats(self) -> None:
         """Log the interval timings every ``STATS_INTERVAL_SEC`` seconds.
 
-        Read off the same metrics the Prometheus endpoint serves, so the two
-        can never disagree. A series with no observations in the interval
-        logs nothing rather than repeating a stale summary.
+        A series with no observations in the interval logs nothing rather
+        than repeating a stale summary.
         """
         while True:
             await asyncio.sleep(STATS_INTERVAL_SEC)
-            try:
-                for report in self.metrics.reports:
-                    if (summary := report.report()) is not None:
-                        logger.info("Periodic stats: %s", summary)
-            except (ValueError, KeyError, ZeroDivisionError) as e:
-                logger.error(f"Could not summarize proxy metrics: {e}")
+            for report in self.metrics.reports:
+                if (summary := report.report()) is not None:
+                    logger.info("Periodic stats: %s", summary)
 
     async def wait_for_spdk_ready(self) -> None:
         """Block until SPDK responds to spdk_get_version on the unix socket."""
