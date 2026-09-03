@@ -148,6 +148,9 @@ class RunningProxy:
         except RetryError:
             return False
 
+    def metric(self, name, **labels):
+        return self.proxy.metrics.registry.get_sample_value(name, labels or None)
+
     def is_refusing_connections(self):
         try:
             requests.post(self.url, data="{}", timeout=2)
@@ -271,8 +274,8 @@ class TestProxyE2E(unittest.TestCase):
         for _ in range(5):
             self._proxy.post("spdk_get_version")
 
-        self.assertEqual(self._proxy.proxy.open_connections, 0)
-        self.assertEqual(self._proxy.proxy.active_requests, 0)
+        self.assertEqual(self._proxy.metric("spdk_proxy_unix_connections_open"), 0)
+        self.assertEqual(self._proxy.metric("spdk_proxy_requests_in_flight"), 0)
 
     def test_concurrent_requests(self):
         results = []
@@ -292,7 +295,7 @@ class TestProxyE2E(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertEqual(results, [200] * 8)
-        self.assertEqual(self._proxy.proxy.open_connections, 0)
+        self.assertEqual(self._proxy.metric("spdk_proxy_unix_connections_open"), 0)
 
 
 class TestProxyReadinessGate(unittest.TestCase):
@@ -305,7 +308,7 @@ class TestProxyReadinessGate(unittest.TestCase):
 
             with mock_spdk(path):
                 self.assertTrue(proxy.wait_until_serving())
-                self.assertEqual(proxy.proxy.open_connections, 0)
+                self.assertEqual(proxy.metric("spdk_proxy_unix_connections_open"), 0)
 
 
 class TestProxyTimeout(unittest.TestCase):
@@ -324,7 +327,7 @@ class TestProxyTimeout(unittest.TestCase):
 
             self.assertEqual(response.status_code, 500)
             self.assertLess(elapsed, 1)
-            self.assertEqual(proxy.proxy.open_connections, 0)
+            self.assertEqual(proxy.metric("spdk_proxy_unix_connections_open"), 0)
 
 
 if __name__ == "__main__":
