@@ -38,8 +38,11 @@ def _snap(node_id="n1", deleted=False):
 
 
 class TestCheckLvstoreObjectLimit(unittest.TestCase):
-    def test_limit_is_12000_flat(self):
-        self.assertEqual(LIMIT, 12000)
+    def test_limit_is_6000_flat(self):
+        # Pinned deliberately: the cap is a product decision, not an
+        # implementation detail, so a change to it must be a change to this
+        # test too. 6000 -> 12000 on 2026-08-20, back to 6000 on 2026-08-28.
+        self.assertEqual(LIMIT, 6000)
         lvols = [_lvol() for _ in range(LIMIT)]
         self.assertIsNotNone(check_lvstore_object_limit(_node(), lvols, []))
         self.assertIsNone(check_lvstore_object_limit(_node(), lvols[:-1], []))

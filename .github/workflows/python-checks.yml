@@ -26,7 +26,7 @@ jobs:
         cache: 'pip'
 
     - name: Install tox
-      run: pip install tox
+      run: pip install tox tox-uv
 
     - name: Checking cli.py status
       run: |
@@ -37,6 +37,56 @@ jobs:
           echo "${changes}"
           exit 1
         fi
+
+
+  env-var:
+    name: Deployment image pins
+    runs-on: ubuntu-latest
+    # env_var pins the images built from the branch it sits on, so its tags can
+    # only be checked on the long-lived branches. Keep in sync with the push
+    # trigger above.
+    if: contains(fromJSON('["main", "R26.2-PRE"]'), github.base_ref || github.ref_name)
+
+    steps:
+    - uses: actions/checkout@v7
+
+    # A test image pinned here ships to everyone deploying from this branch, and
+    # is regularly forgotten in a merge. Only the tag is checked: the registry
+    # has legitimately differed per branch.
+    - name: Checking env_var image pins
+      env:
+        BRANCH: ${{ github.base_ref || github.ref_name }}
+      run: |
+        docker_image="$(sed -n 's|^SIMPLY_BLOCK_DOCKER_IMAGE=||p' simplyblock_core/env_var)"
+        ultra_image="$(sed -n 's|^SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=||p' simplyblock_core/env_var)"
+
+        status=0
+        if [[ "${docker_image}" != */*:"${BRANCH}" ]]; then
+          echo "::error file=simplyblock_core/env_var::SIMPLY_BLOCK_DOCKER_IMAGE is ${docker_image:-unset}, expected an image tagged ${BRANCH}. Revert the test pin before merging."
+          status=1
+        fi
+        if [[ "${ultra_image}" != */*:"${BRANCH}" && "${ultra_image}" != */*:"${BRANCH}-latest" ]]; then
+          echo "::error file=simplyblock_core/env_var::SIMPLY_BLOCK_SPDK_ULTRA_IMAGE is ${ultra_image:-unset}, expected an image tagged ${BRANCH} or ${BRANCH}-latest. Revert the test pin before merging."
+          status=1
+        fi
+        exit "${status}"
+
+
+  lock:
+    name: Lockfile up to date
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install uv
+      run: pip install uv
+
+    # Fails if uv.lock no longer matches pyproject.toml. The image build uses
+    # `uv sync --locked`, so a stale lock breaks the build rather than silently
+    # resolving something new -- this reports it on the PR instead.
+    - name: Check uv.lock
+      run: uv lock --check
 
 
   lint:
@@ -58,6 +108,14 @@ jobs:
     - name: Execute linter
       run: ruff check
 
+    # ruff's target version comes from requires-python (>=3.9); this asserts the
+    # sources also parse on the interpreter the image actually runs.
+    - name: Check sources parse on the image interpreter
+      run: |
+        pip install uv
+        uv run --python 3.14t --no-project -- \
+          python -m compileall -q simplyblock_core simplyblock_web simplyblock_cli
+
 
   types:
     name: Type checker
@@ -72,11 +130,8 @@ jobs:
         python-version: '3.9'
         cache: 'pip'
 
-    - name: Install type checker
-      run: pip install mypy 
+    - name: Install tox
+      run: pip install tox tox-uv
 
     - name: Execute type checker
-      run: |
-        pip install -r requirements.txt
-        pip install -r type-requirements.txt
-        mypy simplyblock_web simplyblock_cli simplyblock_core
+      run: tox run -e types

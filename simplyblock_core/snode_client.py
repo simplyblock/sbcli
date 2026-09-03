@@ -184,6 +184,10 @@ class SNodeClient:
         #     "db_connection": db_connection}
         # return self._request("POST", "join_swarm", params)
 
+    def spdk_thread_state(self, rpc_port):
+        """Per-thread state of SPDK, sampled twice ~1s apart (diagnostic)."""
+        return self._request("GET", "spdk_thread_state", {"rpc_port": rpc_port})
+
     def spdk_process_kill(self, rpc_port, cluster_id=None):
         return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port, "cluster_id": cluster_id})
 
@@ -227,13 +231,33 @@ class SNodeClient:
     def set_hugepages(self):
         return self._request("POST", "set_hugepages")
 
-    def persist_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list):
+    def persist_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list,
+                            cpu_mask=None, isolated=None, l_cores=None,
+                            distribution=None, core_to_index=None,
+                            small_pool_count=None, large_pool_count=None,
+                            number_of_distribs=None):
         payload = {
             "max_lvol": max_lvol,
             "huge_page_memory": huge_page_memory,
             "numa_node": numa_node,
             "ssd_list": ssd_list,
         }
+        if cpu_mask is not None:
+            payload["cpu_mask"] = cpu_mask
+        if isolated is not None:
+            payload["isolated"] = isolated
+        if l_cores is not None:
+            payload["l_cores"] = l_cores
+        if distribution is not None:
+            payload["distribution"] = distribution
+        if core_to_index is not None:
+            payload["core_to_index"] = core_to_index
+        if small_pool_count is not None:
+            payload["small_pool_count"] = small_pool_count
+        if large_pool_count is not None:
+            payload["large_pool_count"] = large_pool_count
+        if number_of_distribs is not None:
+            payload["number_of_distribs"] = number_of_distribs
         return self._request("POST", "persist_node_config", payload)
 
     def ifc_is_roce(self, nic):

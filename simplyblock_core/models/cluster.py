@@ -1,11 +1,11 @@
 # coding=utf-8
 import os.path
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
 from pydantic import SecretStr
 
 from simplyblock_core import constants
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class HashicorpVaultSettings(BaseModel):
@@ -32,7 +32,7 @@ class Cluster(BaseModel):
     #: clear out from under a live rebuild.
     STATUS_IN_SHRINK = "in_shrink"
 
-    STATUS_CODE_MAP = {
+    STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 1,
         STATUS_INACTIVE: 2,
         STATUS_READONLY: 3,
@@ -89,7 +89,7 @@ class Cluster(BaseModel):
     #: Empty means the cluster has never been activated. Once set, activation
     #: refuses to run with nodes present that are not in this list: growth goes
     #: through the expansion flow, never through re-activation.
-    activated_node_ids: List[str] = []
+    activated_node_ids: List[str] = default_factory(list)
     #: Set by "cluster op-stop": the cluster refuses creation, deletion and
     #: modification of lvols, snapshots, clones and pools while this is true.
     #: Read paths and the cluster's own maintenance are unaffected.
@@ -143,7 +143,7 @@ class Cluster(BaseModel):
     inflight_io_threshold: int = 4
     iscsi: str = ""
     max_queue_size: int = 128
-    model_ids: List[str] = []
+    model_ids: List[str] = default_factory(list)
     cluster_name: str = None # type: ignore[assignment]
     nqn: str = ""
     page_size_in_blocks: int = 2097152
@@ -160,7 +160,7 @@ class Cluster(BaseModel):
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False
-    tls_config: dict = {}
+    tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False
     # Suspend-recovery drain phase marker.
     #
@@ -199,6 +199,24 @@ class Cluster(BaseModel):
     # storage_node_monitor consumes this flag, calls set_shared_placement once,
     # and clears it. shared_placement (above) is the durable "done" marker.
     shared_placement_migration_pending: bool = False
+    # Which generation of distrib write protection this cluster runs.
+    #   False (NO)  -> v1: distribs are created with `write_protection`
+    #   True  (YES) -> v2: distribs are created with `write_protection_v2`
+    #
+    # Cluster-wide because a distrib must be re-created with the same
+    # generation it was created with, and an already-existing distrib can only
+    # be moved to v2 by the runtime distr_write_protection_v2 RPC -- not by a
+    # create parameter. So the flag says "every distrib in this cluster has
+    # been switched to v2", which is the only state in which it is correct to
+    # create new ones that way.
+    #
+    # Default is deliberately False: a cluster row written by an older release
+    # has no such key, and reading it back must mean "not switched yet".
+    # Fresh clusters set it True at create (create_cluster / _add_cluster_impl);
+    # update_cluster stamps it back to False because an upgraded cluster's
+    # pre-existing distribs are still v1 until `sbctl cluster
+    # switch-write-protection` runs the RPC on every online node.
+    write_protection_v2: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
@@ -214,7 +232,7 @@ class Cluster(BaseModel):
     snapshot_replication_timeout: int = 60*10
     client_data_nic: str = ""
     max_fault_tolerance: int = 1
-    backup_config: dict = {}
+    backup_config: dict = default_factory(dict)
     backup_source: str = ""  # active backup source cluster_id ("" = local)
     backup_timeout_seconds: int = 14400  # 4 hours default
     nvmf_base_port: int = 4420
@@ -227,13 +245,13 @@ class Cluster(BaseModel):
     # is in flight. Populated/advanced/cleared via the helpers in
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
-    expand_state: dict = {}
+    expand_state: dict = default_factory(dict)
     # State owned by release-specific upgrade plug-ins (see
     # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
     # is set by the plugin's pre_update step (first thing `cluster update`
     # does) and cleared by its upgrade_complete step (`cluster
     # upgrade-complete`). Empty dict = no release upgrade in flight.
-    release_upgrade_state: dict = {}
+    release_upgrade_state: dict = default_factory(dict)
     # Release stamped by the last completed `cluster upgrade-complete`.
     # Consumed by release_upgrades plugins with a from_release restriction.
     # Empty on clusters that never completed an upgrade under this framework.

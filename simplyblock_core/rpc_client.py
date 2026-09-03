@@ -1,8 +1,11 @@
 import errno
+import hashlib
 import json
+import threading
+from collections import OrderedDict
 from enum import IntEnum
 from json import JSONDecodeError
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 import jsonschema
 import requests
@@ -158,6 +161,97 @@ RPC_METHOD_NOT_FOUND = -32601
 RPC_UNSUPPORTED = "__rpc_unsupported__"
 
 
+def _build_session(host, port, username, password: SecretStr, retry: int,
+                   settings: Settings) -> requests.Session:
+    """Build one fully-configured ``requests.Session``. Split out of
+    ``RPCClient.__init__`` so ``RPCSessionPool`` can memoize it."""
+    session = requests.session()
+    if settings.tls_connect != "disabled":
+        session.verify = str(settings.tls_certificate_authority)
+    session.auth = (username, password.get_secret_value())
+    retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
+                    allowed_methods=RPCClient.DEFAULT_ALLOWED_METHODS)
+    session.mount("http://", HTTPAdapter(max_retries=retries))
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    if settings.tls_connect == "authenticated":
+        session.cert = (str(settings.tls_certificate), str(settings.tls_key))
+    return session
+
+
+class RPCSessionPool:
+    """Process-local cache of configured ``requests.Session`` objects,
+    shared across ``RPCClient`` instances instead of building a fresh one
+    (TCP+TLS+auth setup) per instance.
+
+    Key is ``(host, port, username, password, tls_connect, retry)`` —
+    ``retry`` is included because it's baked into the mounted ``Retry`` at
+    ``Session``-construction time; ``timeout`` is deliberately excluded
+    because it's already applied per-call (``effective_timeout`` in
+    ``_request2``/``_request3``) and never touches the ``Session`` itself.
+
+    Bounded LRU rather than unbounded, in case a node's identity churns
+    (IP failover, credential rotation) faster than ``evict()`` is called.
+    """
+
+    _MAX_ENTRIES = 256
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sessions: "OrderedDict[tuple, requests.Session]" = OrderedDict()
+
+    @staticmethod
+    def _fingerprint(password: SecretStr) -> str:
+        # Hashed rather than stored raw so the key tuple never carries the
+        # plaintext secret (e.g. into a repr() in a stack trace). Not a
+        # security comparison, so a plain hash is fine here.
+        return hashlib.sha256(password.get_secret_value().encode()).hexdigest()
+
+    def get(self, host, port, username, password: SecretStr, retry: int,
+            settings: Settings) -> requests.Session:
+        key = (host, port, username, self._fingerprint(password),
+               settings.tls_connect, retry)
+        with self._lock:
+            session = self._sessions.get(key)
+            if session is not None:
+                self._sessions.move_to_end(key)
+                return session
+        # Built outside the lock — no sockets are opened here, so a race
+        # costs at most a duplicate build, never a lock held during I/O.
+        session = _build_session(host, port, username, password, retry, settings)
+        with self._lock:
+            existing = self._sessions.get(key)
+            if existing is not None:
+                self._sessions.move_to_end(key)
+                return existing
+            self._sessions[key] = session
+            if len(self._sessions) > self._MAX_ENTRIES:
+                self._sessions.popitem(last=False)
+        return session
+
+    def evict(self, host, port) -> None:
+        """Drop every cached session for ``(host, port)`` (all retry
+        buckets/credentials). Call wherever a node's ``mgmt_ip`` or RPC
+        credentials change, so a stale session isn't reused afterward."""
+        with self._lock:
+            for key in [k for k in self._sessions if k[0] == host and k[1] == port]:
+                del self._sessions[key]
+
+    def clear(self) -> None:
+        """Drop every cached session. Test-only, for pool-reset fixtures."""
+        with self._lock:
+            self._sessions.clear()
+
+
+#: One pool per process, shared by every RPCClient constructed in it.
+_session_pool = RPCSessionPool()
+
+
+def evict_cached_session(host, port) -> None:
+    """Public wrapper around ``_session_pool.evict()`` for callers outside
+    this module (e.g. ``storage_node_ops`` on node restart/failover)."""
+    _session_pool.evict(host, port)
+
+
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
@@ -170,8 +264,8 @@ class RPCClient:
     # Connection-error retries (`connect=`) are independent of this set and
     # still apply, since a failed *connect* means the request never reached the
     # node and is safe to resend.
-    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
-    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat", "bdev_get_histogram"]
+    DEFAULT_ALLOWED_METHODS: ClassVar[list] = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
+    RPC_NO_PRINT_OUTPUT: ClassVar[list] = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat", "bdev_get_histogram"]
 
     def __init__(self, host, port, username, password: SecretStr, timeout=180, retry=3):
         self.host = host
@@ -182,16 +276,8 @@ class RPCClient:
         self.username = username
         self.password = password
         self.timeout = timeout
-        self.session = requests.session()
-        if settings.tls_connect != "disabled":
-            self.session.verify = str(settings.tls_certificate_authority)
-        self.session.auth = (self.username, self.password.get_secret_value())
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
-                        allowed_methods=self.DEFAULT_ALLOWED_METHODS)
-        self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        if settings.tls_connect == "authenticated":
-            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
+        self.retry = retry
+        self.session = _session_pool.get(host, port, username, password, retry, settings)
 
     def _request(self, method, params=None, request_timeout=None):
         ret, _ = self._request2(method, params, request_timeout=request_timeout)
@@ -458,8 +544,24 @@ class RPCClient:
         params = {"traddr": pci_addr, "ns_id": 1, "label": name}
         return self._request2("ultra21_alloc_ns_mount", params)
 
-    def bdev_nvme_detach_controller(self, name):
+    def bdev_nvme_detach_controller(self, name, traddr=None, trsvcid=None,
+                                    trtype="TCP", adrfam="ipv4"):
+        """Detach a controller, or -- with a trid -- only the paths on that
+        address.
+
+        Note the SPDK semantics before using this to prune: bdev_nvme_delete()
+        walks EVERY nvme_ctrlr under the bdev and removes each one whose
+        path matches, so a trid detach removes *all* controllers on that
+        address, not one of them. There is deliberately no way to single out
+        one of two identical trids -- the duplicate-path repair in
+        storage_node_ops therefore detaches the address and re-attaches it
+        once, rather than trying to drop a single copy.
+        """
         params = {"name": name}
+        if traddr:
+            params.update({"traddr": traddr, "trtype": trtype, "adrfam": adrfam})
+            if trsvcid:
+                params["trsvcid"] = str(trsvcid)
         return self._request2("bdev_nvme_detach_controller", params)
 
     def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
@@ -801,7 +903,8 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True, shared_placement=False):
+                            full_page_unmap=True, shared_placement=False,
+                            write_protection_v2=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -839,7 +942,16 @@ class RPCClient:
             params['ha_inode_self'] = ha_inode_self
         if distrib_cpu_mask:
             params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
-        if write_protection:
+        # Write protection has two generations and a distrib is created with
+        # exactly one of them. v2 supersedes v1 -- the data plane derives the
+        # old flag from the new one (b_write_protection = b_write_protection ||
+        # b_write_protection_v2), so sending both is redundant and sending the
+        # wrong one for the cluster's generation is a correctness problem. The
+        # caller decides via cluster.write_protection_v2; see
+        # storage_node_ops.apply_write_protection_mode.
+        if write_protection_v2:
+            params["write_protection_v2"] = True
+        elif write_protection:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
@@ -871,6 +983,31 @@ class RPCClient:
         if name:
             params["name"] = name
         return self._request("distr_shared_placement", params)
+
+    def distr_write_protection_v2(self, name=None, enable=True):
+        """Activate (or deactivate) v2 write protection on distrib bdevs at
+        runtime.
+
+        This is the one-shot migration RPC for bdevs that already exist:
+        a distrib created by an older release carries v1 write protection and
+        cannot gain v2 by being told about it at create time -- it is already
+        created. `sbctl cluster switch-write-protection` sends this to every
+        online node after an upgrade, then stamps cluster.write_protection_v2
+        so subsequent (re-)creations use the v2 create parameter instead.
+
+        Args:
+            name: target a single distrib bdev. If None / empty, applies to
+                every distrib bdev on this node -- which is what the cluster
+                switch wants.
+            enable: True activates v2.
+
+        Returns True on success; raises on RPC error (the data plane answers
+        with an error response carrying ndev/nfail when some devices failed).
+        """
+        params: dict = {"enable": bool(enable)}
+        if name:
+            params["name"] = name
+        return self._request("distr_write_protection_v2", params)
 
     def jm_set_shared_placement(self, name, enable=True):
         """Flip the shared_placement mode of a JM bdev at runtime.
@@ -1469,6 +1606,54 @@ class RPCClient:
         }
         return self._request("jc_explicit_synchronization", params)
 
+    def jc_replace_jm(self, name_old: str, replacements: list):
+        """Swap the JM bdev backing one or more live JC members from
+        ``name_old`` to a per-member ``name_new`` in place -- JC re-syncs
+        each new JM's journal in the background and, from then on, treats
+        it as the member for that slot. Replaces the old
+        override_name_on_node naming trick (which faked the replacement
+        under the removed peer's old name so JC wouldn't need touching):
+        this RPC updates JC's live state directly, so the caller can
+        connect the replacement(s) under their own natural name.
+
+        A single storage node can run more than one local JC instance
+        against the SAME ``name_old`` bdev at once -- its own redundancy
+        set, plus one instance per primary it hosts as secondary/tertiary
+        (each such role uses a distinct ``jm_vuid``, up to 3 total per
+        node). This call covers ALL of them in one shot:
+
+        ``replacements``: 1..3 dicts, each ``{"jm_vuid": int, "name_new":
+        str}`` -- ``jm_vuid`` identifies which local JC instance to patch
+        (must currently use ``name_old``), ``name_new`` is the bdev to use
+        instead (must already exist as a bdev; the caller connects it
+        first). The SAME ``name_new`` may cover multiple ``jm_vuid``
+        entries -- reusing a bdev already in use by a DIFFERENT jm_vuid on
+        this node is fine, only reusing one already in THIS jm_vuid's own
+        member list is rejected. Must cover every jm_vuid on this node
+        that currently uses ``name_old``, or the whole call is rejected.
+
+        Raises RPCRemoteError with one of the documented codes on
+        rejection/failure:
+            -10 JC is closing
+            -11 invalid JM names (empty, or name_new == name_old)
+            -12 another JM replacement is already in progress
+            -13 name_old is not used by JC
+            -14 this jm_vuid uses name_new already
+            -15 the JM of name_old is being removed
+            -16 invalid number of replacements (0, or more than 3)
+            -17 the replacements do not cover all jm_vuids that use name_old
+            -18 the same jm_vuid is given twice
+            -19 unknown jm_vuid
+            -20 this jm_vuid does not use name_old
+            -3  JC started closing during the operation
+            -4  the JM context has disappeared during the operation
+            -5  failed to prepare or substitute the JM contexts (OOM)
+            -6  timed out connecting to the new JM bdev(s)
+                (c_jc_tmo_ms_replace_jm_open) -- NOT undone in this case:
+                JC keeps retrying to connect. Check the JM bdevs and log.
+        """
+        return self._request3("jc_replace_jm", name_old=name_old, replacements=replacements)
+
     def listeners_del(self, nqn, trtype, traddr, trsvcid):
         """"
             nqn: Subsystem NQN.
@@ -1640,6 +1825,21 @@ class RPCClient:
             "remote_bdev": bdev,
         })
 
+    def jc_set_dual_node(self, enable):
+        """Tell the journal component whether this is a DUAL-NODE cluster.
+
+        The JC aborts its whole SPDK application when the number of reachable
+        journal members drops below jc_ha_nmin_jms(), which is 2 unless the
+        dual-node flag is set, and 1 when it is. On a 2-node cluster losing
+        the peer leaves exactly 1 of 2 JMs, so without this flag the SURVIVING
+        node aborts itself the moment its partner stops -- a single graceful
+        `sn shutdown` takes the entire cluster down (soak case 6: "JC detected
+        a network outage nd=1 njms=2" / "JC aborts the node due to network
+        outage" / core dump, every client path gone, XFS shut down).
+        The fork implements the tolerance; nothing ever switched it on.
+        """
+        return self._request2("jc_set_dual_node", {"enable": bool(enable)})
+
     def jc_suspend_compression(self, jm_vuid, suspend=False):
         params = {
             "jm_vuid": jm_vuid,
@@ -1688,6 +1888,19 @@ class RPCClient:
             params["rr_min_io"] = rr_min_io
         return self._request("bdev_nvme_set_multipath_policy", params,
                              request_timeout=request_timeout)
+
+    def bdev_jm_get_status(self, jm_vuid):
+        """Journal status for one JM group.
+
+        Returns (on res > 0) a dict with jm_vuid, generation_id,
+        total_records, total_bytes, uncompressed_bytes, compression_threshold
+        and compression_status -- total_records is the record count the
+        compression-backlog alert keys on.
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+        }
+        return self._request("bdev_jm_get_status", params)
 
     def jc_get_jm_status(self, jm_vuid):
         """

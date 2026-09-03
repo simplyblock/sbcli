@@ -93,7 +93,7 @@ class HubControllerManager:
     # Seconds since the last acquire() before the GC triggers a detach.
     # Refreshed on every acquire() so concurrent migrations naturally keep
     # the controller alive without any reference counting.
-    IDLE_TIMEOUT = 300  # 5 minutes
+    IDLE_TIMEOUT = 1200  # 20 minutes
 
     # GC sweep period.
     GC_INTERVAL = 30

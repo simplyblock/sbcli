@@ -1046,6 +1046,15 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_db = MagicMock()
         mock_db.get_primary_storage_nodes_by_secondary_node_id.return_value = [primary_node]
         mock_db.get_lvols_by_node_id.return_value = [lvol_secured, lvol_open]
+        # The unconditional soft-reconnect prelude re-fetches snode by id
+        # after _connect_to_remote_devs/_connect_to_remote_jm_devs (to avoid
+        # writing back a stale copy over a concurrent DB update) -- an
+        # unstubbed get_storage_node_by_id would hand back a disconnected
+        # MagicMock instead of sec_node/primary_node, and every downstream
+        # field read (and the _reapply_allowed_hosts identity assertion
+        # below) would diverge from the real nodes built above.
+        nodes_by_id = {sec_node.uuid: sec_node, primary_node.uuid: primary_node}
+        mock_db.get_storage_node_by_id.side_effect = lambda node_id: nodes_by_id.get(node_id, MagicMock())
         MockDB.return_value = mock_db
 
         mock_rpc_inst = MagicMock()

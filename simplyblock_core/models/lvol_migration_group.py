@@ -14,8 +14,14 @@ SNAP_COPY
     N worker tasks copy their owned snapshot chains in parallel.
     snap_copy_done tracks which workers have finished.
 INTERMEDIATE
-    All workers take exactly one intermediate ('shrink') snapshot each.
-    intermediates_done tracks which workers have finished.
+    All workers take one intermediate ('shrink') snapshot each, in lockstep
+    rounds. intermediates_done tracks which workers have finished the
+    current round (intermediate_round). If any worker's dirty delta is
+    still above the threshold after a round, it flags itself in
+    intermediate_more_needed; once every worker has finished the round, the
+    orchestrator starts another synchronized round (all members retake a
+    snapshot together, even ones whose own delta was already low) if
+    intermediate_more_needed is non-empty and the round cap hasn't been hit.
 BATCH_MIGRATE
     Main calls bdev_lvol_batch_final_step with all lvols ordered by ns_id.
     batch_result is set to True on success, False on failure.
@@ -30,9 +36,9 @@ COMPLETED
 """
 
 import datetime
-from typing import List, Optional
+from typing import ClassVar, List, Optional
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class LVolMigrationGroup(BaseModel):
@@ -50,7 +56,7 @@ class LVolMigrationGroup(BaseModel):
     STATUS_FAILED    = 'failed'
     STATUS_CANCELLED = 'cancelled'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_RUNNING:   1,
         STATUS_DONE:      3,
         STATUS_FAILED:    4,
@@ -67,25 +73,37 @@ class LVolMigrationGroup(BaseModel):
 
     # Ordered list of {ns_id: int, migration_id: str} dicts sorted by ns_id
     # ascending.  This is the order bdev_lvol_batch_final_step expects.
-    members: List[dict] = []
+    members: List[dict] = default_factory(list)
 
     # Static snap-ownership map: snap_uuid → migration_id.
     # Computed once at group creation from all members' snapshot chains.
     # Each snap is assigned to the member with the lowest ns_id that references
     # it.  Workers only transfer their owned snaps; the rest are immediately
     # marked snaps_preexisting_on_target on that worker.
-    snap_owners: dict = {}
+    snap_owners: dict = default_factory(dict)
 
     # migration_ids that finished transferring their owned snaps and are now
     # waiting for the INTERMEDIATE phase signal from the main orchestrator.
-    snap_copy_done: List[str] = []
+    snap_copy_done: List[str] = default_factory(list)
 
-    # migration_ids that have taken and transferred their single intermediate
-    # snapshot and are waiting for batch_result.
-    intermediates_done: List[str] = []
+    # migration_ids that have taken and transferred their intermediate
+    # snapshot for the CURRENT intermediate_round and are waiting for either
+    # another round or batch_result. Cleared when a new round starts.
+    intermediates_done: List[str] = default_factory(list)
+
+    # Which intermediate round is currently in flight (0-indexed; round 0 is
+    # always taken unconditionally). Incremented when the orchestrator starts
+    # another synchronized round.
+    intermediate_round: int = 0
+
+    # migration_ids that reported their dirty delta still exceeded the
+    # threshold after finishing intermediate_round. Cleared when a new round
+    # starts. Non-empty at the end of a round (and under the round cap)
+    # triggers another synchronized round for every member.
+    intermediate_more_needed: List[str] = default_factory(list)
 
     # migration_ids that have completed CLEANUP_SOURCE.
-    cleanup_source_done: List[str] = []
+    cleanup_source_done: List[str] = default_factory(list)
 
     # Written by the main orchestrator after bdev_lvol_batch_final_step.
     # None = call not yet made; True = success; False = failure.

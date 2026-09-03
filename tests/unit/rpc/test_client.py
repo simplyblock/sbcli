@@ -4,11 +4,11 @@ subsystem_get). Coverage is partial — add cases here as wrappers grow."""
 
 import errno
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from pydantic import SecretStr
 
-from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
+from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError, _session_pool
 
 
 def _make_client(**kwargs):
@@ -87,6 +87,65 @@ class TestSubsystem(unittest.TestCase):
         client = _make_client()
         with self.assertRaises(RPCException):
             client.subsystem_get("nqn.b")
+
+
+class TestSessionPool(unittest.TestCase):
+    """RPCClient no longer builds a fresh requests.Session per instance --
+    it fetches (or builds once) a pooled Session keyed by
+    (host, port, username, password, tls_connect, retry)."""
+
+    def test_same_identity_and_retry_share_one_session(self):
+        with patch("requests.session") as mock_session_factory:
+            c1 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=2)
+            c2 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=2)
+
+        mock_session_factory.assert_called_once()
+        self.assertIs(c1.session, c2.session)
+
+    def test_different_host_gets_a_different_session(self):
+        with patch("requests.session", side_effect=MagicMock) as mock_session_factory:
+            c1 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=2)
+            c2 = RPCClient("10.0.0.2", 8080, "user", SecretStr("pass"), retry=2)
+
+        self.assertEqual(mock_session_factory.call_count, 2)
+        self.assertIsNot(c1.session, c2.session)
+
+    def test_different_password_gets_a_different_session(self):
+        with patch("requests.session", side_effect=MagicMock) as mock_session_factory:
+            c1 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass1"), retry=2)
+            c2 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass2"), retry=2)
+
+        self.assertEqual(mock_session_factory.call_count, 2)
+        self.assertIsNot(c1.session, c2.session)
+
+    def test_different_retry_gets_a_different_session(self):
+        # retry is baked into the mounted urllib3.Retry at build time, so
+        # unlike timeout it has to be part of the pool key.
+        with patch("requests.session", side_effect=MagicMock) as mock_session_factory:
+            c1 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=2)
+            c2 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=5)
+
+        self.assertEqual(mock_session_factory.call_count, 2)
+        self.assertIsNot(c1.session, c2.session)
+
+    def test_different_timeout_shares_a_session(self):
+        # timeout is never baked into the Session, so it must not force a
+        # new pooled entry.
+        with patch("requests.session") as mock_session_factory:
+            c1 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=2, timeout=1)
+            c2 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=2, timeout=99)
+
+        mock_session_factory.assert_called_once()
+        self.assertIs(c1.session, c2.session)
+
+    def test_evict_forces_a_rebuild(self):
+        with patch("requests.session", side_effect=MagicMock) as mock_session_factory:
+            c1 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=2)
+            _session_pool.evict("10.0.0.1", 8080)
+            c2 = RPCClient("10.0.0.1", 8080, "user", SecretStr("pass"), retry=2)
+
+        self.assertEqual(mock_session_factory.call_count, 2)
+        self.assertIsNot(c1.session, c2.session)
 
 
 if __name__ == "__main__":

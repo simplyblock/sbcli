@@ -11,6 +11,7 @@ tests/
 ├── conftest_proxy.py    # `import_proxy_module()` helper that neutralizes spdk_http_proxy_server's module-level run_server side-effect; used by both proxy unit + e2e tests.
 ├── unit/                # Pure-logic tests; single module under test, no model state, no flows.
 │   ├── conftest.py      # Stubs the native `fdb` module so unit tests run without libfdb_c / a live cluster.
+│   ├── models/          # Every `BaseModel` test: field defaults, secrets, chunked reads, serialization.
 │   └── web/             # Unit tests for simplyblock_web (settings, v2 auth).
 ├── integration/         # Flow/controller tests — ALL run against real FDB.
 │   ├── conftest.py      # `pytest_configure` provisions FDB (testcontainers) before collection; autouse per-test keyspace wipe.
@@ -31,6 +32,21 @@ Pure-logic tests. Pick this tier when the test:
 - Doesn't drive controller flows (failover, restart, takeover, migration, expand, …).
 
 `tests/unit/conftest.py` stubs out `fdb` (returning `None` from `fdb.open`), so unit tests never touch a real database. Run with `tox run -e unit` — no Docker, no infra.
+
+**Never stand in for the database in a unit test.** The tier split is *about* the database, and there are only two positions:
+
+- the test does not interact with the database API **at all** → `tests/unit/`;
+- the test interacts with the **real** database API → `tests/integration/`.
+
+A `_FakeDB`, a patched `DBController`, a module's `db` / `db_controller` singleton swapped for a mock, an assigned `kv_store` — each of these invents a third position that does not exist. It neither avoids the database nor exercises it: it asserts against a second, undeclared copy of the `DBController` interface that nothing keeps in sync with the real one. Such a test stays green until production code calls an accessor the fake never implemented, and then fails on an `AttributeError` that says nothing about the behaviour under test.
+
+That is not hypothetical. The snapshot-replication retention suite had a `_FakeDB` implementing the four accessors retention used when it was written; the moment retention began consulting `get_replication_policy_for_lvol`, twelve tests failed on a missing attribute rather than on anything about retention. They are now `tests/integration/test_snapshot_replication_retention.py`, seeding real models and reading them back through a live `DBController`.
+
+So, when a unit test seems to need a fake DB: **the need is the signal that it is not a unit test.** Move it to `tests/integration/`, seed real models with `write_to_db(db.kv_store)`, and mock only what sits above the database. If the code under test does not actually need the database, delete the stand-in rather than feeding it a fake.
+
+`.agents/hooks/guard-fake-db-tests.py` enforces this (see the root `AGENTS.md` § Guard hooks). It is a **ratchet**: the suite carries ~400 pre-existing stand-ins, so the guard compares each file before and after an edit and refuses only what that edit *introduces*. Editing or cleaning up a grandfathered file is unaffected. `python3 .agents/hooks/guard-fake-db-tests.py --scan` lists what is left.
+
+> **Migration in progress, here too.** `simplyblock_core/test/` is a second unit-tier directory (also collected by `tox run -e unit`, with its own `fdb` stub) and holds the densest concentration of these fakes. Treat it as legacy: don't add files there, and convert what you touch.
 
 ### `tests/integration/`
 
@@ -54,6 +70,25 @@ What you *may* still mock: everything **above** the database. Storage nodes are 
 tox run -e unit             # Fast; no infra.
 tox run -e integration      # Requires Docker + libfdb_c on host. EXCLUDES slow tests.
 tox run -e integration-slow # Slow tier only (the migration suite, ~20min).
+```
+
+Each tier also has a `py314t-` twin (`tox run -e py314t-unit`, `py314t-integration`) running the
+free-threaded 3.14 interpreter the container image ships; the un-prefixed envs use python3.9, the
+floor `requires-python` promises. tox-uv fetches both, so neither has to be installed on the host.
+
+`passenv` is deliberately minimal — it lists only `PYTEST_ADDOPTS`, so a machine-specific value
+cannot leak into a run and change its result. Pass local infrastructure overrides on the command
+line with `-x` instead of widening it. The common case is a non-default container socket: the FDB
+testcontainer otherwise falls back to `/var/run/docker.sock` and the tier dies with
+`PermissionError(13)` before collecting a test.
+
+```bash
+# rootless podman (DOCKER_HOST already exported in the shell)
+tox run -e integration -x testenv:integration.passenv+=DOCKER_HOST
+
+# or skip the container entirely by pointing at an FDB you already run
+FDB_CLUSTER_FILE=/etc/foundationdb/fdb.cluster \
+  tox run -e integration -x testenv:integration.passenv+=FDB_CLUSTER_FILE
 ```
 
 ### Test timeouts
@@ -168,7 +203,7 @@ tox run -e integration   # pytest_configure detects the env var and skips its ow
 **Targeted runs** use `{posargs}` passthrough:
 
 ```bash
-tox run -e unit -- tests/unit/test_secrets.py -v
+tox run -e unit -- tests/unit/models/test_secrets.py -v
 tox run -e integration -- tests/integration/migration/test_migration_flow.py -v
 ```
 
@@ -178,7 +213,7 @@ tox run -e integration -- tests/integration/migration/test_migration_flow.py -v
 2. Place test files under `tests/unit/` or `tests/integration/` (mirroring the source layout is fine but not required). **Never drop a `test_*.py` directly in `tests/`** — it belongs to no tier, is selected by neither tox env, and gets no tier-specific conftest. `tests/conftest.py`'s `pytest_configure` enforces this: any top-level `tests/test_*.py` aborts collection (both `unit` and `integration`) with a `UsageError` telling you to move it.
 3. Reuse `from tests._mocks import make_mock_cluster` for mock `Cluster` objects rather than rebuilding the same fixture.
 4. For new FDB-backed scenarios, prefer extending `ftt2/`, `migration/`, or `expansion_sim/` over inventing another conftest — they already provide topology/cluster bootstrap on top of the tier-wide keyspace wipe. Persist real models to FDB; never mock the DB layer (see the integration-tier rules above).
-5. Never edit symlink targets — `tests/CLAUDE.md` is a symlink to this file.
+5. Never edit `tests/CLAUDE.md` — it is a stub that imports this file via `@AGENTS.md`.
 
 ## Secret-handling tests
 
@@ -193,12 +228,12 @@ Canonical patterns:
 
 - `tests/unit/test_secret_redaction.py` — `repr`/`str`/`pprint`/log formatter masking.
 - `tests/unit/test_client_secret_logging.py` — log-then-unwrap pattern for RPC + SNode clients.
-- `tests/unit/test_basemodel_secrets.py` — FDB round-trip.
+- `tests/unit/models/test_secrets.py` — FDB round-trip.
 - `tests/unit/test_display_helpers.py` — `utils.dump_json` / `utils.print_table` masking + unwrap.
 
 ## Verification
 
-After changes, follow the `tox-verify` skill (`.agents/skills/tox-verify.md`):
+After changes, follow the `tox-verify` skill (`.agents/skills/tox-verify/SKILL.md`):
 
 1. `tox run-parallel -e lint,types`
 2. `tox run -e unit -- <changed paths>` for iteration.

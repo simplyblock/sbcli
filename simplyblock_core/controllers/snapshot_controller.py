@@ -122,7 +122,8 @@ def _lvstore_lock_heartbeat(db_controller, cluster_id, lvs_name, owner, stop_eve
 
 
 @contextlib.contextmanager
-def lvstore_op_lock(cluster_id, lvs_name, *, node_id=None, enabled=True):
+def lvstore_op_lock(cluster_id, lvs_name, *, node_id=None, enabled=True,
+                    best_effort=False, timeout=None):
     """INNER lock — serialize a SINGLE single-node data-plane operation per
     lvstore (one RPC to one node).
 
@@ -150,7 +151,21 @@ def lvstore_op_lock(cluster_id, lvs_name, *, node_id=None, enabled=True):
         return
     lock_key = f"{lvs_name}@{node_id[:8]}" if node_id else lvs_name
     owner = _new_lvstore_lock_owner()
-    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, lock_key, owner):
+    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, lock_key,
+                                          owner, timeout=timeout):
+        if best_effort:
+            # Recovery/cleanup (force delete): the holder may be a process
+            # that died mid-section on a node that is now gone, so blocking
+            # forever is not an option -- but neither is the old behaviour
+            # of skipping the lock entirely, which let a forced delete
+            # interleave with any create/delete/resize on the same lvstore.
+            # Wait the bounded time, then proceed and say so loudly.
+            logger.warning(
+                "Proceeding WITHOUT the lvstore lock on %s (force/recovery "
+                "path); a concurrent object operation on this node is "
+                "possible", lock_key)
+            yield
+            return
         raise PreconditionError(
             f"Timed out acquiring lvstore lock on {lock_key}")
     stop = threading.Event()
@@ -373,7 +388,8 @@ def resolve_chain_root(object_uuid):
 
 
 @contextlib.contextmanager
-def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
+def object_mutation_lock(cluster_id, object_uuid, *, enabled=True,
+                         best_effort=False, timeout=None):
     """OUTER lock — serialize the WHOLE multi-node sequence of one operation on
     a CHAIN (a volume, its snapshots, their clones, recursively) and exclude
     any other operation (create / delete / resize / clone) on that same chain
@@ -398,7 +414,15 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
     chain_root, chain_lvs = resolve_chain_root(object_uuid)
     key = f"{_OBJECT_LOCK_PREFIX}/{chain_lvs}:{chain_root}"
     owner = _new_lvstore_lock_owner()
-    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, key, owner):
+    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, key, owner,
+                                          timeout=timeout):
+        if best_effort:
+            logger.warning(
+                "Proceeding WITHOUT the chain lock on %s (force/recovery "
+                "path); a concurrent operation on this chain is possible",
+                chain_root)
+            yield
+            return
         raise PreconditionError(
             f"Timed out acquiring chain lock on {chain_root} "
             f"(for {object_uuid})")
@@ -839,7 +863,15 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
         if task:
             snapshot_events.replication_task_created(snap)
-    if lvol.cloned_from_snap:
+    # Keep-the-recovered-source-in-sync: a FAIL-OVER clone's snapshots are
+    # shipped back to the original cluster so a later fail-back is a delta.
+    # ONLY when nothing else owns the volume's replication: once a forward
+    # policy is attached (migration onward, case-4 style), this to-source task
+    # runs CONCURRENTLY with the policy's forward transfers on the same
+    # snapshots — 2026-08-21: two volumes' shrink snapshots kept landing on
+    # the (emptied!) original cluster, the target-side copies the cutover was
+    # gated on never appeared, and both cutovers died on max retry.
+    if lvol.cloned_from_snap and not getattr(lvol, "replication_policy_id", ""):
         lvol_snap = _parent_snap  # reuse fetch from above — same ID, no second DB read
         if lvol_snap and lvol_snap.source_replicated_snap_uuid:
             try:
@@ -1093,8 +1125,6 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
     if snap.lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
-            rpc_client = snode.rpc_client()
-
             with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
                                  node_id=snode.get_id(), enabled=lock and not force_delete):
                 ret = delete_bdev_absent_ok(snode, snap.snap_bdev)
@@ -1150,8 +1180,6 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
             snap.deletion_status = ""
             snap.write_to_db(db_controller.kv_store)
             return True
-
-        rpc_client = primary_node.rpc_client()
 
         # special_delete (SPDK migration_flag) must be set ONLY when the SAME
         # snapshot exists on more than one node — i.e. lvol migration placed a
@@ -1316,7 +1344,12 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             return False, msg
 
     records = db_controller.get_cluster_capacity(cluster, 1)
-    if records:
+    if records and records[0].size_total > 0:
+        # Both operands are EFFECTIVE (client-visible) bytes: size_prov is the
+        # sum of provisioned lvol sizes, and size_total is parity-adjusted at
+        # collection time (see simplyblock_core.utils.capacity). size_total is
+        # zero on a cluster whose collector has not yet reported any device --
+        # skip the check rather than dividing by it.
         rec = records[0]
         cluster_size_prov_util = int(((rec.size_prov+size) / rec.size_total) * 100)
 
@@ -1518,8 +1551,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             elif action == "queue":
                 queue_for_restart_drain(
                     candidate.get_id(), lvol.lvs_name,
-                    lambda c=candidate, si=secondary_index_map[candidate.get_id()]:
-                        lvol_controller.add_lvol_on_node(lvol, c, is_primary=False, secondary_index=si),
+                    lambda c=candidate: lvol_controller.add_lvol_on_node(
+                        lvol, c, is_primary=False,
+                        secondary_index=secondary_index_map[c.get_id()]),
                     f"register clone {lvol.uuid} on {candidate.get_id()[:8]}")
             # "skip" — disconnected or pre_block, skip
 

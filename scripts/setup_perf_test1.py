@@ -5,9 +5,21 @@ import re
 import select
 import time
 from concurrent.futures import ThreadPoolExecutor
+import sys
 
-import boto3
-import paramiko
+# Streamed remote stderr is arbitrary UTF-8 -- systemctl alone prints
+# "Created symlink ... -> ..." with U+2192. On Windows a redirected stdout
+# defaults to cp1252, so the first such byte killed a 6-node deployment at
+# phase 2a with UnicodeEncodeError (2026-08-26). Never let log formatting
+# abort a deployment.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+import boto3  # noqa: E402  (must follow the stdout reconfigure above)
+import paramiko  # noqa: E402  (must follow the stdout reconfigure above)
 
 # paramiko's transport thread logs banner/handshake errors to stderr on its own;
 # silence them since wait_for_ssh retries through these failures anyway
@@ -20,12 +32,40 @@ KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ = "us-east-1a"
 SG_NAME = "default"
 BRANCH = "main"
-MAX_LVOL = "100"
+MAX_LVOL = "75"  # capped by constants.MAX_SUBSYSTEMS_PER_NODE (75): above it, values were silently clamped at placement time, so a node reserved huge pages for subsystems it could never serve. cluster create rejects it since 8bcedce79.
 # --- Manual Network Config ---
 # Replace this with your actual Subnet ID (e.g., "subnet-0593459d6b931ee4c")
 SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
+#: Root disk of the mgmt node. 30G filled to 100% four hours into the
+#: 2026-08-31 soak: /etc/foundationdb/backup reached 7.0G (524 unpruned
+#: ~28MB backups, one per minute) on top of ~14G of fixed overhead
+#: (containerd blobs 9.9G, Graylog/OpenSearch indices 4.2G). A full disk
+#: made FDB transactions time out (error 1031), `sbctl sn list --json`
+#: returned rc=1, and the run aborted at iteration 37 of 40 with 36 passes
+#: and no product failure. 60G buys roughly 27h at that backup rate; the
+#: real fix is retention on fdb_backup.
+MGMT_ROOT_GB = 60
+
 SN_TYPE = "i3en.2xlarge"
+#: Pin the SPDK/ultra image so a run is reproducible and comparable against
+#: another run. Without it, sn add-node takes the control-plane default, which
+#: drifts as main is rebuilt -- useless when the whole point of a run is to
+#: hold the build constant. Empty string = control-plane default.
+#: NOTE ultra publishes per-arch "<branch>-<sha>-amd64" tags for main, but the
+#: dbg-main branch has only the plain "<branch>-<sha>" tag -- appending -amd64
+#: gives a 404. dbg-main-84cece66 is itself a single linux/amd64 manifest.
+SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:dbg-main-84cece66"
+
+
+#: Dedicated client disk for fio --write_iolog history. 300 GB holds ~3h at
+#: the observed ~95 GB/h across six volumes; the soak trims to
+#: --iolog-keep-hours regardless. Kept off the root filesystem because
+#: filling that stops fio and the client itself.
+IOLOG_DISK_GB = 300
+IOLOG_DEVICE = '/dev/sdf'
+IOLOG_MOUNT = '/iolog'
+
 SN_COUNT = 6
 MGMT_TYPE = "m6i.2xlarge"
 # --- Selectable Client Specification ---
@@ -37,7 +77,7 @@ ec2 = boto3.resource('ec2', region_name='us-east-1')
 USER = "ec2-user"
 AZ = "us-east-1a"
 IFACE = "eth0"
-MAX_LVOL = "100"
+MAX_LVOL = "75"
 
 VOLUME_PLAN = [
     {"idx": 0, "node_idx": 0, "qty": 5, "size": "100G", "client": "client1", "io_queues": 12},
@@ -45,9 +85,9 @@ VOLUME_PLAN = [
 ]
 
 
-# --- Helper: Management Node with 30GB Root ---
+# --- Helper: Management Node with 60GB Root ---
 def launch_mgmt():
-    print("Launching Management Node with 30GB Root Volume...")
+    print(f"Launching Management Node with {MGMT_ROOT_GB}GB Root Volume...")
     return ec2.create_instances(
         KeyName=KEY_NAME,
         MinCount=1,
@@ -58,7 +98,7 @@ def launch_mgmt():
         BlockDeviceMappings=[{
             'DeviceName': '/dev/sda1',
             'Ebs': {
-                'VolumeSize': 30,
+                'VolumeSize': MGMT_ROOT_GB,
                 'DeleteOnTermination': True,
                 'VolumeType': 'gp3'
             }
@@ -298,6 +338,20 @@ def create_aws_clients(count, instance_type):
         MaxCount=count,
         KeyName=KEY_NAME,
 
+        # A dedicated disk for fio's write history. On 2026-08-26 the iologs
+        # filled the client's 8.8G root in about four minutes (6.3 GiB,
+        # ~95 GB/hour across six volumes), and a full root while fio is
+        # running can itself manufacture I/O errors. One hour of history needs
+        # ~100 GB, so this is sized for it and kept off the root entirely.
+        BlockDeviceMappings=[
+            {'DeviceName': '/dev/sda1',
+             'Ebs': {'VolumeSize': 30, 'VolumeType': 'gp3',
+                     'DeleteOnTermination': True}},
+            {'DeviceName': IOLOG_DEVICE,
+             'Ebs': {'VolumeSize': IOLOG_DISK_GB, 'VolumeType': 'gp3',
+                     'DeleteOnTermination': True}},
+        ],
+
         NetworkInterfaces=[{
             'DeviceIndex': 0,
             'SubnetId': SUBNET_ID,
@@ -372,6 +426,63 @@ class PersistentSSH:
 
 
 
+#: Soak wiring. The deployment is only useful if the soak actually starts, and
+#: getting the mgmt node ready by hand is where runs get lost: the soak runs ON
+#: mgmt (--run-on-mgmt) and SSHes to the nodes and client, so it needs the key,
+#: the metadata this script writes, and its own source there.
+SOAK_SCRIPT = "aws_dual_node_outage_soak_multipath.py"
+SOAK_LAUNCHER = "start_soak_base.sh"
+SOAK_EXTRA_FILES = ("collect_logs.py", "iolog_trimmer.sh")
+METADATA_FILE = "cluster_metadata_base.json"
+
+
+def stage_soak(mgmt_ip):
+    """Put the soak, its launcher, the ssh key and the metadata on mgmt."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    payload = [os.path.join(here, f) for f in
+               (SOAK_SCRIPT, SOAK_LAUNCHER) + SOAK_EXTRA_FILES]
+    payload.append(os.path.abspath(METADATA_FILE))
+    missing = [f for f in payload if not os.path.isfile(f)]
+    if missing:
+        raise RuntimeError(f"cannot stage soak, missing files: {missing}")
+
+    print(f"\n--- Phase 7: Stage soak on mgmt {mgmt_ip} ---")
+    ssh_exec(mgmt_ip, ["mkdir -p ~/.ssh"], check=True)
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(mgmt_ip, username="ec2-user", key_filename=KEY_PATH,
+                allow_agent=False, look_for_keys=False)
+    try:
+        sftp = ssh.open_sftp()
+        try:
+            for src in payload:
+                dst = "/home/ec2-user/" + os.path.basename(src)
+                sftp.put(src, dst)
+                print(f"  staged {os.path.basename(src)}")
+            # The soak reaches the storage nodes and the client from mgmt, so
+            # the private key has to travel with it.
+            sftp.put(KEY_PATH, "/home/ec2-user/.ssh/mtes01.pem")
+            print("  staged ssh key")
+        finally:
+            sftp.close()
+    finally:
+        ssh.close()
+    # The launcher is written with LF endings on purpose; a CRLF shell script
+    # fails on the node with a bare-CR "set" option error.
+    ssh_exec(mgmt_ip, [
+        "chmod 600 ~/.ssh/mtes01.pem",
+        f"chmod +x ~/{SOAK_LAUNCHER}",
+        f"sed -i 's/\r$//' ~/{SOAK_LAUNCHER}",
+    ], check=True)
+
+
+def start_soak(mgmt_ip, env_prefix=""):
+    print(f"\n--- Phase 8: Start soak on mgmt {mgmt_ip} ---")
+    out = ssh_exec(mgmt_ip, [f"{env_prefix}bash ~/{SOAK_LAUNCHER}"],
+                   get_output=True, check=True)[0]
+    print(out)
+    return out
+
 def main():
 
 
@@ -437,19 +548,29 @@ def main():
     print("Phase 2b: Configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure"
+            "sudo /usr/local/bin/sbctl -d sn configure"
         ], check=True) for ip in sn_ips]
         for t in tasks:
             t.result()
     print("Phase 2b: DONE - all SNs configured.")
 
+    # Detached, like 2a -- but for a different reason than 2a's load spike.
+    # `sn deploy` leaves the SNodeAPI container running, and a plain
+    # exec_command hands that daemon the channel's stdout, so the pipe never
+    # reaches EOF: stdout.read() blocks past the command's own exit and dies
+    # on paramiko's inactivity timeout instead. Observed 2026-08-31 -- all six
+    # nodes had SNodeAPI up and answering 200 by 19:04, and the deploy still
+    # aborted at 2c with TimeoutError, discarding a cluster that was fine.
+    # Redirecting to a file detaches the daemon from the channel.
     print("Phase 2c: Deploying storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
-        tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}"
-        ], check=True) for ip in sn_ips]
-        for t in tasks:
-            t.result()
+        raise RuntimeError("The command below references an unbound variable")
+        #tasks = [executor.submit(
+        #    ssh_exec_detached, ip,
+        #    f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}",
+        #    label="sn deploy") for ip in sn_ips]
+        #for t in tasks:
+        #    t.result()
     print("Phase 2c: DONE - all SNs deployed. Rebooting...")
 
     # Reboot all SNs in parallel (reboot returns non-zero, don't check)
@@ -486,7 +607,8 @@ def main():
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
+                    f"sudo /usr/local/bin/sbctl -d --dev sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
+                    + (f" --spdk-image {SPDK_IMAGE}" if SPDK_IMAGE else "")
                 ], check=True)
                 return
             except RuntimeError:
@@ -532,10 +654,26 @@ def main():
     print("Pool created.")
 
     # Commands for Performance Clients
+    # The iolog disk is attached as IOLOG_DEVICE but surfaces under a nitro
+    # name (/dev/nvme?n1), so find it by size and by having no filesystem
+    # rather than by device path. Mounted before fio starts, because fio's
+    # --write_iolog target directory must exist up front.
+    iolog_mount_cmd = (
+        "set -e; "
+        "dev=$(lsblk -dpno NAME,SIZE,FSTYPE | awk '$2 ~ /^" + str(IOLOG_DISK_GB) + "G/ && $3 == \"\" {print $1; exit}'); "
+        "if [ -z \"$dev\" ]; then echo 'iolog disk NOT found -- history will be disabled'; exit 0; fi; "
+        "echo \"iolog disk: $dev\"; "
+        "sudo blkid \"$dev\" >/dev/null 2>&1 || sudo mkfs.xfs -f \"$dev\"; "
+        "sudo mkdir -p " + IOLOG_MOUNT + "; "
+        "mountpoint -q " + IOLOG_MOUNT + " || sudo mount \"$dev\" " + IOLOG_MOUNT + "; "
+        "sudo chown ec2-user:ec2-user " + IOLOG_MOUNT + "; "
+        "df -h " + IOLOG_MOUNT + " | tail -1"
+    )
     client_prep_cmds = [
         "sudo dnf install nvme-cli fio -y",
         "sudo modprobe nvme-tcp",
-        "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf"
+        "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
+        iolog_mount_cmd,
     ]
 
 
@@ -591,6 +729,34 @@ def main():
 
     print("\n--- Setup Complete ---")
     print(f"Cluster {cluster_uuid} is active. Metadata saved.")
+
+    # A deployment that stops here needs a second, hand-assembled step before
+    # it produces any data, and that is where runs get lost. Stage the soak and
+    # start it, unless explicitly told not to.
+    if "--no-soak" in sys.argv:
+        stage_soak(mgmt_ip)
+        print("--no-soak: files staged, soak NOT started. Start it with:")
+        print(f"  ssh -i {KEY_PATH} ec2-user@{mgmt_ip} "
+              f"\"PLACEMENT_DUMPS=1 bash ~/{SOAK_LAUNCHER}\"")
+        return
+
+    stage_soak(mgmt_ip)
+    env = "PLACEMENT_DUMPS=1 "
+    for flag, var in (("--iterations", "ITERATIONS"),
+                      ("--runtime", "RUNTIME"),
+                      ("--restart-timeout", "RESTART_TIMEOUT"),
+                      ("--start-iteration", "START_ITERATION")):
+        if flag in sys.argv:
+            env += f"{var}={sys.argv[sys.argv.index(flag) + 1]} "
+    start_soak(mgmt_ip, env_prefix=env)
+    print()
+    print("Soak running on mgmt. Follow it with:")
+    print(f"  ssh -i {KEY_PATH} ec2-user@{mgmt_ip} "
+          "\"tail -f ~/soak_base_$(cat ~/soak_ts).out\"")
+    print("Check verdicts / faults with:")
+    print(f"  ssh -i {KEY_PATH} ec2-user@{mgmt_ip} "
+          "\"grep -E '####|PASS|FAIL|ERROR|verify:' "
+          "~/soak_base_$(cat ~/soak_ts).out | tail -20\"")
 
 
 

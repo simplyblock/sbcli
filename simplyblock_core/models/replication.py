@@ -7,6 +7,7 @@ and a volume optionally references one policy. Structurally this mirrors
 ``BackupPolicy`` / ``BackupPolicyAttachment`` in ``models/backup.py``, including
 the ``cluster_id/uuid`` composite id.
 """
+from typing import ClassVar
 import datetime
 
 from simplyblock_core.models.base_model import BaseModel
@@ -23,7 +24,7 @@ class ReplicationTarget(BaseModel):
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 0,
         STATUS_INACTIVE: 1,
     }
@@ -51,7 +52,7 @@ class ReplicationPolicy(BaseModel):
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 0,
         STATUS_INACTIVE: 1,
     }
@@ -71,6 +72,12 @@ class ReplicationPolicy(BaseModel):
     interval_min: int = 1         # internal snapshot cadence, 0 = user snaps only
     mode: str = MODE_FAILOVER
     keep_replicated: int = MIN_KEEP_REPLICATED
+    #: Tiered retention, e.g. "15m:2h,1h:11h,1d:7d" -- one snapshot every 15
+    #: minutes for the last 2 hours, then hourly for 11 hours, then daily for
+    #: 7 days. Empty keeps the flat keep_replicated behaviour. A schedule
+    #: never overrides MIN_KEEP_REPLICATED: the newest pair is always kept so
+    #: an arriving delta has a predecessor to chain onto.
+    retention_schedule: str = ""
     status: str = STATUS_ACTIVE
 
     def get_id(self):

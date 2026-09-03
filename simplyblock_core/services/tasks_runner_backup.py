@@ -446,7 +446,7 @@ def process_task(task, cl):
         task.write_to_db(db.kv_store)
 
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting backup tasks runner...")
     while True:
         try:
@@ -470,3 +470,7 @@ if __name__ == "__main__":
                 process_task(task, cl)
 
         time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

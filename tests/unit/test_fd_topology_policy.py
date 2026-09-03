@@ -19,6 +19,7 @@ Policy under test (2026-08-04 design decision):
 """
 
 import unittest
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 from simplyblock_core.controllers.cluster_expansion import planner
@@ -96,7 +97,7 @@ class TestInterleavedOrder(unittest.TestCase):
 
 class TestFdLayoutInvariant(unittest.TestCase):
 
-    FDS_2x2 = {"a1": 0, "b1": 1, "a2": 0, "b2": 1}
+    FDS_2x2: ClassVar[dict] = {"a1": 0, "b1": 1, "a2": 0, "b2": 1}
 
     def test_balanced_interleaved_ftt2_valid(self):
         topo = [["a1"], ["b1"], ["a2"], ["b2"]]
@@ -176,6 +177,41 @@ class TestFdBalance(unittest.TestCase):
 
     def test_unset_domain_ignored(self):
         self.assertIsNone(planner.fd_balance_violation({-1: 7, 0: 2, 1: 2}))
+
+
+# ---------------------------------------------------------------------------
+# planner.fd_activation_domain_count_violation
+# ---------------------------------------------------------------------------
+
+class TestFdActivationDomainCount(unittest.TestCase):
+
+    def test_npcs1_two_domains_violates(self):
+        self.assertIsNotNone(
+            planner.fd_activation_domain_count_violation(1, 2))
+
+    def test_npcs1_three_domains_ok(self):
+        self.assertIsNone(
+            planner.fd_activation_domain_count_violation(1, 3))
+
+    def test_npcs1_one_domain_violates(self):
+        self.assertIsNotNone(
+            planner.fd_activation_domain_count_violation(1, 1))
+
+    def test_npcs2_two_domains_violates(self):
+        self.assertIsNotNone(
+            planner.fd_activation_domain_count_violation(2, 2))
+
+    def test_npcs2_three_domains_violates(self):
+        self.assertIsNotNone(
+            planner.fd_activation_domain_count_violation(2, 3))
+
+    def test_npcs2_four_domains_ok(self):
+        self.assertIsNone(
+            planner.fd_activation_domain_count_violation(2, 4))
+
+    def test_npcs2_more_than_four_domains_ok(self):
+        self.assertIsNone(
+            planner.fd_activation_domain_count_violation(2, 6))
 
 
 # ---------------------------------------------------------------------------

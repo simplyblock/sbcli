@@ -6,8 +6,11 @@ import json
 import re
 import sys
 import time
+from pathlib import Path
+
 import argcomplete
 
+from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, utils, db_controller, constants
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
@@ -112,7 +115,7 @@ class CLIWrapperBase:
         # unable to honour a larger cluster setting.
         max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
         max_size = 0
-        number_of_devices = getattr(args, "number_of_devices") or 0
+        number_of_devices = args.number_of_devices or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
             try:
@@ -613,6 +616,9 @@ class CLIWrapperBase:
         cluster_ops.set_(args.cluster_id, args.attr_name, args.attr_value)
         return True
 
+    def cluster__switch_write_protection(self, sub_command, args):
+        return cluster_ops.switch_write_protection(args.cluster_id)
+
     def cluster__set_shared_placement(self, sub_command, args):
         # Default action is enable (False -> True). --disable runs the
         # debug-only reverse transition and requires --force.
@@ -661,7 +667,8 @@ class CLIWrapperBase:
         return replication_policy_controller.add_policy(
             args.cluster_id, args.name, args.target,
             interval_min=args.interval_min, mode=args.mode,
-            keep_replicated=args.keep_replicated)
+            keep_replicated=args.keep_replicated,
+            retention_schedule=args.retention_schedule)
 
     def cluster__replication_policy_list(self, sub_command, args):
         data = [{
@@ -671,6 +678,7 @@ class CLIWrapperBase:
             "Interval (min)": p.interval_min,
             "Mode": p.mode,
             "Keep": p.keep_replicated,
+            "Retention": p.retention_schedule or "-",
             "Status": p.status,
         } for p in replication_policy_controller.list_policies(args.cluster_id)]
         return _format_result(data, json=args.json)
@@ -715,6 +723,10 @@ class CLIWrapperBase:
             "State": rel["state"],
             "Direction": rel["direction"],
             "Mode": rel["mode"],
+            # Which side serves the client right now; resolvable by the SOURCE
+            # uuid even after the source volume was deleted.
+            "Active": rel.get("active", ""),
+            "Active Volume": rel.get("active_lvol_id", ""),
         }])
 
     def volume__add(self, sub_command, args):
@@ -853,7 +865,8 @@ class CLIWrapperBase:
             mode=getattr(args, 'mode', None), interval_min=getattr(args, 'interval_min', None))
 
     def volume__replication_commit(self, sub_command, args):
-        return lvol_controller.replication_commit(args.lvol_id)
+        return lvol_controller.replication_commit(
+            args.lvol_id, delete_source=getattr(args, "delete_source", False))
 
     def volume__replication_failback(self, sub_command, args):
         return lvol_controller.replication_failback(
@@ -1011,7 +1024,9 @@ class CLIWrapperBase:
         ifname = args.ifname
         mgmt_ip = args.mgmt_ip
         mode = args.mode
-        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode)
+        alert_config = parse_alerting_config(
+            Path(args.alerting_config_path) if args.alerting_config_path else None)
+        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode, alert_config)
 
     def control_plane__list(self, sub_command, args):
         return _format_result(mgmt_ops.list_mgmt_nodes(), json=args.json)
@@ -1390,6 +1405,8 @@ class CLIWrapperBase:
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,
+            alert_config=parse_alerting_config(
+                Path(args.alerting_config_path) if args.alerting_config_path else None),
         )
 
     def query_yes_no(self, question, default="yes"):

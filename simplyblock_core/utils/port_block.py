@@ -16,8 +16,23 @@ from simplyblock_core.fw_api_client import FirewallClient
 logger = logging.getLogger(__name__)
 
 
-def set_port(node, port, block, is_reject=False, timeout=5, retry=2):
+def set_port(node, port, block, is_reject=False, timeout=0.5, retry=1):
     """Block or unblock ``port`` on ``node``.
+
+    Budget: ``timeout`` is PER HTTP ATTEMPT and RPCClient builds
+    ``Retry(total=retry, backoff_factor=1, connect=retry)``, so the wall
+    clock is roughly (retry+1) x timeout plus urllib3 backoff -- not
+    ``timeout``. The old defaults (5s, 2) therefore cost 12s against a host
+    that is rebooting and so drops SYNs instead of refusing them
+    (measured 12.009s = 5 + 5 + 2 on 2026-08-31).
+
+    That matters because blocking a port fences a peer's client listener:
+    while it is blocked the peer cannot answer keep-alives, and the client
+    KATO is 4s. A fence window longer than KATO is indistinguishable from an
+    outage -- on 2026-08-31 a 12s failing block on a rebooting peer left a
+    healthy survivor fenced, the client lost its last path at 4.1s, and fio
+    took EIO. A healthy peer answers this RPC in ~11ms, so 0.5s is ~45x the
+    observed latency; two attempts bound the whole call near 1s.
     If spdk_version is R26.2-PRE-latest or empty (came from upgrade) then
      use FirewallClient(iptables). Default is to use SPDK RPC.
 

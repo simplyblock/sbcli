@@ -20,6 +20,7 @@ from fastapi import APIRouter
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metric
+from prometheus_client.registry import Collector
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.stats import CpuStats, ReactorStats, ThreadStats
@@ -65,20 +66,34 @@ _IO_COUNTERS: Sequence[tuple[str, str, str]] = (
 # percentages (`size_util`, `size_prov_util`), but those are truncated with
 # `int(used / total * 100)`, so exporting them would publish a lossy copy of
 # something PromQL can divide exactly.
+#
+# Every gauge below is EFFECTIVE (client-visible) capacity, so
+# size_provisioned_bytes / size_total_bytes is a meaningful ratio -- it was not
+# while the totals were raw, physical bytes. The raw figures the devices
+# reported are exported separately as the `*_raw_bytes` gauges; the difference
+# between a raw and an effective total is the erasure-coding parity overhead.
 _SIZE_GAUGES: Sequence[tuple[str, str, str]] = (
-    ('size_total', 'size_total_bytes', 'Total capacity in bytes'),
-    ('size_used', 'size_used_bytes', 'Used capacity in bytes'),
-    ('size_free', 'size_free_bytes', 'Free capacity in bytes'),
+    ('size_total', 'size_total_bytes', 'Total effective capacity in bytes'),
+    ('size_used', 'size_used_bytes', 'Used effective capacity in bytes'),
+    ('size_free', 'size_free_bytes', 'Free effective capacity in bytes'),
     ('size_prov', 'size_provisioned_bytes', 'Provisioned capacity in bytes'),
+    ('size_total_raw', 'size_total_raw_bytes', 'Total raw (physical) capacity in bytes'),
+    ('size_used_raw', 'size_used_raw_bytes', 'Used raw (physical) capacity in bytes'),
+    ('size_free_raw', 'size_free_raw_bytes', 'Free raw (physical) capacity in bytes'),
 )
 
 # Only levels whose collector actually populates a key may export it, otherwise
 # the field's zero default would be published as a real measurement. Device,
-# volume and pool records never carry a provisioned size.
+# volume and pool records never carry a provisioned size; volume and pool
+# records carry no raw capacity either, being measured at the lvstore layer,
+# which is effective by construction.
 _SIZE_KEYS_BY_LEVEL = {
-    'cluster': ('size_total', 'size_used', 'size_free', 'size_prov'),
-    'snode': ('size_total', 'size_used', 'size_free', 'size_prov'),
-    'device': ('size_total', 'size_used', 'size_free'),
+    'cluster': ('size_total', 'size_used', 'size_free', 'size_prov',
+                'size_total_raw', 'size_used_raw', 'size_free_raw'),
+    'snode': ('size_total', 'size_used', 'size_free', 'size_prov',
+              'size_total_raw', 'size_used_raw', 'size_free_raw'),
+    'device': ('size_total', 'size_used', 'size_free',
+               'size_total_raw', 'size_used_raw', 'size_free_raw'),
     'lvol': ('size_total', 'size_used', 'size_free'),
     'pool': ('size_total', 'size_used', 'size_free'),
 }
@@ -257,7 +272,7 @@ def _cpu_families(entries: Iterable[tuple[list[str], CpuStats]]) -> Iterator[Met
         yield family
 
 
-class SimplyblockCollector:
+class SimplyblockCollector(Collector):
     """Builds the full metric set from FoundationDB on every scrape."""
 
     def collect(self) -> Iterator[Metric]:

@@ -16,6 +16,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.utils.nvme import NvmeConnectEntry
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
@@ -50,9 +51,23 @@ StorageNodeStatus = Literal[
     "unreachable",
     "schedulable",
     "down",
+    "in_removal",
+    "pending_removal",
 ]
 
 TaskStatus = Literal["new", "running", "suspended", "done"]
+
+ReplicationTargetStatus = Literal["active", "inactive"]
+
+ReplicationPolicyStatus = Literal["active", "inactive"]
+
+ReplicationMode = Literal["failover", "migration"]
+
+FailoverStatus = Literal["failed_over", "skipped", "failed"]
+
+ReplicationState = Literal["replicating", "cutover_pending", "cutover_done", "failed_over"]
+
+ReplicationDirection = Literal["to_target", "to_source"]
 
 TaskFunctionName = Literal[
     "device_restart",
@@ -225,7 +240,7 @@ class StoragePoolDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    capacity: CapacityStatDTO
+    capacity: Optional[CapacityStatDTO]
     dhchap: bool = False
     allowed_hosts: List[str] = []
 
@@ -244,9 +259,7 @@ class StoragePoolDTO(BaseModel):
             max_w_mbytes=model.max_w_mbytes_per_sec,
             dhchap=getattr(model, 'dhchap', False),
             allowed_hosts=list(getattr(model, 'allowed_hosts', [])),
-            capacity=CapacityStatDTO.from_model(
-                stat_obj if stat_obj else StatsObject()
-            ),
+            capacity=CapacityStatDTO.from_model(stat_obj) if stat_obj else None,
         )
 
 
@@ -556,6 +569,79 @@ class BackupPolicyDTO(BaseModel):
             backup_schedule=model.backup_schedule or "",
             status=model.status,
         )
+
+
+def _record_uuid(record_id: str) -> UUID:
+    """Replication records carry a composite ``cluster_id/uuid`` id."""
+    return UUID(record_id.split('/')[-1])
+
+
+class ReplicationTargetDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    target_name: str
+    target_cluster_id: UUID
+    target_pool_uuid: util.OptionalUUID
+    timeout_sec: util.Unsigned
+    status: ReplicationTargetStatus
+
+    @staticmethod
+    def from_model(model: ReplicationTarget):
+        return ReplicationTargetDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            target_name=model.target_name,
+            target_cluster_id=UUID(model.target_cluster_id),
+            target_pool_uuid=UUID(model.target_pool_uuid) if model.target_pool_uuid else None,
+            timeout_sec=model.timeout_sec,
+            status=cast(ReplicationTargetStatus, model.status),
+        )
+
+
+class ReplicationPolicyDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    policy_name: str
+    target_id: UUID
+    interval_min: util.Unsigned
+    mode: ReplicationMode
+    keep_replicated: int
+    status: ReplicationPolicyStatus
+
+    @staticmethod
+    def from_model(model: ReplicationPolicy):
+        return ReplicationPolicyDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            policy_name=model.policy_name,
+            target_id=_record_uuid(model.target_id),
+            interval_min=model.interval_min,
+            mode=cast(ReplicationMode, model.mode),
+            keep_replicated=model.keep_replicated,
+            status=cast(ReplicationPolicyStatus, model.status),
+        )
+
+
+class ReplicationRelationshipDTO(BaseModel):
+    replication_id: UUID
+    source_lvol_id: util.OptionalUUID
+    target_lvol_id: util.OptionalUUID
+    source_cluster_id: util.OptionalUUID
+    target_cluster_id: util.OptionalUUID
+    mode: ReplicationMode
+    state: ReplicationState
+    direction: ReplicationDirection
+    target_nqn: str
+    target_ns_id: int
+    is_source: bool
+
+
+class FailoverResultDTO(BaseModel):
+    lvol_id: UUID
+    status: FailoverStatus
+    detail: Optional[str] = None
+    target_lvol_id: util.OptionalUUID = None
+    connection_strings: List[NvmeConnectEntry] = []
 
 
 class MigrationDTO(BaseModel):

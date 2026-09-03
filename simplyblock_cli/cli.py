@@ -106,7 +106,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model.', type=str, default='', dest='size_range', required=False)
         subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
         subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions.', dest='force', action='store_true')
-        subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-subsys, --nodes-per-socket, --number-of-devices.', dest='calculate_hp_only', action='store_true')
+        subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --sockets-to-use, --nodes-per-socket, --number-of-devices. Subsystem count and the vCPU budget are cluster-level settings.', dest='calculate_hp_only', action='store_true')
         subcommand.add_argument('--number-of-devices', help='Number of devices that will be used on this host. For calculating huge pages memory only.', type=int, dest='number_of_devices')
 
     def init_storage_node__configure_upgrade(self, subparser):
@@ -359,9 +359,9 @@ class CLIWrapper(CLIWrapperBase):
         subparser = self.add_command('cluster', 'Cluster Commands')
         self.init_cluster__create(subparser)
         self.init_cluster__add(subparser)
-        self.init_cluster__activate(subparser)
         self.init_cluster__op_stop(subparser)
         self.init_cluster__op_start(subparser)
+        self.init_cluster__activate(subparser)
         self.init_cluster__list(subparser)
         self.init_cluster__status(subparser)
         self.init_cluster__complete_expand(subparser)
@@ -388,6 +388,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__set_shared_placement(subparser)
+        self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
         self.init_cluster__replication_target_add(subparser)
@@ -415,7 +416,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--tls-secret-name', help='Name of the Kubernetes TLS Secret to be used by the Ingress for HTTPS termination (e.g., my-tls-secret).', type=str, dest='tls_secret')
         subcommand.add_argument('--log-del-interval', help='The logging retention policy. Default: `3d`.', type=str, default='3d', dest='log_del_interval')
         subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus). Default: `7d`.', type=str, default='7d', dest='metrics_retention_period')
-        subcommand.add_argument('--contact-point', help='The email or slack webhook url to be used for alerting.', type=str, default='', dest='contact_point')
+        subcommand.add_argument('--contact-point', help='**Deprecated since: 26.3** Do not use this parameter: The alerting notification configuration got extended and uses --alerting-config-path\n\nThe email or slack webhook url to be used for alerting.', type=str, dest='contact_point')
         subcommand.add_argument('--grafana-endpoint', help='The endpoint url for Grafana.', type=str, default='', dest='grafana_endpoint')
         subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `1`.', type=int, default=1, dest='distr_ndcs')
         subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `1`.', type=int, default=1, dest='distr_npcs')
@@ -448,11 +449,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', type=int, default=0, dest='max_subsys')
+        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
+        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
-
-        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', dest='max_subsys', type=int, default=0)
-        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', dest='hugepages_mem', type=str, default='')
-        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', dest='vcpu_count', type=int, default=0)
+        subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster.')
@@ -486,25 +487,24 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', type=int, default=0, dest='max_subsys')
+        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
+        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
 
-        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', dest='max_subsys', type=int, default=0)
-        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', dest='hugepages_mem', type=str, default='')
-        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', dest='vcpu_count', type=int, default=0)
+    def init_cluster__op_stop(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'op-stop', 'Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster\'s own maintenance are unaffected.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__op_start(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'op-start', 'Resumes object lifecycle operations on the cluster.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--force', help='Force recreate distr and lv stores.', dest='force', action='store_true')
         subcommand.add_argument('--force-lvstore-create', help='Force recreate lv stores.', dest='force_lvstore_create', action='store_true').completer = self._completer_get_cluster_list
-
-    def init_cluster__op_stop(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'op-stop', 'Stops the cluster accepting object lifecycle operations (create/delete/change of volumes, snapshots, clones, pools).')
-        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
-
-    def init_cluster__op_start(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'op-start', 'Resumes object lifecycle operations on the cluster.')
-        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Shows the cluster list.')
@@ -572,8 +572,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--cp-only', help='Update the control plane only. Default: `false`.', type=bool, default=False, dest='mgmt_only')
         subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image.', type=str, dest='spdk_image')
         subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image.', type=str, dest='mgmt_image')
-        subcommand.add_argument('--max-subsys', help='Change the cluster-wide max nvmf subsystems per storage node. Applied by each node on its next restart. Given alone, no image update runs.', dest='max_subsys', type=int, default=None)
-        subcommand.add_argument('--hugepages-mem', help='Change the cluster-wide huge-page memory floor per storage node, e.g. 4G. Applied by each node on its next restart. Given alone, no image update runs.', dest='hugepages_mem', type=str, default=None)
+        subcommand.add_argument('--max-subsys', help='Change the cluster-wide max nvmf subsystems per storage node. Applied by each node on its next restart. Given alone, no image update runs.', type=int, dest='max_subsys')
+        subcommand.add_argument('--hugepages-mem', help='Change the cluster-wide huge-page memory floor per storage node, e.g. 4G. Applied by each node on its next restart. Given alone, no image update runs.', type=str, dest='hugepages_mem')
 
     def init_cluster__upgrade_complete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'upgrade-complete', 'Completes a cluster upgrade.')
@@ -621,6 +621,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
         subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
+
+    def init_cluster__switch_write_protection(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'switch-write-protection', 'Activate v2 distrib write protection cluster-wide.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__change_name(self, subparser):
         subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
@@ -847,6 +851,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_commit(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-commit', 'Commit a migration/fail-back cutover: minimize delta then fail the client over to the target')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+        subcommand.add_argument('--delete-source', help='Delete the source volume once the cutover has completed (migration semantics)', dest='delete_source', action='store_true')
 
     def init_volume__replication_failback(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-failback', 'Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit.')
@@ -932,6 +937,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--ifname', help='The management interface name.', type=str, dest='ifname')
         subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10).', type=str, dest='mgmt_ip')
         subcommand.add_argument('--mode', help='The environment to deploy management services. Default: `docker`.', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
+        subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
 
     def init_control_plane__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all control plane nodes.')
@@ -1411,6 +1417,8 @@ class CLIWrapper(CLIWrapperBase):
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
                         args.disable_monitoring = False
+                    if getattr(args, 'contact_point', None) is not None:
+                        raise ValueError("Deprecated parameter '--contact-point' cannot be used: The alerting notification configuration got extended and uses --alerting-config-path")
                     ret = self.cluster__create(sub_command, args)
                 elif sub_command in ['add']:
                     if not self.developer_mode:
@@ -1420,12 +1428,12 @@ class CLIWrapper(CLIWrapperBase):
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
                     ret = self.cluster__add(sub_command, args)
-                elif sub_command in ['activate']:
-                    ret = self.cluster__activate(sub_command, args)
                 elif sub_command in ['op-stop']:
                     ret = self.cluster__op_stop(sub_command, args)
                 elif sub_command in ['op-start']:
                     ret = self.cluster__op_start(sub_command, args)
+                elif sub_command in ['activate']:
+                    ret = self.cluster__activate(sub_command, args)
                 elif sub_command in ['list']:
                     ret = self.cluster__list(sub_command, args)
                 elif sub_command in ['status']:
@@ -1482,6 +1490,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['set-shared-placement']:
                     ret = self.cluster__set_shared_placement(sub_command, args)
+                elif sub_command in ['switch-write-protection']:
+                    ret = self.cluster__switch_write_protection(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:

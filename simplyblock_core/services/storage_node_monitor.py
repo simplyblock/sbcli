@@ -497,8 +497,7 @@ def _requeue_stuck_auto_restarts(cluster_id):
         if tasks_controller.is_auto_restart_paused(cluster):
             return
         for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status not in (StorageNode.STATUS_OFFLINE,
-                                   StorageNode.STATUS_SCHEDULABLE):
+            if node.status != StorageNode.STATUS_OFFLINE:
                 continue
             # Nodes stopped on purpose (`sn shutdown`) land in OFFLINE just
             # like a failure-detected node, but must NOT be auto-restarted.
@@ -770,7 +769,20 @@ def update_cluster_status(cluster_id):
             return
         _ucs_running[cluster_id] = True
     try:
-        while True:
+        # AT MOST two passes -- what the comment above always promised, now
+        # enforced. The unbounded re-run turned into permanent capture the
+        # moment one pass grew slower than the callers' re-arm period: the
+        # main loop marks the cluster dirty every NODE_MONITOR_INTERVAL_SEC
+        # (3s), and in run mass_create_delete_docker-20260821 a pass took
+        # ~4.3s at 12k entities, so `pending` was ALWAYS set again before a
+        # pass ended. The per-node thread that happened to be computing
+        # (sn-1's) looped cluster passes for 10.6 HOURS while its node's
+        # SPDK was killed 30 times undetected -- the node sat "online" in
+        # the DB with no SPDK process, and every delete returned "No leader
+        # available". Exiting after the second pass is safe: a dropped
+        # pending flag only means the next caller (at most 3s away) becomes
+        # the computing thread and recomputes.
+        for _ in range(2):
             _update_cluster_status_impl(cluster_id)
             with _ucs_state_lock:
                 if not _ucs_pending.pop(cluster_id, False):
@@ -778,6 +790,7 @@ def update_cluster_status(cluster_id):
     finally:
         with _ucs_state_lock:
             _ucs_running[cluster_id] = False
+            _ucs_pending.pop(cluster_id, None)
 
 
 def _delete_old_tasks(tasks: list[JobSchedule]):
@@ -840,8 +853,13 @@ def _update_cluster_status_impl(cluster_id):
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
 
-    _delete_old_tasks(cluster_tasks)
-    _delete_old_logs(db.get_events(), cluster_id)
+    # Retention housekeeping happens in _run_periodic_housekeeping (main
+    # loop, every few minutes), NOT here. It used to run on every pass: the
+    # event sweep is an unbounded full read of the events table, and at 12k
+    # entities it alone pushed a pass past the callers' 3s re-arm period --
+    # the capture described in update_cluster_status. On an hours-old
+    # cluster with 30-day retention it also deleted precisely nothing for
+    # that cost.
 
     # Suspend recovery: while the cluster is SUSPENDED, first drain every node
     # to OFFLINE (auto-restart is paused until then), so recovery restarts from
@@ -1135,11 +1153,19 @@ def _count_data_plane_votes_uncached(node):
     node_id = node.get_id()
     cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
+    # ONLINE in the DB is not proof a peer can answer: node status lags reality
+    # by seconds. On 2026-09-01 this list still contained a node that had been
+    # host-rebooted 6s earlier, and dialling it cost a full RPC timeout inside
+    # a restart's port fence. health_controller.repairs_allowed() is the same
+    # gate the repair paths use; a peer that cannot answer contributes nothing
+    # to a liveness vote anyway.
+    from simplyblock_core.controllers import health_controller as _hc
     online_peers = [
         n for n in cluster_nodes
         if n.get_id() != node_id
         and n.status == StorageNode.STATUS_ONLINE
         and n.jm_vuid
+        and _hc.repairs_allowed(n)
     ]
 
     if not online_peers:
@@ -1152,7 +1178,11 @@ def _count_data_plane_votes_uncached(node):
     votes: dict = {}
 
     def _vote_one_peer(peer):
-        peer_rpc = peer.rpc_client(timeout=8, retry=1)
+        # A liveness vote must not outlive its usefulness: a timeout here IS
+        # a failure to answer, and the caller treats a missing vote as an
+        # abstain. See constants.DP_VOTE_RPC_TIMEOUT_SEC.
+        peer_rpc = peer.rpc_client(timeout=constants.DP_VOTE_RPC_TIMEOUT_SEC,
+                                   retry=constants.DP_VOTE_RPC_RETRY)
 
         # Fast path: does the namespace bdev still exist on the peer?
         # A missing bdev means the controller has been torn down / is being
@@ -1209,8 +1239,21 @@ def _count_data_plane_votes_uncached(node):
                              name=f"dp-vote-{peer.get_id()[:8]}")
         t.start()
         vote_threads.append(t)
+    # Bounded join. An unbounded one made this the single biggest cost inside
+    # a restart's port fence (7.95s of 12.2s on 2026-09-01) because one vote
+    # thread was dialling a rebooting node. A thread still running when the
+    # ceiling expires simply never records a vote, and a missing vote is an
+    # abstain -- the same outcome as a peer that could not answer.
+    deadline = time.time() + constants.DP_VOTE_JOIN_TIMEOUT_SEC
     for t in vote_threads:
-        t.join()
+        t.join(timeout=max(0.0, deadline - time.time()))
+    slow = [t.name for t in vote_threads if t.is_alive()]
+    if slow:
+        logger.warning(
+            "Data-plane vote for %s: %d peer(s) did not answer within %.1fs "
+            "(%s); counting them as abstain",
+            node_id, len(slow), constants.DP_VOTE_JOIN_TIMEOUT_SEC,
+            ", ".join(slow))
 
     disconnected = sum(1 for v in votes.values() if v)
     total = len(votes)
@@ -1263,7 +1306,7 @@ def set_node_schedulable(node):
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_SCHEDULABLE)
             # initiate shutdown
             # initiate restart
-            tasks_controller.add_node_to_auto_restart(node)
+            # tasks_controller.add_node_to_auto_restart(node)
             for dev in node.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
@@ -1397,6 +1440,90 @@ def decrement():
     State.counter = 0
 def value():
     return State.counter
+
+#: How long a node's RPC interface may stay unreachable -- while SNodeAPI
+#: answers and the SPDK process is still running -- before the monitor aborts
+#: SPDK so auto-restart can rebuild it.
+#:
+#: This exists because a hung RPC channel is invisible to every other recovery
+#: path. On 2026-09-01 13:22 node 22f365ef handled its last RPC
+#: (bdev_distrib_status_events_update -> api_bdev_distrib_status_events_notify)
+#: and never completed it: the target JM lived on 172.31.98.212, which the
+#: soak had just shut down, and the notify blocked on that peer with no
+#: timeout. SPDK's JSON-RPC server reads one request at a time per connection,
+#: so the whole channel wedged -- 0 successful RPCs for 15 minutes while every
+#: poller kept running normally. Nothing escalated until 13:37, when the socket
+#: finally went from hanging to refusing and HealthCheck saw a connection
+#: error. A restart fixed it in ~70s.
+#:
+#: 60s is comfortably longer than a legitimately slow RPC (the proxy's own
+#: socket timeout is ~2s) and far shorter than the 900s a test waits for paths
+#: to heal.
+RPC_HANG_ABORT_SEC = 60
+
+#: node_id -> monotonic time of the first consecutive RPC failure. Per node on
+#: purpose: the older `State.counter` guard below is a single process-global
+#: int shared by every node's monitor thread, so a healthy node's decrement()
+#: clears a broken node's increment() and the ":FAILED" escalation is never
+#: reached (32 x ":TIMEOUT", 0 x ":FAILED" in the incident above).
+_rpc_hang_since: dict[str, float] = {}
+_rpc_hang_lock = threading.Lock()
+
+
+def _note_rpc_ok(node_id):
+    """Forget any recorded hang -- the node answered."""
+    with _rpc_hang_lock:
+        _rpc_hang_since.pop(node_id, None)
+
+
+def _rpc_hang_seconds(node_id):
+    """Seconds this node's RPC has been failing without interruption."""
+    with _rpc_hang_lock:
+        now = time.monotonic()
+        return now - _rpc_hang_since.setdefault(node_id, now)
+
+
+def _abort_hung_spdk(snode, hung_for):
+    """Kill SPDK on a node whose RPC hung while the process is still alive.
+
+    Deliberately a kill rather than a graceful shutdown: a graceful stop is
+    itself driven over the RPC channel that is wedged, so it would hang too.
+    The node is flipped OFFLINE afterwards, which is what arms the existing
+    auto-restart.
+    """
+    node_id = snode.get_id()
+    logger.error(
+        "Node %s RPC unreachable for %.0fs while SNodeAPI answers and SPDK is "
+        "running -- aborting SPDK so auto-restart can rebuild it",
+        node_id, hung_for)
+    # Capture WHY before destroying the evidence. A wedged RPC channel on a
+    # live process leaves nothing in the logs -- the pollers keep printing
+    # normally -- so without this the kill recovers the node and the cause is
+    # lost, which is exactly what happened on 2026-09-01. utime frozen across
+    # the samples means the thread is blocked; utime advancing means it is
+    # running but never returns to the RPC poller. Best-effort: a failed
+    # capture must never delay the abort.
+    try:
+        state = snode.client(timeout=20, retry=1).spdk_thread_state(snode.rpc_port)
+        logger.error("Hung SPDK thread state for %s: %s", node_id, state)
+    except Exception as e:
+        logger.warning("Could not capture thread state for %s before abort: %s",
+                       node_id, e)
+
+    try:
+        snode_api = snode.client(timeout=20, retry=1)
+        snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+    except Exception as e:
+        logger.error("Failed to abort hung SPDK on %s: %s", node_id, e)
+        return False
+    _note_rpc_ok(node_id)   # the hang is resolved; do not abort again next tick
+    try:
+        set_node_offline(snode)
+    except Exception as e:
+        logger.error("Aborted SPDK on %s but could not flip it OFFLINE: %s",
+                     node_id, e)
+    return True
+
 
 def _spdk_is_dead(snode):
     """True if the node's SPDK is confirmed NOT running (or the node API can't
@@ -1618,9 +1745,18 @@ def check_node(snode):
     #so we try it twice. If all other checks pass again, but only this one fails: it's the spdk process
     if not node_rpc_check:
         logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:TIMEOUT")
+        # A hung RPC channel on a live SPDK recovers by nothing else: the
+        # process is up, SNodeAPI answers, ping passes, so every other check
+        # says healthy. Abort it once the hang outlives RPC_HANG_ABORT_SEC.
+        hung_for = _rpc_hang_seconds(snode.get_id())
+        if hung_for >= RPC_HANG_ABORT_SEC and not _spdk_is_dead(snode):
+            _abort_hung_spdk(snode, hung_for)
+            return False
         if value()==0:
            increment()
            return False
+    else:
+        _note_rpc_ok(snode.get_id())
 
     decrement()
     if not node_rpc_check or not node_rpc_check_1:
@@ -1723,6 +1859,30 @@ def readmit_devices_after_node_online(node_id):
         logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
 
 
+#: Retention housekeeping cadence. The scans are unbounded full-table reads
+#: (events especially), so they run from the MAIN loop on a period, never
+#: inside the per-status-change recompute path.
+HOUSEKEEPING_INTERVAL_SEC = 300
+_housekeeping_last_run: dict = {}
+
+
+def _run_periodic_housekeeping(cluster_id):
+    """Delete expired tasks and events for one cluster, at most once per
+    HOUSEKEEPING_INTERVAL_SEC. Runs in the main loop thread; a slow sweep
+    here delays only the next main-loop tick, never a node's liveness
+    monitoring."""
+    now = time.time()
+    last = _housekeeping_last_run.get(cluster_id, 0)
+    if now - last < HOUSEKEEPING_INTERVAL_SEC:
+        return
+    _housekeeping_last_run[cluster_id] = now
+    try:
+        _delete_old_tasks(db.get_job_tasks(cluster_id))
+        _delete_old_logs(db.get_events(), cluster_id)
+    except Exception as e:
+        logger.error(f"Retention housekeeping failed for {cluster_id}: {e}")
+
+
 def loop_for_node(snode):
     # global logger
     # logger = logging.getLogger()
@@ -1735,7 +1895,7 @@ def loop_for_node(snode):
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
 
@@ -1768,4 +1928,9 @@ if __name__ == "__main__":
                 logger.debug("Iteration has been finished...")
             except Exception:
                 logger.error("Error while updating cluster status")
+            _run_periodic_housekeeping(cluster_id)
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

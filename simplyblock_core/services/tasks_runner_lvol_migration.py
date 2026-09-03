@@ -83,12 +83,9 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
-import logging
 import random
 import time
 from typing import Optional
-
-from tenacity import RetryError, Retrying, before_sleep_log, stop_after_attempt, wait_fixed
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
@@ -104,7 +101,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException, RPCClient
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
-from simplyblock_core.storage_node_ops import execute_on_leader_with_failover
+from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -423,20 +420,32 @@ def _bytes_to_mib(nbytes):
     return max(1, utils.convert_size(nbytes, 'MiB', round_up=False))
 
 
-def _log_spdk_bdev_size(rpc, composite_name, label):
+# Sentinel distinguishing "caller has no answer, query fresh" from a
+# caller-supplied get_bdevs() result -- including an explicit [] (confirmed
+# absent). Used by _log_spdk_bdev_size and _setup_snap_transfer to avoid
+# repeating an RPC round-trip the caller already paid for.
+_BDEV_INFO_UNSET = object()
+
+
+def _log_spdk_bdev_size(rpc, composite_name, label, bdev_info=_BDEV_INFO_UNSET):
     """Query SPDK for *composite_name* and emit a [BDEV SIZE] log line.
 
     Reports num_blocks × block_size → actual_mib and sectors@512 (the sector
     count the client sees via the NVMe namespace).  Never raises.
+
+    ``bdev_info``: pass an already-fetched get_bdevs() result to log against
+    it instead of paying for a second identical RPC round-trip -- callers
+    that are about to query (or just queried) the same composite for their
+    own purposes should pass that result through here.
     """
     _MIB = 1048576
     try:
-        info = rpc.get_bdevs(composite_name)
+        info = rpc.get_bdevs(composite_name) if bdev_info is _BDEV_INFO_UNSET else bdev_info
         if not info:
             logger.warning(
                 f"[BDEV SIZE] {label}: {composite_name} — bdev not found in SPDK")
             return None
-        b = info[0]
+        b = info[0]  # type: ignore[index]
         num_blocks   = b.get('num_blocks', 0)
         block_size   = b.get('block_size', 512)
         actual_bytes = num_blocks * block_size
@@ -455,64 +464,8 @@ def _log_spdk_bdev_size(rpc, composite_name, label):
         return None
 
 
-def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_rpc=None,
-                          timeout_s=120, coalescing=False, all_nodes=None, lvs_name=None):
-    """
-    Two-phase blocking bdev delete.
-
-    Phase 1 — leader node, sync=False: initiates the async delete.  When
-      all_nodes + lvs_name are supplied, the actual LVS leader is resolved via
-      execute_on_leader_with_failover so the delete goes to the secondary or
-      tertiary if the primary is down.  Without them the call falls back to
-      primary_rpc directly (original behaviour).  By default (coalescing=False)
-      special_delete=True tells SPDK to free the bdev's own clusters without
-      merging them into any child — correct for source cleanup, rollback, and
-      any path where no child needs to inherit data.  Pass coalescing=True when
-      the bdev's child must inherit its clusters (e.g. deleting a migration
-      intermediate snapshot).
-    Wait   — poll bdev_lvol_get_lvol_delete_status on the leader until done.
-    Phase 2 — all nodes (primary + secondary + tertiary), sync=True
-      (sync=True, special_delete=False): finalises the deletion on every replica.
-    """
-    if all_nodes and lvs_name:
-        def _async_delete(leader):
-            ret, _ = leader.rpc_client().delete_lvol(
-                bdev_name, sync=False, special_delete=not coalescing)
-            return ret or False
-        ok, leader_node, _ = execute_on_leader_with_failover(all_nodes, lvs_name, _async_delete)
-        if not ok or leader_node is None:
-            raise RuntimeError(f"delete bdev {bdev_name}: initiation failed")
-        leader_rpc = leader_node.rpc_client()
-    else:
-        ret, _ = primary_rpc.delete_lvol(bdev_name, sync=False, special_delete=not coalescing)
-        if not ret:
-            raise RuntimeError(f"delete bdev {bdev_name}: initiation failed")
-        leader_rpc = primary_rpc
-
-    deadline = time.monotonic() + timeout_s
-    while leader_rpc.bdev_lvol_get_lvol_delete_status(bdev_name) == 1:
-        if time.monotonic() > deadline:
-            if not leader_rpc.get_bdevs(bdev_name):
-                logger.warning(
-                    f"delete bdev {bdev_name}: poll timed out after {timeout_s}s "
-                    f"but bdev is gone — treating as success")
-                break
-            raise RuntimeError(
-                f"delete bdev {bdev_name}: timed out after {timeout_s}s, bdev still present")
-        time.sleep(0.2)
-
-    for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
-        try:
-            Retrying(
-                stop=stop_after_attempt(3),
-                wait=wait_fixed(1),
-                before_sleep=before_sleep_log(logger, logging.WARNING),
-            )(rpc.delete_lvol, bdev_name, sync=True, special_delete=False)
-        except RetryError:
-            logger.exception(
-                f"delete bdev {bdev_name} sync finalize STILL failing after 3 attempts "
-                f"(non-fatal, blob metadata may not be cleared on this replica)"
-            )
+# _delete_bdev_blocking lives in controllers/migration_bdev_ops.py (imported
+# above as delete_bdev_blocking) -- see that module's docstring for why.
 
 
 # ---------------------------------------------------------------------------
@@ -698,7 +651,7 @@ def _swap_namespace(rpc, nqn, new_bdev, uuid, guid, label):
         logger.info(f"Swap NS {label}: removed nsid={nsid}")
     except Exception as e:
         logger.warning(f"Swap NS remove (non-fatal) on {label}: {e}")
-    ret = rpc.nvmf_subsystem_add_ns(nqn, new_bdev, uuid, guid)
+    ret = rpc.nvmf_subsystem_add_ns(nqn, new_bdev, uuid, guid, nsid=nsid)
     if not ret:
         logger.error(f"Swap NS add failed on {label}")
 
@@ -748,7 +701,7 @@ def _ensure_nvmf_state_on_node(migration, lvol, nqn, path, label, owns_subsystem
         for _ip in path['ips']:
             rpc.listeners_create(nqn, path['trtype'], _ip, path['port'],
                                  ana_state="inaccessible")
-        ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid)
+        ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
         if not ns:
             logger.warning(
                 f"_ensure_nvmf_state_on_node: namespace add failed on "
@@ -785,7 +738,7 @@ def _ensure_nvmf_state_on_node(migration, lvol, nqn, path, label, owns_subsystem
             logger.warning(
                 f"_ensure_nvmf_state_on_node: namespace for {lvol.uuid} "
                 f"missing on {label} target node {node_id[:8]} — re-adding")
-            ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid)
+            ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
             if not ns:
                 logger.warning(
                     f"_ensure_nvmf_state_on_node: namespace re-add failed "
@@ -865,12 +818,12 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
                              tgt_all_nodes=None, tgt_lvs_name=None):
     """Clean up after a final lvol migration attempt.
 
-    On the success path (rollback_target=False) the hub controller is kept
-    attached on source — detaching it would drop the migration path before
-    clients have switched to the new target path.
+    The hub controller is never touched here on either path — it is owned
+    and lifecycle-managed entirely by hub_manager's own activity-based idle
+    timeout, not by this function.
 
-    On the rollback path (rollback_target=True) the hub controller IS detached
-    and the target lvol/subsystem are torn down so a retry starts clean.
+    On the rollback path (rollback_target=True) the target lvol/subsystem
+    are torn down so a retry starts clean.
 
     ``nqn``/``lvol_uuid``/``subsystem_created_on_target`` must come from the
     caller (the lvol record and migration.target_subsystem_node_ids) —
@@ -878,13 +831,12 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
     stage, so reading them from ``ctx`` here silently no-ops the subsystem
     cleanup entirely.
     """
-    ctrl_name = ctx.get('ctrl_name')
-    if ctrl_name and rollback_target:
-        try:
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        except Exception as e:
-            logger.warning(f"detach hub ctrl {ctrl_name}: {e}")
-
+    # The hub controller is intentionally left attached here, even on
+    # rollback: it's managed entirely by hub_manager's own activity-based
+    # idle timeout (IDLE_TIMEOUT with no acquire()s). A retry of this same
+    # migration will just reuse it via acquire() instead of paying the
+    # reattach + DETACH_COOLDOWN cost, and a sibling migration to the same
+    # target isn't disrupted.
     if rollback_target and tgt_rpc:
         tgt_composite = ctx.get('tgt_lvol_composite')
         _nqn = ctx.get('nqn') or nqn
@@ -907,10 +859,17 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
 # ---------------------------------------------------------------------------
 
 
+# Sentinel distinguishing "caller has no answer, query fresh" from a caller-
+# supplied get_bdevs() result (including an explicit [], i.e. "confirmed
+# absent") for _setup_snap_transfer's existing_bdev_info param below.
+_BDEV_INFO_UNSET = object()
+
+
 def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
                          src_rpc, tgt_rpc, trtype,
                          tgt_sec=None, sec_rpc=None, tgt_ter=None, ter_rpc=None,
-                         lvol_size_mib=None, migration=None):
+                         lvol_size_mib=None, migration=None,
+                         existing_bdev_info=_BDEV_INFO_UNSET):
     """
     Prepare a single snapshot for async transfer:
       1. Create writable lvol on target primary
@@ -922,6 +881,14 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
 
     Returns a transfer-dict on success or (None, error_string) on failure.
     Callers are responsible for rolling back any previously launched transfers.
+
+    ``existing_bdev_info``: every caller already runs its own get_bdevs(tgt_composite)
+    pre-check (to decide whether to reuse an owned bdev or clean up a stale one)
+    immediately before calling this function, which then repeated the identical
+    query for its own reuse-vs-create decision -- two RPC round-trips for the
+    same fact. Callers that already have a trustworthy answer (the bdev was
+    confirmed absent, or confirmed present and owned) can pass that result
+    straight through here instead of paying for a second lookup.
     """
     snap_uuid = snap.uuid
     snap_short = _snap_tgt_short_name(snap)
@@ -951,11 +918,15 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     # Step 1: create target lvol on primary, or reuse if already owned by this migration.
     # Pre-cleanup skips deletion of owned bdevs so we can reuse them here on retry
     # rather than paying the create cost again.
-    _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
+    if existing_bdev_info is _BDEV_INFO_UNSET:
+        _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
+    else:
+        _bdev_info = existing_bdev_info
     if _bdev_info:
         logger.info(
             f"[REUSE] snap={snap_uuid[:8]} reusing owned writable bdev {tgt_composite}")
-        _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] reuse")
+        _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] reuse",
+                           bdev_info=_bdev_info)
         if migration is not None and tgt_composite not in migration.target_snap_bdevs:
             migration.target_snap_bdevs.append(tgt_composite)
             migration.write_to_db(db.kv_store)
@@ -967,11 +938,12 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore, ndcs=_ndcs, npcs=_npcs)
         if not ret:
             return None, f"Failed to create target lvol for snap {snap_uuid}"
-        _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] post-create")
+        _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
+        _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] post-create",
+                           bdev_info=_bdev_info)
         if migration is not None and tgt_composite not in migration.target_snap_bdevs:
             migration.target_snap_bdevs.append(tgt_composite)
             migration.write_to_db(db.kv_store)
-        _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
 
     # Step 2: register on secondary/tertiary if not already there.
     # On a normal first pass the secondary has no knowledge of this bdev yet;
@@ -988,8 +960,8 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             except Exception as e:
                 logger.warning(f"cleanup target lvol {tgt_composite} (non-fatal): {e}")
             return None, f"Could not get bdev info for {tgt_composite} after creation"
-        snap_blobid = _bdev_info[0]['driver_specific']['lvol']['blobid']
-        snap_uuid_on_tgt = _bdev_info[0]['uuid']
+        snap_blobid = _bdev_info[0]['driver_specific']['lvol']['blobid']  # type: ignore[index]
+        snap_uuid_on_tgt = _bdev_info[0]['uuid']  # type: ignore[index]
         if sec_rpc.get_bdevs(tgt_composite):
             sec_registered = True
             logger.info(f"Secondary already has {tgt_composite}; skipping registration")
@@ -1371,7 +1343,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 # Pre-existing (immutable) bdevs were caught by the pre-scan above and
                 # excluded from unprocessed. Anything still found here is a writable
                 # leftover from a previous failed attempt — delete and retry.
-                if tgt_rpc.get_bdevs(tgt_composite):
+                _existing_bdev = tgt_rpc.get_bdevs(tgt_composite)
+                if _existing_bdev:
                     if tgt_composite in (migration.target_snap_bdevs or []):
                         logger.info(
                             f"Owned writable bdev {tgt_composite} found — reusing for retry")
@@ -1384,10 +1357,16 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                                                   lvs_name=tgt_node.lvstore)
                             for _ in range(10):
                                 if not tgt_rpc.get_bdevs(tgt_composite):
+                                    _existing_bdev = []
                                     break
                                 time.sleep(0.2)
+                            else:
+                                # Deletion never confirmed within the polling window —
+                                # state is uncertain, let _setup_snap_transfer re-query.
+                                _existing_bdev = _BDEV_INFO_UNSET
                         except Exception as e:
                             logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
+                            _existing_bdev = _BDEV_INFO_UNSET
 
                 t, err = _setup_snap_transfer(
                     snap, snap_index, src_node, tgt_node,
@@ -1395,7 +1374,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     tgt_sec=tgt_sec, sec_rpc=sec_rpc,
                     tgt_ter=tgt_ter, ter_rpc=ter_rpc,
                     lvol_size_mib=_snap_lvol_size_mib,
-                    migration=migration)
+                    migration=migration,
+                    existing_bdev_info=_existing_bdev)
                 if t is None:
                     return False, True, err
 
@@ -1423,9 +1403,18 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # ── B. Poll all in-flight transfers; post-process completed ones ──────────
     if ctx.get('stage') == 'parallel_transfer':
         transfers = ctx['transfers']
-        # Resolve secondary once for the whole poll pass
+        # Resolve secondary and tertiary once for the whole poll pass. This
+        # branch runs on a fresh function invocation (tgt_sec/tgt_ter default
+        # to None at the top of this function) whenever a transfer launched
+        # on a prior tick is still being polled -- the common case, since
+        # transfers essentially never finish within the same tick they start.
+        # Tertiary was previously left unresolved here, silently skipping its
+        # add_clone/convert in _post_process_snap below (the `if tgt_ter and
+        # ter_rpc:` guard just evaluated false, with no error logged).
         tgt_sec, _sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
         sec_rpc = _make_rpc(tgt_sec) if tgt_sec and not _sec_err else None
+        tgt_ter, _ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
+        ter_rpc = _make_rpc(tgt_ter) if tgt_ter and not _ter_err else None
         # Process in snap_index order: add_clone requires predecessor to be
         # converted first.  prev_post_done tracks whether the predecessor has
         # been post-processed; if not, we must not post-process the current snap
@@ -1579,7 +1568,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Pre-cleanup: if a bdev exists on the target it is a writable leftover
         # from a previous crashed run — intermediate snaps are always freshly
         # created by this migration so they can never be pre-existing.
-        if tgt_rpc.get_bdevs(tgt_composite):
+        _existing_bdev = tgt_rpc.get_bdevs(tgt_composite)
+        if _existing_bdev:
             if tgt_composite in (migration.target_snap_bdevs or []):
                 logger.info(
                     f"Owned writable intermediate bdev {tgt_composite} found — reusing for retry")
@@ -1592,10 +1582,14 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                                           lvs_name=tgt_node.lvstore)
                     for _ in range(10):
                         if not tgt_rpc.get_bdevs(tgt_composite):
+                            _existing_bdev = []
                             break
                         time.sleep(0.2)
+                    else:
+                        _existing_bdev = _BDEV_INFO_UNSET
                 except Exception as e:
                     logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
+                    _existing_bdev = _BDEV_INFO_UNSET
 
         t, err = _setup_snap_transfer(
             snap, snap_index, src_node, tgt_node,
@@ -1603,7 +1597,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             tgt_sec=tgt_sec, sec_rpc=sec_rpc,
             tgt_ter=tgt_ter, ter_rpc=ter_rpc,
             lvol_size_mib=_snap_lvol_size_mib,
-            migration=migration)
+            migration=migration,
+            existing_bdev_info=_existing_bdev)
         if t is None:
             return False, True, err
 
@@ -1953,7 +1948,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             try:
                 last_snap = db.get_snapshot_by_id(last_snap_uuid)
             except KeyError:
-                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                # Hub controller left attached — hub_manager owns its
+                # lifecycle entirely via its own idle timeout.
                 try:
                     _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc,
                                           secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc,
@@ -1979,7 +1975,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                             tgt_snap_composite = snap_bdev
                         break
             if not tgt_snap_composite:
-                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                # Hub controller left attached — see comment above.
                 try:
                     _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc,
                                           secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc,
@@ -2041,7 +2037,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if not ret:
             if state not in ('Done', 'No process'):
                 _revert_src_replicas("final migration failed")
-                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                # Hub controller left attached — see comment above; this is a
+                # retryable suspend, not an abandoned migration.
                 # Do NOT delete the target bdev on transfer failure — the bdev is
                 # still valid and retaining it keeps the map_id stable across retries.
                 # Deleting it would force a recreate at a higher map_id (due to
@@ -2229,13 +2226,27 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
 
 def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None,
-                                         tgt_all_nodes=None, tgt_lvs_name=None):
+                                         tgt_all_nodes=None, tgt_lvs_name=None,
+                                         src_rpc=None, src_sec_rpc=None, src_ter_rpc=None,
+                                         src_all_nodes=None, src_lvs_name=None):
     """
-    Delete migration-created intermediate ('shrink') snapshots from the target
-    after a successful migration.
+    Delete migration-created intermediate ('shrink') snapshots from wherever
+    each one actually lives after a successful migration.
 
-    Must be called AFTER apply_migration_to_db() — at that point snap.snap_bdev
-    already holds the target composite path (e.g. LVS_TGT/SNAP_xxxm).
+    Most rounds' snap.snap_bdev holds the target composite path (e.g.
+    LVS_TGT/SNAP_xxxm), updated by apply_migration_to_db(). But a round whose
+    OWN transfer never completed (superseded by a later round, e.g. a
+    multi-round intermediate sequence) never got that update -- snap.snap_bdev
+    is still the ORIGINAL source composite. Routing that delete through the
+    current target's lvstore name/node-list makes the leader-routed async
+    delete's lvstore mismatch what it's operating on, which SPDK rejects --
+    _delete_bdev_blocking then raises before ever reaching its poll/sync
+    phases, silently caught below, leaking the blob's metadata on every
+    replica (observed run 2026-08-22, group B LVOL_30's round-0 snap
+    SNAP_611: async delete fired and was rejected, zero follow-up poll or
+    sync calls ever appeared in the SPDK logs). Resolve the lvstore actually
+    present in snap.snap_bdev and route to the matching node-list/rpc set
+    (target's or source's) instead of assuming it's always the target's.
 
     Delegates to _delete_bdev_blocking(coalescing=True): the intermediate
     snapshot's clusters must be merged into its child bdev before being freed
@@ -2249,21 +2260,44 @@ def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None, t
             logger.info(f"Intermediate snap {snap_uuid} already removed from DB; skipping")
             continue
 
-        tgt_composite = snap.snap_bdev  # updated to target path by apply_migration_to_db
+        composite = snap.snap_bdev  # target path if its round's transfer completed, else still source
+        actual_lvs = composite.split('/', 1)[0] if composite and '/' in composite else None
 
-        if not tgt_rpc.get_bdevs(tgt_composite):
+        if actual_lvs == tgt_lvs_name:
+            _rpc, _sec_rpc, _ter_rpc, _all_nodes, _lvs_name = (
+                tgt_rpc, tgt_sec_rpc, tgt_ter_rpc, tgt_all_nodes, tgt_lvs_name)
+        elif src_lvs_name and actual_lvs == src_lvs_name:
             logger.info(
-                f"Intermediate snap bdev {tgt_composite} absent from target; skipping SPDK delete")
+                f"Intermediate snap {composite}: this round's transfer never completed "
+                f"(still on source lvstore {actual_lvs}); routing delete to source")
+            _rpc, _sec_rpc, _ter_rpc, _all_nodes, _lvs_name = (
+                src_rpc, src_sec_rpc, src_ter_rpc, src_all_nodes, src_lvs_name)
+        else:
+            logger.warning(
+                f"Intermediate snap {composite}: lvstore {actual_lvs!r} matches neither "
+                f"target ({tgt_lvs_name!r}) nor source ({src_lvs_name!r}); skipping delete "
+                f"to avoid routing it against the wrong lvstore")
+            continue
+
+        if _rpc is None:
+            logger.warning(
+                f"Intermediate snap {composite}: no RPC client available for lvstore "
+                f"{actual_lvs!r} (caller did not supply source routing info); skipping delete")
+            continue
+
+        if not _rpc.get_bdevs(composite):
+            logger.info(
+                f"Intermediate snap bdev {composite} absent; skipping SPDK delete")
         else:
             try:
-                _delete_bdev_blocking(tgt_composite, tgt_rpc,
-                                      secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc,
+                _delete_bdev_blocking(composite, _rpc,
+                                      secondary_rpc=_sec_rpc, tertiary_rpc=_ter_rpc,
                                       coalescing=True,
-                                      all_nodes=tgt_all_nodes, lvs_name=tgt_lvs_name)
-                logger.info(f"Deleted intermediate snap bdev {tgt_composite} from target")
+                                      all_nodes=_all_nodes, lvs_name=_lvs_name)
+                logger.info(f"Deleted intermediate snap bdev {composite}")
             except Exception as e:
                 logger.warning(
-                    f"Could not delete intermediate snap {tgt_composite} from target: {e}")
+                    f"Could not delete intermediate snap {composite}: {e}")
 
         try:
             snap.remove(db.kv_store)
@@ -2541,7 +2575,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
             bdev_name = (source_snap_bdevs.get(snap_uuid)
-                         or f"{src_node.lvstore}/{_snap_short_name(snap)}")
+                        or f"{src_node.lvstore}/{_snap_short_name(snap)}")
             try:
                 _delete_bdev_blocking(bdev_name, src_rpc,
                                       secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
@@ -2554,19 +2588,29 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
 
     # --- Source NVMe-oF subsystem teardown (best-effort) ---
+    # Batch group workers share ONE subsystem across every member -- deleting
+    # it here, per worker, would mean up to N-1 redundant attempts before the
+    # group orchestrator's own _delete_source_subsystem() runs once, after
+    # the barrier, on the master thread. Skip it here for group workers;
+    # single-lvol migrations (no group) still own their own subsystem and
+    # must still delete it themselves.
     lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
-        logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
-        _src_paths_cu, _, _overlap_ids_cu = _build_paths(
-            src_node, tgt_node, src_rpc, tgt_rpc)
-        for _sp in _src_paths_cu:
-            if _sp['node_id'] in _overlap_ids_cu:
-                logger.info(
-                    f"Step 8: skip subsystem delete on overlap node "
-                    f"{_sp['node_id'][:8]} (now serving TGT)")
-            else:
-                migration_controller.cleanup_subsystem_or_ns(lvol.nqn, lvol.uuid, True, _sp['rpc'])
+        if migration.migration_group_id:
+            logger.info(f"Step 8: source subsystem delete deferred to group "
+                       f"orchestrator (worker of group {migration.migration_group_id[:8]})")
+        else:
+            logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
+            _src_paths_cu, _, _overlap_ids_cu = _build_paths(
+                src_node, tgt_node, src_rpc, tgt_rpc)
+            for _sp in _src_paths_cu:
+                if _sp['node_id'] in _overlap_ids_cu:
+                    logger.info(
+                        f"Step 8: skip subsystem delete on overlap node "
+                        f"{_sp['node_id'][:8]} (now serving TGT)")
+                else:
+                    migration_controller.cleanup_subsystem_or_ns(lvol.nqn, lvol.uuid, True, _sp['rpc'])
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed: {e}")
 
@@ -2606,7 +2650,15 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             _delete_intermediate_snaps_on_target(
                 migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
                 tgt_all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                tgt_lvs_name=tgt_node.lvstore)
+                tgt_lvs_name=tgt_node.lvstore,
+                # A round whose own transfer never completed (superseded by a
+                # later round) leaves snap.snap_bdev on the SOURCE composite --
+                # pass source routing too so that case gets deleted from the
+                # right place instead of being mis-routed against the target's
+                # lvstore and silently rejected. See the function's docstring.
+                src_rpc=src_rpc, src_sec_rpc=src_sec_rpc, src_ter_rpc=src_ter_rpc,
+                src_all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
+                src_lvs_name=src_node.lvstore)
         _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
                                warnings=_warnings)
     except Exception as e:
@@ -2621,7 +2673,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     return True, False, None
 
 
-def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
+def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=None):
     """
     Roll back a failed or cancelled migration: remove any partially-created
     target lvol/subsystem, then delete all snapshots copied to the target.
@@ -2630,18 +2682,34 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     on primary and secondary).  Idempotent: "not found" (status 2) is treated as
     already done, so a crash-recovery re-run is safe.
 
+    Overlap safety: a target node that is also one of this lvol's SOURCE
+    replica paths (shared/overlap topology) still has its namespace pointing
+    at the SRC bdev pre-cutover -- it is the live path a client is currently
+    using, not a spare "target" namespace. Rollback must never touch the
+    subsystem/namespace on such a node; only non-overlap target-only nodes
+    are safe to tear down.
+
     Returns (done: bool, suspend: bool, error: str|None).
     """
 
-    # Immediately detach the hub controller on failure/cancel — don't leave it
-    # connected to a target whose snapshots we're about to roll back.
-    hub_manager.detach_now(migration.source_node_id, tgt_node.get_id(), src_rpc=src_rpc)
+    # Hub controller left attached here too — hub_manager owns its lifecycle
+    # entirely via its own idle timeout now; nothing in the migration runners
+    # calls detach_now() any more.
 
     ctx = migration.transfer_context or {}
     tgt_sec, _ = _get_target_secondary_node(tgt_node, migration.source_node_id)
     tgt_sec_rpc = _make_rpc(tgt_sec) if tgt_sec else None
     tgt_ter, _ = _get_target_tertiary_node(tgt_node, migration.source_node_id)
     tgt_ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
+
+    overlap_ids = set()
+    if src_node is not None:
+        try:
+            _, _, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+        except Exception as e:
+            logger.warning(
+                f"cleanup_target: could not compute overlap nodes, treating "
+                f"none as overlap (safer would be all -- proceeding with caution): {e}")
 
     # --- Step 0: delete dangling target lvol/subsystems from a failed LVOL_MIGRATE ---
     # Also handles the pre-create case where bdev/subsystems were set up by
@@ -2672,17 +2740,27 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
         # Clean up NVMe-oF subsystem — from ctx (LVOL_MIGRATE failure) or from pre-create.
         _nqn_to_clean = nqn or _pre_nqn
         if _nqn_to_clean:
-            try:
-                migration_controller.cleanup_subsystem_or_ns(
-                    _nqn_to_clean, migration.lvol_id,
-                    tgt_node.get_id() in owned_node_ids, tgt_rpc)
-            except Exception as e:
-                logger.warning(f"cleanup target subsystem {_nqn_to_clean}: {e}")
+            if tgt_node.get_id() in overlap_ids:
+                logger.info(
+                    f"cleanup_target: skip subsystem/ns teardown on overlap "
+                    f"node {tgt_node.get_id()[:8]} (still serving live SRC path)")
+            else:
+                try:
+                    migration_controller.cleanup_subsystem_or_ns(
+                        _nqn_to_clean, migration.lvol_id,
+                        tgt_node.get_id() in owned_node_ids, tgt_rpc)
+                except Exception as e:
+                    logger.warning(f"cleanup target subsystem {_nqn_to_clean}: {e}")
             for _label, _extra_node, _extra_rpc in [
                 ("secondary", tgt_sec, tgt_sec_rpc),
                 ("tertiary", tgt_ter, tgt_ter_rpc),
             ]:
                 if _extra_rpc and _extra_node:
+                    if _extra_node.get_id() in overlap_ids:
+                        logger.info(
+                            f"cleanup_target: skip {_label} subsystem/ns teardown on "
+                            f"overlap node {_extra_node.get_id()[:8]} (still serving live SRC path)")
+                        continue
                     try:
                         migration_controller.cleanup_subsystem_or_ns(
                             _nqn_to_clean, migration.lvol_id,
@@ -2989,7 +3067,7 @@ def task_runner(task):
             next_phase = LVolMigration.PHASE_COMPLETED
 
         elif phase == LVolMigration.PHASE_CLEANUP_TARGET:
-            done, suspend, error = _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=src_rpc)
+            done, suspend, error = _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=src_rpc, src_node=src_node)
             next_phase = ""  # terminal — done-handler always sets STATUS_FAILED/CANCELLED
 
         else:
@@ -3133,7 +3211,10 @@ def _post_process_snap_group(snap, migration):
     if snap_uuid not in migration.snaps_transferred_group:
         migration.snaps_transferred_group.append(snap_uuid)
     migration_events.migration_snap_copied(migration, snap_uuid)
-    logger.info(f"Group worker: snap {snap_uuid} raw-transferred (pending tree reconstruction)")
+    logger.info(
+        f"Group worker {migration.uuid[:8]}: DIAG snap {snap_uuid[:8]} raw-transferred "
+        f"(pending tree reconstruction), lvol={migration.lvol_id[:8] if migration.lvol_id else None}, "
+        f"snaps_transferred_group now={list(migration.snaps_transferred_group)}")
     return True, None
 
 
@@ -3202,7 +3283,8 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _g_sec_rpc = _make_rpc(_g_tgt_sec) if _g_tgt_sec else None
         _g_ter_rpc = _make_rpc(_g_tgt_ter) if _g_tgt_ter else None
 
-        if tgt_rpc.get_bdevs(tgt_composite):
+        _existing_bdev = tgt_rpc.get_bdevs(tgt_composite)
+        if _existing_bdev:
             if tgt_composite in (migration.target_snap_bdevs or []):
                 logger.info(
                     f"Owned writable bdev {tgt_composite} found — reusing for retry")
@@ -3211,8 +3293,13 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     _delete_bdev_blocking(tgt_composite, tgt_rpc, _g_sec_rpc, _g_ter_rpc,
                                           all_nodes=[n for n in [tgt_node, _g_tgt_sec, _g_tgt_ter] if n],
                                           lvs_name=tgt_node.lvstore)
+                    # No post-delete confirmation poll here (unlike the solo-path
+                    # callers) — state after this point is uncertain, so let
+                    # _setup_snap_transfer re-query rather than assuming deleted.
+                    _existing_bdev = _BDEV_INFO_UNSET
                 except Exception as e:
                     logger.warning(f"Group worker: pre-cleanup of {tgt_composite} failed: {e}")
+                    _existing_bdev = _BDEV_INFO_UNSET
 
         t, err = _setup_snap_transfer(
             snap, plan.index(snap_uuid), src_node, tgt_node,
@@ -3220,7 +3307,8 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             tgt_sec=_g_tgt_sec, sec_rpc=_g_sec_rpc,
             tgt_ter=_g_tgt_ter, ter_rpc=_g_ter_rpc,
             lvol_size_mib=_snap_lvol_size_mib,
-            migration=migration)
+            migration=migration,
+            existing_bdev_info=_existing_bdev)
         if t is None:
             return False, True, err
 
@@ -3283,22 +3371,34 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     return True, False, None
 
 
-def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
+def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc, target_round=0):
     """
     INTERMEDIATE phase for a group worker.
 
-    Takes exactly one intermediate ("shrink") snapshot and transfers it to the
-    target, skipping add_clone/convert (same as snap_copy).  After this the
-    worker signals intermediates_done to the group and waits for batch_result.
+    Takes one intermediate ("shrink") snapshot per round and transfers it to
+    the target, skipping add_clone/convert (same as snap_copy). After this
+    the worker signals intermediates_done to the group and waits for either
+    another round or batch_result.
+
+    ``target_round`` is the group's current intermediate_round. If this
+    worker has already completed that round (migration.intermediate_snap_rounds
+    > target_round), it's done for now. Otherwise -- including when it was
+    previously done for an earlier round but the group has since asked for
+    another synchronized round -- it resets and takes a fresh snapshot.
 
     Returns (done: bool, suspend: bool, error: str|None).
     """
     trtype, _ = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
 
-    # If we already took and transferred the intermediate snap, we're done.
+    # If we already took and transferred the intermediate snap for the round
+    # the group is currently on, we're done. Otherwise the group has asked
+    # for another round since we last finished -- fall through and redo.
     if ctx.get('stage') == 'intermediate_done':
-        return True, False, None
+        if migration.intermediate_snap_rounds > target_round:
+            return True, False, None
+        ctx = {}
+        migration.transfer_context = {}
 
     # Take the intermediate snapshot if not already in flight.
     if ctx.get('stage') != 'intermediate_transfer':
@@ -3336,7 +3436,8 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _g_sec_rpc = _make_rpc(_g_tgt_sec) if _g_tgt_sec else None
         _g_ter_rpc = _make_rpc(_g_tgt_ter) if _g_tgt_ter else None
 
-        if tgt_rpc.get_bdevs(tgt_composite):
+        _existing_bdev = tgt_rpc.get_bdevs(tgt_composite)
+        if _existing_bdev:
             if tgt_composite in (migration.target_snap_bdevs or []):
                 logger.info(
                     f"Owned writable intermediate bdev {tgt_composite} found — reusing for retry")
@@ -3345,8 +3446,12 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     _delete_bdev_blocking(tgt_composite, tgt_rpc, _g_sec_rpc, _g_ter_rpc,
                                           all_nodes=[n for n in [tgt_node, _g_tgt_sec, _g_tgt_ter] if n],
                                           lvs_name=tgt_node.lvstore)
+                    # No post-delete confirmation poll here — state after this
+                    # point is uncertain, so let _setup_snap_transfer re-query.
+                    _existing_bdev = _BDEV_INFO_UNSET
                 except Exception as e:
                     logger.warning(f"Group intermediate: pre-cleanup of {tgt_composite} failed: {e}")
+                    _existing_bdev = _BDEV_INFO_UNSET
 
         t, err = _setup_snap_transfer(
             snap, snap_index, src_node, tgt_node,
@@ -3354,7 +3459,8 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             tgt_sec=_g_tgt_sec, sec_rpc=_g_sec_rpc,
             tgt_ter=_g_tgt_ter, ter_rpc=_g_ter_rpc,
             lvol_size_mib=_snap_lvol_size_mib,
-            migration=migration)
+            migration=migration,
+            existing_bdev_info=_existing_bdev)
         if t is None:
             return False, True, err
 
@@ -3463,9 +3569,10 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
     Manages the group worker state machine:
       SNAP_COPY   → transfer owned snaps (no add_clone/convert)
                   → signal snap_copy_done to group → wait for INTERMEDIATE
-      LVOL_MIGRATE (repurposed as the single-intermediate phase for workers)
-                  → take + transfer 1 intermediate snap
-                  → signal intermediates_done → wait for batch_result
+      LVOL_MIGRATE (repurposed as the intermediate phase for workers)
+                  → take + transfer 1 intermediate snap for the current round
+                  → signal intermediates_done → wait for either another
+                    synchronized round or batch_result
       CLEANUP_SOURCE → normal source cleanup + signal cleanup_source_done
       CLEANUP_TARGET → normal target rollback
 
@@ -3483,8 +3590,14 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
     if phase == LVolMigration.PHASE_SNAP_COPY:
         if migration_id not in group.snap_copy_done:
             # Still transferring owned snaps.
-            done, suspend, error = _handle_group_snap_copy(
-                migration, src_node, tgt_node, src_rpc, tgt_rpc)
+            try:
+                done, suspend, error = _handle_group_snap_copy(
+                    migration, src_node, tgt_node, src_rpc, tgt_rpc)
+            except RPCException as exc:
+                # Charge this worker's own retry budget and report failure to
+                # the group -- never decide/roll back unilaterally (see
+                # _group_worker_budget_suspend's docstring).
+                return _group_worker_budget_suspend(task, migration, group_id, str(exc))
             if error:
                 return _group_worker_budget_suspend(task, migration, group_id, error)
             if suspend:
@@ -3523,11 +3636,29 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
         task.write_to_db(db.kv_store)
         return False
 
-    # --- LVOL_MIGRATE (group worker: take 1 intermediate + wait for batch_result) ---
+    # --- LVOL_MIGRATE (group worker: take intermediate round(s) + wait for batch_result) ---
     if phase == LVolMigration.PHASE_LVOL_MIGRATE:
         if migration_id not in group.intermediates_done:
-            done, suspend, error = _handle_group_intermediate(
-                migration, src_node, tgt_node, src_rpc, tgt_rpc)
+            # A sibling may have already failed and told the group to roll
+            # back while we were mid-retry ourselves -- notice it immediately
+            # instead of continuing to loop until our own budget runs out.
+            group = db.get_migration_group_by_id(group_id)
+            if group.phase == LVolMigrationGroup.PHASE_CLEANUP_TARGET:
+                migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
+                migration.write_to_db(db.kv_store)
+                return _group_worker_phase_dispatch(
+                    task, migration, LVolMigration.PHASE_CLEANUP_TARGET,
+                    src_node, tgt_node, src_rpc, tgt_rpc)
+
+            try:
+                done, suspend, error = _handle_group_intermediate(
+                    migration, src_node, tgt_node, src_rpc, tgt_rpc,
+                    target_round=group.intermediate_round)
+            except RPCException as exc:
+                # Charge this worker's own retry budget and report failure to
+                # the group -- never decide/roll back unilaterally (see
+                # _group_worker_budget_suspend's docstring).
+                return _group_worker_budget_suspend(task, migration, group_id, str(exc))
             if error:
                 return _group_worker_budget_suspend(task, migration, group_id, error)
             if suspend:
@@ -3535,11 +3666,33 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             if done:
                 group = db.get_migration_group_by_id(group_id)
                 if migration_id not in group.intermediates_done:
+                    # Below the round cap, check whether this worker's dirty
+                    # delta is still too large to freeze quickly at cutover --
+                    # if so, flag it so the orchestrator starts another
+                    # synchronized round for every member (see
+                    # LVolMigrationGroup's INTERMEDIATE docstring).
+                    needs_more = False
+                    if group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS:
+                        try:
+                            lvol = db.get_lvol_by_id(migration.lvol_id)
+                            src_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+                            delta = _get_lvol_delta_bytes(src_rpc, src_composite)
+                            needs_more = (
+                                delta is None
+                                or delta > constants.LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES)
+                        except Exception as e:
+                            logger.warning(
+                                f"Group worker {migration_id[:8]}: delta check failed "
+                                f"(assuming another round is needed): {e}")
+                            needs_more = True
+                    if needs_more and migration_id not in group.intermediate_more_needed:
+                        group.intermediate_more_needed.append(migration_id)
                     group.intermediates_done.append(migration_id)
                     group.write_to_db(db.kv_store)
                     logger.info(
                         f"Group worker {migration_id[:8]}: signalled intermediates_done "
-                        f"({len(group.intermediates_done)}/{group.member_count()})")
+                        f"({len(group.intermediates_done)}/{group.member_count()})"
+                        + (" [delta still high, requesting another round]" if needs_more else ""))
             migration.write_to_db(db.kv_store)
             task.write_to_db(db.kv_store)
             return False
@@ -3606,7 +3759,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
     if phase == LVolMigration.PHASE_CLEANUP_TARGET:
         try:
             done, suspend, error = _handle_cleanup_target(
-                migration, tgt_node, tgt_rpc, src_rpc=src_rpc)
+                migration, tgt_node, tgt_rpc, src_rpc=src_rpc, src_node=src_node)
         except RPCException as exc:
             return _suspend_task(task, migration, str(exc))
 
@@ -3717,7 +3870,7 @@ def _cancel_stale_new_migrations(cluster_id):
 # Runner main loop
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting LVol Migration task runner...")
 
     while True:
@@ -3744,3 +3897,7 @@ if __name__ == "__main__":
                         task_runner(task)
 
         time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()

@@ -4,15 +4,67 @@ import pprint
 import json
 from inspect import ismethod, isfunction
 import sys
-from typing import Mapping, Type, Union
+from typing import Callable, ClassVar, Mapping, Type, TypeVar, Union, cast, get_origin
 from collections import ChainMap
 
 from pydantic import SecretBytes, SecretStr
 
 
+_T = TypeVar('_T')
+
+
+class _DefaultFactory:
+    """Marker standing in for a field default that must be built per instance."""
+
+    __slots__ = ('factory',)
+
+    def __init__(self, factory: Callable[[], object]) -> None:
+        self.factory = factory
+
+
+def default_factory(factory: Callable[[], _T]) -> _T:
+    """Declare a per-instance default for a mutable model field.
+
+    Model defaults are plain class attributes, so a literal
+    ``nodes: List[str] = []`` stores ONE list on the class. Every instance
+    that receives no value for the field then aliases — and mutates — that
+    single object, so one ``lvol.nodes.append(...)`` is visible on every other
+    lvol and on every instance created later in the process.
+
+    This mirrors ``dataclasses.field(default_factory=...)``: the class holds
+    only a marker, and :meth:`BaseModel.get_attrs_map` calls the factory once
+    per instance. The declared return type is the factory's result so static
+    type checkers still see the field's real type.
+    """
+    return cast(_T, _DefaultFactory(factory))
+
+
+def _detached(value: _T) -> _T:
+    """A copy of ``value`` that shares no mutable structure with it.
+
+    ``from_dict`` is handed a payload it does not own — an FDB record, a
+    request body, another model's ``to_dict()`` — and several of its branches
+    store the payload's own list or dict on the model. Source and model then
+    alias each other, so an ``append`` on either side is visible on the other
+    and on every further model built from the same payload.
+
+    ``BaseModel`` children are already built fresh by ``from_dict`` and are
+    handed back as they are.
+    """
+    if isinstance(value, dict):
+        return cast(_T, {k: _detached(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return cast(_T, [_detached(item) for item in value])
+    if isinstance(value, set):
+        return cast(_T, set(value))
+    if isinstance(value, bytearray):
+        return cast(_T, bytearray(value))
+    return value
+
+
 class BaseModel(object):
 
-    _STATUS_CODE_MAP: dict = {}
+    _STATUS_CODE_MAP: ClassVar[dict] = {}
 
     id: str = ""
     uuid: str = ""
@@ -75,12 +127,18 @@ class BaseModel(object):
         both ``ismethod`` and ``isfunction``: on an instance a class function
         appears as a bound method, but on the class (where we now evaluate)
         it is a plain function.
+
+        ``ClassVar`` attributes are class constants shared on purpose (a
+        status-code map), not per-instance data: they are excluded so they are
+        neither serialized into the FDB record nor overwritten by
+        ``from_dict``.
         """
         cached = cls.__dict__.get('_annotated_attrs_cache')
         if cached is None:
             cached = [
                 (s, t) for s, t in cls.all_annotations().items()
                 if not s.startswith("_")
+                and get_origin(t) is not ClassVar
                 and not ismethod(getattr(cls, s, None))
                 and not isfunction(getattr(cls, s, None))
             ]
@@ -88,10 +146,13 @@ class BaseModel(object):
         return cached
 
     def get_attrs_map(self):
-        return {
-            s: {"type": t, "default": getattr(self, s)}
-            for s, t in self.__class__._annotated_attrs()
-        }
+        attrs = {}
+        for s, t in self.__class__._annotated_attrs():
+            default = getattr(self, s)
+            if isinstance(default, _DefaultFactory):
+                default = default.factory()
+            attrs[s] = {"type": t, "default": default}
+        return attrs
 
     def get_db_id(self, use_this_id=None):
         if use_this_id:
@@ -155,6 +216,8 @@ class BaseModel(object):
                                 value = inner(data[attr])
                 else:
                     value = value_dict['type'](data[attr])
+
+                value = _detached(value)
             setattr(self, attr, value)
         self.id = self.uuid
         return self
@@ -374,8 +437,10 @@ class BaseNodeObject(BaseModel):
     STATUS_UNREACHABLE = 'unreachable'
     STATUS_SCHEDULABLE = 'schedulable'
     STATUS_DOWN = 'down'
+    STATUS_IN_REMOVAL = 'in_removal'
+    STATUS_PENDING_REMOVAL = 'pending_removal'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,
         STATUS_OFFLINE: 1,
         STATUS_SUSPENDED: 2,
@@ -386,4 +451,6 @@ class BaseNodeObject(BaseModel):
         STATUS_UNREACHABLE: 20,
         STATUS_SCHEDULABLE: 30,
         STATUS_DOWN: 40,
+        STATUS_IN_REMOVAL: 41,
+        STATUS_PENDING_REMOVAL: 42,
     }

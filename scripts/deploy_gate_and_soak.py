@@ -10,7 +10,11 @@ earlier runs looked instrumented and were not (ultra:main-latest's manifest list
 points amd64 at a five-day-old image), so a quiet soak log proves nothing unless
 the binary was checked first.
 
-Usage:  python deploy_gate_and_soak.py [--skip-deploy]
+Usage:  python deploy_gate_and_soak.py [--skip-deploy] [--mgmt-boot-100]
+                                       [--placement-dumps]
+
+--mgmt-boot-100 gives the mgmt node a 100GB boot disk (default 80).
+--placement-dumps turns on per-outage placement-map dumps in the soak.
         --skip-deploy reuses the existing cluster_metadata_mp.json (gate + soak
         only), for when a cluster is already up.
 """
@@ -28,7 +32,16 @@ SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
 #: mtime: the ultra Dockerfile bakes `git log` of the spdk repo into
 #: /root/spdk/git_log.txt, which pins the image to a commit. See the SPDK_IMAGE
 #: pin in setup_perf_test_multipath.py for why this is checked, not assumed.
-EXPECT_SPDK_COMMIT = "a311a6852"
+EXPECT_SPDK_COMMIT = "554c80f11"
+#: The ultra commit that must be running. b44de698 defers the JC leadership
+#: signal until the parity-desynchronisation check completes. Before it, a
+#: reactively promoted distrib announced leadership while parity was still
+#: desynchronised, so reads served in that window came off desynchronised
+#: parity and returned arbitrary bytes -- the 2026-08-24 iteration-12 "bad
+#: magic" failures, whose received magics were random rather than fio's
+#: 0xacca, ruling out stale-but-valid data. Without this pin the run would
+#: re-test the build that already failed.
+EXPECT_ULTRA_COMMIT = "b44de698"
 #: Lines probe_bin.sh must print, with what their absence would mean. These
 #: distinguish upstream d528e1a67 (zeroes retry state at the submission entry
 #: point) from the superseded local attempt that zeroed it at completion and so
@@ -77,7 +90,10 @@ def deploy():
     dlog = HERE / f"mp_deploy_{time.strftime('%Y%m%d_%H%M%S')}.log"
     log(f"deployer output -> {dlog.name}")
     with open(dlog, "w", encoding="utf-8") as fh:
-        proc = subprocess.run([sys.executable, "setup_perf_test_multipath.py"],
+        deploy_cmd = [sys.executable, "setup_perf_test_multipath.py"]
+        if "--mgmt-boot-100" in sys.argv:
+            deploy_cmd += ["--mgmt-boot-gb", "100"]
+        proc = subprocess.run(deploy_cmd,
                               cwd=str(HERE), stdout=fh,
                               stderr=subprocess.STDOUT, timeout=5400)
     tail = "\n".join(
@@ -116,6 +132,11 @@ def gate(mgmt, sn):
             f"— /root/spdk/git_log.txt names a different commit, so the node is "
             f"on a stale image. Check the SPDK_IMAGE pin and that the "
             f"spdk-core R26.3 tags finished rebuilding (amd64 included).")
+    if EXPECT_ULTRA_COMMIT not in out:
+        raise RuntimeError(
+            f"GATE FAILED: image was not built from ultra "
+            f"{EXPECT_ULTRA_COMMIT} — the parity-desync leadership fix under "
+            f"test is absent, so the run would prove nothing.")
     for fragment, why in REQUIRED_FIX_LINES:
         if fragment not in out:
             raise RuntimeError(f"GATE FAILED: {why} ({fragment!r} absent)")
@@ -130,7 +151,8 @@ def gate(mgmt, sn):
 
 def start_soak(mgmt):
     log("=== starting soak ===")
-    out = ssh(mgmt, "bash ~/start_soak_mp.sh")
+    env_prefix = "PLACEMENT_DUMPS=1 " if "--placement-dumps" in sys.argv else ""
+    out = ssh(mgmt, f"{env_prefix}bash ~/start_soak_mp.sh")
     log(out.strip())
     time.sleep(120)
     status = ssh(mgmt, "TS=$(cat ~/soak_ts); P=$(cat ~/soak_pid); "

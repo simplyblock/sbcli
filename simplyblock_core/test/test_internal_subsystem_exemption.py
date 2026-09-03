@@ -12,6 +12,7 @@ Internal volumes are still COUNTED, so a user create continues to see true
 occupancy; they are only exempt from being refused.
 """
 import pytest
+from typing import ClassVar
 
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -49,7 +50,7 @@ class _NewLvol:
     nqn = ""
     namespace = ""
     max_namespace_per_subsys = 1
-    allowed_hosts = []
+    allowed_hosts: ClassVar[list[dict]] = []
 
     def get_id(self):
         return "NEW"

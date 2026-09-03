@@ -6,7 +6,7 @@ from simplyblock_core import db_controller, storage_node_ops, utils, constants
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
-
+from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
 
@@ -34,6 +34,7 @@ def process_task(task):
         task.function_result = "cluster is in_activation, waiting"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
+        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
         return False
 
     if task.status != JobSchedule.STATUS_RUNNING:
@@ -57,42 +58,47 @@ def process_task(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         return True
+    else:
+        # Incomplete: a phase asked us to retry (typically waiting on migration).
+        task.function_result = "removal in progress, retrying"
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
 
-    # Incomplete: a phase asked us to retry (typically waiting on migration).
-    task.function_result = "removal in progress, retrying"
-    task.retry += 1
-    task.status = JobSchedule.STATUS_SUSPENDED
-    task.write_to_db(db.kv_store)
-    return False
+
+def main():
+    logger.info("Starting Tasks runner node removal...")
+
+    while True:
+        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        try:
+            clusters = db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            continue
+        if not clusters:
+            logger.error("No clusters found!")
+            continue
+        for cl in clusters:
+            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+            for task in tasks:
+                if task.function_name != JobSchedule.FN_NODE_REMOVAL:
+                    continue
+                if task.status == JobSchedule.STATUS_DONE:
+                    continue
+                # get a fresh object: cancel/other writers may have changed it
+                task = db.get_task_by_id(task.uuid)
+                # Lease gate: skip a task another live runner host owns.
+                if not tasks_controller.claim_task(task):
+                    logger.info(f"Node-removal task {task.uuid} owned by another runner host; skipping")
+                    continue
+                try:
+                    process_task(task)
+                except Exception as e:
+                    logger.error(f"Node-removal task {task.uuid} processing crashed: {e}")
+                    logger.exception(e)
 
 
-logger.info("Starting Tasks runner node removal...")
-
-while True:
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
-    try:
-        clusters = db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        continue
-    if not clusters:
-        logger.error("No clusters found!")
-        continue
-    for cl in clusters:
-        tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-        for task in tasks:
-            if task.function_name != JobSchedule.FN_NODE_REMOVAL:
-                continue
-            if task.status == JobSchedule.STATUS_DONE:
-                continue
-            # get a fresh object: cancel/other writers may have changed it
-            task = db.get_task_by_id(task.uuid)
-            # Lease gate: skip a task another live runner host owns.
-            if not tasks_controller.claim_task(task):
-                logger.info(f"Node-removal task {task.uuid} owned by another runner host; skipping")
-                continue
-            try:
-                process_task(task)
-            except Exception as e:
-                logger.error(f"Node-removal task {task.uuid} processing crashed: {e}")
-                logger.exception(e)
+if __name__ == "__main__":
+    main()

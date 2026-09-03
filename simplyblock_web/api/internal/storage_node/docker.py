@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 import docker
 import psutil
@@ -350,6 +350,93 @@ def _spdk_unix_socket_alive(rpc_port, timeout=1.0):
         return False
 
 
+def _spdk_thread_sample(pid):
+    """One sample of every thread's name / state / wchan / utime from /proc."""
+    out = []
+    try:
+        for tid in os.listdir(f"/proc/{pid}/task"):
+            t = f"/proc/{pid}/task/{tid}"
+            entry: Dict[str, Any] = {"tid": tid}
+            for field, path in (("comm", "comm"), ("wchan", "wchan")):
+                try:
+                    with open(f"{t}/{path}") as fh:
+                        entry[field] = fh.read().strip()
+                except OSError:
+                    entry[field] = ""
+            try:
+                with open(f"{t}/stat") as fh:
+                    # comm can contain spaces/parens; everything after ") " is stable
+                    fields = fh.read().rsplit(") ", 1)[-1].split()
+                entry["state"] = fields[0]
+                entry["utime"] = int(fields[11])
+                entry["stime"] = int(fields[12])
+            except (OSError, IndexError, ValueError):
+                entry["state"], entry["utime"], entry["stime"] = "?", -1, -1
+            out.append(entry)
+    except OSError as e:
+        logger.warning(f"spdk_thread_state: cannot read /proc/{pid}/task: {e}")
+    return out
+
+
+@api.get('/spdk_thread_state', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object'
+    })}}},
+})
+def spdk_thread_state(query: utils.RPCPortParams):
+    """Per-thread state of the SPDK process, sampled twice ~1s apart.
+
+    Exists to answer one question when the RPC channel is wedged but the
+    process is alive: is the app thread (reactor_0, which runs the JSON-RPC
+    poller) BLOCKED or SPINNING? Those need opposite fixes and the logs cannot
+    tell them apart -- on 2026-09-01 node 22f365ef served zero RPCs for 15
+    minutes while its pollers kept printing normally, and the control plane
+    killed it without ever learning why.
+
+    utime frozen across the two samples => the thread is not running (blocked,
+    e.g. on a lock taken with an unbounded wait). utime advancing while RPCs
+    go unanswered => it is running but never returns to the RPC poller.
+
+    Deliberately NOT folded into spdk_process_kill: that path is tuned to
+    ~50-200ms for peer termination and must not grow a 1s sampling delay.
+    """
+    pid = None
+    try:
+        for proc in os.listdir("/proc"):
+            if not proc.isdigit():
+                continue
+            try:
+                with open(f"/proc/{proc}/cmdline", "rb") as fh:
+                    cmdline = fh.read().decode(errors="replace")
+            except OSError:
+                continue
+            if f"spdk_{query.rpc_port}/spdk.sock" in cmdline:
+                pid = int(proc)
+                break
+    except OSError as e:
+        return utils.get_response(None, f"cannot scan /proc: {e}")
+
+    if pid is None:
+        return utils.get_response(None,
+            f"no SPDK process found for rpc_port {query.rpc_port}")
+
+    first = _spdk_thread_sample(pid)
+    time.sleep(1)
+    second = _spdk_thread_sample(pid)
+
+    by_tid = {sample["tid"]: sample for sample in first}
+    threads = []
+    for sample in second:
+        prev = by_tid.get(sample["tid"], {})
+        threads.append({
+            "tid": sample["tid"], "comm": sample["comm"], "state": sample["state"],
+            "wchan": sample["wchan"],
+            "utime_delta": sample["utime"] - prev.get("utime", sample["utime"]),
+            "stime_delta": sample["stime"] - prev.get("stime", sample["stime"]),
+        })
+    return utils.get_response({"pid": pid, "threads": threads})
+
+
 @api.get('/spdk_process_is_up', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
@@ -518,6 +605,11 @@ def get_info():
 
         "cpu_count": node_info["cpu_info"]['count'],
         "cpu_hz": node_info["cpu_info"]['hz_advertised'][0] if 'hz_advertised' in node_info["cpu_info"] else 1,
+        # Per-NUMA-node core ids, keyed by socket id as a string (JSON has no
+        # int keys). Read-only topology -- add_node uses it to resize a
+        # node's isolated-core set to the cluster's spdk_vcpu_count; nothing
+        # here is persisted.
+        "cpu_topology": {str(k): v for k, v in init_utils.get_numa_cores().items()},
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -696,8 +788,24 @@ def bind_device_to_spdk(body: utils.DeviceParams):
 class PersistNodeConfigParams(BaseModel):
     max_lvol: Optional[int] = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
     huge_page_memory: Optional[int] = Field(None, ge=0)
+    # small/large_pool_count are written alongside huge_page_memory whenever
+    # add_node recalculates it against the cluster's real max_lvol/core count
+    # -- they are what that memory figure was derived from (calculate_pool_count
+    # -> calculate_minimum_hp_memory), so they must never drift from it.
+    small_pool_count: Optional[int] = Field(None, ge=0)
+    large_pool_count: Optional[int] = Field(None, ge=0)
     numa_node: Optional[int] = Field(None, ge=0)
     ssd_list: Optional[List[str]] = Field(None)
+    # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
+    # storage_node_ops.apply_cluster_vcpu_count). Written together, once, by
+    # the same caller -- never partially, so the file never holds a mask from
+    # one layout next to a distribution from another.
+    cpu_mask: Optional[str] = None
+    isolated: Optional[List[int]] = None
+    l_cores: Optional[str] = None
+    distribution: Optional[dict] = None
+    core_to_index: Optional[dict] = None
+    number_of_distribs: Optional[int] = Field(None, ge=0)
 
 
 @api.post('/persist_node_config', responses={
@@ -721,13 +829,49 @@ def persist_node_config(body: PersistNodeConfigParams):
             node_config["max_lvol"] = body.max_lvol
         if body.huge_page_memory is not None:
             node_config["huge_page_memory"] = body.huge_page_memory
+        if body.small_pool_count is not None:
+            node_config["small_pool_count"] = body.small_pool_count
+        if body.large_pool_count is not None:
+            node_config["large_pool_count"] = body.large_pool_count
+        if body.cpu_mask is not None:
+            node_config["cpu_mask"] = body.cpu_mask
+        if body.isolated is not None:
+            node_config["isolated"] = body.isolated
+        if body.l_cores is not None:
+            node_config["l-cores"] = body.l_cores
+        if body.distribution is not None:
+            node_config["distribution"] = body.distribution
+        if body.core_to_index is not None:
+            node_config["core_to_index"] = body.core_to_index
+        if body.number_of_distribs is not None:
+            node_config["number_of_distribs"] = body.number_of_distribs
         matched = True
         break
 
     if not matched:
         return utils.get_response(False, "No matching node found for given numa_node and ssd_list")
 
-    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE)
+    # isolated_cores/host_cpu_mask are the union of every node's "isolated"
+    # list, computed once at configure time (generate_configs/regenerate_
+    # config) -- nothing reads them back today (the one consumer,
+    # validate_config, always recomputes the union fresh from the nodes
+    # themselves), but leaving them silently stale after a per-node isolated
+    # list changes here is exactly the kind of drift that bites whoever
+    # trusts them next. Recompute unconditionally; cheap, and correct
+    # regardless of which field this call actually changed.
+    all_isolated_cores: Set[int] = set()
+    for n in node_info["nodes"]:
+        all_isolated_cores.update(n.get("isolated") or [])
+    node_info["isolated_cores"] = sorted(all_isolated_cores)
+    node_info["host_cpu_mask"] = core_utils.generate_mask(all_isolated_cores)
+
+    # get_nodes_config() refuses (both here and on k8s) whenever the live file
+    # differs from its "_read_only" sibling -- that is the drift check meant
+    # to catch a hand-edited config. This write is sanctioned, not drift, so
+    # it must refresh the read-only baseline too, or the very next /info call
+    # (this same add_node's own idempotent retry included) sees a mismatch
+    # and refuses with "run sbcli sn configure-upgrade".
+    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE, create_read_only_file=True)
     return utils.get_response(True)
 
 

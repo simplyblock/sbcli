@@ -143,13 +143,14 @@ the input of the deprecated `cluster add-replication`.
 
 Per source cluster:
 
-- `POST/GET/DELETE /clusters/{id}/replication-targets[/{target_id}]`
-- `POST/GET/DELETE /clusters/{id}/replication-policies[/{policy_id}]`
-- `PUT/DELETE /clusters/{c}/storage-pools/{p}/volumes/{v}/replication-policy`
+- `POST/GET/DELETE /clusters/{id}/replication/targets[/{target_id}]`
+- `POST/GET/DELETE /clusters/{id}/replication/policies[/{policy_id}]`
+- `PUT /clusters/{c}/storage-pools/{p}/volumes/{v}` with `replication_policy_id`
+  (`null` detaches)
 
 Two REST defects to fix while touching this surface:
 
-1. `POST .../replication_start` passes the **path** cluster as
+1. `POST .../replication/start` passes the **path** cluster as
    `replication_cluster_id`, i.e. the volume's own cluster, so it self-targets
    and never falls back to the configured destination.
 2. The same route takes no body, so `mode` and `interval_min` are unreachable
@@ -209,15 +210,15 @@ aggregates into one multipath device on the client, so returning both during
 
 ### Group fail-over
 
-Per-volume fail-over (`POST .../volumes/{v}/replicate_lvol`) is the only trigger
+Per-volume fail-over (`POST .../volumes/{v}/replication/failover`) is the only trigger
 today: there is no CLI verb, and no automatic trigger anywhere in the control
 plane — the Kubernetes operator supplies the automation by polling health and
 calling that route per volume. A site loss needs to fail over **every** volume
 replicating to a given destination, so add a group call:
 
-- `POST /clusters/{c}/replication-targets/{target_id}/failover` — fails over
+- `POST /clusters/{c}/replication/targets/{target_id}/failover` — fails over
   every volume whose policy points at that target.
-- `POST /clusters/{c}/replication-policies/{policy_id}/failover` — same, scoped
+- `POST /clusters/{c}/replication/policies/{policy_id}/failover` — same, scoped
   to one policy.
 
 Both run as background tasks, are idempotent per volume (a volume already

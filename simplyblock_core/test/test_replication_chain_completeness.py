@@ -16,9 +16,9 @@ So ancestors replicate FIRST, bottom-up. And because clones make the chain a
 TREE, a shared ancestor must be transferred exactly ONCE and recognized as
 already existent on the target by every other descendant.
 """
-import pytest
 
-from simplyblock_core.models.job_schedule import JobSchedule
+from typing import Optional
+
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_replication as sr
 
@@ -46,6 +46,7 @@ class _Snap:
         self.source_replicated_snap_uuid = source
         self.status = status
         self.snap_ref_id = ""
+        self.next_snap_uuid = ""
         self.lvol = lvol or _LvolRef()
 
     def get_id(self):
@@ -150,7 +151,7 @@ def test_shared_ancestor_is_found_by_every_descendant(monkeypatch):
     walk names the SAME record, so task dedupe collapses them to one transfer."""
     shared = _Snap(f"{LVS}/SNAP_BASE")
     tops = [_Snap(f"{LVS}/SNAP_C{i}") for i in (1, 2, 3)]
-    bases = {f"{LVS}/SNAP_C{i}": "SNAP_BASE" for i in (1, 2, 3)}
+    bases: dict[str, Optional[str]] = {f"{LVS}/SNAP_C{i}": "SNAP_BASE" for i in (1, 2, 3)}
     bases[f"{LVS}/SNAP_BASE"] = None
     picked = set()
     for top in tops:
@@ -245,3 +246,298 @@ def test_delete_guard_tolerates_a_vanished_successor(monkeypatch):
 
     monkeypatch.setattr(sc, "db_controller", _DB3())
     assert sc._successor_mid_replication(victim) is False
+
+
+# --- to-source auto-enqueue must yield to a forward policy ------------------
+
+
+def test_no_backward_task_for_a_policy_managed_clone():
+    """A fail-over clone under a FORWARD policy must not also ship its
+    snapshots back to the original cluster: both directions then race on the
+    same snapshots and the cutover's target-side gate starves (2026-08-21,
+    two of five case-4 cutovers dead on max retry)."""
+    import inspect
+    from simplyblock_core.controllers import snapshot_controller as sc
+    src = inspect.getsource(sc.add)
+    gate = 'if lvol.cloned_from_snap and not getattr(lvol, "replication_policy_id", "")'
+    assert gate in src, "the to-source enqueue must be gated on no forward policy"
+    assert src.index(gate) < src.index("replicate_to_source=True"), \
+        "the gate must guard the to-source enqueue"
+
+
+# --- fail-back cutover: the preserved identity must evict the stale ns ------
+
+
+class _EvictRPC:
+    def __init__(self, namespaces, linger_polls=0):
+        self.removed = []
+        self._ns = list(namespaces)
+        self._linger = linger_polls   # polls before a removed ns disappears
+
+    def subsystem_get(self, nqn):
+        # the real client returns ONE dict (single_or_none), never a list
+        if self._linger > 0:
+            self._linger -= 1
+            return {"nqn": nqn, "namespaces": self._ns}
+        live = [n for n in self._ns
+                if (nqn, n.get("nsid")) not in self.removed]
+        return {"nqn": nqn, "namespaces": live}
+
+    def nvmf_subsystem_remove_ns(self, nqn, nsid):
+        # acknowledges immediately; disappearance is governed by linger_polls,
+        # modelling the fork's async remove_ns false-success
+        self.removed.append((nqn, nsid))
+        return True
+
+
+class _EvictNode:
+    def __init__(self, rpc):
+        self._rpc = rpc
+
+    def get_id(self):
+        return "NODE_R"
+
+    def rpc_client(self):
+        return self._rpc
+
+
+class _CloneLvol:
+    nqn = "nqn.test:lvol:ORIG"
+    ns_id = 7
+    top_bdev = "LVS_1/LVOL_CLONE"
+
+
+def test_failback_evicts_the_recovered_sources_stale_namespace():
+    """2026-08-24: on a recovered source the preserved-NQN subsystem still held
+    the ORIGINAL volume's namespace at the clone's nsid; add_ns failed -32602
+    on every retry and 5/5 fail-back cutovers died on max retry."""
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _EvictRPC([{"nsid": 7, "bdev_name": "LVS_1/LVOL_ORIG"}])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == [("nqn.test:lvol:ORIG", 7)]
+
+
+def test_failback_eviction_is_idempotent_for_its_own_namespace():
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _EvictRPC([{"nsid": 7, "bdev_name": "LVS_1/LVOL_CLONE"}])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == []
+
+
+def test_failback_eviction_leaves_other_namespaces_alone():
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _EvictRPC([{"nsid": 3, "bdev_name": "LVS_1/OTHER"}])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == []
+
+
+def test_failback_eviction_tolerates_a_missing_subsystem():
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    class _NoSubsysRPC(_EvictRPC):
+        def subsystem_get(self, nqn):
+            return None
+    rpc = _NoSubsysRPC([])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))   # must not raise
+    assert rpc.removed == []
+
+
+def test_failback_eviction_waits_out_the_async_removal(monkeypatch):
+    """remove_ns acknowledges before it completes (the PVC-expand
+    false-success); the eviction must confirm the namespace is GONE before
+    add_ns runs, or the add races the removal and loses (run 20260824_110959:
+    40 evictions immediately followed by 40 add_ns -32602)."""
+    from simplyblock_core.controllers import lvol_controller as lc
+    monkeypatch.setattr(lc.time, "sleep", lambda s: None)
+    rpc = _EvictRPC([{"nsid": 7, "bdev_name": "LVS_1/LVOL_ORIG"}], linger_polls=3)
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == [("nqn.test:lvol:ORIG", 7)]
+    # after the helper returns, the namespace must actually be gone
+    assert rpc.subsystem_get("nqn.test:lvol:ORIG")["namespaces"] == []
+
+
+def test_failback_eviction_matches_by_uuid_too(monkeypatch):
+    from simplyblock_core.controllers import lvol_controller as lc
+    monkeypatch.setattr(lc.time, "sleep", lambda s: None)
+    rpc = _EvictRPC([{"nsid": 3, "uuid": "LV_UUID", "bdev_name": "LVS_1/LVOL_ORIG"}])
+    class _C(_CloneLvol):
+        uuid = "LV_UUID"
+    lc._evict_stale_namespace(_C(), _EvictNode(rpc))
+    assert rpc.removed == [("nqn.test:lvol:ORIG", 3)]
+
+
+def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
+    """Run 20260824_113711: eviction on the primary made ITS add_ns succeed
+    (result: 1) while the HA peer's failed with the same -32602 -- the
+    preserved-NQN subsystem exists on EVERY node of the recovered set, each
+    still holding the original namespace. The peer failure rolled the whole
+    cutover back: 0/5. The clone path must evict per node."""
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    def _fake_add_lvol_on_node(lvol, node, is_primary=True):
+        added.append((node.get_id(), is_primary))
+        return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
+
+    evicted, added = [], []
+    monkeypatch.setattr(lc, "_evict_stale_namespace",
+                        lambda lvol, node: evicted.append(node.get_id()))
+    monkeypatch.setattr(lc, "add_lvol_on_node", _fake_add_lvol_on_node)
+
+    class _N:
+        def __init__(self, nid, secondary="", tertiary=""):
+            self._id, self.secondary_node_id, self.tertiary_node_id = nid, secondary, tertiary
+            self.lvstore = "LVS_1"
+            self.status = lc.StorageNode.STATUS_ONLINE
+        def get_id(self):
+            return self._id
+
+    primary = _N("P", secondary="S")
+    peer = _N("S")
+
+    class _DB:
+        kv_store = None
+        def get_storage_node_by_id(self, nid):
+            return {"P": primary, "S": peer}[nid]
+        def release_lvol_ns_slot(self, lvol):
+            pass
+
+    class _Lvol:
+        uuid = "ORIG"
+        nqn = "nqn.test:lvol:ORIG"
+        ns_id = 7
+        lvol_bdev = "LVOL_C"
+        crypto_bdev = ""
+        def __deepcopy__(self, memo):
+            c = _Lvol()
+            c.__dict__.update(self.__dict__)
+            return c
+        def write_to_db(self, kv=None):
+            pass
+
+    class _Snap:
+        cluster_id = "C1"
+        snap_bdev = "LVS_1/SNAP_1"
+        def get_id(self):
+            return "SNAP1"
+
+    new_lvol, error = lc._create_target_lvol_clone(_DB(), _Lvol(), primary, "POOL", _Snap())
+    assert error is None
+    assert evicted == ["P", "S"], \
+        "stale-namespace eviction must run on the primary AND every online HA peer"
+    assert ("S", False) in added
+
+
+def test_interrupted_landing_volume_is_adopted_or_cleared():
+    """Case 6, run 20260824_144226: a node outage mid-create left a REP_*
+    landing volume whose id was never stored on the task; every retry then
+    died on "LVol name must be unique" and three volumes' chains stalled for
+    the rest of the run. Before creating the landing volume, the runner must
+    look for a record already wearing the derived name and adopt it (online),
+    wait for it (in_deletion), or clear it (half-created)."""
+    import inspect
+    from simplyblock_core.services import snapshot_replication as sr
+    src = inspect.getsource(sr)
+    probe = src.index('rep_name = f"REP_{snapshot.snap_name}"')
+    create = src.index("lvol_controller.add_lvol_ha")
+    assert probe < create, "the adopt/clear probe must run before the create"
+    adopt = src.index("Adopting landing volume")
+    assert probe < adopt < create
+    for handled in ("STATUS_ONLINE", "STATUS_IN_DELETION", "force_delete=True"):
+        assert src.index(handled, probe) < create, \
+            f"collision handling must cover {handled} before creating"
+
+
+def test_failover_guard_matches_nqn_and_nsid_not_nqn_alone():
+    """Soak case 7 (run 20260824_174611): namespaced volumes SHARE a subsystem,
+    so the fail-over idempotency guard's nqn-only match fired for every
+    namespace after the first — namespaces 2..N returned namespace 1's target
+    lvol id and were never failed over, losing 9 of 10 volumes in a DR event
+    while reporting success. The guard must compare the FULL preserved
+    identity: nqn AND ns_id."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
+    assert "lv.nqn == lvol.nqn and lv.ns_id == lvol.ns_id" in src, \
+        "the fail-over existing-copy guard must match nqn AND nsid"
+
+
+def test_namespaced_siblings_replicate_to_the_same_target_node():
+    """Soak case 7 (run 20260824_215758): the replication destination was
+    picked per volume by capacity, so volumes SHARING a subsystem were
+    scattered across the target cluster's nodes. A fail-over copy preserves
+    the NQN, so that splits one shared subsystem across unrelated primaries
+    -- each advertising the same NQN with only part of the namespaces.
+    Siblings must inherit the node their subsystem already replicates to."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc.add_lvol_ha)
+    assert "sibling_node_id" in src, "namespaced siblings must share a replication node"
+    pick = src.index("_get_next_3_nodes(replication_cluster_id")
+    check = src.index("sibling_node_id")
+    assert check < pick, "the sibling lookup must precede the capacity-based pick"
+    assert "lv.nqn == lvol.nqn" in src, "siblings are identified by shared NQN"
+
+
+def test_clone_register_confirms_the_bdev_before_add_ns():
+    """Run 20260825_122423: bdev_lvol_clone_register acknowledges before the
+    bdev is examinable, and the peer's nvmf_subsystem_add_ns raced it and lost
+    (-32602 with the subsystem EMPTY; the bdev existed moments later). Third
+    member of the acknowledge-before-complete family, after remove_ns
+    (PVC-expand) and the case-3 eviction. The stack build must poll the bdev
+    into existence before the namespace add runs."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc._create_bdev_stack)
+    reg = src.index("bdev_lvol_clone_register")
+    assert "not appear within 20s" in src[reg:], \
+        "clone_register must be followed by a bdev confirmation poll"
+    poll = src.index("not appear within 20s", reg)
+    assert "get_bdevs" in src[reg:poll], "the poll must probe get_bdevs"
+
+
+def test_retired_landing_records_are_record_only_deletions():
+    """A retired landing volume's record deliberately carries an EMPTY
+    bdev_stack: its blob lives on as the converted, chained snapshot. The
+    monitor must retire such a record without issuing ANY bdev delete (runs
+    20260824/20260825: interrupted retirements left records in_deletion that
+    the delete flow could never finish -- status poll 4, forever -- and a
+    naive top_bdev fallback delete would have destroyed the replicated
+    snapshot's data)."""
+    import inspect
+    from simplyblock_core.services import lvol_monitor as lm
+    src = inspect.getsource(lm.check_node)
+    guard = src.index("if not lvol.bdev_stack:")
+    flow = src.index("delete_lvol_from_node", guard)
+    finish = src.index("process_lvol_delete_finish", guard)
+    assert finish < flow, "empty-stack records must retire BEFORE the delete flow"
+
+
+def test_retirement_tears_down_plumbing_without_delete_lvol():
+    """The retirement path must not route through delete_lvol: that flips the
+    record to in_deletion for the monitor's async machinery, so any
+    interruption before remove() strands the record."""
+    import inspect
+    from simplyblock_core.services import snapshot_replication as sr
+    src = inspect.getsource(sr)
+    empty = src.index("remote_lv.bdev_stack = []")
+    remove = src.index("remote_lv.remove(db.kv_store)", empty)
+    seg = src[empty:remove]
+    assert "delete_lvol_from_node" in seg, "teardown must be the direct per-node call"
+    assert "delete_lvol(remote_lv" not in seg, "must not route through delete_lvol"
+
+
+def test_shared_subsystem_survives_one_members_teardown():
+    """Run 20260825_224221: a stuck in_deletion member's teardown loop saw the
+    SHARED subsystem transiently empty on the HA peer (between one member's
+    teardown and the next member's add) and deleted it -- every following
+    namespaced fail-over then died in add_ns on a missing subsystem (8/20
+    landed). Delete-on-empty must first prove no other live volume claims
+    the NQN."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc._remove_lvol_subsys_from_node)
+    guard = src.index("other")
+    delete = src.index("subsystem_delete")
+    assert guard < delete, "the other-claimants check must precede subsystem_delete"
+    assert "x.nqn == lvol.nqn" in src, "claimants are identified by shared NQN"
+    assert "Leaving subsystem" in src

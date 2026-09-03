@@ -37,6 +37,12 @@ def _peer_connections_relevant(peer_node) -> bool:
     )
 
 
+#: Per-RPC bound for the hublvol attach+connect issued from the health cycle.
+#: Generous enough for a connect against a healthy peer, short enough that one
+#: unresponsive peer cannot stall the checks for every other node.
+HUBLVOL_REPAIR_RPC_TIMEOUT_SEC = 2.0
+
+
 def repairs_allowed(node) -> bool:
     """Whether repairs may be attempted against ``node`` at all.
 
@@ -416,41 +422,184 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             # _collect_attached_ips holds the same rule for device controllers,
             # including the older single-entry/alternate_trids shape.
             attached_ips = storage_node_ops._collect_attached_ips(ret)
-            expected_ips = set()
-            for iface in primary_node.data_nics:
-                if (primary_node.active_rdma and iface.trtype == "RDMA") or                    (not primary_node.active_rdma and primary_node.active_tcp
-                        and iface.trtype == "TCP"):
-                    expected_ips.add(iface.ip4_address)
+
+            def _data_ips(peer):
+                ips = set()
+                for iface in peer.data_nics:
+                    if (peer.active_rdma and iface.trtype == "RDMA") or                        (not peer.active_rdma and peer.active_tcp
+                            and iface.trtype == "TCP"):
+                        ips.add(iface.ip4_address)
+                return ips
+
+            # Expected paths depend on the ROLE of this node, not just on the
+            # primary. A secondary connects to the primary (2 paths); a
+            # tertiary connects to the primary AND the secondary (4 paths).
+            # Built from the primary alone, a tertiary that came up with only
+            # one of the secondary's two paths looked complete here — the
+            # primary's paths were all present, missing_ips was empty, and the
+            # 3-path controller sat unrepaired forever (both tertiaries on the
+            # fresh 2026-08-24 deploy, always missing the secondary's second
+            # NIC; the len(ctrlrs) < 2 branch above cannot see it either).
+            expected_ips = _data_ips(primary_node)
+            if is_sec2 and primary_node.secondary_node_id:
+                try:
+                    _sec1 = db_controller.get_storage_node_by_id(
+                        primary_node.secondary_node_id)
+                    if _sec1.status in (StorageNode.STATUS_ONLINE,
+                                        StorageNode.STATUS_DOWN):
+                        expected_ips |= _data_ips(_sec1)
+                except KeyError:
+                    pass
+            # A duplicated address is invisible to the set comparison below --
+            # (96.179, 97.9, 97.9) reads as 2-of-2 -- so it must be checked
+            # separately or the node is reported healthy while carrying a
+            # surplus path. That is exactly what happened on 2026-08-25: the
+            # control plane saw nothing wrong for hours while the soak's path
+            # verifier counted 3-of-2 and eventually gave up. Two controllers
+            # on one address also give the bdev two unordered qpairs to the
+            # same target, so this is a fault to surface, not cosmetics.
+            # Only meaningful for a named controller: ``ret`` came from
+            # bdev_nvme_controller_list(bdev_name), and an empty name makes
+            # that return every controller on the node -- whose paths then
+            # look mutually "duplicated".
+            hub_bdev = (primary_node.hublvol.bdev_name
+                        if primary_node.hublvol else "")
+            duplicate_ips = (storage_node_ops.duplicate_attached_paths(ret)
+                             if hub_bdev else set())
+            if duplicate_ips:
+                # Detecting this without acting on it is what made the
+                # 2026-09-01 multipath soak unrunnable: LVS_4/hublvol carried
+                # peer 98.248 three times (97.36 twice, cntlid 1002 and 1003),
+                # the check logged "repair_multipath_controller will prune
+                # them" every cycle for 20 minutes, and nothing ever pruned --
+                # hublvol is in neither device_repair_jobs nor jm_repair_jobs,
+                # so repair_multipath_controller is never called for it. The
+                # soak's path gate wants a multiple of len(data_nics), saw 5,
+                # and gave up with "repair is stuck, not merely slow".
+                #
+                # Prune here, and deliberately do NOT re-attach: the detach
+                # removes every copy of the address, and the missing-path
+                # branch below reconciles it back through
+                # HublvolReconnectCoordinator, whose cooldown is what closes
+                # the "cntlid N are duplicated" race. Re-attaching inline
+                # would bypass that and could recreate the duplicate.
+                tr_type = "RDMA" if primary_node.active_rdma else "TCP"
+                pruned = False
+                try:
+                    pruned = storage_node_ops.prune_duplicate_paths(
+                        rpc_client, primary_node.hublvol.bdev_name, ret,
+                        primary_node.hublvol.nvmf_port, tr_type)
+                except Exception:
+                    logger.exception(
+                        "Failed to prune duplicate hublvol path(s) %s on %s",
+                        duplicate_ips, node.get_id())
+                if pruned:
+                    # Re-read so missing_ips below sees the pruned addresses
+                    # as missing and reconciles each back exactly once.
+                    ret = rpc_client.bdev_nvme_controller_list(
+                        primary_node.hublvol.bdev_name) or []
+                    attached_ips = storage_node_ops._collect_attached_ips(ret)
+                    logger.info(
+                        "Pruned duplicate hublvol path(s) %s on %s; %d path(s) "
+                        "remain, reconcile will restore them",
+                        duplicate_ips, node.get_id(), len(attached_ips))
+                else:
+                    logger.error(
+                        "Hublvol %s on %s has duplicate path(s) %s that could "
+                        "not be pruned -- node is NOT healthy",
+                        primary_node.hublvol.bdev_name, node.get_id(),
+                        duplicate_ips)
+                # Unhealthy for this cycle either way: the surplus path was
+                # real, and the reconcile has not completed yet.
+                passed = False
+
             missing_ips = expected_ips - attached_ips
             if missing_ips:
                 logger.info(
                     "Hublvol %s on %s missing paths: %s, reconciling via coordinator",
                     primary_node.hublvol.bdev_name, node.get_id(), missing_ips)
                 try:
-                    # All hublvol (re)attach goes through the single
-                    # cross-process coordinator, which serializes against any
-                    # other non-restart caller and enforces the attach cooldown
-                    # that closes the "cntlid N are duplicated" race.
+                    # Reconnect the TRANSPORT *and* rejoin the lvstore.
+                    #
+                    # This used to call HublvolReconnectCoordinator.reconcile()
+                    # directly, which only issues bdev_nvme_attach_controller --
+                    # its own docstring says the caller "can return immediately
+                    # and proceed to bdev_lvol_connect_hublvol / port-unblock".
+                    # Nothing here did, so a repaired hublvol was left with NVMe
+                    # paths up but never connected to the LVS.
+                    #
+                    # 2026-09-01, LVS_10: node ...4424 took a hublvol remove
+                    # event at 16:24:50, this path re-attached the controller at
+                    # 16:25:35, and the connect RPC never followed. The node sat
+                    # half-wired as secondary, so when IO reached it at 16:28:31
+                    # it could not redirect and instead triggered a leadership
+                    # switch ("Leadership changed due to receive new IO"). The
+                    # control plane then unblocked the old primary's port at
+                    # 16:28:37, the client went back to a node that was no
+                    # longer leader, and its IO was failed with a generic status
+                    # -> client EIO.
+                    #
+                    # connect_to_hublvol() is the complete operation: it still
+                    # routes the attach through the same coordinator (cooldown
+                    # and cntlid-duplicate protection intact, and it takes the
+                    # cross-process lock itself when none is handed in), then
+                    # stamps the role via bdev_lvol_set_lvs_opts and issues
+                    # bdev_lvol_connect_hublvol. It is idempotent: an already
+                    # attached path is skipped.
                     from simplyblock_core.utils.hublvol_reconnect import (
                         HublvolReconnectCoordinator,
                     )
-                    coordinator = HublvolReconnectCoordinator(db_controller)
+                    role = "tertiary" if is_sec2 else "secondary"
                     peers = [primary_node]
+                    failover_node = None
                     if is_sec2 and primary_node.secondary_node_id:
                         try:
                             sec1 = db_controller.get_storage_node_by_id(
                                 primary_node.secondary_node_id)
                             if repairs_allowed(sec1):
+                                failover_node = sec1
                                 peers.append(sec1)
                         except Exception:
                             pass
-                    coordinator.reconcile(
-                        node, primary_node, peers,
-                        role="tertiary" if is_sec2 else "secondary")
+
+                    # Two steps, not one. reconcile() adds the MISSING PATHS
+                    # to an existing controller -- that is the repair, and it
+                    # is the only thing that goes through the coordinator's
+                    # cooldown / cntlid-duplicate protection.
+                    coordinator = HublvolReconnectCoordinator(db_controller)
+                    coordinator.reconcile(node, primary_node, peers, role=role)
+
+                    # Then rejoin the lvstore. reconcile() deliberately stops
+                    # at the transport -- its docstring says the caller "can
+                    # return immediately and proceed to
+                    # bdev_lvol_connect_hublvol" -- and until now nothing here
+                    # did. On 2026-09-01 node ...4424 was re-attached at
+                    # 16:25:35 and never connected, so it sat half-wired as
+                    # secondary: when IO arrived at 16:28:31 it could not
+                    # redirect and triggered a leadership switch instead,
+                    # which is what led to the client EIO.
+                    #
+                    # connect_to_hublvol skips the attach when the remote bdev
+                    # is already present, so after reconcile() it contributes
+                    # only set_lvs_opts + connect_hublvol. Calling it INSTEAD
+                    # of reconcile() was wrong for exactly that reason: a
+                    # partially attached controller has its bdev, so the
+                    # missing path never got added (caught by
+                    # test_repairs_missing_primary_nic_path).
+                    connected = node.connect_to_hublvol(
+                        primary_node, failover_node=failover_node, role=role,
+                        rpc_timeout=HUBLVOL_REPAIR_RPC_TIMEOUT_SEC,
+                        lvs_node=primary_node)
+                    if not connected:
+                        logger.error(
+                            "Hublvol %s on %s: rejoin did not complete",
+                            primary_node.hublvol.bdev_name, node.get_id())
+                        passed = False
                 except Exception as e:
                     logger.error(
-                        "Failed to reconcile hublvol on %s: %s",
+                        "Failed to reconnect hublvol on %s: %s",
                         node.get_id(), e)
+                    passed = False
 
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), rpc_client=rpc_client)
         if not passed:
@@ -588,10 +737,12 @@ def _check_node_lvstore(
                                                     # Atomic: rebuild remote_devices on the freshly-read node
                                                     # inside the FDB tx so a concurrent node.status change is
                                                     # not clobbered (incident 2026-06-18).
-                                                    def _mut(nn, did=dev.get_id(), rd=remote_device):
+                                                    did = dev.get_id()
+
+                                                    def _mut(nn, did=did, remote_device=remote_device):
                                                         nn.remote_devices = [
                                                             r for r in nn.remote_devices if r.get_id() != did]
-                                                        nn.remote_devices.append(rd)
+                                                        nn.remote_devices.append(remote_device)
                                                         return True
 
                                                     db_controller.atomic_update(

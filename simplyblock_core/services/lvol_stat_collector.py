@@ -224,6 +224,10 @@ def main():
 
             pools_lvols_stats: dict[str, list[LVolStatObject]] = {}
             for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+                # Built once per node, not once per lvol below: only the
+                # lvol changes across that loop, not the node.
+                node_online = snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]
+                rpc_client = snode.rpc_client(timeout=3, retry=2) if node_online else None
 
                 for lvol in lvol_list:
                     if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
@@ -233,9 +237,8 @@ def main():
 
                     capacity_dict = {}
                     stats = []
-                    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                    if rpc_client is not None:
                         logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
-                        rpc_client = snode.rpc_client(timeout=3, retry=2)
                         ret = rpc_client.get_lvol_stats(lvol.lvol_uuid)
                         if ret:
                             stats.append(ret["bdevs"][0])

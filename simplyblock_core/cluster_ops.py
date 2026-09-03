@@ -279,6 +279,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_failure_domain=False,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
+                   alert_config: t.Optional[t.Dict[str, t.Any]] = None,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -369,6 +370,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     # from a legacy release, whose pre-existing bdevs need the one-shot
     # runtime flip via set_shared_placement.
     cluster.shared_placement = True
+    # New clusters create every distrib with v2 write protection from the
+    # start, so there is nothing to migrate and the runtime
+    # distr_write_protection_v2 RPC is never needed here. Only a cluster
+    # UPGRADED from a release without v2 goes through
+    # `cluster switch-write-protection`.
+    cluster.write_protection_v2 = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -415,7 +422,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
     cluster.spdk_vcpu_count = spdk_vcpu_count or 0
-    cluster.contact_point = contact_point
+    cluster.contact_point = contact_point or ""
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
     cluster.full_page_unmap = False
@@ -436,7 +443,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.backup_config = backup_config
 
     if not disable_monitoring:
-        utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
+        utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
@@ -542,6 +549,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         distr_bs=distr_bs, distr_chunk_bs=distr_chunk_bs, ha_type=ha_type, enable_node_affinity=enable_node_affinity,
         qpair_count=qpair_count, max_queue_size=max_queue_size, inflight_io_threshold=inflight_io_threshold,
         strict_node_anti_affinity=strict_node_anti_affinity, is_single_node=is_single_node, name=name,
+        max_subsys=max_subsys, hugepages_mem=hugepages_mem, spdk_vcpu_count=spdk_vcpu_count,
         cr_name=cr_name, cr_namespace=cr_namespace, cr_plural=cr_plural, fabric=fabric,
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
@@ -565,6 +573,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
                 cr_namespace=None, cr_plural=None, fabric="tcp",
+                max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
@@ -601,6 +610,12 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     # from a legacy release, whose pre-existing bdevs need the one-shot
     # runtime flip via set_shared_placement.
     cluster.shared_placement = True
+    # New clusters create every distrib with v2 write protection from the
+    # start, so there is nothing to migrate and the runtime
+    # distr_write_protection_v2 RPC is never needed here. Only a cluster
+    # UPGRADED from a release without v2 goes through
+    # `cluster switch-write-protection`.
+    cluster.write_protection_v2 = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -818,10 +833,10 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                     if node.enable_ha_jm:
                         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
 
-                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
-                        n.remote_devices = rd
-                        if rjd is not None:
-                            n.remote_jm_devices = rjd
+                    def _apply(snode, devices=remote_devices, jm_devices=remote_jm_devices):
+                        snode.remote_devices = devices
+                        if jm_devices is not None:
+                            snode.remote_jm_devices = jm_devices
                     db_controller.atomic_update(node, _apply)
                 except Exception as e:
                     logger.warning(
@@ -839,10 +854,10 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(
                             node, only_node_id=owner_id)
 
-                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
-                        n.remote_devices = rd
-                        if rjd is not None:
-                            n.remote_jm_devices = rjd
+                    def _apply(snode, devices=remote_devices, jm_devices=remote_jm_devices):
+                        snode.remote_devices = devices
+                        if jm_devices is not None:
+                            snode.remote_jm_devices = jm_devices
                     db_controller.atomic_update(node, _apply)
                 except Exception as e:
                     logger.warning(
@@ -1110,14 +1125,16 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         set_cluster_status(cl_id, ols_status)
         raise
 
-    # Failure-domain coverage check (best-effort: warn, don't block). To
-    # survive losing a whole failure domain we need at least npcs+1 distinct
-    # domains; with fewer, placement falls back to host-disjoint and a domain
-    # outage may exceed the cluster's fault tolerance.
+    # Failure-domain coverage check (best-effort: warn, don't block). A 2-FD
+    # layout can never absorb a second independent failure once one domain
+    # is down, so the hard minimum below (enforced at fresh activation) is
+    # npcs+2, not npcs+1 -- this warning uses the same number so a
+    # reactivation that's short of it gets the same signal without being
+    # blocked (recovering a drifted layout must not turn into an outage).
     fd_desired_layout: t.Dict[str, t.Tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
-        min_domains = cluster.distr_npcs + 1
+        min_domains = cluster.distr_npcs + 2
         if len(distinct_domains) < min_domains:
             logger.warning(
                 "Failure-domain feature is enabled but only %d distinct failure "
@@ -1157,9 +1174,15 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                              f"a host must sit entirely in one domain")
 
             fd_host_counts = Counter(host_fd.values())
-            if len(fd_host_counts) < 2:
-                _fd_fail("failure domains are enabled but all hosts are in a "
-                         "single domain; at least two domains are required")
+            # See fd_activation_domain_count_violation's docstring: npcs+2
+            # domains, not just the bare rotation-correctness minimum, so a
+            # later single add/remove has a spare candidate instead of
+            # stranding another node's secondary/tertiary with none at all.
+            # This also subsumes the plain "at least two domains" floor.
+            domain_count_violation = fd_planner.fd_activation_domain_count_violation(
+                cluster.distr_npcs, len(fd_host_counts))
+            if domain_count_violation:
+                _fd_fail(domain_count_violation)
             if len(set(fd_host_counts.values())) != 1:
                 _fd_fail(
                     f"failure domains must hold an EQUAL number of hosts at "
@@ -1196,6 +1219,18 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     used_nodes_as_sec: t.List[str] = []
     used_nodes_as_tertiary: t.List[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    # Process primaries grouped by failure domain. get_secondary_nodes/
+    # get_secondary_nodes_2 (and their splice repairs) already sort their own
+    # candidate scan by domain, which alone is enough to keep the assignment
+    # domain-disjoint when domains are evenly sized. But once any node needs
+    # splice-repair (uneven domain sizes, some conflict unavoidable), the
+    # repair works off whatever partial assignment already exists -- so which
+    # primary gets processed first still changes the outcome. Grouping here
+    # too makes the result deterministic instead of order-dependent in that
+    # case. A no-op when FD is disabled (all nodes share one failure_domain).
+    # Fresh FD+HA activation bypasses this fallback via fd_desired_layout,
+    # but reactivation and non-HA/non-fresh paths still rely on it.
+    snodes = sorted(snodes, key=lambda n: n.failure_domain)
     if cluster.ha_type == "ha":
         for snode in snodes:
             # Do not assign secondary to removed node
@@ -1215,16 +1250,21 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     secondary_nodes = [fd_desired_layout[snode.get_id()][0]]
                 else:
                     secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
-                if not secondary_nodes:
+                if secondary_nodes:
+                    snode = db_controller.get_storage_node_by_id(snode.get_id())
+                    snode.secondary_node_id = secondary_nodes[0]
+                    snode.write_to_db()
+                    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                    sec_node.lvstore_stack_secondary = snode.get_id()
+                    sec_node.write_to_db()
+                elif not storage_node_ops.splice_stranded_secondary(snode):
+                    # get_secondary_nodes()'s greedy walk closed a cycle that
+                    # excludes this node, and there isn't even one existing
+                    # pairing left to splice it into (only possible this early
+                    # in the pass, before 2+ pairings exist).
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, No enough secondary nodes")
-
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
-                snode.secondary_node_id = secondary_nodes[0]
-                snode.write_to_db()
-                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                sec_node.lvstore_stack_secondary = snode.get_id()
-                sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
 
             # Assign second secondary when max_fault_tolerance >= 2
@@ -1243,15 +1283,19 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                         exclude_failure_domains=[sec_node.failure_domain],
                         exclude_physical_labels=[sec_node.physical_label],
                     )
-                if not secondary_nodes_2:
+                if secondary_nodes_2:
+                    snode.tertiary_node_id = secondary_nodes_2[0]
+                    snode.write_to_db()
+                    sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+                    sec_node_2.lvstore_stack_tertiary = snode.get_id()
+                    sec_node_2.write_to_db()
+                elif not storage_node_ops.splice_stranded_tertiary(snode):
+                    # get_secondary_nodes_2()'s greedy walk closed a cycle that
+                    # excludes this node, and there isn't even one existing
+                    # tertiary pairing left to splice it into.
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
-
-                snode.tertiary_node_id = secondary_nodes_2[0]
-                snode.write_to_db()
-                sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
-                sec_node_2.lvstore_stack_tertiary = snode.get_id()
-                sec_node_2.write_to_db()
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
 
     # Pass 1: bring up the primary LVS on every online primary node.
@@ -2032,6 +2076,102 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
     return True
 
 
+def switch_write_protection(cl_id) -> bool:
+    """Move a cluster from v1 to v2 distrib write protection.
+
+    Two steps, strictly in this order, so the recorded generation never claims
+    more than the data plane has actually done:
+
+      1. Send the runtime ``distr_write_protection_v2(enable=True)`` RPC to
+         every ONLINE storage node, with no ``name`` so it covers every distrib
+         bdev on that node. This is the only way an already-created distrib
+         gains v2 -- a create parameter cannot reach a bdev that exists. Every
+         online node must succeed; a single failure aborts the switch and
+         leaves the cluster on v1, so recovery is just re-running the command.
+
+      2. Only then stamp the generation: into each node's stored distrib params
+         (so a restart replays the right key) and onto the cluster row (so
+         newly created distribs, and nodes added later, pick it up).
+
+    Offline nodes are not a failure and are not skipped: they have no running
+    bdevs to migrate, and step 2 rewrites their stored stack, so their distribs
+    come back on v2 when they next restart.
+
+    Idempotent: a cluster already on v2 returns True untouched.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if cluster.write_protection_v2:
+        logger.info(
+            "Cluster %s already runs v2 write protection; nothing to do", cl_id)
+        return True
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    online = [n for n in nodes if n.status == StorageNode.STATUS_ONLINE]
+    if not online:
+        logger.error(
+            "Cluster %s has no online storage node; cannot switch write "
+            "protection", cl_id)
+        return False
+
+    # Step 1: the runtime RPC on every online node.
+    failures = []
+    for node in online:
+        try:
+            if node.rpc_client().distr_write_protection_v2(enable=True):
+                logger.info("Node %s: v2 write protection activated",
+                            node.get_id())
+            else:
+                failures.append(node.get_id())
+                logger.error(
+                    "Node %s rejected distr_write_protection_v2(enable=True)",
+                    node.get_id())
+        except Exception as e:
+            failures.append(node.get_id())
+            logger.error(
+                "Node %s raised on distr_write_protection_v2(enable=True): %s",
+                node.get_id(), e)
+
+    if failures:
+        logger.error(
+            "Aborting write-protection switch: %d of %d online node(s) failed "
+            "(%s). The cluster stays on v1 -- fix those nodes and re-run.",
+            len(failures), len(online), ", ".join(failures))
+        return False
+
+    # Step 2a: persist the generation in every stored distrib stack entry, on
+    # every node including offline ones. Atomic compare-and-set so the long
+    # per-node RPC loop above cannot clobber a concurrent node.status write
+    # (lost-update class -- incident 2026-06-18).
+    for node in nodes:
+        def _mut(n):
+            changed = False
+            for entry in (n.lvstore_stack or []):
+                if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                    continue
+                params = entry.get("params")
+                if not isinstance(params, dict):
+                    continue
+                before = ("write_protection" in params,
+                          "write_protection_v2" in params)
+                storage_node_ops.apply_write_protection_mode(params, True)
+                if before != ("write_protection" in params,
+                              "write_protection_v2" in params):
+                    changed = True
+            return changed
+
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()), _mut)
+
+    # Step 2b: the cluster row (atomic, so it does not clobber a concurrent
+    # cluster.status write from set_cluster_status).
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cl_id),
+        lambda c: setattr(c, "write_protection_v2", True))
+    logger.info("Cluster %s switched to v2 write protection (%d node(s))",
+                cl_id, len(online))
+    return True
+
+
 def list() -> t.List[dict]:
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
@@ -2435,6 +2575,26 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     # upgrade before anything was changed. Completed later by
     # `cluster upgrade-complete` (upgrade_complete below).
     release_upgrades.run_pre_update(cluster)
+
+    # An upgraded cluster's existing distribs carry v1 write protection, and no
+    # create parameter can retrofit a bdev that already exists -- only the
+    # runtime distr_write_protection_v2 RPC can, via
+    # `sbctl cluster switch-write-protection`. Stamp the generation back to v1
+    # BEFORE the rolling restart below, because those restarts replay each
+    # node's stored distrib stack and must replay it under the key the running
+    # bdevs actually use.
+    #
+    # This also demotes a cluster that was already on v2: after an upgrade the
+    # switch has to be re-run either way, and claiming v2 we have not verified
+    # on the new image is the one failure mode worth avoiding here.
+    if cluster.write_protection_v2:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "write_protection_v2", False))
+        logger.info(
+            "Cluster %s stamped back to v1 write protection for the upgrade; "
+            "run `sbctl cluster switch-write-protection` once every node is "
+            "back online", cluster_id)
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":

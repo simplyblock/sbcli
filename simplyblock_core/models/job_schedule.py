@@ -1,7 +1,7 @@
 # coding=utf-8
 import datetime
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class JobSchedule(BaseModel):
@@ -45,12 +45,12 @@ class JobSchedule(BaseModel):
     date: int = 0
     device_id: str = ""
     function_name: str = ""
-    function_params: dict = {}
+    function_params: dict = default_factory(dict)
     function_result: str = ""
     max_retry: int = -1
     node_id: str = ""
     retry: int = 0
-    sub_tasks: list = []
+    sub_tasks: list = default_factory(list)
     # Hostname of the runner that currently holds this task's lease. Empty
     # means unclaimed. Combined with updated_at (refreshed on every write) this
     # gives a soft lease: a different host may take over only once the lease
