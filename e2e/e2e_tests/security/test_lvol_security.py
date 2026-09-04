@@ -809,6 +809,20 @@ class SecurityTestBase(TestClusterBase):
                     self.created_storage_classes.remove(canary_sc)
             except Exception as exc:
                 self.logger.warning(f"[canary] cleanup {canary_sc}: {exc}")
+            # Delete the canary's StoragePool too. Without this it outlives
+            # the check and, because it asks for the same dhchap +
+            # allowedNodes as _k8s_setup_dhchap_pool_subset does,
+            # add_storage_pool hands it straight back to the first real test
+            # -- so the whole suite ends up running against a pool named
+            # "canary...". Functionally equivalent, but it leaks a pool per
+            # run and makes every downstream log line misleading.
+            canary_crd = self._pool_crd_name
+            if canary_crd:
+                try:
+                    self.sbcli_utils.delete_storage_pool(canary_crd)
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[canary] cleanup pool {canary_crd}: {exc}")
             (self.pool_name, self._storage_class_name,
              self._dhchap_node_label, self._pool_crd_name) = saved
 
@@ -1305,12 +1319,19 @@ class SecurityTestBase(TestClusterBase):
         """
         k8s = self._ensure_k8s_utils()
         try:
-            out = k8s.exec_in_pod(
+            # exec_in_pod returns (stdout, stderr) -- unlike get_pod_logs and
+            # get_pod_events on the same class, which return a bare string.
+            out, err = k8s.exec_in_pod(
                 pod_name, "grep ' /spdkvol ' /proc/mounts || cat /proc/mounts")
         except Exception as exc:
             self.logger.warning(
                 f"{TOK_WEAK_EVIDENCE} [{tc}] could not read /proc/mounts in "
                 f"{pod_name}: {exc}")
+            return
+        if err and not (out or "").strip():
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} [{tc}] reading /proc/mounts in "
+                f"{pod_name} errored: {err!r}")
             return
         line = next((ln for ln in (out or "").splitlines()
                      if " /spdkvol " in ln), "")
@@ -6805,13 +6826,20 @@ class TestDhchapPodScheduling(SecurityTestBase):
         # Write known data so the re-attach below proves the volume is USABLE
         # across allowed nodes, not merely mountable.
         marker = f"dhchap-{_rand_suffix()}"
+        wrote_marker = False
         try:
-            k8s.exec_in_pod(
+            # exec_in_pod already wraps the command in `sh -c`, so pass the
+            # bare shell line. It returns (stdout, stderr).
+            _, werr = k8s.exec_in_pod(
                 pod_name_1,
-                f"sh -c 'echo {marker} > /spdkvol/marker.txt && sync'")
-            wrote_marker = True
+                f"echo {marker} > /spdkvol/marker.txt && sync")
+            if werr and werr.strip():
+                self.logger.warning(
+                    f"{TOK_WEAK_EVIDENCE} TC-DHCHAP-SCHED-003: writing the "
+                    f"marker file reported: {werr!r}")
+            else:
+                wrote_marker = True
         except Exception as exc:
-            wrote_marker = False
             self.logger.warning(
                 f"{TOK_WEAK_EVIDENCE} TC-DHCHAP-SCHED-003: could not write a "
                 f"marker file: {exc}")
@@ -6828,12 +6856,12 @@ class TestDhchapPodScheduling(SecurityTestBase):
             pvc_name, pod_2_target, expect_success=True,
             pod_prefix="dhsched-pod2")
         if wrote_marker:
-            out = k8s.exec_in_pod(pod_name_2, "cat /spdkvol/marker.txt")
+            out, rerr = k8s.exec_in_pod(pod_name_2, "cat /spdkvol/marker.txt")
             assert marker in (out or ""), (
                 f"TC-DHCHAP-SCHED-004: data written on "
                 f"{allowed_node_names[0]!r} is not readable on "
                 f"{pod_2_target!r} — the volume re-attached but the data did "
-                f"not survive. got: {out!r}")
+                f"not survive. got out={out!r} err={rerr!r}")
             self.logger.info(
                 f"TC-DHCHAP-SCHED-004: marker survived the re-attach to "
                 f"{pod_2_target!r}")
