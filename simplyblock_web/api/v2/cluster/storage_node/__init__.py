@@ -1,3 +1,4 @@
+import builtins
 from threading import Thread
 from uuid import UUID
 
@@ -12,7 +13,6 @@ from ... import util as util
 from ..._dependencies import Cluster, StorageNode
 from .device import api as device_api
 from ..._dtos import StorageNodeDTO, TaskDTO
-import builtins
 
 
 api = APIRouter()
@@ -20,7 +20,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-nodes:list')
-def list(cluster: Cluster) -> list[StorageNodeDTO]:
+def list(cluster: Cluster) -> builtins.list[StorageNodeDTO]:
     data = []
     for storage_node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
         node_stat_obj = None

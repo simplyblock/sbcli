@@ -1,3 +1,4 @@
+import builtins
 from threading import Thread
 from typing import Annotated, Literal
 from uuid import UUID
@@ -111,7 +112,7 @@ class ClusterParams(BaseModel):
 
 
 @api.get('/', name='clusters:list')
-def list() -> list[ClusterDTO]:
+def list() -> builtins.list[ClusterDTO]:
     data = []
     for cluster in db.get_clusters():
         stat_obj = None
