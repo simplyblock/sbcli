@@ -36,6 +36,7 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from tests._mocks import unique_ip
 
 
 def _device(uuid, node_id, status, io_error=False, retries_exhausted=False,
@@ -59,7 +60,7 @@ def _node(uuid, status):
     # Distinct per-node mgmt_ip: get_next_cluster_status dedups affected
     # nodes by physical host (mgmt_ip); leaving the model default ("") on
     # every node collapses all affected nodes into one and undercounts.
-    n.mgmt_ip = f"10.99.0.{abs(hash(uuid)) % 250 + 1}"
+    n.mgmt_ip = unique_ip(uuid)
     return n
 
 

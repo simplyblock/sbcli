@@ -47,6 +47,7 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from tests._mocks import unique_ip
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +75,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, mgmt_ip=None,
     n = MagicMock(spec=StorageNode)
     n.status = status
     n.cluster_id = cluster_id
-    n.mgmt_ip = mgmt_ip or f"10.0.0.{abs(hash(uuid)) % 250 + 1}"
+    n.mgmt_ip = mgmt_ip or unique_ip(uuid)
     # Default False: a bare MagicMock attribute is truthy, which would make
     # the re-queue scan treat every node as a deliberate shutdown and skip it.
     n.auto_restart_disabled = False

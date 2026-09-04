@@ -24,7 +24,7 @@ SUSPENDED after CLUSTER_ACTIVATION_WATCHDOG_SEC.
 """
 
 import unittest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
@@ -131,14 +131,14 @@ class TestActivationNodeGate(unittest.TestCase):
         self.assertIn("restart task", reason)
 
     def test_recently_online_blocks(self):
-        recent = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+        recent = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
         nodes = [_node("n0"), _node("n1", online_since=recent)]
         ok, reason = self._gate(nodes)
         self.assertFalse(ok)
         self.assertIn("30 seconds", reason)
 
     def test_settled_online_ok(self):
-        old = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+        old = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
         nodes = [_node("n0", online_since=old), _node("n1", online_since=old)]
         ok, reason = self._gate(nodes)
         self.assertTrue(ok, reason)
@@ -165,12 +165,12 @@ class TestActivationWatchdog(unittest.TestCase):
         ops.set_cluster_status.assert_not_called()
 
     def test_recent_activation_not_reverted(self):
-        recent = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+        recent = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
         ops = self._run(recent)
         ops.set_cluster_status.assert_not_called()
 
     def test_stuck_activation_reverted_to_suspended(self):
-        stale = (datetime.now(timezone.utc) - timedelta(seconds=3600)).isoformat()
+        stale = (datetime.now(UTC) - timedelta(seconds=3600)).isoformat()
         ops = self._run(stale)
         ops.set_cluster_status.assert_called_once_with("cluster-1", Cluster.STATUS_SUSPENDED)
 

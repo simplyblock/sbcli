@@ -41,7 +41,7 @@ Usage:
 
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 
 try:
     import requests
@@ -74,16 +74,16 @@ if not CLUSTER_SECRET:
 if START_TIME_STR:
     start_dt = datetime.fromisoformat(START_TIME_STR.replace(" ", "T"))
     if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=timezone.utc)
+        start_dt = start_dt.replace(tzinfo=UTC)
     end_dt = start_dt + timedelta(minutes=DURATION_MINUTES)
 elif DURATION_MINUTES:
     # No start time but duration given -> last N minutes
-    end_dt = datetime.now(timezone.utc)
+    end_dt = datetime.now(UTC)
     start_dt = end_dt - timedelta(minutes=DURATION_MINUTES)
 else:
     # No start time, no duration -> collect everything Graylog has
-    start_dt = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    end_dt = datetime.now(timezone.utc)
+    start_dt = datetime(2020, 1, 1, tzinfo=UTC)
+    end_dt = datetime.now(UTC)
 
 FROM_ISO = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 TO_ISO = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -419,8 +419,8 @@ def gl_discover_containers():
     search_url = f"{GRAYLOG_BASE}/search/universal/absolute"
     pairs = set()
 
-    t_start = datetime.fromisoformat(FROM_ISO.replace("Z", "+00:00"))
-    t_end = datetime.fromisoformat(TO_ISO.replace("Z", "+00:00"))
+    t_start = datetime.fromisoformat(FROM_ISO)
+    t_end = datetime.fromisoformat(TO_ISO)
     total_minutes = (t_end - t_start).total_seconds() / 60
 
     # Use ~10-20 slices, minimum 1 minute each
@@ -551,8 +551,8 @@ def gl_fetch_container_logs(container_name, source, out_path):
             written = _write_window(fh, query, FROM_ISO, TO_ISO)
         else:
             # Split into 10-minute sub-windows
-            t = datetime.fromisoformat(FROM_ISO.replace("Z", "+00:00"))
-            t_end = datetime.fromisoformat(TO_ISO.replace("Z", "+00:00"))
+            t = datetime.fromisoformat(FROM_ISO)
+            t_end = datetime.fromisoformat(TO_ISO)
             chunk = timedelta(minutes=10)
             while t < t_end:
                 chunk_end = min(t + chunk, t_end)

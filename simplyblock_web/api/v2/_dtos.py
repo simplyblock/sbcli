@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from ipaddress import IPv4Address
 from typing import List, Literal, Optional, cast
 from uuid import UUID
@@ -294,7 +294,7 @@ class SnapshotDTO(BaseModel):
             size=model.size,
             used_size=model.used_size,
             migrating=is_migrating,
-            created_at=datetime.fromtimestamp(model.created_at, tz=timezone.utc),
+            created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
             lvol=str(
                 request.url_for(
                     #"clusters:pools:volumes:detail",

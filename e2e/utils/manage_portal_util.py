@@ -1,7 +1,7 @@
 # utils/supabase_test_runs.py
 import os
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Tuple, Optional
 
 SUPABASE_TOKEN = os.getenv("SUPABASE_ANON_KEY")
@@ -27,7 +27,7 @@ DEFAULT_HEADERS = {
 }
 
 def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 TEST_TYPES = {
     "e2e":   "08a274a3-4cd2-43ca-8b4d-072dc5fae360",  # E2E Tests

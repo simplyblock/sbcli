@@ -49,7 +49,7 @@ class Backup(BaseModel):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
         super().write_to_db(kv_store)
 
 
@@ -86,7 +86,7 @@ class BackupPolicy(BaseModel):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
         super().write_to_db(kv_store)
 
 

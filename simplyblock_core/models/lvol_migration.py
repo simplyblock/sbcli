@@ -145,7 +145,7 @@ class LVolMigration(BaseModel):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
         self._merge_external_cancel(kv_store)
         super().write_to_db(kv_store)
 

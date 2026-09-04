@@ -59,7 +59,7 @@ def _task_finish(task, result):
     already finished (or gone) — callers gating side effects (give-up
     OFFLINE flip, re-queue) on having won the transition must check it.
     """
-    now = str(datetime.datetime.now(datetime.timezone.utc))
+    now = str(datetime.datetime.now(datetime.UTC))
     wrote = {"done": False}
 
     def _mutate(t):
@@ -87,7 +87,7 @@ def _task_update(task, mutate):
     ``mutate`` may be replayed on transaction conflict; it must only mutate
     the object passed to it (no I/O, no other writes).
     """
-    now = str(datetime.datetime.now(datetime.timezone.utc))
+    now = str(datetime.datetime.now(datetime.UTC))
 
     def _mutate(t):
         if t.status == JobSchedule.STATUS_DONE or t.canceled:

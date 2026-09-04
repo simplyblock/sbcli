@@ -5397,7 +5397,7 @@ def restart_storage_node(
                 # anyway, but we use a direct write here to avoid any
                 # second-order effects from the helper).
                 post_node.status = StorageNode.STATUS_OFFLINE
-                post_node.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+                post_node.updated_at = str(datetime.datetime.now(datetime.UTC))
                 post_node.online_since = ""
                 # This would disable adding further node restart tasks.
                 # if this restart was because of a restart task, then the same task would continue,
@@ -5694,6 +5694,23 @@ def _restart_storage_node_impl(
         max_lvol = cluster_max_subsys
     if not max_prov and cluster_hp_mem:
         max_prov = cluster_hp_mem
+
+    if max_lvol and max_lvol != snode.max_lvol:
+        # Occupancy guard: never adopt a subsystem limit below what the node
+        # already serves. Restart recreates every existing subsystem
+        # record-driven, so a smaller max_lvol would size huge pages and
+        # iobuf pools for fewer subsystems than actually come back
+        # (undersized SPDK). Typical trigger: `cluster update --max-subsys`
+        # on an upgraded cluster whose legacy nodes carry larger, divergent
+        # per-node values from before the setting became cluster-wide.
+        current_subsys = lvol_controller.count_lvol_subsystems(snode)
+        if max_lvol < current_subsys:
+            logger.error(
+                f"Refusing max_lvol {max_lvol} on node {snode.get_id()}: the "
+                f"node already serves {current_subsys} subsystems; the lowest "
+                f"adoptable value is {current_subsys}. Existing subsystems "
+                f"are never torn down by a limit change.")
+            return False
 
     if not utils.vcpu_requirement_met(snode.cpu, cluster_vcpu_count):
         # Same rule as add-node: refuse rather than run SPDK on fewer cores
@@ -7081,6 +7098,32 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     if not keep_auto_restart:
         snode.auto_restart_disabled = True
         snode.write_to_db(db_controller.kv_store)
+        # The flag alone is not enough: it is enforced at ENQUEUE time only
+        # (tasks_controller.add_node_to_auto_restart, "the single chokepoint
+        # for every auto-restart queue path"). tasks_runner_restart never
+        # consults it. So an FN_NODE_RESTART row queued BEFORE the flag was
+        # set survives, executes unconditionally, and its ONLINE transition
+        # clears the flag again -- the deliberate-stop intent destroyed by the
+        # very task it was meant to prevent. Live 2026-09-03: a cluster
+        # graceful-shutdown left s7457 and zdgtb ONLINE because two such rows
+        # fired seconds after the sweep passed them.
+        #
+        # Reap them here, mirroring what set_node_status already does on the
+        # opposite transition (ONLINE cancels obsolete restart rows). This
+        # also gives the runner its dequeue-side check for free -- it already
+        # honours task.canceled -- without a new field and without breaking
+        # ensure_node_restart_task, which deliberately bypasses the flag
+        # because an explicit `sn restart` is the operator intervention the
+        # flag is waiting for. A restart queued AFTER this point is exactly
+        # that, and is left alone.
+        #
+        # current_restart_task_id is excluded: the restart runner drives this
+        # very function as its kill step, so cancelling its task here would
+        # abort the restart that is doing the shutting down.
+        tasks_controller.cancel_pending_node_restart_tasks(
+            snode.cluster_id, node_id,
+            exclude_task_id=current_restart_task_id,
+            reason="node deliberately shut down")
 
     # Step 2: cancel migration tasks while controllers are still up.
     pending_tasks = db_controller.get_job_tasks(snode.cluster_id)
@@ -7751,7 +7794,7 @@ def set_node_status(node_id, status, caused_by="monitor"):
         logger.error(f"set_node_status: node {node_id} not found")
         return False
 
-    now = str(datetime.datetime.now(datetime.timezone.utc))
+    now = str(datetime.datetime.now(datetime.UTC))
     # verdict communicates the (single, committed) outcome of the mutator out
     # of the transaction so the irreversible work — event emission, peer
     # broadcast, task cancellation, error logging — happens exactly once,
