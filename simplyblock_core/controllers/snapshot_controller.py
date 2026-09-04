@@ -533,6 +533,72 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
             cluster_id, node.get_id(), bdev_name, primary_node.get_id())
 
 
+def check_snapshot_capacity(pool, cluster, lvol, all_lvols=None, all_snaps=None):
+    """Admission control for taking a snapshot, at pool AND cluster level.
+
+    A new snapshot immediately owns the source volume's utilized bytes (the
+    blobstore hands the volume's allocated clusters to the snapshot, the
+    volume continues as a thin overlay), so the snapshot must be charged at
+    the source's UTILIZED size — not the source's provisioned size. Block
+    the snapshot when
+
+        provisioned-capacity limit
+          - sum of provisioned volume sizes
+          - actual utilization by existing snapshots
+        <  utilized size of the source volume
+
+    on either level: the pool (pool_max_size against
+    get_pool_total_capacity, which is exactly that sum) or the cluster
+    (prov_cap_crit percent of effective cluster capacity against the
+    collector's lvol-only size_prov plus get_cluster_snapshot_utilization).
+    Unlimited pools/clusters skip the respective scans entirely; a missing
+    stats record falls back to the provisioned size (conservative).
+
+    Returns an error message, or None when the snapshot is admitted.
+    """
+    size = lvol.size
+    if pool.lvol_max_size > 0 or pool.pool_max_size > 0 or cluster.prov_cap_crit:
+        rec = db_controller.get_lvol_stats(lvol, 1)
+        if rec:
+            size = rec[0].size_used
+
+    if 0 < pool.lvol_max_size < size:
+        return (f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, "
+                f"LVol size: {utils.humanbytes(size)} must be below this limit")
+
+    if pool.pool_max_size > 0:
+        # Only load the full lvol/snapshot sets when a pool size limit is set
+        # (the capacity sum). Unlimited pools — the common case — skip both scans.
+        if not all_lvols:
+            all_lvols = db_controller.get_mini_lvols()
+        if not all_snaps:
+            all_snaps = db_controller.get_mini_snapshots()
+        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
+        if total + size > pool.pool_max_size:
+            return (f"Cannot take snapshot: pool capacity would reach "
+                    f"{utils.humanbytes(total + size)} of "
+                    f"{utils.humanbytes(pool.pool_max_size)} (snapshot inherits "
+                    f"{utils.humanbytes(size)} utilized from the volume)")
+
+    if cluster.prov_cap_crit:
+        records = db_controller.get_cluster_capacity(cluster, 1)
+        if records and records[0].size_total > 0:
+            # size_prov is lvol-only (see capacity_and_stats_collector);
+            # snapshots hold ACTUAL bytes on top of it.
+            if not all_snaps:
+                all_snaps = db_controller.get_mini_snapshots()
+            snap_used = pool_controller.get_cluster_snapshot_utilization(
+                cluster.get_id(), all_snaps=all_snaps)
+            cl_rec = records[0]
+            util = int(((cl_rec.size_prov + snap_used + size) / cl_rec.size_total) * 100)
+            if cluster.prov_cap_crit < util:
+                return (f"Cannot take snapshot: cluster provisioned cap would "
+                        f"reach {util}% of the {cluster.prov_cap_crit}% limit "
+                        f"(snapshot inherits {utils.humanbytes(size)} utilized "
+                        f"from the volume)")
+    return None
+
+
 def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
         bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
     try:
@@ -625,40 +691,19 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
-    # The stats read only refines the size used for the pool-limit checks
-    # below; on unlimited pools (the common case) its result is never
-    # consulted, so skip the FDB stats lookup entirely.
-    size = lvol.size
-    if pool.lvol_max_size > 0 or pool.pool_max_size > 0:
-        rec = db_controller.get_lvol_stats(lvol, 1)
-        if rec:
-            size = rec[0].size_used
-
-    if 0 < pool.lvol_max_size < size:
-        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
-        logger.error(msg)
-        return False, msg
-
-    if pool.pool_max_size > 0:
-        # Only load the full lvol/snapshot sets when a pool size limit is set
-        # (the capacity sum). Unlimited pools — the common case — skip both scans.
-        if not all_lvols:
-            all_lvols = db_controller.get_mini_lvols()
-        if not all_snaps:
-            all_snaps = db_controller.get_mini_snapshots()
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
-        if total + size > pool.pool_max_size:
-            msg = f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
-            logger.error(msg)
-            return False, msg
-        if total + lvol.size > pool.pool_max_size:
-            msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
-            logger.error(msg)
-            return False, msg
-
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
+
+    # Pool- and cluster-level capacity admission: the snapshot is charged at
+    # the source volume's UTILIZED size (see check_snapshot_capacity). This
+    # replaces the former extra pool check at the source's full provisioned
+    # size, which rejected snapshots the capacity model actually allows.
+    cap_error = check_snapshot_capacity(pool, cluster, lvol,
+                                        all_lvols=all_lvols, all_snaps=all_snaps)
+    if cap_error:
+        logger.error(cap_error)
+        return False, cap_error
 
     snap_vuid = utils.get_random_snapshot_vuid()
     snap_bdev_name = f"SNAP_{snap_vuid}"
