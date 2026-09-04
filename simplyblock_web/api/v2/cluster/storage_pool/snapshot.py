@@ -1,4 +1,3 @@
-from typing import List
 
 from fastapi import APIRouter, Response, Request
 
@@ -14,7 +13,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-pools:snapshots:list')
-def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[SnapshotDTO]:
+def list(request: Request, cluster: Cluster, pool: StoragePool) -> list[SnapshotDTO]:
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot in db.get_snapshots_by_pool_id(pool.get_id())

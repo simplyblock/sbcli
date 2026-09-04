@@ -2,7 +2,6 @@
 import os
 import requests
 from datetime import datetime, UTC
-from typing import Tuple, Optional
 
 SUPABASE_TOKEN = os.getenv("SUPABASE_ANON_KEY")
 if not SUPABASE_TOKEN:
@@ -52,7 +51,7 @@ ENVIRONMENTS_BY_SUFFIX = {
 FAILURE_REASON_OTHER = "01d766fa-78d5-4215-8ffb-2e99b4877504"
 
 
-def resolve_environment_id_from_ip(mgmt_ip: str) -> Optional[str]:
+def resolve_environment_id_from_ip(mgmt_ip: str) -> str | None:
     """
     Given a management node IP like '10.10.10.81', derive '.81' and map to environment_id.
     """
@@ -63,7 +62,7 @@ def resolve_environment_id_from_ip(mgmt_ip: str) -> Optional[str]:
     except Exception:
         return None
 
-def detect_fe_be_tags(ssh_obj, client_ip: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def detect_fe_be_tags(ssh_obj, client_ip: str) -> tuple[str | None, str | None, str | None, str | None]:
     cmd = "sudo docker images --digests --format '{{.Repository}} {{.Tag}} {{.Digest}}'"
     out, _ = ssh_obj.exec_command(client_ip, cmd)
 
@@ -92,16 +91,16 @@ class TestRunsAPI:
         if test_type_key not in TEST_TYPES:
             raise ValueError(f"Unknown test_type '{test_type_key}'. Valid: {list(TEST_TYPES.keys())}")
         self.test_type_id = TEST_TYPES[test_type_key]
-        self.run_id: Optional[str] = None
+        self.run_id: str | None = None
 
     def create_run(
         self,
         jira_ticket: str,
         environment_id: str,  # now required (we’ll resolve from mgmt IP in caller)
-        github_branch_frontend: Optional[str] = None,
-        github_branch_backend: Optional[str] = None,
-        github_commit_tag_frontend: Optional[str] = None,
-        github_commit_tag_backend: Optional[str] = None,
+        github_branch_frontend: str | None = None,
+        github_branch_backend: str | None = None,
+        github_commit_tag_frontend: str | None = None,
+        github_commit_tag_backend: str | None = None,
     ) -> str:
         payload = {
             "test_type_id": self.test_type_id,
@@ -127,8 +126,8 @@ class TestRunsAPI:
         self,
         status: str,  # "completed" | "failed"
         completion_comment: str,
-        completion_jira_ticket: Optional[str] = None,
-        failure_reason_id: Optional[str] = None,
+        completion_jira_ticket: str | None = None,
+        failure_reason_id: str | None = None,
         errors: dict = None,
     ):
         if not self.run_id:

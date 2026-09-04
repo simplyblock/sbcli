@@ -1,4 +1,3 @@
-# coding=utf-8
 """Pytest harness that generates the four expansion protocols and asserts
 structural invariants on each.
 

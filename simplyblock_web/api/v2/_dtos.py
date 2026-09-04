@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, UTC
 from ipaddress import IPv4Address
-from typing import List, Literal, Optional, cast
+from typing import Literal, cast
 from uuid import UUID
 
 from fastapi import Request
@@ -112,7 +112,7 @@ class CapacityStatDTO(BaseModel):
 
 class ClusterDTO(BaseModel):
     id: UUID
-    name: Optional[str]
+    name: str | None
     nqn: str
     status: ClusterStatus
     is_re_balancing: bool
@@ -138,7 +138,7 @@ class ClusterDTO(BaseModel):
         return value.get_secret_value()
 
     @staticmethod
-    def from_model(model: Cluster, stat_obj: Optional[StatsObject] = None):
+    def from_model(model: Cluster, stat_obj: StatsObject | None = None):
         return ClusterDTO(
             id=UUID(model.get_id()),
             name=model.cluster_name,
@@ -176,19 +176,19 @@ class DeviceDTO(BaseModel):
     pcie_address: str
     status: str
     # None => health check not applicable (owning node not ONLINE/DOWN)
-    health_check: Optional[bool]
+    health_check: bool | None
     retries_exhausted: bool
     size: int
     cluster_device_order: util.Unsigned
     io_error: bool
     is_partition: bool
-    nvmf_ips: List[IPv4Address]
+    nvmf_ips: list[IPv4Address]
     nvmf_nqn: str = ""
     nvmf_port: int = 0
     capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: NVMeDevice, storage_node_id: str, stat_obj: Optional[StatsObject] = None):
+    def from_model(model: NVMeDevice, storage_node_id: str, stat_obj: StatsObject | None = None):
         return DeviceDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
@@ -240,12 +240,12 @@ class StoragePoolDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    capacity: Optional[CapacityStatDTO]
+    capacity: CapacityStatDTO | None
     dhchap: bool = False
-    allowed_hosts: List[str] = []
+    allowed_hosts: list[str] = []
 
     @staticmethod
-    def from_model(model: Pool, stat_obj: Optional[StatsObject] = None):
+    def from_model(model: Pool, stat_obj: StatsObject | None = None):
         return StoragePoolDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
@@ -271,7 +271,7 @@ class SnapshotDTO(BaseModel):
     size: util.Unsigned
     used_size: util.Unsigned
     migrating: bool
-    lvol: Optional[util.UrlPath]
+    lvol: util.UrlPath | None
     created_at: datetime
 
 
@@ -312,9 +312,9 @@ class SnapshotDTO(BaseModel):
 class StorageNodeDTO(BaseModel):
     id: UUID
     cluster_id: UUID
-    secondary_node_id: Optional[UUID]
+    secondary_node_id: UUID | None
     status: StorageNodeStatus
-    uptime: Optional[timedelta]
+    uptime: timedelta | None
     hostname: str
     host_nqn: str
     cpu_total_count: util.Unsigned
@@ -332,14 +332,14 @@ class StorageNodeDTO(BaseModel):
     nvmf_port: util.Port
     mgmt_ip: IPv4Address
     # None => health check not applicable (node not ONLINE/DOWN)
-    health_check: Optional[bool]
+    health_check: bool | None
     device_count: int
     online_device_count: int
     failure_domain: int
     capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: StorageNode, stat_obj: Optional[StatsObject] = None):
+    def from_model(model: StorageNode, stat_obj: StatsObject | None = None):
         return StorageNodeDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
@@ -375,14 +375,14 @@ class StorageNodeDTO(BaseModel):
 class TaskDTO(BaseModel):
     id: UUID
     cluster_id: UUID
-    device_id: Optional[UUID]
-    storage_node_id: Optional[UUID]
+    device_id: UUID | None
+    storage_node_id: UUID | None
     status: TaskStatus
     canceled: bool
     function_name: TaskFunctionName
     function_params: dict
     function_result: str
-    max_retry: Optional[util.Unsigned]
+    max_retry: util.Unsigned | None
     retry: util.Unsigned
 
     @staticmethod
@@ -418,7 +418,7 @@ class VolumeDTO(BaseModel):
     priority_class: util.Unsigned
     namespace: str
     fabric: str
-    nodes: List[util.UrlPath]
+    nodes: list[util.UrlPath]
     port: util.Port
     size: util.Unsigned
     ndcs: int
@@ -429,7 +429,7 @@ class VolumeDTO(BaseModel):
     snapshot_name: str = ""
     blobid: int
     ns_id: int
-    cloned_from: Optional[util.UrlPath]
+    cloned_from: util.UrlPath | None
     high_availability: bool
     do_replicate: bool = False
     max_namespace_per_subsys: int
@@ -437,10 +437,10 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: List[str]
+    allowed_hosts: list[str]
     policy: str
     capacity: CapacityStatDTO
-    rep_info: Optional[dict] = None
+    rep_info: dict | None = None
     from_source: bool = True
 
     @staticmethod
@@ -448,7 +448,7 @@ class VolumeDTO(BaseModel):
         model: LVol,
         request: Request,
         cluster_id: str,
-        stat_obj: Optional[StatsObject] = None,
+        stat_obj: StatsObject | None = None,
         rep_info=None,
     ):
         active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
@@ -526,7 +526,7 @@ class BackupDTO(BaseModel):
     status: str
     prev_backup_id: str
     size: int
-    allowed_hosts: List[dict]
+    allowed_hosts: list[dict]
     created_at: int
     completed_at: int
     source_cluster_id: str
@@ -639,9 +639,9 @@ class ReplicationRelationshipDTO(BaseModel):
 class FailoverResultDTO(BaseModel):
     lvol_id: UUID
     status: FailoverStatus
-    detail: Optional[str] = None
+    detail: str | None = None
     target_lvol_id: util.OptionalUUID = None
-    connection_strings: List[NvmeConnectEntry] = []
+    connection_strings: list[NvmeConnectEntry] = []
 
 
 class MigrationDTO(BaseModel):
@@ -663,7 +663,7 @@ class MigrationDTO(BaseModel):
     connect_strings: list[NvmeConnectEntry] = []
 
     @staticmethod
-    def from_model(model: LVolMigration, connect_strings: Optional[List[NvmeConnectEntry]] = None):
+    def from_model(model: LVolMigration, connect_strings: list[NvmeConnectEntry] | None = None):
         return MigrationDTO(
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
@@ -697,7 +697,7 @@ class BatchMigrationDTO(BaseModel):
     connect_strings: list[NvmeConnectEntry] = []
 
     @staticmethod
-    def from_model(model: LVolMigrationGroup, connect_strings: Optional[List[NvmeConnectEntry]] = None):
+    def from_model(model: LVolMigrationGroup, connect_strings: list[NvmeConnectEntry] | None = None):
         return BatchMigrationDTO(
             id=UUID(model.uuid),
             cluster_id=model.cluster_id,

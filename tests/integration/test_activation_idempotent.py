@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_activation_idempotent.py — tests for the activation-mode idempotency
 helpers and for the new ``LVSRestartRequiredError`` behaviour.

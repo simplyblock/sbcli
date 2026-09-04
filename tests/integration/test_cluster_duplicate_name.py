@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_cluster_duplicate_name.py – integration tests for duplicate cluster
 name prevention, running against the real FoundationDB provisioned by

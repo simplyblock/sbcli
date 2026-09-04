@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_namespace_matches.py — pins namespace identity matching.
 

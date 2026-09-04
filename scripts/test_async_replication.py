@@ -34,7 +34,6 @@ import itertools
 import json
 import os
 import re
-import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -141,7 +140,7 @@ def run(ip, key_path, cmd, check=True, quiet=False, timeout=900, replayable=Fals
             o = out.read().decode()
             e = err.read().decode()
             rc = out.channel.recv_exit_status()
-        except (socket.timeout, TimeoutError, OSError, paramiko.SSHException) as exc:
+        except (TimeoutError, OSError, paramiko.SSHException) as exc:
             # The command was dispatched, so we cannot safely replay it unless
             # the caller marked it replayable. For best-effort work
             # (check=False) a hang must not kill the run: an `umount`/`nvme
@@ -2148,9 +2147,9 @@ CASE12_RUNTIME_MIN = int(os.environ.get("CASE12_RUNTIME_MIN", "25"))
 def _start_stall_probe(client_ip, key_path, mount):
     """100ms wall-clock heartbeats into the volume; gaps measure IO freezes."""
     run(client_ip, key_path,
-        "sudo rm -f {m}/probe.ts; sudo nohup bash -c 'while :; do "
-        "date +%s%3N >> {m}/probe.ts; sync {m}/probe.ts; sleep 0.1; done' "
-        ">/dev/null 2>&1 & echo probe_started".format(m=mount), quiet=True)
+        f"sudo rm -f {mount}/probe.ts; sudo nohup bash -c 'while :; do "
+        f"date +%s%3N >> {mount}/probe.ts; sync {mount}/probe.ts; sleep 0.1; done' "
+        ">/dev/null 2>&1 & echo probe_started", quiet=True)
 
 
 def _stop_probes(client_ip, key_path):
@@ -2161,8 +2160,8 @@ def _stop_probes(client_ip, key_path):
 def _max_probe_gap_ms(client_ip, key_path, mount, t0_ms, t1_ms):
     """Largest heartbeat gap inside [t0_ms, t1_ms] = the freeze duration the
     CLIENT actually observed (includes a ~100ms sampling floor)."""
-    awk = ("sudo awk 'p && $1>={t0} && $1<={t1} && $1-p>m {{m=$1-p}} {{p=$1}} "
-           "END{{print m+0}}' {m}/probe.ts").format(t0=t0_ms, t1=t1_ms, m=mount)
+    awk = (f"sudo awk 'p && $1>={t0_ms} && $1<={t1_ms} && $1-p>m {{m=$1-p}} {{p=$1}} "
+           f"END{{print m+0}}' {mount}/probe.ts")
     out = run(client_ip, key_path, awk, check=False, quiet=True)
     try:
         return int(out.strip())
@@ -2173,10 +2172,10 @@ def _max_probe_gap_ms(client_ip, key_path, mount, t0_ms, t1_ms):
 def _start_recorder(client_ip, key_path, mount, interval_sec=30):
     """Timestamped, fsynced records every interval -- the ground truth for
     which point-in-time a snapshot generation captured."""
-    cmd = ("sudo rm -f {m}/records.log; sudo nohup bash -c 'i=0; while :; do "
-           "i=$((i+1)); echo \"iter=$i ts=$(date +%s)\" >> {m}/records.log; "
-           "sync {m}/records.log; sleep {iv}; done' >/dev/null 2>&1 & "
-           "echo recorder_started").format(m=mount, iv=interval_sec)
+    cmd = (f"sudo rm -f {mount}/records.log; sudo nohup bash -c 'i=0; while :; do "
+           f"i=$((i+1)); echo \"iter=$i ts=$(date +%s)\" >> {mount}/records.log; "
+           f"sync {mount}/records.log; sleep {interval_sec}; done' >/dev/null 2>&1 & "
+           "echo recorder_started")
     run(client_ip, key_path, cmd, quiet=True)
 
 
@@ -2188,19 +2187,19 @@ def _stop_recorders(client_ip, key_path):
 def _snapshot_ages(mgmt_ip, key_path, lvol_uuid):
     """created_at (epoch) of every replicated internal snapshot of the volume,
     newest first."""
-    return mgmt_py(mgmt_ip, key_path, """
+    return mgmt_py(mgmt_ip, key_path, f"""
 import json
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.snapshot import SnapShot
 db = DBController()
 out = []
 for snp in db.get_snapshots():
-    if snp.deleted or not snp.lvol or snp.lvol.get_id() != {lv!r}:
+    if snp.deleted or not snp.lvol or snp.lvol.get_id() != {lvol_uuid!r}:
         continue
     if snp.snap_type == SnapShot.TYPE_INTERNAL and snp.target_replicated_snap_uuid:
         out.append(snp.created_at or 0)
 print(json.dumps(sorted(out, reverse=True)))
-""".format(lv=lvol_uuid), replayable=True)
+""", replayable=True)
 
 
 def _verify_retention_ladder(times, tiers, now, cadence_sec=60, slack=150):
@@ -2259,14 +2258,14 @@ def _records_match_generation(client_ip, key_path, mount, snap_ts, slack=35,
 
 def _target_snapshot_ts(mgmt_ip, key_path, target_lvol):
     """created_at of the snapshot the fail-over copy was cloned from."""
-    return mgmt_py(mgmt_ip, key_path, """
+    return mgmt_py(mgmt_ip, key_path, f"""
 import json
 from simplyblock_core.db_controller import DBController
 db = DBController()
-lv = db.get_lvol_by_id({t!r})
+lv = db.get_lvol_by_id({target_lvol!r})
 snp = db.get_snapshot_by_id(lv.cloned_from_snap)
 print(json.dumps(snp.created_at or 0))
-""".format(t=target_lvol), replayable=True)
+""", replayable=True)
 
 
 def test_case_10(meta):
@@ -2286,13 +2285,13 @@ def test_case_10(meta):
     policy = set_cluster_replication(mgmt_ip, key_path, src_uuid, tgt_uuid,
                                      pool_uuid_of(mgmt_ip, key_path, tgt["pool"]),
                                      mode="migration")
-    node_ids = mgmt_py(mgmt_ip, key_path, """
+    node_ids = mgmt_py(mgmt_ip, key_path, f"""
 import json
 from simplyblock_core.db_controller import DBController
 print(json.dumps([n.get_id() for n in
-                  DBController().get_storage_nodes_by_cluster_id({c!r})
+                  DBController().get_storage_nodes_by_cluster_id({src_uuid!r})
                   if n.status == "online"]))
-""".format(c=src_uuid), replayable=True)
+""", replayable=True)
     lvols = []
     for n_idx, nid in enumerate(node_ids):
         for v in range(CASE10_VOLS_PER_NODE):
@@ -2522,17 +2521,17 @@ def test_case_12(meta):
     # Ordered writer: seq into A, then B, then C, fsync each -- in ANY
     # crash-consistent group snapshot seq(A) >= seq(B) >= seq(C).
     ordered = " ".join(m["mount"] for m in mounts)
-    cmd = ("sudo nohup bash -c 'i=0; while :; do i=$((i+1)); for m in {mts}; do "
+    cmd = (f"sudo nohup bash -c 'i=0; while :; do i=$((i+1)); for m in {ordered}; do "
            "echo \"seq=$i ts=$(date +%s)\" >> $m/order.log; sync $m/order.log; "
            "done; sleep 2; done' >/dev/null 2>&1 & echo writer_started"
-           ).format(mts=ordered)
+           )
     run(client_ip, key_path, cmd, quiet=True)
 
     print("Running %d minutes of CG history..." % CASE12_RUNTIME_MIN)
     time.sleep(CASE12_RUNTIME_MIN * 60)
 
     # Group snapshots: every generation must cover ALL members with one seq.
-    groups = mgmt_py(mgmt_ip, key_path, """
+    groups = mgmt_py(mgmt_ip, key_path, f"""
 import json
 from collections import defaultdict
 from simplyblock_core.db_controller import DBController
@@ -2540,12 +2539,12 @@ from simplyblock_core.models.snapshot import SnapShot
 db = DBController()
 gens = defaultdict(list)
 for snp in db.get_snapshots():
-    if snp.deleted or not snp.lvol or snp.lvol.get_id() not in {lvs!r}:
+    if snp.deleted or not snp.lvol or snp.lvol.get_id() not in {lvols!r}:
         continue
     if snp.snap_type == SnapShot.TYPE_INTERNAL and getattr(snp, "group_seq", 0):
         gens[snp.group_seq].append(snp.lvol.get_id())
 print(json.dumps(dict((str(k), sorted(v)) for k, v in gens.items())))
-""".format(lvs=lvols), replayable=True)
+""", replayable=True)
     bad = [g for g, members in groups.items() if len(members) != 3]
     print("  %d group generations retained; incomplete: %d" % (len(groups), len(bad)))
     if not groups:

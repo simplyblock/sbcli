@@ -603,7 +603,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         try:
             # Call the grandparent's run() via super() — this creates the
             # standard pool, computes FIO size, and runs the main test loop.
-            super(RandomMultiClientMultiFailoverAllNodesTest, self).run()
+            super().run()
         finally:
             # Stop pcap capture on all nodes
             for node_ip in all_node_ips:

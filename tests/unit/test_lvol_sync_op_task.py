@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_lvol_sync_op_task.py — unit tests for the DB-backed deferred per-node
 lvol operations (FN_LVOL_SYNC_OP) that replace the in-memory

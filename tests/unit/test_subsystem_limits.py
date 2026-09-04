@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the hard subsystem limits (2026-08-04):
 
   - at most constants.MAX_NAMESPACES_PER_SUBSYSTEM (50) lvols (namespaces)

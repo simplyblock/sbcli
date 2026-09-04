@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/.../snapshots endpoints (snapshot_controller mocked)."""
 
 from tests.unit.web.api.v2 import _factories as factories

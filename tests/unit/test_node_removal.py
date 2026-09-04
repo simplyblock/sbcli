@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Unit tests for online storage-node removal (inverse of cluster expansion).
 

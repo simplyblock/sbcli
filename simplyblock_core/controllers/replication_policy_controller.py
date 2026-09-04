@@ -1,4 +1,3 @@
-# coding=utf-8
 """Replication targets, policies and volume assignment.
 
 target -> policy -> volume. A source cluster has any number of named targets, a

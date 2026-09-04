@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_stale_restart_phase.py — regression tests for incident 2026-07-10
 (K8sNativeResilientFailoverTest): lvol cef09c39's subsystem was never

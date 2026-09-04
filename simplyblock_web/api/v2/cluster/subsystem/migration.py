@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional, Union
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -20,7 +20,7 @@ _db = DBController()
 
 
 @api.get('/', name='clusters:subsystems:migrations:list')
-def list_migrations(cluster: Cluster, subsystem: Subsystem) -> List[Union[MigrationDTO, BatchMigrationDTO]]:
+def list_migrations(cluster: Cluster, subsystem: Subsystem) -> list[MigrationDTO | BatchMigrationDTO]:
     groups = [
         g for g in _db.get_migration_groups(cluster.get_id())
         if g.target_nqn == subsystem
@@ -50,7 +50,7 @@ def list_migrations(cluster: Cluster, subsystem: Subsystem) -> List[Union[Migrat
 class _MigrationParams(BaseModel):
     target_node_id: UUID
     ctrl_loss_tmo: int = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
-    host_nqn: Optional[Annotated[str, Field(pattern=utils.NQN_PATTERN)]] = None
+    host_nqn: Annotated[str, Field(pattern=utils.NQN_PATTERN)] | None = None
 
 
 def _resolve_member_lvol(cluster_id: str, nqn: str):
@@ -123,7 +123,7 @@ instance_api = APIRouter(prefix='/{migration_id}')
 
 
 @instance_api.get('/', name='clusters:subsystems:migrations:detail')
-def get_migration(migration: SubsystemMigration) -> Union[MigrationDTO, BatchMigrationDTO]:
+def get_migration(migration: SubsystemMigration) -> MigrationDTO | BatchMigrationDTO:
     if isinstance(migration, LVolMigrationGroup):
         return BatchMigrationDTO.from_model(migration)
     return MigrationDTO.from_model(migration)

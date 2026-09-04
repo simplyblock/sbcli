@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_chunked_read.py — completeness contract for the chunked
 read_from_db pagination (review of d6dfcd73).

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_node_add_concurrency.py – unit tests for the parallel node-add machinery.
 

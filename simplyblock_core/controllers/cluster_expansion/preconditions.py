@@ -1,4 +1,3 @@
-# coding=utf-8
 """Pre-flight checks for single-node cluster expansion.
 
 The role rebalance re-wires the secondary LVS at the newcomer's direct

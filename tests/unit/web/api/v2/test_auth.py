@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_auth.py – unit tests for simplyblock_web.api.v2._auth.
 """

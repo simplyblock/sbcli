@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_ucs_debounce_bound.py — the cluster-status debounce must not capture
 its computing thread.
 

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the v2 Prometheus exporter.
 
 The exporter's contract is not only "emits the right numbers" but also "emits

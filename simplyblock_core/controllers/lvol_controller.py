@@ -1,10 +1,9 @@
-# coding=utf-8
 import copy
 import random
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import ops_gate
@@ -250,7 +249,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
     utils.print_table_dict(node_start_end)
     #############
 
-    selected_node_ids: List[str] = []
+    selected_node_ids: list[str] = []
     while len(selected_node_ids) < min(len(node_stats), 3):
         r_index = random.randint(0, n_start)
         print(f"Random is {r_index}/{n_start}")
@@ -1923,7 +1922,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
         # Nodes whose sync leg completes here are recorded on the lvol so
         # lvol_monitor does not issue a second one when it finalises the
         # record.
-        sync_done: List[str] = []
+        sync_done: list[str] = []
         non_leaders = [n for n in all_nodes if actual_leader and n.get_id() != actual_leader.get_id()]
         for nl in non_leaders:
             # Under the chain lock: same reasoning as the create path --
@@ -2355,7 +2354,7 @@ def get_replication_info(lvol_id_or_name):
     # Heterogeneous status payload (str / int / None / list). Annotated so the
     # numeric comparisons further down ("lag > lag_budget",
     # "outstanding_count > 0") are not inferred as int-vs-object.
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "last_snapshot_id": "",
         "last_replication_time": "",
         "last_replication_duration": "",
@@ -3228,7 +3227,7 @@ def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
     """
     if all_snaps is None:
         all_snaps = db_controller.get_snapshots()
-    by_lvol: Dict[str, list] = {}
+    by_lvol: dict[str, list] = {}
     for s in all_snaps:
         by_lvol.setdefault(s.lvol.uuid, []).append(s)
 
@@ -4393,7 +4392,7 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None)-> Optional[LVol]:
+def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None)-> LVol | None:
     """``exclude_nqns`` skips subsystems the caller knows are unusable even
     though the DB count says they have room (SPDK rejected the add with
     -32602 — SPDK is the authority on its own namespace table)."""

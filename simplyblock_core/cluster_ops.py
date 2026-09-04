@@ -1,4 +1,3 @@
-# coding=utf-8
 import base64
 import json
 import os
@@ -37,6 +36,7 @@ from simplyblock_core.prom_client import PromClient
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.utils import pull_docker_image_with_retry
 from simplyblock_core.settings import Settings
+import builtins
 
 logger = utils.get_logger(__name__)
 
@@ -278,11 +278,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
-                   hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                   hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                    enable_failure_domain=False,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
-                   alert_config: t.Optional[t.Dict[str, t.Any]] = None,
+                   alert_config: dict[str, t.Any] | None = None,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -529,7 +529,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                 enable_failure_domain=False,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
@@ -579,7 +579,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                 enable_failure_domain=False,
 ) -> str:
 
@@ -1134,7 +1134,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # npcs+2, not npcs+1 -- this warning uses the same number so a
     # reactivation that's short of it gets the same signal without being
     # blocked (recovering a drifted layout must not turn into an outage).
-    fd_desired_layout: t.Dict[str, t.Tuple[str, str]] = {}
+    fd_desired_layout: dict[str, tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
         min_domains = cluster.distr_npcs + 2
@@ -1164,8 +1164,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 set_cluster_status(cl_id, ols_status)
                 raise ValueError(f"Failed to activate cluster: {msg}")
 
-            hosts: t.Dict[str, t.List] = {}
-            host_fd: t.Dict[str, int] = {}
+            hosts: dict[str, builtins.list] = {}
+            host_fd: dict[str, int] = {}
             for node in online_nodes:
                 if node.failure_domain < 0:
                     _fd_fail(f"node {node.get_id()} has no failure-domain id; "
@@ -1219,8 +1219,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
-    used_nodes_as_sec: t.List[str] = []
-    used_nodes_as_tertiary: t.List[str] = []
+    used_nodes_as_sec: builtins.list[str] = []
+    used_nodes_as_tertiary: builtins.list[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     # Process primaries grouped by failure domain. get_secondary_nodes/
     # get_secondary_nodes_2 (and their splice repairs) already sort their own
@@ -1316,8 +1316,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Port allocation inside create_lvstore is separately serialized by
     # storage_node_ops._lvstore_port_alloc_lock.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    pass1_recreate_ids: t.List[str] = []
-    pass1_create_ids: t.List[str] = []
+    pass1_recreate_ids: builtins.list[str] = []
+    pass1_create_ids: builtins.list[str] = []
     for snode in snodes:
         if snode.is_secondary_node:  # pass
             continue
@@ -1361,8 +1361,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         return storage_node_ops.recreate_lvstore(snode, activation_mode=True)
 
     if pass1_recreate_ids:
-        pass1_results: t.Dict[str, t.Any] = {}
-        pass1_errors: t.List[ValueError] = []
+        pass1_results: dict[str, t.Any] = {}
+        pass1_errors: builtins.list[ValueError] = []
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_recreate_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1") as pool:
             futures = {pool.submit(_recreate_primary_lvs, nid): nid for nid in pass1_recreate_ids}
@@ -1390,8 +1390,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         # itself plus its secondary/tertiary. Locks are acquired in sorted-id
         # order so two creates with intersecting sets serialize deadlock-free
         # while disjoint pairs run concurrently.
-        pass1_create_lock_ids: t.Dict[str, t.List[str]] = {}
-        pass1_create_locks: t.Dict[str, threading.Lock] = {}
+        pass1_create_lock_ids: dict[str, builtins.list[str]] = {}
+        pass1_create_locks: dict[str, threading.Lock] = {}
         for nid in pass1_create_ids:
             n = db_controller.get_storage_node_by_id(nid)
             touched = {nid}
@@ -1416,8 +1416,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 for lk in reversed(locks):
                     lk.release()
 
-        create_results: t.Dict[str, t.Any] = {}
-        create_errors: t.List[ValueError] = []
+        create_results: dict[str, t.Any] = {}
+        create_errors: builtins.list[ValueError] = []
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_create_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1c") as pool:
             futures = {pool.submit(_create_primary_lvs, nid): nid for nid in pass1_create_ids}
@@ -1440,7 +1440,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # is_secondary_node filter only matched dedicated secondary-only nodes,
     # skipping the ring participants entirely.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    pass2_ids: t.List[str] = []
+    pass2_ids: builtins.list[str] = []
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
@@ -1452,7 +1452,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # secondary and tertiary, and the leader port-block plus the
     # lvstore_status writes on that primary are not concurrency-safe.
     # Pre-created per-primary locks serialize exactly that, nothing more.
-    pass2_primary_locks: t.Dict[str, threading.Lock] = {}
+    pass2_primary_locks: dict[str, threading.Lock] = {}
     for node_id in pass2_ids:
         for p in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
             pass2_primary_locks.setdefault(p.get_id(), threading.Lock())
@@ -1536,7 +1536,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         return True
 
     if pass2_ids:
-        pass2_errors: t.List[ValueError] = []
+        pass2_errors: builtins.list[ValueError] = []
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass2_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p2") as pool:
             futures = {pool.submit(_recreate_non_leader_lvs, nid): nid for nid in pass2_ids}
@@ -1565,7 +1565,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # the primary and its peers, so each worker holds the locks of every node
     # it touches. Locks are pre-created and acquired in sorted-id order so two
     # workers sharing a peer cannot deadlock.
-    pass3_node_locks: t.Dict[str, threading.Lock] = {
+    pass3_node_locks: dict[str, threading.Lock] = {
         n.get_id(): threading.Lock() for n in snodes}
 
     def _wire_hublvols(node_id) -> None:
@@ -1580,7 +1580,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if not secondary_ids:
             return
 
-        held: t.List[threading.Lock] = []
+        held: builtins.list[threading.Lock] = []
         try:
             for nid in sorted({node_id, *secondary_ids}):
                 lock = pass3_node_locks.setdefault(nid, threading.Lock())
@@ -1827,7 +1827,7 @@ def cluster_expand(cl_id) -> None:
     logger.info("Cluster expanded successfully")
 
 
-def get_cluster_status(cl_id) -> t.List[dict]:
+def get_cluster_status(cl_id) -> list[dict]:
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     return sorted([
@@ -2213,7 +2213,7 @@ def switch_write_protection(cl_id) -> bool:
     return True
 
 
-def list() -> t.List[dict]:
+def list() -> list[dict]:
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
 
@@ -2442,7 +2442,7 @@ def list_all_info(cluster_id) -> str:
     return out
 
 
-def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
+def get_capacity(cluster_id, history, records_count=20) -> builtins.list[dict]:
     try:
         _ = db_controller.get_cluster_by_id(cluster_id)
     except KeyError:
@@ -2463,7 +2463,7 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
     return utils.process_records(records, records_count, keys=cap_stats_keys)
 
 
-def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> t.List[dict]:
+def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> builtins.list[dict]:
     try:
         _ = db_controller.get_cluster_by_id(cluster_id)
     except KeyError:
@@ -2556,7 +2556,7 @@ def change_cluster_name(cluster_id, new_name) -> None:
     logger.info(f"Cluster has been renamed: {old_name} -> {new_name}")
 
 
-def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
+def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
     db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
@@ -2602,7 +2602,7 @@ _GRAFANA_DURATION = re.compile(r'^(?:\d+(?:ms|[smhdwy]))+$')
 
 
 def _event_alert_settings(enabled, log_limit, interval, pending_period,
-                          plugin_url, plugin_preinstalled) -> t.Dict[str, t.Any]:
+                          plugin_url, plugin_preinstalled) -> dict[str, t.Any]:
     """Validate the tuning knobs and shape them for the templates.
 
     Validated here because Grafana answers a malformed duration or limit by
@@ -2638,7 +2638,7 @@ def _event_alert_settings(enabled, log_limit, interval, pending_period,
     return settings
 
 
-def _grafana_provisioning_dirs(cluster_docker) -> t.Tuple[str, str]:
+def _grafana_provisioning_dirs(cluster_docker) -> tuple[str, str]:
     """The host directories the running Grafana reads its provisioning from.
 
     Read off the service rather than computed from this package's location, so
@@ -2662,7 +2662,7 @@ def _grafana_provisioning_dirs(cluster_docker) -> t.Tuple[str, str]:
     return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
 
 
-def _install_provisioning_on_all_managers(files: t.Dict[str, str]) -> None:
+def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
     """Write Grafana's provisioning files onto every management node.
 
     Grafana is constrained to node.role == manager and may be rescheduled to

@@ -2,7 +2,6 @@ import os
 import sys
 import argparse
 import logging
-from typing import List, Tuple, Dict
 import re
 
 LOG_DIR = "iolog-debug"
@@ -18,7 +17,7 @@ logging.basicConfig(
     ]
 )
 
-def extract_offsets_from_log(log_file: str) -> List[int]:
+def extract_offsets_from_log(log_file: str) -> list[int]:
     offsets = set()
     pattern = re.compile(r"offset (\d+), length")
     try:
@@ -32,7 +31,7 @@ def extract_offsets_from_log(log_file: str) -> List[int]:
     logging.debug(f"Extracted offsets from {log_file}: {offsets}")
     return sorted(list(offsets))
 
-def parse_iolog_file(file_path: str) -> List[Tuple[float, int, int, str]]:
+def parse_iolog_file(file_path: str) -> list[tuple[float, int, int, str]]:
     entries = []
     if not os.path.exists(file_path):
         logging.warning(f"File not found: {file_path}")
@@ -63,14 +62,14 @@ def parse_iolog_file(file_path: str) -> List[Tuple[float, int, int, str]]:
     logging.debug(f"Parsed {len(entries)} entries from {file_path}")
     return entries
 
-def merge_iolog_files(file_list: List[str]) -> List[Tuple[float, int, int, str]]:
+def merge_iolog_files(file_list: list[str]) -> list[tuple[float, int, int, str]]:
     all_entries = []
     for file_path in file_list:
         all_entries.extend(parse_iolog_file(file_path))
     logging.debug(f"Merged {len(all_entries)} total entries from {len(file_list)} files")
     return sorted(all_entries, key=lambda x: x[0])
 
-def find_matches(entries: List[Tuple[float, int, int, str]], target_offsets: List[int], threshold: int = 4096) -> Dict[int, Dict[str, List[Tuple[float, int, int, str]]]]:
+def find_matches(entries: list[tuple[float, int, int, str]], target_offsets: list[int], threshold: int = 4096) -> dict[int, dict[str, list[tuple[float, int, int, str]]]]:
     results = {}
     for target in target_offsets:
         exact_matches = [e for e in entries if e[1] == target]
@@ -92,7 +91,7 @@ def find_matches(entries: List[Tuple[float, int, int, str]], target_offsets: Lis
 def format_timestamp(ts: float) -> str:
     return f"{ts / 1_000_000:.3f}s" 
 
-def save_results_to_logfile(entity: str, results: Dict[int, Dict[str, List[Tuple[float, int, int, str]]]]):
+def save_results_to_logfile(entity: str, results: dict[int, dict[str, list[tuple[float, int, int, str]]]]):
     log_file = os.path.join(LOG_DIR, f"fio_md5_offset_trace_{entity}.log")
     with open(log_file, "w") as f:
         for offset, result in results.items():
@@ -117,7 +116,7 @@ def save_results_to_logfile(entity: str, results: Dict[int, Dict[str, List[Tuple
                 logging.info(f"[{entity}] {msg}")
         
 
-def collect_fio_entities(iolog_dir: str) -> Dict[str, Dict[str, List[str]]]:
+def collect_fio_entities(iolog_dir: str) -> dict[str, dict[str, list[str]]]:
     grouped = {}
     for file in os.listdir(iolog_dir):
         full_path = os.path.join(iolog_dir, file)

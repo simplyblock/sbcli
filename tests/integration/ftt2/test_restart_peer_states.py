@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_restart_peer_states.py - comprehensive test matrix for all peer node
 state combinations during restart.

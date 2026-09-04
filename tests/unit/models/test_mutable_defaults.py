@@ -10,7 +10,7 @@ import importlib
 import inspect
 import pkgutil
 import typing
-from typing import ClassVar, Dict, List
+from typing import ClassVar
 
 import pytest
 
@@ -21,10 +21,10 @@ from simplyblock_core.models.cluster import Cluster
 
 class Sample(BaseModel):
     plain: str = "x"
-    items: List[str] = default_factory(list)
-    mapping: Dict[str, str] = default_factory(dict)
-    seeded: List[dict] = default_factory(lambda: [{'a': 1}])
-    shared: ClassVar[List[str]] = ['const']
+    items: list[str] = default_factory(list)
+    mapping: dict[str, str] = default_factory(dict)
+    seeded: list[dict] = default_factory(lambda: [{'a': 1}])
+    shared: ClassVar[list[str]] = ['const']
 
 
 def test_defaults_are_not_shared_between_instances():

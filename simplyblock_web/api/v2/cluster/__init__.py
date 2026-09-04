@@ -1,5 +1,5 @@
 from threading import Thread
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -29,28 +29,28 @@ db = DBController()
 class _ReplicationParams(BaseModel):
     snapshot_replication_target_cluster: str
     snapshot_replication_timeout: int = 0
-    target_pool: Optional[str] = None
+    target_pool: str | None = None
 
 class _UpdateParams(BaseModel):
-    management_image: Optional[str]
-    spdk_image: Optional[str]
+    management_image: str | None
+    spdk_image: str | None
     restart: bool = Field(False)
 
 
 class BackupConfigParams(BaseModel):
-    access_key_id: Optional[SecretStr] = None
-    secret_access_key: Optional[SecretStr] = None
-    local_endpoint: Optional[str] = None
-    bucket_name: Optional[str] = None
-    snapshot_backups: Optional[bool] = None
-    with_compression: Optional[bool] = None
-    secondary_target: Optional[int] = Field(default=None, ge=0)
-    local_testing: Optional[bool] = None
-    s3_thread_pool_size: Optional[int] = Field(default=None, ge=0)
+    access_key_id: SecretStr | None = None
+    secret_access_key: SecretStr | None = None
+    local_endpoint: str | None = None
+    bucket_name: str | None = None
+    snapshot_backups: bool | None = None
+    with_compression: bool | None = None
+    secondary_target: int | None = Field(default=None, ge=0)
+    local_testing: bool | None = None
+    s3_thread_pool_size: int | None = Field(default=None, ge=0)
 
 
 class HashicorpVaultSettings(BaseModel):
-    base_url: Optional[Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])]] = None
+    base_url: Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])] | None = None
     transit_mount: str = "simplyblock/transit"
     kv_mount: str = "simplyblock/kv"
     cert_role: str = "simplyblock-webappapi"
@@ -83,8 +83,8 @@ class ClusterParams(BaseModel):
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
-    backup_config: Optional[BackupConfigParams] = None
-    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
+    backup_config: BackupConfigParams | None = None
+    hashicorp_vault_settings: HashicorpVaultSettings | None = None
     enable_failure_domain: bool = False
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
@@ -111,7 +111,7 @@ class ClusterParams(BaseModel):
 
 
 @api.get('/', name='clusters:list')
-def list() -> List[ClusterDTO]:
+def list() -> list[ClusterDTO]:
     data = []
     for cluster in db.get_clusters():
         stat_obj = None
@@ -158,7 +158,7 @@ def get(cluster: Cluster) -> ClusterDTO:
 
 
 class UpdatableClusterParameters(BaseModel):
-    name: Optional[str] = None
+    name: str | None = None
 
 
 @instance_api.put('/', name='clusters:update')
@@ -179,7 +179,7 @@ def delete(cluster: Cluster) -> Response:
 
 
 @instance_api.get('/capacity', name='clusters:capacity')
-def capacity(cluster: Cluster, history: Optional[str] = None):
+def capacity(cluster: Cluster, history: str | None = None):
     capacity_or_false = cluster_ops.get_capacity(
             cluster.get_id(), history)
     if not capacity_or_false:
@@ -189,7 +189,7 @@ def capacity(cluster: Cluster, history: Optional[str] = None):
 
 
 @instance_api.get('/iostats', name='clusters:iostats')
-def iostats(cluster: Cluster, history: Optional[str] = None):
+def iostats(cluster: Cluster, history: str | None = None):
     iostats_or_false = cluster_ops.get_iostats_history(
             cluster.get_id(), history, with_sizes=True)
     if not iostats_or_false:

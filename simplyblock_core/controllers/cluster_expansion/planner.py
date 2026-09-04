@@ -1,4 +1,3 @@
-# coding=utf-8
 """Pure planning logic for cluster expansion (FTT1 and FTT2).
 
 When new node(s) are added to a cluster that already has its (primary,
@@ -41,7 +40,8 @@ Two entry points:
   caller needs to express the host topology explicitly.
 """
 
-from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import NamedTuple
+from collections.abc import Sequence
 
 
 # Role names match the wire protocol used by bdev_lvol_set_lvs_opts.
@@ -96,7 +96,7 @@ class RoleMove(NamedTuple):
         return self.from_node_id == ""
 
 
-def _host_rotation_layout(hosts: List[List[str]], ftt: int):
+def _host_rotation_layout(hosts: list[list[str]], ftt: int):
     """Yield ``(lvs_primary_id, sec_id, tert_id_or_empty)`` for a host
     rotation.
 
@@ -123,7 +123,7 @@ def _host_rotation_layout(hosts: List[List[str]], ftt: int):
                    (tert_host[s] if tert_host is not None else ""))
 
 
-def _rotation_layout(node_ids: List[str], ftt: int):
+def _rotation_layout(node_ids: list[str], ftt: int):
     """1-node-per-host rotation. Special case of :func:`_host_rotation_layout`.
 
     Kept as a thin wrapper so existing callers and tests that imported this
@@ -132,7 +132,7 @@ def _rotation_layout(node_ids: List[str], ftt: int):
     yield from _host_rotation_layout([[n] for n in node_ids], ftt)
 
 
-def _validate_topology(topology: List[List[str]], label: str) -> None:
+def _validate_topology(topology: list[list[str]], label: str) -> None:
     """Reject obviously-malformed host topologies before they reach the
     rotation helper. Enforced invariants:
 
@@ -162,12 +162,12 @@ def _validate_topology(topology: List[List[str]], label: str) -> None:
 
 
 def compute_role_diff_topology(
-    current_topology: List[List[str]],
-    new_topology: List[List[str]],
+    current_topology: list[list[str]],
+    new_topology: list[list[str]],
     ftt: int,
     *,
-    current_layout: Optional[Dict[str, Tuple[str, str]]] = None,
-) -> List[RoleMove]:
+    current_layout: dict[str, tuple[str, str]] | None = None,
+) -> list[RoleMove]:
     """Plan the role moves to integrate one or more new hosts.
 
     Parameters
@@ -260,8 +260,8 @@ def compute_role_diff_topology(
             new_topology, ftt)
     }
 
-    phase_a: List[RoleMove] = []
-    phase_b: List[RoleMove] = []
+    phase_a: list[RoleMove] = []
+    phase_b: list[RoleMove] = []
 
     for primary_id, (new_sec, new_tert) in desired.items():
         if primary_id in newcomers:
@@ -285,10 +285,10 @@ def compute_role_diff_topology(
 
 
 def compute_role_diff(
-    existing_node_ids: List[str],
+    existing_node_ids: list[str],
     new_node_id: str,
     ftt: int,
-) -> List[RoleMove]:
+) -> list[RoleMove]:
     """Plan the role moves to integrate ``new_node_id`` into the cluster.
 
     This is the **1-node-per-host** special case of
@@ -371,8 +371,8 @@ def compute_role_diff(
 
 
 def fd_interleaved_host_order(
-    host_fd_pairs: Sequence[Tuple[str, int]],
-) -> List[str]:
+    host_fd_pairs: Sequence[tuple[str, int]],
+) -> list[str]:
     """Order hosts round-robin across failure domains.
 
     ``host_fd_pairs`` is a list of ``(host_key, failure_domain)`` in a
@@ -387,11 +387,11 @@ def fd_interleaved_host_order(
     adjacency (at the cyclic wrap) — the single degraded LVS the +/-1
     policy accepts, whose tertiary the rotation still lands cross-domain.
     """
-    by_fd: Dict[int, List[str]] = {}
+    by_fd: dict[int, list[str]] = {}
     for host, fd in host_fd_pairs:
         by_fd.setdefault(fd, []).append(host)
     fds = sorted(by_fd)
-    order: List[str] = []
+    order: list[str] = []
     for round_idx in range(max((len(v) for v in by_fd.values()), default=0)):
         for fd in fds:
             if round_idx < len(by_fd[fd]):
@@ -400,9 +400,9 @@ def fd_interleaved_host_order(
 
 
 def rotation_layout(
-    topology: List[List[str]],
+    topology: list[list[str]],
     ftt: int,
-) -> Dict[str, Tuple[str, str]]:
+) -> dict[str, tuple[str, str]]:
     """Public wrapper around the host-rotation formula: the desired
     ``primary -> (secondary, tertiary)`` layout for ``topology`` (tertiary
     is ``""`` for FTT1). Validates the topology first (uniform slots per
@@ -424,12 +424,12 @@ def rotation_layout(
 
 
 def compute_fd_layout_violations(
-    topology: List[List[str]],
+    topology: list[list[str]],
     ftt: int,
-    fd_by_node: Dict[str, int],
+    fd_by_node: dict[str, int],
     *,
-    layout: Optional[Dict[str, Tuple[str, str]]] = None,
-) -> List[str]:
+    layout: dict[str, tuple[str, str]] | None = None,
+) -> list[str]:
     """Check the >=1-cross-domain-role invariant over a (desired) layout.
 
     Evaluates the rotation layout implied by ``topology`` (or an explicit
@@ -448,7 +448,7 @@ def compute_fd_layout_violations(
             for primary_id, sec_id, tert_id in _host_rotation_layout(
                 topology, ftt)
         }
-    violations: List[str] = []
+    violations: list[str] = []
     for primary_id, (sec_id, tert_id) in layout.items():
         fd_p = fd_by_node.get(primary_id, -1)
         if fd_p < 0:
@@ -466,11 +466,11 @@ def compute_fd_layout_violations(
 
 
 def fd_balance_violation(
-    fd_host_counts: Dict[int, int],
+    fd_host_counts: dict[int, int],
     *,
     max_delta: int = 1,
-    min_hosts_per_fd: Optional[int] = None,
-) -> Optional[str]:
+    min_hosts_per_fd: int | None = None,
+) -> str | None:
     """Validate per-domain host counts against the balance policy.
 
     ``fd_host_counts`` maps failure-domain id (>= 0) to the number of
@@ -505,7 +505,7 @@ def fd_balance_violation(
 
 def fd_activation_domain_count_violation(
     npcs: int, distinct_domain_count: int,
-) -> Optional[str]:
+) -> str | None:
     """Validate the number of distinct failure domains for fresh activation.
 
     A 2-FD layout can never absorb a second independent failure once one
@@ -589,7 +589,7 @@ def move_from_dict(data: dict) -> RoleMove:
     )
 
 
-def make_expand_state(new_node_id: str, moves: List[RoleMove]) -> dict:
+def make_expand_state(new_node_id: str, moves: list[RoleMove]) -> dict:
     """Build the initial ``Cluster.expand_state`` for a fresh expansion.
 
     Parameters
@@ -621,7 +621,7 @@ def is_expand_in_progress(state: dict) -> bool:
     return bool(state) and state.get("phase") == EXPAND_PHASE_IN_PROGRESS
 
 
-def pending_moves(state: dict) -> List[RoleMove]:
+def pending_moves(state: dict) -> list[RoleMove]:
     """Return the moves at and after ``state['cursor']`` — the work that
     remains. Returns an empty list when the expansion is finished or the
     state is empty/aborted."""

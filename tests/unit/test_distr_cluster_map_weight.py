@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_distr_cluster_map_weight.py — regression test for the parent (node)
 weight invariant in ``distr_controller.get_distr_cluster_map``.

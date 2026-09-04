@@ -3281,7 +3281,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 seen.add(ip)
 
         if not all_ips:
-            raise EnvironmentError(
+            raise OSError(
                 "TC-BCK-070: STORAGE_PRIVATE_IPS (and/or NEW_NODE_IPS) env var "
                 "required to auto-bootstrap a second cluster")
 
@@ -3302,7 +3302,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             c1_keep = all_ips[:split]
             c2_ips = all_ips[split:]
             if len(c1_keep) < self._MIN_NODES_PER_CLUSTER:
-                raise EnvironmentError(
+                raise OSError(
                     f"TC-BCK-070: cannot split {total} nodes into 2 clusters "
                     f"with min {self._MIN_NODES_PER_CLUSTER} each")
             self.logger.info(
@@ -3311,7 +3311,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             # Remove c2 nodes from Cluster-1 if they are currently members
             self._remove_nodes_from_cluster1(c2_ips)
         else:
-            raise EnvironmentError(
+            raise OSError(
                 f"TC-BCK-070: need at least {self._MIN_NODES_PER_CLUSTER} spare "
                 f"nodes for Cluster-2 (have {len(spare_ips)} spare out of "
                 f"{total} total). Pass spare nodes via NEW_NODE_IPS or "

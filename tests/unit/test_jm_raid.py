@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Unit tests for simplyblock_core/jm_raid.py — the Journal-Manager RAID topology
 and reconfiguration planner.

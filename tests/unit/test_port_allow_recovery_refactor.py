@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the 2026-07-08 port-allow recovery refactor.
 
 Covers the network-outage recovery fixes:

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_imports.py – smoke tests that verify all packages import cleanly.
 

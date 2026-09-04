@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_restart_guards.py – tests for mutual exclusion between restart/shutdown,
 Phase 5 operation blocking, and hublvol multipath verification.

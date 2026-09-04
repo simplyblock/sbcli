@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Journal-Manager (JM) RAID topology planner.
 
@@ -23,13 +22,12 @@ This module is pure logic (no RPC, no DB) so the decisions are unit-testable.
 The orchestration that issues the bdev_raid RPCs lives in storage_node_ops.
 """
 
-from typing import List, Tuple
 
 RAID_NONE = "none"        # single base device, no raid bdev
 RAID_0PLUS1 = "raid01"    # raid1 over two raid0 legs (2 devices => 2-way mirror)
 
 
-def split_two_groups(items: list) -> Tuple[list, list]:
+def split_two_groups(items: list) -> tuple[list, list]:
     """Split ``items`` into two groups whose sizes differ by at most one.
 
     The first group gets the extra element when the count is odd, so e.g.
@@ -39,7 +37,7 @@ def split_two_groups(items: list) -> Tuple[list, list]:
     return list(items[:half]), list(items[half:])
 
 
-def plan_topology(members: List[str]) -> dict:
+def plan_topology(members: list[str]) -> dict:
     """Decide the JM RAID topology for the given base bdevs.
 
     Returns:
@@ -57,17 +55,17 @@ def plan_topology(members: List[str]) -> dict:
     return {"level": RAID_0PLUS1, "base": None, "legs": [a, b]}
 
 
-def is_balanced(legs: List[list]) -> bool:
+def is_balanced(legs: list[list]) -> bool:
     """True if the two legs' member counts differ by at most one."""
     return abs(len(legs[0]) - len(legs[1])) <= 1
 
 
-def smaller_leg_index(legs: List[list]) -> int:
+def smaller_leg_index(legs: list[list]) -> int:
     """Index of the leg a new device should join (the smaller one; ties -> 0)."""
     return 0 if len(legs[0]) <= len(legs[1]) else 1
 
 
-def plan_reconfigure(legs: List[list], *, failed=None, added=None) -> dict:
+def plan_reconfigure(legs: list[list], *, failed=None, added=None) -> dict:
     """Plan the leg rebuild(s) for a drive lifecycle event.
 
     Args:

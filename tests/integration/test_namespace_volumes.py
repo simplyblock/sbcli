@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_namespace_volumes.py – unit tests for namespace volume support.
 

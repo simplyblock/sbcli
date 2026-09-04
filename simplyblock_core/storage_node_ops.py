@@ -10,7 +10,7 @@ import subprocess
 
 import psutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List, Optional
+from typing import Any
 
 import threading
 
@@ -699,7 +699,7 @@ def _collect_attached_ips(ctrlr_list):
     return attached
 
 
-def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: Optional[float] = None):
+def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: float | None = None):
     """Connect snode to device
 
     This only performs the actual operation between both involved SPDK instances,
@@ -780,7 +780,7 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
         # Wait transients out; on a controller that stays transient past
         # the budget, raise so the calling task suspends and retries.
         _TRANSIENT_STATES = ("failed", "resetting", "deleting", "reconnect_is_delayed")
-        states: List[str] = []
+        states: list[str] = []
         for _attempt in range(5):
             if not ret:
                 # The module destructed the controller on its own; the
@@ -1756,7 +1756,7 @@ def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
     except Exception:
         # Unknown owner / DB hiccup: keep the full best-effort retry.
         pass
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     for attempt in attempts:
         try:
             connect_device(name, device, node)
@@ -1776,7 +1776,7 @@ def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
 def _connect_to_remote_devs(
         this_node: StorageNode, /,
         reattach: bool = True, force_connect_restarting_nodes: bool = False,
-        only_node_id: Optional[str] = None
+        only_node_id: str | None = None
 ):
     """Connect ``this_node`` to remote data devices and return the refreshed
     remote-device records.
@@ -6540,7 +6540,7 @@ def list_storage_devices(node_id):
             "Status": remote_jm_device.status,
         })
 
-    data: dict[str, List[Any]] = {
+    data: dict[str, list[Any]] = {
         "Storage Devices": storage_devices,
         "JM Devices": jm_devices,
         "Remote Devices": remote_devices,
@@ -11860,7 +11860,7 @@ def splice_stranded_tertiary(stranded_node) -> bool:
 def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    lvstore_stack: List[dict] = []
+    lvstore_stack: list[dict] = []
     distrib_list = []
     distrib_vuids = []
     # Fixed size per distrib, reported up to the raid0/lvstore layer,

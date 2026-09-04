@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_activation_growth_guard.py — a cluster does not grow by re-activation.
 
 Once activated, a cluster's node set is fixed. Nodes added afterwards are

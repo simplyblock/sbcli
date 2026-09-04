@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_restart_connect_hardening.py — unit tests for the 2026-07-16
 half-cluster restart-storm fixes.

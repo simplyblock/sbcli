@@ -7,7 +7,6 @@ import socket
 import sys
 import threading
 import time
-from typing import Optional
 
 from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
@@ -111,7 +110,7 @@ def wait_for_spdk_ready():
                     return
                 except ValueError:
                     continue
-        except (socket.error, OSError) as e:
+        except OSError as e:
             logger.info(f"Waiting for SPDK to be ready: {e}")
         finally:
             if sock:
@@ -201,7 +200,7 @@ def _rpc_call_inner(req, req_data, req_time, sock_timeout):
         logger.info(f"Response:{req_time}")
 
         return buf
-    except socket.timeout:
+    except TimeoutError:
         logger.error(f"Socket timeout waiting for SPDK response (request {req_time}, function: {req_data.get('method', 'unknown')})")
         raise ValueError('SPDK response timeout')
     finally:
@@ -230,7 +229,7 @@ class ServerHandler(BaseHTTPRequestHandler):
     # own `httpd.timeout` (set in run_server(), only bounds serve_forever()'s
     # accept loop). Assigned in run_server() once KEEPALIVE_TIMEOUT exists,
     # same as `key` below.
-    timeout: ClassVar[Optional[float]] = None
+    timeout: ClassVar[float | None] = None
 
     def do_HEAD(self, content_length=0):
         self.send_response(200)

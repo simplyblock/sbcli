@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Tests for the no-suspension graceful shutdown flow.
 

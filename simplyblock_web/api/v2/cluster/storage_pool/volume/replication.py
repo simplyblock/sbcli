@@ -1,4 +1,3 @@
-from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -17,7 +16,7 @@ api = APIRouter(tags=['replication'])
 collection_api = APIRouter(tags=['replication'])
 
 
-def apply_policy(volume: LVol, policy_id: Optional[UUID]) -> None:
+def apply_policy(volume: LVol, policy_id: UUID | None) -> None:
     """Put *volume* under replication policy *policy_id*, or take it out (None).
 
     Changing policy is detach-then-attach, so the new target receives a FULL
@@ -56,15 +55,15 @@ def get_relationship(cluster: Cluster, pool: StoragePool, volume: Volume) -> Rep
 
 
 class ReplicationStartParams(BaseModel):
-    replication_cluster_id: Optional[UUID] = None  # destination; None = cluster default
-    mode: Optional[ReplicationMode] = None
-    interval_min: Optional[util.Unsigned] = None
+    replication_cluster_id: UUID | None = None  # destination; None = cluster default
+    mode: ReplicationMode | None = None
+    interval_min: util.Unsigned | None = None
 
 
 @api.post('/start', name='clusters:storage-pools:volumes:replication:start',
           status_code=204, responses={204: {"content": None}})
 def start(cluster: Cluster, pool: StoragePool, volume: Volume,
-          body: Optional[ReplicationStartParams] = None) -> Response:
+          body: ReplicationStartParams | None = None) -> Response:
     """Start replicating a volume.
 
     The destination is the request's replication_cluster_id, else the cluster's
@@ -149,7 +148,7 @@ def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume
 
 
 class FailbackParams(BaseModel):
-    source_cluster_id: Optional[UUID] = None
+    source_cluster_id: UUID | None = None
 
 
 @api.post('/failback', name='clusters:storage-pools:volumes:replication:failback',
@@ -170,7 +169,7 @@ def failback(cluster: Cluster, pool: StoragePool, volume: Volume, body: Failback
 
 
 @api.get('/tasks', name='clusters:storage-pools:volumes:replication:tasks')
-def list_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+def list_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> list[TaskDTO]:
     return [TaskDTO.from_model(task) for task in lvol_controller.list_replication_tasks(volume.get_id())]
 
 

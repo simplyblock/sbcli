@@ -1,4 +1,3 @@
-# coding=utf-8
 import glob
 import hashlib
 import json
@@ -14,7 +13,8 @@ import sys
 import uuid
 import time
 from datetime import datetime, UTC
-from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 from pydantic import SecretStr
 from docker import DockerClient
@@ -303,7 +303,7 @@ def print_table_dict(node_stats):
     print(print_table(d))
 
 
-def generate_rpc_user_and_pass() -> Tuple[str, SecretStr]:
+def generate_rpc_user_and_pass() -> tuple[str, SecretStr]:
     def _generate_string(length):
         return ''.join(random.SystemRandom().choice(
             string.ascii_letters + string.digits) for _ in range(length))
@@ -747,7 +747,7 @@ def make_async_handler(target_handler):
     import atexit
     import queue as _queue
     import logging.handlers as _lh
-    log_queue: "_queue.Queue" = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
+    log_queue: _queue.Queue = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
     listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
     listener.start()
 
@@ -851,7 +851,7 @@ def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[i
     )
 
 
-def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '', strict: bool = False) -> int:
+def parse_size(size: str | int, mode: str = 'si/iec', assume_unit: str = '', strict: bool = False) -> int:
     """Parse the given data size
 
     If passed and not explicitly given, 'assume_unit' will be assumed.
@@ -897,7 +897,7 @@ def get_total_cpu_cores(mapping: str) -> int:
     return len(items)
 
 
-def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> int:
+def convert_size(size: int | str, unit: str, round_up: bool = False) -> int:
     """Convert the given number of bytes to target unit
 
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
@@ -1716,11 +1716,11 @@ def get_core_indexes(core_to_index, list_of_cores):
 
 
 def build_unisolated_stride(
-        all_cores: List[int],
+        all_cores: list[int],
         num_unisolated: int,
         client_qpair_count: int,
         pool_stride: int = 2,
-) -> List[int]:
+) -> list[int]:
     """
     Build a list of 'unisolated' CPUs by picking from per-qpair pools.
 
@@ -1769,7 +1769,7 @@ def build_unisolated_stride(
         sib_i = i + half if i < half else i - half
         return cores[sib_i]
 
-    out: List[int] = []
+    out: list[int] = []
     used = set()
 
     def add_cpu(cpu: int) -> bool:
@@ -2580,7 +2580,7 @@ def _top_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 
-def render_legacy_alerting(contact_point: Optional[str], grafana_endpoint: str) -> str:
+def render_legacy_alerting(contact_point: str | None, grafana_endpoint: str) -> str:
     """Render the single-contact-point alerting config kept for --contact-point.
 
     `contact_point` is optional at every layer above (the CLI flag defaults to
@@ -2609,7 +2609,7 @@ def render_legacy_alerting(contact_point: Optional[str], grafana_endpoint: str) 
     })
 
 
-def render_configfile_alerting(alert_config: Dict[str, Any]) -> str:
+def render_configfile_alerting(alert_config: dict[str, Any]) -> str:
     """Render the multi-receiver alerting config from an alerting config file."""
     env = Environment(loader=FileSystemLoader(_alerts_template_folder()), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template(f'{ALERT_RESOURCES_FILE}.j2')
@@ -2617,8 +2617,8 @@ def render_configfile_alerting(alert_config: Dict[str, Any]) -> str:
     return template.render(alert_config)
 
 
-def render_event_alert_configs(settings: Dict[str, Any],
-                               clusters: Iterable[Tuple[str, str]]) -> Dict[str, str]:
+def render_event_alert_configs(settings: dict[str, Any],
+                               clusters: Iterable[tuple[str, str]]) -> dict[str, str]:
     """Render the Grafana provisioning files for the cluster event log alerts.
 
     Returns {filename: content} for both files, always, so that disabling the
@@ -2656,7 +2656,7 @@ def render_event_alert_configs(settings: Dict[str, Any],
     return rendered
 
 
-def render_and_deploy_alerting_configs(alert_config: Optional[Dict[str, Any]], contact_point: Optional[str],
+def render_and_deploy_alerting_configs(alert_config: dict[str, Any] | None, contact_point: str | None,
                                        grafana_endpoint, cluster_uuid, cluster_secret):
     top_dir = _top_dir()
     alerts_template_folder = _alerts_template_folder()
@@ -2888,7 +2888,7 @@ def patch_cr_node_status(
         name: str,
         node_uuid: str,
         node_mgmt_ip: str,
-        updates: Optional[Dict[str, Any]] = None,
+        updates: dict[str, Any] | None = None,
         remove: bool = False,
 ) -> bool:
     """
@@ -3024,10 +3024,10 @@ def patch_cr_lvol_status(
         plural: str,
         namespace: str,
         name: str,
-        lvol_uuid: Optional[str] = None,
-        updates: Optional[Dict[str, Any]] = None,
+        lvol_uuid: str | None = None,
+        updates: dict[str, Any] | None = None,
         remove: bool = False,
-        add: Optional[Dict[str, Any]] = None,
+        add: dict[str, Any] | None = None,
 ):
     """
     Patch status.lvols[*] for an LVOL CustomResource.
@@ -3187,7 +3187,7 @@ def label_node_as_mgmt_plane(node_name: str):
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
 
-def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[Tuple[str, str]]:
+def get_mgmt_ip(node_info: Any, iface_names: str | list[str]) -> tuple[str, str] | None:
     if isinstance(node_info, (bytes, bytearray)):
         try:
             node_info = json.loads(node_info.decode("utf-8"))
@@ -3422,7 +3422,7 @@ def find_lbaf_id(json_data: str, target_ms: int, target_ds: int) -> int:
         print("Error: Invalid JSON format provided.")
         return 0
 
-    lbafs_list: List[Dict[str, int]] = data.get('lbafs', [])
+    lbafs_list: list[dict[str, int]] = data.get('lbafs', [])
 
     # LBAF IDs are 1-based, so we use enumerate starting from 1
     for index, lbaf in enumerate(lbafs_list, start=0):
@@ -3600,7 +3600,7 @@ def query_nvme_ssd_by_model_and_size(model: str, size_range: str) -> list:
     return pci_lst
 
 
-def query_nvme_ssd_by_namespace_names(nvme_names: Iterable[str]) -> List[str]:
+def query_nvme_ssd_by_namespace_names(nvme_names: Iterable[str]) -> list[str]:
     """
     Match NVMe devices by namespace names (e.g. nvme0n1, nvme1n1) using nvme list -v JSON output.
     Returns a de-duplicated list of PCI addresses (e.g. 0000:00:03.0).
@@ -3615,7 +3615,7 @@ def query_nvme_ssd_by_namespace_names(nvme_names: Iterable[str]) -> List[str]:
     json_string = get_nvme_list_verbose()  # should return the JSON string shown in your example
     data = json.loads(json_string)
 
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
 
     for dev in data.get("Devices", []):
@@ -3896,7 +3896,7 @@ def _take_sibling_aware(cores_remaining, count, siblings):
     but driven by real sysfs sibling data instead of pair_hyperthreads()'
     os.cpu_count()-wide guess, since here the pool is already scoped to one
     node's own fresh core list."""
-    chosen: List[int] = []
+    chosen: list[int] = []
     for core in sorted(cores_remaining):
         if len(chosen) >= count:
             break
@@ -3938,7 +3938,7 @@ def reassign_l_cores_for_restart(cores, distrib_indices, poller_indices, alceml_
     n = len(cores)
     remaining = set(cores)
     siblings = parse_thread_siblings()
-    placement: List[Optional[int]] = [None] * n
+    placement: list[int | None] = [None] * n
 
     for role, indices in (("distrib", distrib_indices), ("poller", poller_indices),
                          ("alceml", alceml_indices)):

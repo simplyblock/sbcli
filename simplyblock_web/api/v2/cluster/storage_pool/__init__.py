@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -22,7 +22,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-pools:list')
-def list(cluster: Cluster) -> List[StoragePoolDTO]:
+def list(cluster: Cluster) -> list[StoragePoolDTO]:
     return [
         StoragePoolDTO.from_model(pool, single_or_none(db.get_pool_stats(pool, limit=1)))
         for pool in db.get_pools(cluster.get_id())
@@ -89,16 +89,16 @@ def delete(cluster: Cluster, pool: StoragePool) -> Response:
 
 
 class UpdatableStoragePoolParams(BaseModel):
-    name: Optional[str] = None
-    max_size: Optional[util.Unsigned] = None
-    volume_max_size: Optional[util.Unsigned] = None
-    max_rw_iops: Optional[util.Unsigned] = None
-    max_rw_mbytes: Optional[util.Unsigned] = None
-    max_r_mbytes: Optional[util.Unsigned] = None
-    max_w_mbytes: Optional[util.Unsigned] = None
-    lvols_cr_name: Optional[str] = None
-    lvols_cr_namespace: Optional[str] = None
-    lvols_cr_plural: Optional[str] = None
+    name: str | None = None
+    max_size: util.Unsigned | None = None
+    volume_max_size: util.Unsigned | None = None
+    max_rw_iops: util.Unsigned | None = None
+    max_rw_mbytes: util.Unsigned | None = None
+    max_r_mbytes: util.Unsigned | None = None
+    max_w_mbytes: util.Unsigned | None = None
+    lvols_cr_name: str | None = None
+    lvols_cr_namespace: str | None = None
+    lvols_cr_plural: str | None = None
 
 
 @instance_api.put('/', name='clusters:storage-pools:update', status_code=204, responses={204: {"content": None}})

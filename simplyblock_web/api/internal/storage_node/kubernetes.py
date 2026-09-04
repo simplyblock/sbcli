@@ -1,10 +1,8 @@
-# encoding: utf-8
 import json
 import logging
 import os
 import time
 import traceback
-from typing import List, Optional, Union
 
 from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException, V1DeleteOptions
@@ -208,21 +206,21 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(ge=1, lt=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: List[str] = Field([])
+    ssd_pcie: list[str] = Field([])
     l_cores: str
-    namespace: Optional[str]
-    total_mem: Union[int, str] = Field('')
+    namespace: str | None
+    total_mem: int | str = Field('')
     spdk_mem: int = Field(core_utils.parse_size('64GiB'))
     system_mem: int = Field(core_utils.parse_size('4GiB'))
     fdb_connection: str = Field('')
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    spdk_proxy_image: str | None = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
-    socket: Optional[int] = Field(None, ge=0)
-    firewall_port: Optional[int] = Field(constants.FW_PORT_START)
+    socket: int | None = Field(None, ge=0)
+    firewall_port: int | None = Field(constants.FW_PORT_START)
     cluster_id: str
-    mcp_max_unavailable: Optional[int] = Field(None)
+    mcp_max_unavailable: int | None = Field(None)
 
 
 @api.post('/spdk_process_start', responses={

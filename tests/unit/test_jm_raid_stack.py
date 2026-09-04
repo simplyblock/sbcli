@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Integration-ish unit test for storage_node_ops._create_jm_stack_on_raid: it
 verifies the bdev_raid_create call sequence that builds the RAID 0+1 JM stack

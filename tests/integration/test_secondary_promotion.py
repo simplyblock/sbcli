@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_secondary_promotion.py – unit tests for:
 
