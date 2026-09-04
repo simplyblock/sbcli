@@ -1,6 +1,9 @@
 # coding=utf-8
+import base64
 import json
 import os
+import re
+import shlex
 import socket
 import subprocess
 import threading
@@ -9,7 +12,7 @@ import uuid
 import typing as t
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import docker
 from kubernetes import client as k8s_client
@@ -370,6 +373,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     # from a legacy release, whose pre-existing bdevs need the one-shot
     # runtime flip via set_shared_placement.
     cluster.shared_placement = True
+    # New clusters create every distrib with v2 write protection from the
+    # start, so there is nothing to migrate and the runtime
+    # distr_write_protection_v2 RPC is never needed here. Only a cluster
+    # UPGRADED from a release without v2 goes through
+    # `cluster switch-write-protection`.
+    cluster.write_protection_v2 = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -604,6 +613,12 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     # from a legacy release, whose pre-existing bdevs need the one-shot
     # runtime flip via set_shared_placement.
     cluster.shared_placement = True
+    # New clusters create every distrib with v2 write protection from the
+    # start, so there is nothing to migrate and the runtime
+    # distr_write_protection_v2 RPC is never needed here. Only a cluster
+    # UPGRADED from a release without v2 goes through
+    # `cluster switch-write-protection`.
+    cluster.write_protection_v2 = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -995,7 +1010,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 fresh = db_controller.get_cluster_by_id(cl_id)
                 if fresh.status != Cluster.STATUS_IN_ACTIVATION:
                     continue
-                now_iso = datetime.now(timezone.utc).isoformat()
+                now_iso = datetime.now(UTC).isoformat()
                 db_controller.atomic_update(
                     fresh, lambda c, v=now_iso: setattr(c, "activation_heartbeat", v))
             except Exception:
@@ -1856,7 +1871,7 @@ def set_cluster_status(cl_id, status) -> None:
         # (incident 2026-06-25). Stamped inside the CAS so it is written
         # atomically with the status flip.
         if status == Cluster.STATUS_IN_ACTIVATION:
-            fresh.in_activation_since = datetime.now(timezone.utc).isoformat()
+            fresh.in_activation_since = datetime.now(UTC).isoformat()
             fresh.activation_heartbeat = fresh.in_activation_since
         elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = ""
@@ -1912,6 +1927,44 @@ def cluster_set_active(cl_id) -> None:
                 dev_stat = db_controller.get_device_stats(dev, 1)
                 if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
                     device_controller.device_set_online(dev.get_id())
+
+
+# The runtime RPCs the data-plane migrations dispatch per node. A data plane
+# whose SPDK advertises them (rpc_get_methods) can be migrated at runtime.
+SHARED_PLACEMENT_RUNTIME_RPCS = ("distr_shared_placement", "jm_set_shared_placement")
+WRITE_PROTECTION_RUNTIME_RPCS = ("distr_write_protection_v2",)
+
+
+def _all_nodes_support_rpcs(nodes, required) -> bool:
+    """True when every given storage node's RUNNING SPDK advertises every RPC
+    in ``required``.
+
+    This is the data-plane capability gate for the post-upgrade
+    auto-migrations (shared placement, write-protection v2): during a rolling
+    upgrade, nodes still on an incapable image do not list the methods, so
+    the probe holds the migration off until the LAST node has restarted onto
+    a capable image. Any unreachable node counts as unsupported — a migration
+    must only run against a fully settled cluster, and its own per-node RPC
+    dispatch would abort on that node anyway.
+    """
+    for node in nodes:
+        try:
+            methods = node.rpc_client(timeout=5, retry=1).rpc_get_methods() or []
+        except Exception as e:
+            logger.debug("rpc_get_methods failed on node %s: %s",
+                         node.get_id()[:8], e)
+            return False
+        if any(rpc not in methods for rpc in required):
+            return False
+    return True
+
+
+def all_nodes_support_shared_placement(nodes) -> bool:
+    return _all_nodes_support_rpcs(nodes, SHARED_PLACEMENT_RUNTIME_RPCS)
+
+
+def all_nodes_support_write_protection_v2(nodes) -> bool:
+    return _all_nodes_support_rpcs(nodes, WRITE_PROTECTION_RUNTIME_RPCS)
 
 
 def set_shared_placement(cl_id, enable=True, force=False) -> bool:
@@ -2061,6 +2114,102 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
         db_controller.get_cluster_by_id(cl_id),
         lambda c, v=enable: setattr(c, "shared_placement", v))
     logger.info("Cluster %s shared_placement set to %s", cl_id, enable)
+    return True
+
+
+def switch_write_protection(cl_id) -> bool:
+    """Move a cluster from v1 to v2 distrib write protection.
+
+    Two steps, strictly in this order, so the recorded generation never claims
+    more than the data plane has actually done:
+
+      1. Send the runtime ``distr_write_protection_v2(enable=True)`` RPC to
+         every ONLINE storage node, with no ``name`` so it covers every distrib
+         bdev on that node. This is the only way an already-created distrib
+         gains v2 -- a create parameter cannot reach a bdev that exists. Every
+         online node must succeed; a single failure aborts the switch and
+         leaves the cluster on v1, so recovery is just re-running the command.
+
+      2. Only then stamp the generation: into each node's stored distrib params
+         (so a restart replays the right key) and onto the cluster row (so
+         newly created distribs, and nodes added later, pick it up).
+
+    Offline nodes are not a failure and are not skipped: they have no running
+    bdevs to migrate, and step 2 rewrites their stored stack, so their distribs
+    come back on v2 when they next restart.
+
+    Idempotent: a cluster already on v2 returns True untouched.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if cluster.write_protection_v2:
+        logger.info(
+            "Cluster %s already runs v2 write protection; nothing to do", cl_id)
+        return True
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    online = [n for n in nodes if n.status == StorageNode.STATUS_ONLINE]
+    if not online:
+        logger.error(
+            "Cluster %s has no online storage node; cannot switch write "
+            "protection", cl_id)
+        return False
+
+    # Step 1: the runtime RPC on every online node.
+    failures = []
+    for node in online:
+        try:
+            if node.rpc_client().distr_write_protection_v2(enable=True):
+                logger.info("Node %s: v2 write protection activated",
+                            node.get_id())
+            else:
+                failures.append(node.get_id())
+                logger.error(
+                    "Node %s rejected distr_write_protection_v2(enable=True)",
+                    node.get_id())
+        except Exception as e:
+            failures.append(node.get_id())
+            logger.error(
+                "Node %s raised on distr_write_protection_v2(enable=True): %s",
+                node.get_id(), e)
+
+    if failures:
+        logger.error(
+            "Aborting write-protection switch: %d of %d online node(s) failed "
+            "(%s). The cluster stays on v1 -- fix those nodes and re-run.",
+            len(failures), len(online), ", ".join(failures))
+        return False
+
+    # Step 2a: persist the generation in every stored distrib stack entry, on
+    # every node including offline ones. Atomic compare-and-set so the long
+    # per-node RPC loop above cannot clobber a concurrent node.status write
+    # (lost-update class -- incident 2026-06-18).
+    for node in nodes:
+        def _mut(n):
+            changed = False
+            for entry in (n.lvstore_stack or []):
+                if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                    continue
+                params = entry.get("params")
+                if not isinstance(params, dict):
+                    continue
+                before = ("write_protection" in params,
+                          "write_protection_v2" in params)
+                storage_node_ops.apply_write_protection_mode(params, True)
+                if before != ("write_protection" in params,
+                              "write_protection_v2" in params):
+                    changed = True
+            return changed
+
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()), _mut)
+
+    # Step 2b: the cluster row (atomic, so it does not clobber a concurrent
+    # cluster.status write from set_cluster_status).
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cl_id),
+        lambda c: setattr(c, "write_protection_v2", True))
+    logger.info("Cluster %s switched to v2 write protection (%d node(s))",
+                cl_id, len(online))
     return True
 
 
@@ -2443,8 +2592,193 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
     return out
 
 
+# Grafana's provisioning paths inside the monitoring container, as mounted by
+# docker-compose-swarm-monitoring.yml.
+GRAFANA_DATASOURCE_TARGET = "/etc/grafana/provisioning/datasources/datasource.yaml"
+GRAFANA_ALERTING_TARGET = "/etc/grafana/provisioning/alerting"
+GRAFANA_EVENT_DATASOURCE_TARGET = "/etc/grafana/provisioning/datasources/datasource-events.yaml"
+
+_GRAFANA_DURATION = re.compile(r'^(?:\d+(?:ms|[smhdwy]))+$')
+
+
+def _event_alert_settings(enabled, log_limit, interval, pending_period,
+                          plugin_url, plugin_preinstalled) -> t.Dict[str, t.Any]:
+    """Validate the tuning knobs and shape them for the templates.
+
+    Validated here because Grafana answers a malformed duration or limit by
+    refusing to start, long after the command that caused it.
+    """
+    settings = {
+        'enabled': enabled,
+        'logLimit': 1000 if log_limit is None else log_limit,
+        'interval': interval or '1m',
+        'for': pending_period or '1m',
+        'plugin': {
+            'url': constants.GRAFANA_EVENT_ALERTS_PLUGIN_URL if plugin_url is None else plugin_url,
+            'preinstalled': plugin_preinstalled,
+        },
+    }
+
+    if not enabled:
+        return settings
+
+    if settings['logLimit'] < 1:
+        raise ValueError(f"--log-limit must be at least 1, got {settings['logLimit']}")
+
+    for flag, key in (('--interval', 'interval'), ('--pending-period', 'for')):
+        if not _GRAFANA_DURATION.match(settings[key]):
+            raise ValueError(
+                f"{flag} must be a Grafana duration such as 30s, 1m or 1h, got {settings[key]!r}")
+
+    if not settings['plugin']['preinstalled'] and not settings['plugin']['url']:
+        raise ValueError(
+            "--plugin-url is empty and --plugin-preinstalled was not given, so the data source "
+            "plugin the rules query would never be installed")
+
+    return settings
+
+
+def _grafana_provisioning_dirs(cluster_docker) -> t.Tuple[str, str]:
+    """The host directories the running Grafana reads its provisioning from.
+
+    Read off the service rather than computed from this package's location, so
+    the files land where the cluster's own mounts point.
+    """
+    try:
+        service = cluster_docker.services.get(constants.MONITORING_GRAFANA_SERVICE)
+    except docker.errors.NotFound as e:
+        raise ValueError(
+            f"Service {constants.MONITORING_GRAFANA_SERVICE} not found: this cluster has no "
+            f"monitoring stack") from e
+
+    mounts = service.attrs['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
+    sources = {mount.get('Target'): mount.get('Source') for mount in mounts}
+    for target in (GRAFANA_DATASOURCE_TARGET, GRAFANA_ALERTING_TARGET):
+        if not sources.get(target):
+            raise ValueError(
+                f"Service {constants.MONITORING_GRAFANA_SERVICE} has no bind mount at {target}; "
+                f"redeploy the monitoring stack before provisioning event log alerts")
+
+    return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
+
+
+def _install_provisioning_on_all_managers(files: t.Dict[str, str]) -> None:
+    """Write Grafana's provisioning files onto every management node.
+
+    Grafana is constrained to node.role == manager and may be rescheduled to
+    any of them, and these are host paths, so a manager that lacks them
+    provisions no rules the first time Grafana lands there. They cannot ship
+    with the package the way alert_rules.yaml does, carrying this cluster's id
+    and secret. Written through each node's docker API, the same way SNodeAPI
+    is started on a remote node; base64 keeps the YAML out of shell quoting,
+    and user=root because the image runs as USER simplyblock, which cannot
+    write into the package directory.
+    """
+    script = "; ".join(
+        f"umask 022 && echo {base64.b64encode(content.encode('utf-8')).decode('ascii')} "
+        f"| base64 -d > {shlex.quote(path)}"
+        for path, content in files.items()
+    )
+    volumes = sorted({os.path.dirname(path) for path in files})
+
+    failed = {}
+    for node in db_controller.get_mgmt_nodes():
+        try:
+            node_docker = docker.DockerClient(
+                base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
+            node_docker.containers.run(
+                constants.SIMPLY_BLOCK_DOCKER_IMAGE, ["sh", "-c", script], user="root",
+                volumes=[f"{directory}:{directory}" for directory in volumes],
+                remove=True, detach=False)
+            logger.info("Provisioning files written on %s", node.mgmt_ip)
+        except Exception as e:
+            failed[node.mgmt_ip] = str(e)
+
+    if failed:
+        raise RuntimeError(
+            "Could not write the provisioning files on: "
+            + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
+            + ". Fix those nodes and re-run; Grafana provisions nothing on a node it cannot "
+              "read them from")
+
+
+def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pending_period=None,
+                     plugin_url=None, plugin_preinstalled=False) -> None:
+    """Provision (or remove) the Grafana alert rules read from the cluster event log.
+
+    Unlike the Thanos-backed rules in alerting/alert_rules.yaml, which ship
+    with the package and are provisioned unconditionally, these are opt-in:
+    they query the control plane's REST API, which needs a Grafana plugin the
+    deployed image does not carry and downloads once.
+
+    Runs against the live stack -- files onto every management node, then the
+    Grafana task recreated so it re-reads them -- so it configures a cluster
+    that already exists.
+    """
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+
+    if cluster.mode != "docker":
+        raise ValueError(
+            "Event log alerts are provisioned by the simplyblock-operator Helm chart on "
+            "kubernetes; this command configures the docker monitoring stack only")
+
+    if cluster.disable_monitoring:
+        raise ValueError("This cluster was created with --disable-monitoring, so it has no Grafana")
+
+    settings = _event_alert_settings(enabled, log_limit, interval, pending_period,
+                                     plugin_url, plugin_preinstalled)
+
+    cluster_docker = utils.get_docker_client(cluster_id)
+    scripts_dir, alerting_dir = _grafana_provisioning_dirs(cluster_docker)
+
+    # The secret is the bearer token the data source sends, and reaches
+    # plaintext only here, on its way into a file Grafana reads -- the same
+    # treatment prometheus.yml gets.
+    rendered = utils.render_event_alert_configs(
+        settings, [(cluster.get_id(), cluster.secret.get_secret_value())])
+    datasource_path = os.path.join(scripts_dir, utils.EVENT_ALERT_DATASOURCE_FILE)
+    _install_provisioning_on_all_managers({
+        os.path.join(alerting_dir, utils.EVENT_ALERT_RULES_FILE):
+            rendered[utils.EVENT_ALERT_RULES_FILE],
+        datasource_path: rendered[utils.EVENT_ALERT_DATASOURCE_FILE],
+    })
+
+    # --force recreates the task, which is what makes Grafana re-read
+    # provisioning; a single-file bind mount also tracks the inode it started
+    # with, so the rewritten data source is only picked up here. Mounts are
+    # keyed by target and env by name, so re-running updates both in place.
+    # Disabling leaves them: both files are empty now, and keeping the plugin
+    # makes re-enabling a restart instead of another download.
+    update = ["sudo", "docker", "service", "update", "--force"]
+    if enabled:
+        if not settings['plugin']['preinstalled']:
+            update += ["--env-add", f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
+                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}"]
+        update += ["--mount-add", f"type=bind,src={datasource_path},"
+                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly"]
+
+    logger.info("Restarting Grafana...")
+    subprocess.check_call(update + [constants.MONITORING_GRAFANA_SERVICE])
+
+
 def get_cluster(cl_id) -> dict:
-    return db_controller.get_cluster_by_id(cl_id).get_clean_dict()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    data = cluster.get_clean_dict()
+    # Derived, human-readable placement-migration state; the raw flags are
+    # shared_placement / shared_placement_migration_pending.
+    if cluster.shared_placement:
+        data['data_placement'] = 'per-chunk'
+    elif cluster.shared_placement_migration_pending:
+        data['data_placement'] = 'per-page (migration pending)'
+    else:
+        data['data_placement'] = 'per-page (legacy)'
+    if cluster.write_protection_v2:
+        data['write_protection'] = 'v2'
+    elif cluster.write_protection_migration_pending:
+        data['write_protection'] = 'v1 (migration pending)'
+    else:
+        data['write_protection'] = 'v1 (legacy)'
+    return data
 
 
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
@@ -2467,6 +2801,26 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     # upgrade before anything was changed. Completed later by
     # `cluster upgrade-complete` (upgrade_complete below).
     release_upgrades.run_pre_update(cluster)
+
+    # An upgraded cluster's existing distribs carry v1 write protection, and no
+    # create parameter can retrofit a bdev that already exists -- only the
+    # runtime distr_write_protection_v2 RPC can, via
+    # `sbctl cluster switch-write-protection`. Stamp the generation back to v1
+    # BEFORE the rolling restart below, because those restarts replay each
+    # node's stored distrib stack and must replay it under the key the running
+    # bdevs actually use.
+    #
+    # This also demotes a cluster that was already on v2: after an upgrade the
+    # switch has to be re-run either way, and claiming v2 we have not verified
+    # on the new image is the one failure mode worth avoiding here.
+    if cluster.write_protection_v2:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "write_protection_v2", False))
+        logger.info(
+            "Cluster %s stamped back to v1 write protection for the upgrade; "
+            "run `sbctl cluster switch-write-protection` once every node is "
+            "back online", cluster_id)
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
@@ -2541,7 +2895,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = deploy.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(timezone.utc).isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
                         deploy.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_deployment(
                             name=deploy.metadata.name,
@@ -2574,7 +2928,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = ds.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(timezone.utc).isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
                         ds.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_daemon_set(
                             name=ds.metadata.name,
@@ -2623,18 +2977,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.error(f"Failed to restart node: {node.get_id()}")
                 return
 
-    # All storage nodes have been restarted onto the upgraded SPDK image.
-    # Arm the one-shot per-chunk placement migration now — and only now,
-    # after the full rolling restart — so storage_node_monitor switches the
-    # cluster once it settles (ACTIVE, not rebalancing, all nodes online).
-    # Skipped on the early-return failure path above, so a partial/failed
-    # upgrade never arms it. No-op if the cluster is already on per-chunk.
-    upgraded = db_controller.get_cluster_by_id(cluster_id)
-    if not upgraded.shared_placement and not upgraded.shared_placement_migration_pending:
-        upgraded.shared_placement_migration_pending = True
-        upgraded.write_to_db(db_controller.kv_store)
-        logger.info("Armed shared_placement migration for cluster %s post-upgrade", cluster_id)
-
+    # The shared-placement migration is NOT armed here any more. This tail
+    # only runs for restart=True callers, which no CLI invocation ever sets,
+    # so arming here stranded every CLI-upgraded cluster on per-page
+    # placement (customer incident 2026-09-04). It is armed by
+    # upgrade_complete below, and storage_node_monitor additionally
+    # self-heals via a data-plane capability probe
+    # (all_nodes_support_shared_placement).
     logger.info("Done")
 
 
@@ -2646,6 +2995,36 @@ def upgrade_complete(cluster_id) -> bool:
     cluster = db_controller.get_cluster_by_id(cluster_id)
     for message in release_upgrades.run_upgrade_complete(cluster):
         logger.info(message)
+
+    # Arm the one-shot per-chunk placement migration for clusters upgraded
+    # from a pre-shared-placement release. upgrade-complete is the documented
+    # final step of every upgrade, i.e. after the full rolling node restart —
+    # exactly when the migration may start. storage_node_monitor performs the
+    # actual flip once the cluster settles (ACTIVE, not rebalancing, all
+    # nodes online) and disarms the flag; it also self-heals clusters whose
+    # upgrade predates this arming via a data-plane capability probe.
+    # No-op for clusters already on per-chunk (including all newly created
+    # ones, which are born shared).
+    if not cluster.shared_placement and not cluster.shared_placement_migration_pending:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "shared_placement_migration_pending", True))
+        logger.info("Armed shared_placement migration for cluster %s "
+                    "post-upgrade", cluster_id)
+
+    # Same for write-protection v2: update_cluster deliberately stamps the
+    # generation back to v1 before the rolling restart, so after every
+    # upgrade the runtime switch has to run again. Previously that was a
+    # manual `sbctl cluster switch-write-protection`; now the monitor runs it
+    # once the cluster settles (and self-heals via the capability probe even
+    # when this arming was never reached). The CLI command remains as the
+    # manual override.
+    if not cluster.write_protection_v2 and not cluster.write_protection_migration_pending:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "write_protection_migration_pending", True))
+        logger.info("Armed write-protection v2 migration for cluster %s "
+                    "post-upgrade", cluster_id)
     return True
 
 
@@ -2679,15 +3058,73 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
 
 
 
+def _grace_shutdown_skipped(node) -> bool:
+    """Nodes a full-cluster shutdown must not touch.
+
+    See the rationale in cluster_grace_shutdown's loop.
+    """
+    return node.status in (StorageNode.STATUS_REMOVED,
+                           StorageNode.STATUS_IN_REMOVAL)
+
+
 def cluster_grace_shutdown(cl_id) -> None:
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
+        # REMOVED is terminal and must survive a cluster shutdown. Without
+        # this filter the sweep force-shuts-down every record it can see,
+        # and shutdown_storage_node drives in_shutdown -> offline, so a node
+        # that was deliberately removed comes back as a plain offline member
+        # (live 2026-09-03: one graceful-shutdown resurrected all four nodes
+        # removed earlier that day). That is not cosmetic --
+        # failure_domain_host_map skips only STATUS_REMOVED, so those records
+        # start counting toward FD host balance again, and the next
+        # activation or startup acts on nodes whose devices are already
+        # failed_and_migrated and which own no lvstore.
+        #
+        # IN_REMOVAL is skipped because node_removal_orchestrate has already
+        # shut that node down and owns the rest of its lifecycle.
+        # PENDING_REMOVAL is deliberately NOT skipped -- the node is still up
+        # and serving at that point, so a full-cluster shutdown must stop it
+        # like any other member.
+        if _grace_shutdown_skipped(node):
+            logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
+            continue
         logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id(), force=True)
         logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+
+    # Settle check. The sweep is serial, so a node it already passed can come
+    # back up behind it -- that is exactly what happened on 2026-09-03, when
+    # queued restart rows put s7457 and zdgtb back ONLINE seconds after the
+    # sweep had shut them down, and the command still returned as if the
+    # cluster were down. shutdown_storage_node now reaps those rows, but this
+    # verifies the end state rather than assuming it: anything that resurrects
+    # a node by another route is caught and stopped here, once.
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    stragglers = [n for n in st
+                  if not _grace_shutdown_skipped(n)
+                  and n.status != StorageNode.STATUS_OFFLINE]
+    for node in stragglers:
+        logger.warning(
+            f"Node {node.get_id()} is {node.status} after the shutdown sweep; "
+            f"shutting it down again")
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    still_up = [n.get_id() for n in st
+                if not _grace_shutdown_skipped(n)
+                and n.status != StorageNode.STATUS_OFFLINE]
+    if still_up:
+        # Deliberately not raising: the caller asked for a shutdown and most
+        # of the cluster is down, so failing here would be less useful than
+        # saying precisely which nodes are not. An operator following up with
+        # `sn shutdown` needs the list, not a traceback.
+        logger.error(
+            f"Graceful shutdown finished with {len(still_up)} node(s) not "
+            f"offline: {still_up}")
 
 
 def cluster_restart(cl_id) -> None:

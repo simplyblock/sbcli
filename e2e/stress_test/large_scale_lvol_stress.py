@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from datetime import UTC
 
 logger = setup_logger(__name__)
 
@@ -359,7 +360,7 @@ class _LargeScaleMixin:
     def _write_monitoring_json(self):
         """Write standardised timing JSON for monitoring suite aggregation."""
         import json as _json
-        from datetime import datetime, timezone
+        from datetime import datetime
         from pathlib import Path
 
         phases = []
@@ -373,7 +374,7 @@ class _LargeScaleMixin:
         total_dur = sum(self._phase_durations.values())
         report = {
             "test_class": self.__class__.__name__,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "status": "passed" if self._fio_failures == 0 else "failed",
             "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},
             "config": {

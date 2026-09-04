@@ -1,11 +1,10 @@
 # coding=utf-8
 import copy
 import random
-import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import ops_gate
@@ -82,33 +81,6 @@ def _create_compress_lvol(rpc_client, base_bdev_name):
         logger.error("failed to create compress LVol on the storage node")
         return False
     return ret
-
-
-def ask_for_device_number(devices_list):
-    question = f"Enter the device number [1-{len(devices_list)}]: "
-    while True:
-        sys.stdout.write(question)
-        choice = str(input())
-        try:
-            ch = int(choice.strip())
-            ch -= 1
-            return devices_list[ch]
-        except Exception as e:
-            logger.debug(e)
-            sys.stdout.write(f"Please respond with numbers 1 - {len(devices_list)}\n")
-
-
-def ask_for_lvol_vuid():
-    question = "Enter VUID number: "
-    while True:
-        sys.stdout.write(question)
-        choice = str(input())
-        try:
-            ch = int(choice.strip())
-            return ch
-        except Exception as e:
-            logger.debug(e)
-            sys.stdout.write("Please respond with numbers")
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
@@ -192,11 +164,18 @@ def count_lvol_subsystems(node, all_lvols=None):
 
 
 def max_subsystems_for_node(node):
-    """Effective per-node subsystem limit: the node's configured ``max_lvol``
-    bounded by the hard cluster-wide cap MAX_SUBSYSTEMS_PER_NODE. min() keeps
-    the legacy semantics of a smaller (or zero) max_lvol while guaranteeing
-    no node ever serves more than the hard cap."""
-    return min(node.max_lvol, constants.MAX_SUBSYSTEMS_PER_NODE)
+    """Effective per-node subsystem limit: the node's configured ``max_lvol``.
+
+    ``max_lvol`` can only exceed MAX_SUBSYSTEMS_PER_NODE on a record written
+    by a release that predates the cap — every configuration surface that can
+    SET the value (sn configure, add-node, restart's explicit argument,
+    cluster update --max-subsys, the node-configure API) clamps new values to
+    the cap. Such legacy nodes were sized (huge pages, iobuf pools) for their
+    configured value and must keep operating AND provisioning as configured
+    after an upgrade; the previous min() against the cap retroactively froze
+    their growth at the cap while they legitimately serve more. The cap is
+    enforced where values are set, not where occupancy is admitted."""
+    return node.max_lvol
 
 
 def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False):
@@ -303,36 +282,6 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
         return ret
     else:
         return online_nodes
-
-def is_hex(s: str) -> bool:
-    """
-    given an input checks if the value is hex encoded or not
-    """
-    try:
-        int(s, 16)
-        return True
-    except ValueError:
-        return False
-
-def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
-    """
-    Key Length: each key should be either 128 or 256 bits long.
-    since hex values of the keys are expected, the key lengths should be either 32 or 64
-    """
-
-    if len(key1) != len(key2):
-        return False, "both the keys should be of the same length"
-
-    if len(key1) not in [32, 64] or len(key2) not in [32, 64]:
-        return False, "each key should be either 16 or 32 bytes long"
-
-    if not is_hex(key1):
-        return False, "please provide hex encoded value for crypto_key1"
-
-    if not is_hex(key2):
-        return False, "please provide hex encoded value for crypto_key2"
-
-    return True, ""
 
 
 def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
@@ -508,6 +457,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # Effective (client-visible) bytes: LVol.size is the logical size the client
     # sees, never the raw cost of storing it.
     cluster_size_prov = sum([lv.size for lv in all_lvols])
+    # Snapshots hold ACTUAL bytes that provisioned sizes do not cover; admit
+    # against provisioned + snapshot utilisation, the same model as the
+    # pool-level check (see pool_controller.get_cluster_snapshot_utilization).
+    cluster_size_prov += pool_controller.get_cluster_snapshot_utilization(
+        cl.get_id(), all_snaps=all_snaps)
 
     dev_count = 0
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
@@ -2839,9 +2793,15 @@ def resize_lvol(id, new_size, lock=True) -> None:
         raise PreconditionError(f"New size {new_size} must not be larger than the pool max size {pool.lvol_max_size}")
 
     if pool.pool_max_size > 0:
+        # get_pool_total_capacity already includes THIS lvol's current
+        # provisioned size, so subtract it before adding the new size.
+        # `total + new_size` double-counted the volume (old + new) and
+        # rejected legal resizes: a single 4G volume in a 10G pool could
+        # not grow past 6G.
         total = pool_controller.get_pool_total_capacity(pool.get_id())
-        if total + new_size > pool.pool_max_size:
-            raise PreconditionError(f"Invalid LVol size: {new_size}, Pool max size has reached {total + new_size} of {pool.pool_max_size}")
+        total_after = total - lvol.size + new_size
+        if total_after > pool.pool_max_size:
+            raise PreconditionError(f"Invalid LVol size: {new_size}, Pool max size has reached {total_after} of {pool.pool_max_size}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 

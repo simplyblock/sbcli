@@ -30,6 +30,7 @@ non-interruption in case 1 assumes the client holds the target multipath paths
 before the ANA flip — the script connects them right after replication-commit,
 before the cutover runner flips ANA.
 """
+import itertools
 import json
 import os
 import re
@@ -2221,7 +2222,7 @@ def _verify_retention_ladder(times, tiers, now, cadence_sec=60, slack=150):
     for every, span in tiers:
         end = start + span
         inside = [a for a in ages if start <= a < end]
-        for prev, cur in zip(inside, inside[1:]):
+        for prev, cur in itertools.pairwise(inside):
             if cur - prev > every + cadence_sec + slack:
                 problems.append(
                     "gap of %ds inside the %ds tier (%d-%ds): a scheduled "

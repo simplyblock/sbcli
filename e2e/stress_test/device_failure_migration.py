@@ -54,7 +54,7 @@ import random
 import string
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 from e2e_tests.cluster_test_base import generate_random_sequence
@@ -1998,7 +1998,7 @@ class _DeviceFailureMigrationBase:
 
         report = {
             "test_class": self.__class__.__name__,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "status": "passed" if self._test_passed else "failed",
             "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},
             "config": {
@@ -3247,7 +3247,7 @@ class _DeviceAddAfterBootstrapBase:
 
         report = {
             "test_class": self.__class__.__name__,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "status": "passed" if self._test_passed else "failed",
             "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},
             "config": {

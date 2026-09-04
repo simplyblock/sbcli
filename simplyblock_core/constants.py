@@ -588,6 +588,20 @@ LVO_MAX_NAMESPACES_PER_SUBSYS=32
 CR_GROUP = "storage.simplyblock.io"
 CR_VERSION  = "v1alpha1"
 
+# Grafana alert rules read from the cluster event log rather than from Thanos,
+# provisioned by `sbctl cluster event-alerts`. The plugin id is both the folder
+# Grafana installs the plugin into and the data source `type` the rules use.
+# 2.12.2 is the last Infinity release compatible with Grafana 10.0.12.
+GRAFANA_EVENT_ALERTS_PLUGIN_ID = "yesoreyeram-infinity-datasource"
+GRAFANA_EVENT_ALERTS_PLUGIN_URL = (
+    "https://grafana.com/api/plugins/yesoreyeram-infinity-datasource/versions/2.12.2/download")
+
+# The control plane as reached from the monitoring stack. HAProxy's default
+# backend is the web API, so /api/v2 needs no route of its own; the same host
+# prometheus.yml.j2 scrapes /cluster/metrics from.
+MONITORING_CONTROL_PLANE_ADDR = "http://HAProxy"
+MONITORING_GRAFANA_SERVICE = "monitoring_grafana"
+
 GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
 GRAYLOG_K8S_ENDPOINT = "http://simplyblock-graylog:9000"
 OS_K8S_ENDPOINT = "http://opensearch-cluster-master:9200"
@@ -662,6 +676,7 @@ LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
+LVOL_MIG_TRANSFER_BATCH_SIZE = 256
 
 #: How long a deferred lvol register task tolerates a missing lvol record
 #: before treating it as obsolete. add_lvol_ha queues the task in its

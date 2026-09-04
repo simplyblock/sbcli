@@ -22,6 +22,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.storage_node import StorageNode
+from tests._mocks import unique_ip
 
 
 def _node(uuid, status=StorageNode.STATUS_ONLINE,
@@ -36,7 +37,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE,
     n.tertiary_node_id = tertiary_node_id
     n.lvstore_stack_secondary = lvstore_stack_secondary
     n.lvstore_stack_tertiary = lvstore_stack_tertiary
-    n.mgmt_ip = f"10.0.0.{abs(hash(uuid)) % 254 + 1}"
+    n.mgmt_ip = unique_ip(uuid)
     n.rpc_port = 8080
     n.rpc_username = "u"
     n.rpc_password = "p"

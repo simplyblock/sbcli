@@ -40,7 +40,7 @@ import simplyblock_core.services.tasks_runner_restart as restart_runner
 
 
 def _now():
-    return datetime.datetime.now(datetime.timezone.utc)
+    return datetime.datetime.now(datetime.UTC)
 
 
 def _node(node_id="node-1", cluster_id="cl-1", status=StorageNode.STATUS_OFFLINE,

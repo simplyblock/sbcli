@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import tasks_controller
@@ -70,7 +70,7 @@ def task_runner(task):
 
             if node.online_since:
                 try:
-                    diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
+                    diff = datetime.now(UTC) - datetime.fromisoformat(node.online_since)
                     if diff.total_seconds() < 60:
                         task.function_result = "node is online < 1 min, retrying"
                         task.status = JobSchedule.STATUS_SUSPENDED

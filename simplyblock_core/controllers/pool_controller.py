@@ -207,9 +207,19 @@ def qos_exists_on_child_lvol(db_controller: DBController, pool_uuid):
             return True
     return False
 
-def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
+def set_pool(uuid, pool_max=None, lvol_max=None, max_rw_iops=0,
              max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name="",
              lvols_cr_name="", lvols_cr_namespace="", lvols_cr_plural=""):
+    """Update a pool. ``pool_max``/``lvol_max`` of None mean "not specified,
+    leave unchanged"; 0 means "explicitly reset to unlimited".
+
+    They default to None rather than 0 because this is a partial update: the
+    CLI passes ``args.pool_max``/``args.lvol_max`` unconditionally and argparse
+    supplies None for a flag the user omitted (the `set` subcommand declares no
+    default, unlike `add`), and the v1 API only forwards the keys present in the
+    request body. With a 0 default, omitting one size silently reset that field
+    to unlimited instead of preserving it.
+    """
     db_controller = DBController()
     try:
         pool = db_controller.get_pool_by_id(uuid)
@@ -289,37 +299,49 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
             if err:
                 return False, err
 
-    if pool_max == 0:
-        pool.pool_max_size = 0
-    elif pool_max > 0:
-        total_lvol_size = 0
-        for lvol in db_controller.get_lvols_by_pool_id(uuid):
-            total_lvol_size += lvol.size
-        if total_lvol_size > pool_max:
-            msg = f"Pool max size can't be less than total provisioned size of lvols: {utils.humanbytes(total_lvol_size)}"
+    # None => the caller did not specify this size, so leave it alone. Without
+    # this guard None fell through `== 0` (False) into `> 0` and raised
+    # "TypeError: '>' not supported between instances of 'NoneType' and 'int'",
+    # which is what `pool set <id> --pool-max 4TB` hit: --lvol-max was omitted,
+    # so args.lvol_max was None and got passed positionally regardless.
+    if pool_max is not None:
+        if pool_max == 0:
+            pool.pool_max_size = 0
+        elif pool_max > 0:
+            total_lvol_size = 0
+            for lvol in db_controller.get_lvols_by_pool_id(uuid):
+                total_lvol_size += lvol.size
+            if total_lvol_size > pool_max:
+                msg = f"Pool max size can't be less than total provisioned size of lvols: {utils.humanbytes(total_lvol_size)}"
+                logger.error(msg)
+                return False, msg
+            pool.pool_max_size = pool_max
+        else:
+            msg = "pool_max can not be negative"
             logger.error(msg)
             return False, msg
-        pool.pool_max_size = pool_max
-    else:
-        msg = "pool_max can not be negative"
-        logger.error(msg)
-        return False, msg
 
-    if lvol_max == 0:
-        pool.lvol_max_size = 0
-    elif lvol_max > 0:
-        lvol_size_max = 0
-        for lvol in db_controller.get_lvols_by_pool_id(uuid):
-            lvol_size_max = max(lvol_size_max, lvol.size)
-        if lvol_size_max > lvol_max:
-            msg = f"LVol max size can't be less than max provisioned size of lvols: {utils.humanbytes(lvol_size_max)}"
+    if lvol_max is not None:
+        if lvol_max == 0:
+            pool.lvol_max_size = 0
+        elif lvol_max > 0:
+            lvol_size_max = 0
+            for lvol in db_controller.get_lvols_by_pool_id(uuid):
+                lvol_size_max = max(lvol_size_max, lvol.size)
+            if lvol_size_max > lvol_max:
+                msg = f"LVol max size can't be less than max provisioned size of lvols: {utils.humanbytes(lvol_size_max)}"
+                logger.error(msg)
+                return False, msg
+            # Was `pool.pool_max_size = lvol_max`, which wrote the per-lvol
+            # limit into the whole-pool limit -- so a non-zero --lvol-max
+            # silently overwrote pool_max_size and never set lvol_max_size at
+            # all. The `== 0` branch above already used the right field, which
+            # is what makes the mismatch visible.
+            pool.lvol_max_size = lvol_max
+        else:
+            msg = "lvol_max can not be negative"
             logger.error(msg)
             return False, msg
-        pool.pool_max_size = lvol_max
-    else:
-        msg = "lvol_max can not be negative"
-        logger.error(msg)
-        return False, msg
 
     # Apply QoS settings via RPC
     for hostname in db_controller.get_hostnames_by_pool_id(uuid):
@@ -506,6 +528,25 @@ def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
         if snap.lvol.pool_uuid == pool_id:
             total += snap.used_size
     return total
+
+
+def get_cluster_snapshot_utilization(cluster_id, all_snaps=None):
+    """Actual (used) bytes held by every snapshot in the cluster, in
+    effective (client-visible) units.
+
+    Snapshots occupy real capacity that provisioned-lvol accounting does not
+    cover: a 100T cluster with 80T provisioned and 15T of snapshot
+    utilisation has 5T of admissible headroom, not 20T. Admission checks
+    must add this on top of the provisioned sum (the pool-level
+    get_pool_total_capacity above already follows the same model), or a
+    cluster can run out of physical space without any overprovisioning.
+    """
+    db_controller = DBController()
+    pool_ids = {p.get_id() for p in db_controller.get_pools()
+                if p.cluster_id == cluster_id}
+    if all_snaps is None:
+        all_snaps = db_controller.get_mini_snapshots()
+    return sum(s.used_size for s in all_snaps if s.lvol.pool_uuid in pool_ids)
 
 
 def get_pool_total_rw_iops(pool_id):

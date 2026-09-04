@@ -71,8 +71,7 @@ RUN echo "OS package layer cache key: ${CACHE_KEY}" && \
         python3 \
         sudo \
         systemd-257 \
-        util-linux \
-        wget && \
+        util-linux && \
     dnf clean all
 
 # parted, libnvme and nvme-cli are not in the UBI repositories, and the
@@ -83,7 +82,7 @@ RUN set -eux; \
         arm64) rpm_arch=aarch64; fdb_dist=el9 ;; \
         *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    wget -q -O /tmp/foundationdb-clients.rpm \
+    curl -fsSL -o /tmp/foundationdb-clients.rpm \
         "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients-${FDB_VERSION}-1.${fdb_dist}.${rpm_arch}.rpm"; \
     rpm -ivh --nodigest --nofiledigest /tmp/foundationdb-clients.rpm; \
     rm -f /tmp/foundationdb-clients.rpm; \

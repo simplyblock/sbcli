@@ -903,7 +903,8 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True, shared_placement=False):
+                            full_page_unmap=True, shared_placement=False,
+                            write_protection_v2=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -941,7 +942,16 @@ class RPCClient:
             params['ha_inode_self'] = ha_inode_self
         if distrib_cpu_mask:
             params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
-        if write_protection:
+        # Write protection has two generations and a distrib is created with
+        # exactly one of them. v2 supersedes v1 -- the data plane derives the
+        # old flag from the new one (b_write_protection = b_write_protection ||
+        # b_write_protection_v2), so sending both is redundant and sending the
+        # wrong one for the cluster's generation is a correctness problem. The
+        # caller decides via cluster.write_protection_v2; see
+        # storage_node_ops.apply_write_protection_mode.
+        if write_protection_v2:
+            params["write_protection_v2"] = True
+        elif write_protection:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
@@ -973,6 +983,31 @@ class RPCClient:
         if name:
             params["name"] = name
         return self._request("distr_shared_placement", params)
+
+    def distr_write_protection_v2(self, name=None, enable=True):
+        """Activate (or deactivate) v2 write protection on distrib bdevs at
+        runtime.
+
+        This is the one-shot migration RPC for bdevs that already exist:
+        a distrib created by an older release carries v1 write protection and
+        cannot gain v2 by being told about it at create time -- it is already
+        created. `sbctl cluster switch-write-protection` sends this to every
+        online node after an upgrade, then stamps cluster.write_protection_v2
+        so subsequent (re-)creations use the v2 create parameter instead.
+
+        Args:
+            name: target a single distrib bdev. If None / empty, applies to
+                every distrib bdev on this node -- which is what the cluster
+                switch wants.
+            enable: True activates v2.
+
+        Returns True on success; raises on RPC error (the data plane answers
+        with an error response carrying ndev/nfail when some devices failed).
+        """
+        params: dict = {"enable": bool(enable)}
+        if name:
+            params["name"] = name
+        return self._request("distr_write_protection_v2", params)
 
     def jm_set_shared_placement(self, name, enable=True):
         """Flip the shared_placement mode of a JM bdev at runtime.
@@ -1974,6 +2009,14 @@ class RPCClient:
             "category": "online"
         }
         return self._request("bdev_raid_get_bdevs", params)
+
+    def rpc_get_methods(self):
+        """Names of every RPC method the node's running SPDK app exposes
+        (standard SPDK ``rpc_get_methods``). Used to probe data-plane
+        capabilities without side effects — e.g. whether the image carries
+        the runtime shared-placement RPCs (see
+        cluster_ops.all_nodes_support_shared_placement)."""
+        return self._request("rpc_get_methods")
 
     def bdev_lvs_dump_tree(self, lvstore_uuid):
         params = {

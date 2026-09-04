@@ -22,7 +22,7 @@ import re
 import shlex
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
@@ -3804,7 +3804,7 @@ class K8sSbcliUtils:
             iso_str = updated_at_raw
             try:
                 dt = datetime.strptime(updated_at_raw, "%H:%M:%S, %d/%m/%Y")
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
                 iso_str = dt.isoformat()
                 date_ts = int(dt.timestamp())
             except Exception:

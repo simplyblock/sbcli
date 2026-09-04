@@ -53,8 +53,8 @@ def restart_claim_active(node, claim_owner=""):
     except (ValueError, TypeError):
         return None
     if claimed.tzinfo is None:
-        claimed = claimed.replace(tzinfo=datetime.timezone.utc)
-    age = (datetime.datetime.now(datetime.timezone.utc) - claimed).total_seconds()
+        claimed = claimed.replace(tzinfo=datetime.UTC)
+    age = (datetime.datetime.now(datetime.UTC) - claimed).total_seconds()
     if age > constants.RESTART_CLAIM_TTL_SEC:
         return None
     return owner
@@ -1238,7 +1238,7 @@ class DBController(metaclass=Singleton):
         if target:
             target.status = StorageNode.STATUS_RESTARTING
             target.restart_claim_owner = claim_owner
-            target.restart_claim_ts = str(datetime.datetime.now(datetime.timezone.utc))
+            target.restart_claim_ts = str(datetime.datetime.now(datetime.UTC))
             prefix = target.get_db_id()
             data = json.dumps(target.get_clean_dict(unwrap_secrets=True))
             tr[prefix.encode()] = data.encode()
@@ -1332,7 +1332,7 @@ class DBController(metaclass=Singleton):
         if not claim_owner:
             return False
         refreshed = {"ok": False}
-        now = str(datetime.datetime.now(datetime.timezone.utc))
+        now = str(datetime.datetime.now(datetime.UTC))
 
         def _mutate(n):
             if n.restart_claim_owner != claim_owner:

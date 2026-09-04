@@ -4,7 +4,7 @@ import time
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
@@ -1280,7 +1280,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
             report = {
                 "test_class": self.__class__.__name__,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "status": "passed" if not self._metrics["failure_info"] else "failed",
                 "duration_sec": round(dur, 2),
                 "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},

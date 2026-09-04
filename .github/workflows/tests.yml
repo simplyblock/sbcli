@@ -19,20 +19,19 @@ jobs:
   unit:
     name: Unit tests (py${{ matrix.py }})
     runs-on: ubuntu-latest
-    # 3.9 is the floor `requires-python` promises for the published wheel; 3.14t
+    # 3.11 is the floor `requires-python` promises for the published wheel; 3.14t
     # is what the container image runs. Both have to stay green -- the GIL-off
     # build is where a previously-masked data race surfaces.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { py: "3.9",   tox_prefix: "" }
+          - { py: "3.11",   tox_prefix: "" }
           - { py: "3.14t", tox_prefix: "py314t-" }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
           cache: 'pip'
       - name: Install tox
         run: pip install tox tox-uv
@@ -44,21 +43,20 @@ jobs:
   integration:
     name: Integration tests (py${{ matrix.py }})
     runs-on: ubuntu-latest
-    # 3.9 is the floor `requires-python` promises for the published wheel; 3.14t
+    # 3.11 is the floor `requires-python` promises for the published wheel; 3.14t
     # is what the container image runs. Both have to stay green -- the GIL-off
     # build is where a previously-masked data race surfaces.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { py: "3.9",   tox_prefix: "" }
+          - { py: "3.11",   tox_prefix: "" }
           - { py: "3.14t", tox_prefix: "py314t-" }
     timeout-minutes: 80
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
           cache: 'pip'
       - name: Install FoundationDB client library
         run: |

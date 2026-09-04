@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# PYTHON_ARGCOMPLETE_OK
 
 import logging
 import sys
@@ -388,6 +387,8 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__set_shared_placement(subparser)
+        self.init_cluster__event_alerts(subparser)
+        self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
         self.init_cluster__replication_target_add(subparser)
@@ -620,6 +621,20 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
         subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
+
+    def init_cluster__event_alerts(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'event-alerts', 'Provisions the Grafana alert rules read from the cluster event log.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--disable', help='Remove the event log alert rules and the data source.', dest='disable', action='store_true')
+        subcommand.add_argument('--log-limit', help='How many of the newest event log records each rule evaluation reads. Default: `1000`.', type=int, dest='log_limit')
+        subcommand.add_argument('--interval', help='How often the rules run, as a Grafana duration. Default: `1m`.', type=str, dest='interval')
+        subcommand.add_argument('--pending-period', help='How long a condition must hold before it notifies, as a Grafana duration. Default: `1m`.', type=str, dest='pending_period')
+        subcommand.add_argument('--plugin-url', help='Where to fetch the Infinity data source plugin from.', type=str, dest='plugin_url')
+        subcommand.add_argument('--plugin-preinstalled', help='The data source plugin is already in the Grafana image; do not download it.', dest='plugin_preinstalled', action='store_true')
+
+    def init_cluster__switch_write_protection(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'switch-write-protection', 'Activate v2 distrib write protection cluster-wide.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__change_name(self, subparser):
         subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
@@ -1485,6 +1500,10 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['set-shared-placement']:
                     ret = self.cluster__set_shared_placement(sub_command, args)
+                elif sub_command in ['event-alerts']:
+                    ret = self.cluster__event_alerts(sub_command, args)
+                elif sub_command in ['switch-write-protection']:
+                    ret = self.cluster__switch_write_protection(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:

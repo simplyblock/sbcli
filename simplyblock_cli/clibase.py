@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# PYTHON_ARGCOMPLETE_OK
 
 import argparse
 import json
@@ -7,8 +6,6 @@ import re
 import sys
 import time
 from pathlib import Path
-
-import argcomplete
 
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, utils, db_controller, constants
@@ -80,7 +77,6 @@ class CLIWrapperBase:
 
     def __init__(self):
         self.parser.add_argument("--cmd", help='cmd', nargs='+')
-        argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(description=f'Simplyblock management CLI v{constants.SIMPLY_BLOCK_VERSION}')
@@ -476,6 +472,22 @@ class CLIWrapperBase:
             return False
         return True
 
+    def cluster__event_alerts(self, sub_command, args):
+        cluster_ops.set_event_alerts(
+            args.cluster_id,
+            enabled=not args.disable,
+            log_limit=args.log_limit,
+            interval=args.interval,
+            pending_period=args.pending_period,
+            plugin_url=args.plugin_url,
+            plugin_preinstalled=args.plugin_preinstalled,
+        )
+        if args.disable:
+            return "Event log alert rules removed from Grafana."
+        return ("Event log alert rules provisioned. Grafana was restarted; the rules start "
+                "evaluating once the data source plugin has loaded, which takes a minute or two "
+                "the first time.")
+
     def cluster__op_stop(self, sub_command, args):
         return cluster_ops.set_object_ops(args.cluster_id, True)
 
@@ -615,6 +627,9 @@ class CLIWrapperBase:
     def cluster__set(self, sub_command, args):
         cluster_ops.set_(args.cluster_id, args.attr_name, args.attr_value)
         return True
+
+    def cluster__switch_write_protection(self, sub_command, args):
+        return cluster_ops.switch_write_protection(args.cluster_id)
 
     def cluster__set_shared_placement(self, sub_command, args):
         # Default action is enable (False -> True). --disable runs the
