@@ -3876,7 +3876,14 @@ class K8sSbcliUtils:
         existing = self.list_storage_pools()
         self.logger.info(f"[pool] existing pools (sbcli): {list(existing.keys())}")
         ns = self.k8s.namespace
-        if existing and not dhchap and not allowed_nodes:
+        # Blind reuse is only safe for a caller that asked for nothing in
+        # particular. A caller passing storage_class_parameters is asking for
+        # a specific StorageClass shape (encryption, filesystem, ...), and
+        # those are immutable once the class exists -- handing back an
+        # arbitrary existing pool silently gives it the wrong one. That is how
+        # a "non-DHCHAP pool" request came back as the DHCHAP pool, whose
+        # StorageClass carries dhchap_node_label.
+        if existing and not dhchap and not allowed_nodes and not storage_class_parameters:
             actual = next(iter(existing))
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
