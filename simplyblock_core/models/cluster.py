@@ -217,6 +217,12 @@ class Cluster(BaseModel):
     # pre-existing distribs are still v1 until `sbctl cluster
     # switch-write-protection` runs the RPC on every online node.
     write_protection_v2: bool = False
+    # One-shot request to run switch_write_protection once the cluster has
+    # settled after an upgrade. Armed by cluster_ops.upgrade_complete (the
+    # documented final upgrade step); storage_node_monitor consumes it, runs
+    # the switch once, and clears it. write_protection_v2 (above) is the
+    # durable "done" marker. Mirrors shared_placement_migration_pending.
+    write_protection_migration_pending: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
