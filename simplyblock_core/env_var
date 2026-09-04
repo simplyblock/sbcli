@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbctl
-SIMPLY_BLOCK_VERSION=26.3.0.1
+SIMPLY_BLOCK_VERSION=26.3.0.2
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:R26.3
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:R26.3-latest
