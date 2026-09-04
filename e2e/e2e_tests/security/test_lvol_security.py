@@ -683,43 +683,73 @@ class SecurityTestBase(TestClusterBase):
                 f"{node_name!r}: {events!r}")
             low = events.lower()
 
-            # A pod that failed for a non-DHCHAP reason produces the same
-            # observation ("never ran") as a genuine denial. Multi-Attach is
-            # the likeliest impostor: a pod still holding the RWO claim on the
-            # allowed node yields FailedAttachVolume regardless of DHCHAP.
+            # The event list is a TIMELINE (get_pod_events sorts by
+            # .lastTimestamp), not a set of competing verdicts. So order of
+            # evaluation matters: a positive DHCHAP denial anywhere in it is
+            # conclusive, because the volume was offered to this node and
+            # refused on nodeAffinity grounds. A transient impostor earlier in
+            # the timeline does not undo that.
+            #
+            # Real example from CI run 093822:
+            #   1. FailedAttachVolume: Multi-Attach error      (transient)
+            #   2. SuccessfulAttachVolume: Attach succeeded    (resolved)
+            #   3. FailedMount: NodeAffinity check failed      (decisive)
+            # Checking for the impostor first rejected a correct denial.
             impostor = next(
                 (r for r in _DISQUALIFYING_REASONS if r in low), None)
-            assert not impostor, (
-                f"Pod {pod_name} on disallowed node {node_name!r} never ran, "
-                f"but for a reason unrelated to DHCHAP ({impostor!r}) — this "
-                f"assertion would have passed for the wrong reason. Release "
-                f"the volume on the allowed node first and re-check. Events: "
-                f"{events!r}")
-
             specific = any(r in low for r in _DENIAL_REASONS)
+
             if specific:
                 self.logger.info(
                     f"[dhchap] denial positively identified for {pod_name} "
                     f"on {node_name!r}")
-            else:
-                # A bare FailedMount is weak evidence: it also covers a
-                # CSI-down or quota failure. Accept it so a genuine denial on
-                # a differently-worded build still passes, but mark the run.
-                assert "failedmount" in low, (
-                    f"Pod {pod_name} on disallowed node {node_name!r} never "
-                    f"ran, but not for a DHCHAP reason — expected a "
-                    f"NodeAffinity / not-in-allowed-hosts / FailedMount "
-                    f"event; got: {events!r}")
-                self.logger.warning(
-                    f"{TOK_WEAK_EVIDENCE}: {pod_name} on disallowed node "
-                    f"{node_name!r} failed with a bare FailedMount and no "
-                    f"NodeAffinity / allowed-hosts wording — treating as a "
-                    f"denial, but the evidence does not positively identify "
-                    f"DHCHAP. Events: {events!r}")
+                if impostor:
+                    # Worth surfacing: it means a volume was still attached
+                    # elsewhere when this pod was created, i.e. a release did
+                    # not wait for detach. The assertion still stands.
+                    self.logger.warning(
+                        f"[dhchap] {pod_name} also saw a transient "
+                        f"{impostor!r} before the DHCHAP denial — a preceding "
+                        f"release did not wait for the volume to detach. The "
+                        f"denial itself is conclusive, but see "
+                        f"_k8s_release_pod(pvc_name=...). Events: {events!r}")
+                return None
+
+            # No positive DHCHAP wording. Now an impostor IS disqualifying:
+            # without a denial reason, "pod never ran" is equally explained by
+            # Multi-Attach, a failed image pull, or an unschedulable node.
+            assert not impostor, (
+                f"Pod {pod_name} on disallowed node {node_name!r} never ran, "
+                f"and the only reason given is unrelated to DHCHAP "
+                f"({impostor!r}) — this assertion would have passed for the "
+                f"wrong reason. Release the volume on the allowed node (and "
+                f"wait for detach) before re-checking. Events: {events!r}")
+
+            # A bare FailedMount is weak evidence: it also covers a CSI-down
+            # or quota failure. Accept it so a genuine denial on a
+            # differently-worded build still passes, but mark the run.
+            assert "failedmount" in low, (
+                f"Pod {pod_name} on disallowed node {node_name!r} never "
+                f"ran, but not for a DHCHAP reason — expected a "
+                f"NodeAffinity / not-in-allowed-hosts / FailedMount "
+                f"event; got: {events!r}")
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE}: {pod_name} on disallowed node "
+                f"{node_name!r} failed with a bare FailedMount and no "
+                f"NodeAffinity / allowed-hosts wording — treating as a "
+                f"denial, but the evidence does not positively identify "
+                f"DHCHAP. Events: {events!r}")
         finally:
+            # Wait for detach here too. A denied pod still ATTACHES the volume
+            # before the mount is refused — the CI events show
+            # "SuccessfulAttachVolume" immediately before the NodeAffinity
+            # failure — so it leaves a VolumeAttachment on the disallowed node
+            # that would block the next pod in classes which continue past a
+            # denial (e.g. DynamicModification's grant-then-authorize).
             try:
-                k8s.delete_pod(pod_name, wait=True)
-                self.created_pods.remove(pod_name)
+                k8s.delete_pod_and_wait_detached(pod_name, pvc_name=pvc_name)
+                if pod_name in self.created_pods:
+                    self.created_pods.remove(pod_name)
             except Exception as e:
                 self.logger.warning(f"  cleanup {pod_name}: {e}")
         return None
@@ -1233,7 +1263,7 @@ class SecurityTestBase(TestClusterBase):
                 self._run_fio_dual(lvol_name, None, None, runtime=30,
                                    node_name=host.node)
             if pod and not keep_pod:
-                self._k8s_release_pod(pod)
+                self._k8s_release_pod(pod, pvc_name=pvc_name)
                 return None
             self.logger.info(
                 f"[{tc}] AUTHORIZED: {host!r} may mount {lvol_name}")
@@ -1346,17 +1376,27 @@ class SecurityTestBase(TestClusterBase):
         self.logger.info(
             f"[{tc}] filesystem verified as {expect_fs_type}: {line.strip()}")
 
-    def _k8s_release_pod(self, pod_name):
-        """Delete a pod and wait, freeing its ReadWriteOnce claim.
+    def _k8s_release_pod(self, pod_name, pvc_name=None):
+        """Delete a pod and wait until its volume is genuinely detached.
 
-        Load-bearing before any denial assertion: a pod still attached on the
-        allowed node makes the next node's mount fail with ``Multi-Attach
-        error``, which looks exactly like a DHCHAP denial. That is the primary
-        way a K8s denial could pass for the wrong reason.
+        Load-bearing before any denial assertion: a volume still attached on
+        the previous node makes the next node's attach fail with
+        ``Multi-Attach error``, which is not a DHCHAP denial at all.
+
+        Deleting the pod is NOT enough. ``delete_pod(wait=True)`` waits for the
+        Pod object only, while the VolumeAttachment survives until kubelet
+        finishes unmounting and the CSI controller completes
+        ``ControllerUnpublishVolume``. Observed in CI: 31 seconds after the
+        pod was gone, the volume was still attached and the next pod hit
+        Multi-Attach. Pass *pvc_name* wherever it is known so the detach is
+        actually waited for.
         """
         k8s = self._ensure_k8s_utils()
         try:
-            k8s.delete_pod(pod_name, wait=True)
+            if pvc_name:
+                k8s.delete_pod_and_wait_detached(pod_name, pvc_name=pvc_name)
+            else:
+                k8s.delete_pod(pod_name, wait=True)
         except Exception as exc:
             self.logger.warning(f"  release {pod_name}: {exc}")
         if pod_name in self.created_pods:
@@ -1978,6 +2018,21 @@ class SecurityTestBase(TestClusterBase):
                 # pod this test created rather than trying to match them to
                 # the claim.
                 self._k8s_release_pod(pod_name)
+            # Then wait for THIS claim's volume to be genuinely detached.
+            # Deleting the pods above only removes the Pod objects; the
+            # VolumeAttachment outlives them, and a denial assertion issued
+            # inside that window sees Multi-Attach rather than the DHCHAP
+            # rejection it is trying to observe.
+            try:
+                pv_name = k8s.get_pvc_pv_name(pvc_name)
+                if pv_name and not k8s.wait_volume_detached(pv_name):
+                    self.logger.warning(
+                        f"{TOK_WEAK_EVIDENCE} PVC {pvc_name!r} (PV {pv_name}) "
+                        f"is still attached; a following denial assertion may "
+                        f"observe Multi-Attach instead of a DHCHAP rejection")
+            except Exception as exc:
+                self.logger.warning(
+                    f"  detach wait for {pvc_name}: {exc}")
             self.logger.info(
                 f"[k8s] released all attachments to PVC {pvc_name!r}")
             return
@@ -5796,7 +5851,7 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
                         f"the suite's denials are DHCHAP-specific and not "
                         f"environmental.")
                     if pod:
-                        self._k8s_release_pod(pod)
+                        self._k8s_release_pod(pod, pvc_name=pvc_name)
             else:
                 host_nqn = self._get_client_host_nqn()
                 connect_ls, cerr = self._get_connect_str_dual(
@@ -6846,7 +6901,7 @@ class TestDhchapPodScheduling(SecurityTestBase):
 
         # ── TC-DHCHAP-SCHED-004: Delete Pod #1, Pod #2 on allowed node ──
         self.logger.info(f"TC-DHCHAP-SCHED-004: Deleting pod {pod_name_1} …")
-        self._k8s_release_pod(pod_name_1)
+        self._k8s_release_pod(pod_name_1, pvc_name=pvc_name)
 
         pod_2_target = allowed_node_names[-1]
         self.logger.info(
@@ -6867,10 +6922,13 @@ class TestDhchapPodScheduling(SecurityTestBase):
                 f"{pod_2_target!r}")
         self.logger.info("TC-DHCHAP-SCHED-004: Pod #2 on allowed node PASSED")
 
-        # Release before the denial case: a pod still holding the RWO claim
-        # would make the next mount fail with Multi-Attach, which looks
-        # identical to a DHCHAP denial.
-        self._k8s_release_pod(pod_name_2)
+        # Release before the denial case, and WAIT for the volume to actually
+        # detach. Deleting the pod is not enough: the VolumeAttachment
+        # outlives it, so the denial pod below would attach-fail with
+        # Multi-Attach instead of being rejected by nodeAffinity. Exactly what
+        # failed in CI run 093822 — 31s after the pod was gone the volume was
+        # still attached to the previous node.
+        self._k8s_release_pod(pod_name_2, pvc_name=pvc_name)
 
         # ── TC-DHCHAP-SCHED-006: Pod pinned to a disallowed node ────────
         if disallowed_node_names:

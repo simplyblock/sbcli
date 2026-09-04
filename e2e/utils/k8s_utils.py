@@ -3155,6 +3155,93 @@ class K8sUtils:
         else:
             self.delete_resource("pod", pod_name, namespace=ns)
 
+    def get_volume_attachments(self, pv_name: str = None) -> list:
+        """Return VolumeAttachments, optionally filtered to a single PV.
+
+        Each entry is ``{"name", "pv", "node", "attached"}``. VolumeAttachment
+        is cluster-scoped, so no namespace applies.
+        """
+        out, _ = self._exec_kubectl(
+            "kubectl get volumeattachments -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        if not (out or "").strip():
+            return []
+        try:
+            items = json.loads(out).get("items", [])
+        except (json.JSONDecodeError, AttributeError):
+            return []
+        result = []
+        for va in items:
+            spec = va.get("spec", {}) or {}
+            pv = (spec.get("source", {}) or {}).get("persistentVolumeName", "")
+            if pv_name and pv != pv_name:
+                continue
+            result.append({
+                "name": (va.get("metadata", {}) or {}).get("name", ""),
+                "pv": pv,
+                "node": spec.get("nodeName", ""),
+                "attached": bool((va.get("status", {}) or {}).get("attached")),
+            })
+        return result
+
+    def wait_volume_detached(self, pv_name: str, timeout: int = 180) -> bool:
+        """Block until no VolumeAttachment references *pv_name*.
+
+        Deleting a pod does NOT detach its volume: the Pod object goes away
+        while the VolumeAttachment survives until kubelet finishes unmounting
+        and the CSI controller completes ``ControllerUnpublishVolume``. A new
+        pod created against the same ReadWriteOnce claim in that window fails
+        with ``FailedAttachVolume: Multi-Attach error ... already exclusively
+        attached to one node``, which has nothing to do with what the test was
+        trying to observe.
+
+        ``delete_pod(wait=True)`` waits only for the Pod, so any caller that
+        moves a volume between nodes has to wait for this as well. That
+        knowledge previously lived inline in
+        ``e2e_tests/upgrade_tests/k8s_major_upgrade.py`` and nowhere else.
+
+        Returns True once detached, False on timeout. Deliberately does not
+        force-delete the VolumeAttachment: removing one that is genuinely in
+        use can strand the volume. Callers decide what a timeout means.
+        """
+        if not pv_name:
+            return True
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            attachments = self.get_volume_attachments(pv_name)
+            if not attachments:
+                self.logger.info(
+                    f"[K8sUtils] PV '{pv_name}' fully detached")
+                return True
+            last = attachments
+            time.sleep(3)
+        self.logger.warning(
+            f"[K8sUtils] PV '{pv_name}' still has VolumeAttachment(s) after "
+            f"{timeout}s: {last}. A pod created for this claim on another "
+            f"node will hit 'Multi-Attach error'."
+        )
+        return False
+
+    def delete_pod_and_wait_detached(self, pod_name: str, pvc_name: str = None,
+                                     namespace: str = None,
+                                     timeout: int = 180) -> bool:
+        """Delete a pod and wait until its volume is genuinely detached.
+
+        The safe way to hand a ReadWriteOnce volume from one node to the next.
+        Returns True when the volume is detached (or there was nothing to wait
+        for); False if the attachment outlived the timeout.
+        """
+        ns = namespace or self.namespace
+        self.delete_pod(pod_name, namespace=ns, wait=True)
+        if not pvc_name:
+            return True
+        pv_name = self.get_pvc_pv_name(pvc_name, namespace=ns)
+        if not pv_name:
+            return True
+        return self.wait_volume_detached(pv_name, timeout=timeout)
+
     def wait_for_per_node_config(self, worker_node: str,
                                   configmap_name: str = "simplyblock-node-per-node-config",
                                   namespace: str = None,
