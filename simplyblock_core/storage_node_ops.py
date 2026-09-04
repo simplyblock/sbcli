@@ -2347,7 +2347,19 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
     for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
         sec_primary_id = getattr(this_node, sec_attr, None)
         if sec_primary_id:
-            org_node = db_controller.get_storage_node_by_id(sec_primary_id)
+            # A dangling peer linkage (primary removed, or a legacy record
+            # value StorageNode.from_dict could not repair) must degrade to
+            # "skip this peer's JMs", never abort the whole restart: the JM
+            # mesh verifier re-establishes missing links once both sides are
+            # up (verify_jm_mesh_coverage).
+            try:
+                org_node = db_controller.get_storage_node_by_id(sec_primary_id)
+            except KeyError:
+                logger.warning(
+                    "Node %s %s references unknown primary %r; skipping its "
+                    "JM devices", this_node.get_id()[:8], sec_attr,
+                    sec_primary_id)
+                continue
             if org_node.jm_device and org_node.jm_device not in remote_devices:
                 remote_devices.append(org_node.jm_device)
             for jm_id in org_node.jm_ids:

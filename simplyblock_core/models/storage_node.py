@@ -198,6 +198,34 @@ class StorageNode(BaseNodeObject):
             host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
         return SNodeClient(host, **kwargs)
 
+    def from_dict(self, data):
+        # lvstore_stack_secondary/_tertiary were a secondary bdev STACK
+        # (List[dict], default []) until the 2026-04-16 restart refactor
+        # (d48c2d78e) repurposed them as the UUID of the primary this node
+        # peers for — without migrating existing records. Records written
+        # before that carry [] (or, once loaded and re-persisted by a
+        # str-annotated 26.3.0 control plane, the coerced string "[]"), and
+        # the generic str() coercion in BaseModel.from_dict turns the falsy
+        # legacy list into a TRUTHY garbage string: get_storage_node_by_id
+        # then aborts the first post-upgrade node restart with
+        # "StorageNode [] not found" (customer incident 2026-09-04).
+        # Normalize legacy values to "" on every read — heals stored records
+        # the moment they are loaded, with no one-shot migration to miss.
+        # A non-empty legacy list also maps to "": any record carrying one
+        # would have crashed every restart since 2026-04-16 already, so
+        # surviving records hold only [] / "[]" / a valid UUID.
+        if data:
+            for attr in ("lvstore_stack_secondary", "lvstore_stack_tertiary"):
+                value = data.get(attr)
+                if isinstance(value, list) or value == "[]":
+                    data = dict(data)
+                    for a in ("lvstore_stack_secondary", "lvstore_stack_tertiary"):
+                        v = data.get(a)
+                        if isinstance(v, list) or v == "[]":
+                            data[a] = ""
+                    break
+        return super().from_dict(data)
+
     def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
 
