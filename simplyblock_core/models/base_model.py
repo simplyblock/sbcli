@@ -1,12 +1,10 @@
 import pprint
-
 import json
-from inspect import ismethod, isfunction
-import sys
+from collections import ChainMap
+from collections.abc import Callable, Mapping
+from inspect import get_annotations, ismethod, isfunction
 from types import UnionType
 from typing import ClassVar, TypeVar, Union, cast, get_args, get_origin
-from collections.abc import Callable, Mapping
-from collections import ChainMap
 
 from pydantic import SecretBytes, SecretStr
 
@@ -90,20 +88,11 @@ class BaseModel:
     def all_annotations(cls) -> Mapping[str, type]:
         """Returns a dictionary-like ChainMap that includes annotations for all
            attributes defined in cls or inherited from superclasses."""
-        if sys.version_info >= (3, 10):
-            from inspect import get_annotations
-            return ChainMap(*(
-                get_annotations(c)
-                for c
-                in cls.__mro__
-            ))
-        else:
-            return ChainMap(*(
-                c.__annotations__
-                for c
-                in cls.__mro__
-                if '__annotations__' in c.__dict__
-            ))
+        return ChainMap(*(
+            get_annotations(c)
+            for c
+            in cls.__mro__
+        ))
 
     def get_id(self):
         return self.uuid
