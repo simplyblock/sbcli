@@ -1,3 +1,89 @@
+"""
+Docker (VM/bare-metal) rolling major upgrade.
+
+OPERATOR PROCEDURE -- the exact sequence this test performs, so it can be
+handed to a customer without re-reading the code or a CI log. Verified by run
+33733403479 (26.2.8-PRE -> R26.3, success).
+
+Scope: rolling upgrade between R26.x versions (e.g. 26.2.8-PRE -> R26.3).
+The R25 -> R26 path additionally needs a DB migration; see
+_needs_db_migration, which gates it to base versions starting with 25.
+
+Workloads stay online throughout: this test keeps 4 FIO sessions per storage
+node running across every step below.
+
+Preconditions
+-------------
+  * cluster status ACTIVE, every storage node "online"
+  * you know the target release tag and BOTH container image tags
+
+Steps
+-----
+  1. Install the target release on EVERY node (management + storage):
+
+         pip install "git+https://github.com/simplyblock-io/sbcli.git@R26.3" \
+             --upgrade --force-reinstall
+
+  2. Pin the target images in simplyblock_core/env_var on the MANAGEMENT
+     nodes (skip if not overriding image tags). Locate the file with:
+
+         python3 -c "import simplyblock_core, os; print(os.path.join(
+             os.path.dirname(simplyblock_core.__file__), 'env_var'))"
+         # e.g. /usr/local/lib/python3.12/site-packages/simplyblock_core/env_var
+
+  3. Update the control plane only:
+
+         sbctl -d cluster update <CLUSTER_ID> --cp-only true
+
+  4. DB migration -- R25 -> R26 ONLY. Skip it for R26.x -> R26.y.
+
+  5. Rolling storage-node upgrade, ONE NODE AT A TIME. Do not start the next
+     node until the current one is "online" AND its migration tasks have
+     finished.
+
+         sbctl -d sn suspend  <NODE_ID>       # wait: status = suspended
+         sbctl -d sn shutdown <NODE_ID>       # wait: status = offline
+
+         # on the storage node itself, if pinning images: update env_var
+         sbctl -d sn deploy --ifname eth0     # run ON the storage node
+
+         sbctl --dev -d sn restart <NODE_ID> \
+             --spdk-image       public.ecr.aws/simply-block/ultra:R26.3-latest \
+             --spdk-proxy-image public.ecr.aws/simply-block/simplyblock:R26.3
+         # wait: status = online, then wait for migration tasks
+
+     BOTH images are required. They are different repositories ("ultra" vs
+     "simplyblock") with different tag shapes ("R26.3-latest" vs "R26.3"), so
+     neither can be inferred from the other.
+
+  6. Verify every container is running the target image.
+
+  7. Activate v2 write protection, then restart every node AGAIN.
+
+     An upgraded cluster's existing distribs stay on v1 write protection --
+     only freshly created clusters start on v2. Run this only once every node
+     is back online: the switch sends the runtime RPC to all online nodes and
+     records v2 only when every one of them accepts it.
+
+         sbctl -d cluster switch-write-protection <CLUSTER_ID>
+
+     then, one node at a time:
+
+         sbctl --dev -d sn restart <NODE_ID> --force
+         # wait: online + migration tasks, before moving to the next node
+
+     --force is REQUIRED: the nodes are already online and healthy, so a plain
+     restart is refused as unnecessary. No image flags here -- the node is
+     already on the target images. This second pass proves the v2 generation
+     persisted and the nodes come back cleanly under it.
+
+  8. Post-upgrade validation: cluster ACTIVE, all nodes online, workload I/O
+     uninterrupted, pre-upgrade checksums still match.
+
+Note on flags: this test uses -d / --dev (debug/dev) throughout. Confirm which
+of those belong in a customer-facing procedure before publishing it.
+"""
+
 # import os
 # import threading
 # from e2e_tests.cluster_test_base import TestClusterBase

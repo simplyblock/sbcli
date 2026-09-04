@@ -24,6 +24,94 @@ Supports two upgrade paths:
   FIO runs continuously throughout the entire upgrade.
 
 No SSH to worker nodes required (Talos-compatible).
+
+
+ROLLING UPGRADE PROCEDURE (R26.x -> R26.y)
+==========================================
+The exact sequence _run_rolling_upgrade performs, recorded here so it can be
+handed to an operator without re-reading the code. This is the R26-to-R26
+rolling path only; the R25 -> R26 maintenance-window path is a different
+flow (_run_maintenance_upgrade) and is not covered here.
+
+Workloads stay online throughout -- FIO keeps running across every step.
+
+Preconditions
+-------------
+  * cluster status ACTIVE, every storage node "online"
+  * the operator Helm chart checked out at the target version
+  * BOTH container image tags known (SPDK and SPDK-proxy are separate images)
+
+Steps
+-----
+  1. Upgrade the control plane with Helm:
+
+         helm upgrade --install spdk-csi <chart-path> \
+             --namespace simplyblock \
+             --set image.simplyblock.repository=<repo> \
+             --set image.simplyblock.tag=<target-tag> \
+             --set image.operator.repository=<operator-repo> \
+             --set image.operator.tag=<operator-tag> \
+             --set controlplane.enabled=true \
+             --set operator.enabled=true
+
+     Add --set image.csi.repository=<repo> and --set image.csi.tag=<tag> to
+     override the CSI driver image. NOTE the repository and the tag are
+     SEPARATE settings: passing a bare tag as the repository yields an image
+     like "release-26.3.0:v26.2.6", which fails with "pull access denied"
+     because Docker resolves it as docker.io/library/release-26.3.0.
+
+     Then wait for the control-plane pods to be Ready.
+
+  2. Rolling storage-node restart, ONE NODE AT A TIME.
+
+     Unlike docker there is no suspend/shutdown/deploy sequence -- the
+     operator drives it. New images are set-level fields on the
+     StorageNodeSet, so patch the SET first, then create a StorageNodeOps CR
+     to trigger the restart:
+
+         kubectl patch storagenodesets.storage.simplyblock.io <SET_NAME> \
+             -n simplyblock --type=merge \
+             -p '{"spec":{"spdkImage":"<SPDK_IMAGE>","spdkProxyImage":"<PROXY_IMAGE>"}}'
+
+         # then a StorageNodeOps CR with action=restart, referencing the
+         # StorageNode CR for this node
+
+     For each node, wait in this order before moving to the next:
+       a. the StorageNodeOps CR reaches Succeeded
+       b. all SPDK pods are Ready
+       c. the node reports "online"
+       d. its migration tasks have finished
+
+  3. Activate v2 write protection, then restart every node AGAIN.
+
+     An upgraded cluster's existing distribs stay on v1 write protection --
+     only freshly created clusters start on v2. Run this only once every node
+     is back online: the switch sends the runtime RPC to all online nodes and
+     records v2 only when every one of them accepts it.
+
+         sbctl -d cluster switch-write-protection <CLUSTER_ID>
+
+     then, one node at a time:
+
+         sbctl -d --dev sn restart <NODE_ID> --force
+
+     --force is REQUIRED: the nodes are already online and healthy, so a plain
+     restart is refused as unnecessary. No image flags -- the node is already
+     on the target images. See _switch_write_protection_and_restart.
+
+  4. Post-upgrade validation: all nodes healthy, cluster ACTIVE, pre-upgrade
+     FIO still running and clean, old data checksums intact, new PVC +
+     snapshot + clone provisioning works, node-outage test, final checklist.
+
+Gotchas worth knowing
+---------------------
+  * Two images, not one: spdkImage and spdkProxyImage are different
+    repositories with different tag shapes; neither can be inferred from the
+    other.
+  * Node labels are sticky. io.simplyblock.node-type=simplyblock-storage-plane
+    is what the storage-node DaemonSet selects on, and nothing removes it on
+    teardown unless cleanup walks EVERY node -- a control-plane node left
+    carrying it silently rejoins the storage plane on the next deploy.
 """
 
 from __future__ import annotations
