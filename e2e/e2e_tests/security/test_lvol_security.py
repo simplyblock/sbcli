@@ -79,7 +79,14 @@ class SecurityTestBase(TestClusterBase):
         self.mount_path = "/mnt"
         self.log_path = str(Path.home())
         self.lvol_mount_details = {}
-        self.pool_name = "sec_test_pool"
+        # Kept short on purpose. The operator turns this into a node label
+        # key: simplyblock.io/pool.<ns>.<cluster CR>.simplyblock-<pool>, whose
+        # name part is capped at 63 chars, and the CSI driver writes that key
+        # into every PV's nodeAffinity — overflow means the PV is rejected and
+        # the PVC never binds. With ns=simplyblock and CR=simplyblock-cluster,
+        # "sec_test_pool" landed at 62/63 and any dedicated-pool suffix pushed
+        # it over. "secpool" leaves ~7 chars of headroom for the suffix.
+        self.pool_name = "secpool"
         self._client_host_nqn = None
         self.fio_threads = []
 

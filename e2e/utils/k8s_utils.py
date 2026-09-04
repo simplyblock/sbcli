@@ -3666,13 +3666,47 @@ class K8sSbcliUtils:
                 # cannot simply delete leftovers. A cleaner design would be
                 # one pool per test with no cross-test sharing at all; that
                 # is a bigger change than this fix.
-                pool_name = f"{pool_name}-{int(time.time() * 1000) % 1000000}"
+                pool_name = f"{pool_name}-{int(time.time()) % 10000}"
                 self.logger.info(
                     f"[pool] No existing pool matches dhchap={dhchap} "
                     f"allowedNodes={wanted_nodes} — creating dedicated pool "
                     f"'{pool_name}'")
 
         k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+
+        # The operator derives a node label from this CRD name:
+        #   simplyblock.io/pool.<ns>.<StorageCluster CR>.<CRD name>
+        # A Kubernetes label key's name part (everything after the "/") is
+        # capped at 63 chars, and the CSI driver writes that key into every
+        # provisioned PV's nodeAffinity — so if it overflows, the PV is
+        # rejected outright ("name part must be no more than 63 characters")
+        # and the PVC never binds. Budget the CRD name against the real
+        # namespace and cluster CR name and truncate rather than emit a name
+        # that cannot be enforced.
+        if dedicated:
+            sc_out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storageclusters -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+            )
+            sc_names = [s.strip() for s in (sc_out or "").strip().splitlines() if s.strip()]
+            cluster_cr = sc_names[0] if sc_names else "simplyblock-cluster"
+            # len("pool.") + ns + "." + cluster_cr + "."
+            fixed = 5 + len(ns) + 1 + len(cluster_cr) + 1
+            budget = 63 - fixed
+            if budget < 8:
+                self.logger.warning(
+                    f"[pool] namespace '{ns}' + cluster CR '{cluster_cr}' "
+                    f"leave only {budget} chars for the pool label name — "
+                    f"DHCHAP enforcement cannot be expressed as a label here")
+            elif len(k8s_resource_name) > budget:
+                truncated = k8s_resource_name[:budget].rstrip("-")
+                self.logger.warning(
+                    f"[pool] CRD name '{k8s_resource_name}' would make the "
+                    f"operator's pool label exceed the 63-char limit "
+                    f"({fixed + len(k8s_resource_name)} > 63) — truncating to "
+                    f"'{truncated}'")
+                k8s_resource_name = truncated
+                pool_name = k8s_resource_name
 
         # 2. Check whether the CRD this call actually wants already exists.
         #    For a dedicated (dhchap/allowedNodes) request this MUST be
