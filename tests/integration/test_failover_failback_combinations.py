@@ -182,6 +182,7 @@ def _setup_node_methods(nodes, rpc):
     """Attach common mock methods to all nodes."""
     for n in nodes.values():
         n.rpc_client = MagicMock(return_value=rpc)
+        n.client = MagicMock()
         n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
         n.create_hublvol = MagicMock()
         n.create_secondary_hublvol = MagicMock()
