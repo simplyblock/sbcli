@@ -116,11 +116,25 @@ _DENIAL_REASONS = (
     # any mount is attempted.
     "is not in requisite",
     "volume node affinity conflict",
+    # Scheduler-side wording. With nodeSelector pinning + the PV's
+    # nodeAffinity, a denied node is rejected by the SCHEDULER rather
+    # than by kubelet, and it words it differently from the mount-time
+    # "NodeAffinity check failed".
+    "didn't match persistentvolume's node affinity",
 )
 
 # Event substrings that mean the pod failed for a reason that has NOTHING to do
 # with DHCHAP. Seeing one of these on a denial path is a test bug, not a pass:
 # the observation "pod never ran" would be right for the wrong reason.
+#
+# Only reasons attributable to THIS pod belong here. A FailedScheduling
+# message is an aggregate over every node in the cluster -- e.g. "0/9 nodes
+# are available: 1 didn't match PersistentVolume's node affinity, 3 had
+# untolerated taint, 5 didn't match Pod's node affinity/selector" -- so it
+# always mentions master taints and the nodeSelector rejecting every node we
+# did not target. Those describe nodes the pod never wanted, so "untolerated
+# taint" and "insufficient <resource>" are deliberately NOT listed: they would
+# fire on essentially every scheduler-side denial.
 _DISQUALIFYING_REASONS = (
     "multi-attach",
     "volume is already exclusively attached",
@@ -133,8 +147,6 @@ _DISQUALIFYING_REASONS = (
     "errimagepull",
     "imagepullbackoff",
     "createcontainerconfigerror",
-    "insufficient",
-    "untolerated taint",
     "waiting for first consumer",
     "unbound immediate persistentvolumeclaims",
 )
