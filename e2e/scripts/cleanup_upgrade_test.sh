@@ -436,7 +436,21 @@ echo ""
 # ══════════════════════════════════════════════════════════════════
 echo "=== Phase 10: Remove stale node labels ==="
 
-for NODE in "${NODES[@]}"; do
+# Every node, not just $WORKER_NODES. These labels are set on whichever node
+# a past run happened to name, and a node that has since dropped out of the
+# worker list keeps them forever. A control-plane node left carrying
+# io.simplyblock.node-type=simplyblock-storage-plane silently rejoins the
+# storage plane on the next deploy, because simplyblock-storage-node-ds
+# selects on that label alone.
+ALL_NODES_CSV=$(kubectl get nodes --no-headers -o custom-columns=:metadata.name 2>/dev/null | tr '\n' ',')
+ALL_NODES_CSV="${ALL_NODES_CSV%,}"
+IFS=',' read -ra LABEL_NODES <<< "$ALL_NODES_CSV"
+if [ ${#LABEL_NODES[@]} -eq 0 ]; then
+  LABEL_NODES=("${NODES[@]}")
+fi
+echo "  Stripping labels from: ${LABEL_NODES[*]}"
+
+for NODE in "${LABEL_NODES[@]}"; do
   kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
   kubectl label node "$NODE" io.simplyblock.node-type- 2>/dev/null || true
   kubectl label node "$NODE" simplyblock.io/role- 2>/dev/null || true
