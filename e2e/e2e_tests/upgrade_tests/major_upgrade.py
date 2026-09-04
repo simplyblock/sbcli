@@ -525,21 +525,34 @@ print("done")
         self.logger.info(f"[{node}] R25->R26 DB migration complete")
 
     def _needs_db_migration(self) -> bool:
-        """Check if DB migration is needed for this upgrade.
+        """Whether the R25 -> R26 DB migration applies to this upgrade.
 
-        The migration re-writes storage node, lvol, and snapshot objects
-        to pick up new fields.  It is idempotent, so it is safe to run on
-        every cross-version upgrade.  The only case we skip is a same-minor
-        hotfix (e.g. R25.10-Hotfix → R25.10-Hotfix2).
+        It applies ONLY when coming from R25. The script backfills fields
+        that R26 introduced (lvstore_ports, lvstore_stack_secondary,
+        lvol_poller_mask, pollers_mask) onto storage-node objects written by
+        R25, and rewrites lvol/snapshot objects in the new shape. On a
+        cluster already running R26 those fields are present and correct, so
+        running it there is at best pointless and at worst overwrites live
+        values with recomputed ones.
+
+        The previous check returned True for ANY base != target, so a
+        26.2.8-PRE -> R26.3 upgrade ran the R25 migration unnecessarily
+        (observed in run 33733403479). Its docstring also claimed a "same
+        base prefix" comparison while the code compared full equality, so
+        even R25.10-Hotfix -> R25.10-Hotfix2 would have run it.
         """
-        if not self.base_version or not self.target_version:
-            return True
-        base_lower = self.base_version.lower()
-        target_lower = self.target_version.lower()
-        # Same base prefix → minor hotfix, skip migration
-        if base_lower == target_lower:
+        if not self.base_version:
+            self.logger.warning(
+                "base_version unknown — assuming the R25->R26 migration is "
+                "NOT needed; pass --base_version to be explicit")
             return False
-        return True
+        base = self.base_version.lower().lstrip("r")
+        needed = base.startswith("25")
+        self.logger.info(
+            f"R25->R26 DB migration {'REQUIRED' if needed else 'not needed'} "
+            f"(base_version={self.base_version!r}, "
+            f"target_version={self.target_version!r})")
+        return needed
 
     def _update_node_env(self, node: str):
         """
