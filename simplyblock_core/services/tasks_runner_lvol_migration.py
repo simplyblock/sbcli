@@ -3008,21 +3008,37 @@ def task_runner(task):
     # against: the primary when reachable, otherwise the online replica
     # pinned once at create_migration() time as active_source_node_id. Every
     # data-plane call below must use src_node/src_rpc, never primary_src_node.
+    # Group workers must never give up through the plain (non-group-aware)
+    # _budget_suspend below: it only marks this one migration record
+    # CLEANUP_TARGET, never the shared group.phase, so the orchestrator's
+    # barrier (waiting for every member's snap_copy_done/intermediates_done)
+    # never learns this worker is gone and waits for it forever. Route through
+    # _group_worker_budget_suspend instead whenever this migration belongs to
+    # a batch group, so one member failing here fails the whole group instead
+    # of hanging it (discovered 2026-09-04: a fallback migration whose active
+    # source node went non-online mid-INTERMEDIATE left all 3 workers silently
+    # CLEANUP_TARGET'd while the group orchestrator polled "waiting for 3
+    # workers" forever, past the test's own 10-minute timeout).
+    def _node_lookup_suspend(error_msg):
+        if migration.migration_group_id:
+            return _group_worker_budget_suspend(task, migration, migration.migration_group_id, error_msg)
+        return _budget_suspend(task, migration, migration_id, error_msg)
+
     try:
         primary_src_node = db.get_storage_node_by_id(migration.source_node_id)
     except KeyError:
-        return _budget_suspend(task, migration, migration_id, "source node not found")
+        return _node_lookup_suspend("source node not found")
 
     try:
         src_node = db.get_storage_node_by_id(
             migration.active_source_node_id or migration.source_node_id)
     except KeyError:
-        return _budget_suspend(task, migration, migration_id, "active source node not found")
+        return _node_lookup_suspend("active source node not found")
 
     try:
         tgt_node = db.get_storage_node_by_id(migration.target_node_id)
     except KeyError:
-        return _budget_suspend(task, migration, migration_id, "target node not found")
+        return _node_lookup_suspend("target node not found")
 
     # Cleanup phases proceed regardless of node status: deletes go through LVS
     # leadership, so a downed node doesn't block the cleanup path.
@@ -3030,9 +3046,7 @@ def task_runner(task):
         LVolMigration.PHASE_CLEANUP_TARGET, LVolMigration.PHASE_CLEANUP_SOURCE)
     if not _is_cleanup_phase:
         if src_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
-            return _budget_suspend(
-                task, migration, migration_id,
-                f"source node not online (status={src_node.status})")
+            return _node_lookup_suspend(f"source node not online (status={src_node.status})")
 
     if tgt_node.status != StorageNode.STATUS_ONLINE:
         if (migration.phase in (LVolMigration.PHASE_SNAP_COPY,
@@ -3053,6 +3067,8 @@ def task_runner(task):
             migration.write_to_db(db.kv_store)
             task.write_to_db(db.kv_store)
             migration_events.migration_phase_changed(migration)
+            if migration.migration_group_id:
+                _fail_group_from_worker(migration, migration.migration_group_id, migration.error_message)
             return False
         if not _is_cleanup_phase:
             # cleanup phases are exempt: deletes go through LVS leadership;
@@ -3572,6 +3588,38 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc,
     return True, False, None
 
 
+def _fail_group_from_worker(migration, group_id, error_msg):
+    """Force the whole group into CLEANUP_TARGET because one member just gave
+    up (retry budget exhausted, or an unconditional hard-fail like the target
+    going offline mid-transfer).
+
+    A worker that stops here without this will never signal its barrier
+    (snap_copy_done / intermediates_done / cleanup_source_done) again -- the
+    orchestrator's barrier check has no way to distinguish "still working" from
+    "silently gone", so it waits forever instead of failing the group. Every
+    place a group worker can reach a terminal state outside its own normal
+    phase progression must call this.
+    """
+    try:
+        group = db.get_migration_group_by_id(group_id)
+        if group.phase not in (LVolMigrationGroup.PHASE_CLEANUP_TARGET,
+                               LVolMigrationGroup.PHASE_CLEANUP_SOURCE,
+                               LVolMigrationGroup.PHASE_COMPLETED):
+            group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+            group.error_message = (
+                f"worker {migration.uuid[:8]} (lvol={migration.lvol_id}) failed: {error_msg}")
+            group.write_to_db(db.kv_store)
+            logger.error(
+                f"Group {group_id[:8]}: failing whole group — worker "
+                f"{migration.uuid[:8]} failed: {error_msg}")
+    except KeyError:
+        # Group may already be removed/cleaned up by another workflow.
+        # We keep worker cleanup flow idempotent by not re-raising.
+        logger.warning(
+            f"Group {group_id[:8]} not found while propagating worker "
+            f"{migration.uuid[:8]} failure; continuing.")
+
+
 def _group_worker_budget_suspend(task, migration, group_id, error_msg):
     """Charge retry budget for a group worker; fail the WHOLE GROUP when this
     worker's own budget is exhausted.
@@ -3602,25 +3650,7 @@ def _group_worker_budget_suspend(task, migration, group_id, error_msg):
         # This worker will never signal done to its barrier now -- fail the
         # whole group rather than let siblings (and the orchestrator) wait
         # on it forever.
-        try:
-            group = db.get_migration_group_by_id(group_id)
-            if group.phase not in (LVolMigrationGroup.PHASE_CLEANUP_TARGET,
-                                   LVolMigrationGroup.PHASE_CLEANUP_SOURCE,
-                                   LVolMigrationGroup.PHASE_COMPLETED):
-                group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
-                group.error_message = (
-                    f"worker {migration.uuid[:8]} (lvol={migration.lvol_id}) "
-                    f"exceeded max retries: {error_msg}")
-                group.write_to_db(db.kv_store)
-                logger.error(
-                    f"Group {group_id[:8]}: failing whole group — worker "
-                    f"{migration.uuid[:8]} exhausted its retry budget")
-        except KeyError:
-            # Group may already be removed/cleaned up by another workflow.
-            # We keep worker cleanup flow idempotent by not re-raising.
-            logger.warning(
-                f"Group {group_id[:8]} not found while propagating worker "
-                f"{migration.uuid[:8]} retry-budget exhaustion; continuing.")
+        _fail_group_from_worker(migration, group_id, error_msg)
         return False
     return _suspend_task(task, migration, error_msg)
 
