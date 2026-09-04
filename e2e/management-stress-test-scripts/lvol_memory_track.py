@@ -8,6 +8,7 @@ import threading
 import psutil
 import csv
 from collections import defaultdict
+from pathlib import Path
 
 
 class ManagementStressUtils:
@@ -820,7 +821,9 @@ class TestLvolMemory:
         # Read milestones
         try:
             self.milestones = [
-                tuple(map(float, line.split())) for line in open("milestones.txt").readlines()
+                tuple(map(float, line.split()))
+                for line
+                in Path("milestones.txt").read_text().splitlines()
             ]
         except OSError:
             self.milestones = []

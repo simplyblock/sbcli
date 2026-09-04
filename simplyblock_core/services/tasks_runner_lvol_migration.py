@@ -348,8 +348,7 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             src_lvstore, src_short = snap.snap_bdev.split('/', 1)
             if src_lvstore != tgt_node.lvstore:
                 # Strip any leftover migration suffix (defensive)
-                base = (src_short[:-len(_MIGRATION_BDEV_SUFFIX)]
-                        if src_short.endswith(_MIGRATION_BDEV_SUFFIX) else src_short)
+                base = (src_short.removesuffix(_MIGRATION_BDEV_SUFFIX))
                 snap.snap_bdev = f"{tgt_node.lvstore}/{base}"
         tgt_short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else None
         if tgt_short and tgt_short in spdk_info:
@@ -387,8 +386,7 @@ def _snap_tgt_short_name(snap):
     from the previous migration) do not produce a double suffix like 'SNAP_16745mm'.
     """
     short = _snap_short_name(snap)
-    if short.endswith(_MIGRATION_BDEV_SUFFIX):
-        short = short[:-len(_MIGRATION_BDEV_SUFFIX)]
+    short = short.removesuffix(_MIGRATION_BDEV_SUFFIX)
     return short + _MIGRATION_BDEV_SUFFIX
 
 
@@ -2820,8 +2818,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
         try:
             _s = db.get_snapshot_by_id(_uuid)
             _sbase = _s.snap_bdev.split('/', 1)[-1]
-            if _sbase.endswith(_MIGRATION_BDEV_SUFFIX):
-                _sbase = _sbase[:-len(_MIGRATION_BDEV_SUFFIX)]
+            _sbase = _sbase.removesuffix(_MIGRATION_BDEV_SUFFIX)
             _protected_bases.add(_sbase)
         except KeyError:
             continue
@@ -2831,8 +2828,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
             continue
         _lvstore, _short_m = _stored_path.rsplit('/', 1)
         _short_base = (
-            _short_m[:-len(_MIGRATION_BDEV_SUFFIX)]
-            if _short_m.endswith(_MIGRATION_BDEV_SUFFIX) else _short_m
+            _short_m.removesuffix(_MIGRATION_BDEV_SUFFIX)
         )
         if _short_base in _protected_bases:
             logger.info(

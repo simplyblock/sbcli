@@ -392,8 +392,7 @@ def lvol_tgt_bdev_name(lvol_bdev: str) -> str:
     suffix from a previous run) never accumulate it (e.g. 'LVOL_Xmm').
     """
     suffix = constants.LVOL_MIG_BDEV_SUFFIX
-    if lvol_bdev.endswith(suffix):
-        lvol_bdev = lvol_bdev[:-len(suffix)]
+    lvol_bdev = lvol_bdev.removesuffix(suffix)
     return lvol_bdev + suffix
 
 

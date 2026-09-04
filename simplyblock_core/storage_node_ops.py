@@ -5070,7 +5070,7 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                     # ~15+ minutes until some unrelated SPDK-side dead-peer
                     # timeout eventually noticed (found live 2026-08-25).
                     # Clean up both sides here instead of waiting for that.
-                    old_controller_name = name_old[:-2] if name_old.endswith("n1") else name_old
+                    old_controller_name = name_old.removesuffix("n1")
                     try:
                         node.rpc_client().bdev_nvme_detach_controller(old_controller_name)
                     except Exception as de:

@@ -16,7 +16,7 @@ def get_config_var(name, default=None):
         return os.getenv(name)
     else:
         with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
-            for line in fh.readlines():
+            for line in fh:
                 if line.startswith(name):
                     return line.split("=", 1)[1].strip()
     return default
