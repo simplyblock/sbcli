@@ -1,10 +1,8 @@
-# coding=utf-8
 """
 test_spdk_proxy_unit.py – unit tests for spdk_http_proxy_server changes.
 """
 
 import json
-import socket
 import threading
 import time
 import unittest
@@ -101,7 +99,7 @@ class TestRpcCallInnerSocketCleanup(unittest.TestCase):
         req = json.dumps(req_data).encode("ascii")
 
         mock_sock = MagicMock()
-        mock_sock.recv = MagicMock(side_effect=socket.timeout("timed out"))
+        mock_sock.recv = MagicMock(side_effect=TimeoutError("timed out"))
 
         with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
             with self.assertRaises(ValueError) as ctx:

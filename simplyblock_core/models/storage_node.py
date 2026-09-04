@@ -1,7 +1,5 @@
-# coding=utf-8
 import time
 from datetime import datetime, timedelta, UTC
-from typing import List, Optional
 from uuid import uuid4
 
 from pydantic import SecretStr
@@ -28,9 +26,9 @@ class StorageNode(BaseNodeObject):
     RESTART_PHASE_POST_UNBLOCK = "post_unblock"
 
 
-    alceml_cpu_cores: List[int] = default_factory(list)
+    alceml_cpu_cores: list[int] = default_factory(list)
     alceml_cpu_index: int = 0
-    alceml_worker_cpu_cores: List[int] = default_factory(list)
+    alceml_worker_cpu_cores: list[int] = default_factory(list)
     alceml_worker_cpu_index: int = 0
     api_endpoint: str = ""
     app_thread_mask: str = ""
@@ -50,8 +48,8 @@ class StorageNode(BaseNodeObject):
     cpu: int = 0
     cpu_hz: int = 0
     ctrl_secret: SecretStr = SecretStr("")
-    data_nics: List[IFace] = default_factory(list)
-    distrib_cpu_cores: List[int] = default_factory(list)
+    data_nics: list[IFace] = default_factory(list)
+    distrib_cpu_cores: list[int] = default_factory(list)
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
     enable_ha_jm: bool = False
@@ -59,12 +57,12 @@ class StorageNode(BaseNodeObject):
     enable_test_device: bool = False
     # None => health check is not applicable (node not in ONLINE/DOWN);
     # health is only measured/shown for ONLINE or DOWN nodes.
-    health_check: Optional[bool] = True
+    health_check: bool | None = True
     host_nqn: str = ""
     host_secret: SecretStr = SecretStr("")
     hostname: str = ""
     hugepages: int = 0
-    ib_devices: List[IFace] = default_factory(list)
+    ib_devices: list[IFace] = default_factory(list)
     id_device_by_nqn: bool = False
     iobuf_large_bufsize: int = 0
     iobuf_large_pool_count: int = 0
@@ -79,7 +77,7 @@ class StorageNode(BaseNodeObject):
     jm_vuid: int = 0
     lvols: int = 0
     lvstore: str = ""
-    lvstore_stack: List[dict] = default_factory(list)
+    lvstore_stack: list[dict] = default_factory(list)
     # Despite the names, these hold the UUID of the primary whose LVS this node
     # serves as a peer for — not a bdev stack.
     lvstore_stack_secondary: str = ""
@@ -97,7 +95,7 @@ class StorageNode(BaseNodeObject):
     number_of_devices: int = 0
     number_of_distribs: int = 4
     number_of_alceml_devices: int = 0
-    nvme_devices: List[NVMeDevice] = default_factory(list)
+    nvme_devices: list[NVMeDevice] = default_factory(list)
     online_since: str = ""
     # ISO timestamp of when this node entered STATUS_DOWN (cleared on any other
     # status). Used to apply a grace window before a DOWN node counts toward the
@@ -110,8 +108,8 @@ class StorageNode(BaseNodeObject):
     # 2026-06-18).
     shutdown_since: str = ""
     partitions_count: int = 0  # Unused
-    poller_cpu_cores: List[int] = default_factory(list)
-    ssd_pcie: List = default_factory(list)
+    poller_cpu_cores: list[int] = default_factory(list)
+    ssd_pcie: list = default_factory(list)
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
@@ -123,15 +121,15 @@ class StorageNode(BaseNodeObject):
     # taken over. Only meaningful while status is RESTARTING/IN_SHUTDOWN.
     restart_claim_owner: str = ""
     restart_claim_ts: str = ""
-    remote_devices: List[RemoteDevice] = default_factory(list)
-    remote_jm_devices: List[RemoteJMDevice] = default_factory(list)
+    remote_devices: list[RemoteDevice] = default_factory(list)
+    remote_jm_devices: list[RemoteJMDevice] = default_factory(list)
     rpc_password: SecretStr = SecretStr("")
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
-    jm_ids: List[str] = default_factory(list)
+    jm_ids: list[str] = default_factory(list)
     spdk_cpu_mask: str = ""
     l_cores: str = ""
     spdk_debug: bool = False
@@ -997,7 +995,7 @@ class StorageNode(BaseNodeObject):
         time.sleep(0.250)
         return True
 
-    def uptime(self) -> Optional[timedelta]:
+    def uptime(self) -> timedelta | None:
         return (
             datetime.now(UTC) - datetime.fromisoformat(self.online_since)
             if self.online_since and self.status == StorageNode.STATUS_ONLINE

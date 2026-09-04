@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for ``simplyblock_core.controllers.cluster_expansion.planner.compute_role_diff``.
 
 These tests exercise the pure planning logic for single-node cluster expansion

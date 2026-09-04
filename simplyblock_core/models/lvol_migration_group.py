@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 lvol_migration_group.py – coordination record for a batch migration of all
 lvols within a shared NVMe-oF namespace subsystem.
@@ -36,7 +35,7 @@ COMPLETED
 """
 
 import datetime
-from typing import ClassVar, List, Optional
+from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
@@ -73,7 +72,7 @@ class LVolMigrationGroup(BaseModel):
 
     # Ordered list of {ns_id: int, migration_id: str} dicts sorted by ns_id
     # ascending.  This is the order bdev_lvol_batch_final_step expects.
-    members: List[dict] = default_factory(list)
+    members: list[dict] = default_factory(list)
 
     # Static snap-ownership map: snap_uuid → migration_id.
     # Computed once at group creation from all members' snapshot chains.
@@ -84,12 +83,12 @@ class LVolMigrationGroup(BaseModel):
 
     # migration_ids that finished transferring their owned snaps and are now
     # waiting for the INTERMEDIATE phase signal from the main orchestrator.
-    snap_copy_done: List[str] = default_factory(list)
+    snap_copy_done: list[str] = default_factory(list)
 
     # migration_ids that have taken and transferred their intermediate
     # snapshot for the CURRENT intermediate_round and are waiting for either
     # another round or batch_result. Cleared when a new round starts.
-    intermediates_done: List[str] = default_factory(list)
+    intermediates_done: list[str] = default_factory(list)
 
     # Which intermediate round is currently in flight (0-indexed; round 0 is
     # always taken unconditionally). Incremented when the orchestrator starts
@@ -100,14 +99,14 @@ class LVolMigrationGroup(BaseModel):
     # threshold after finishing intermediate_round. Cleared when a new round
     # starts. Non-empty at the end of a round (and under the round cap)
     # triggers another synchronized round for every member.
-    intermediate_more_needed: List[str] = default_factory(list)
+    intermediate_more_needed: list[str] = default_factory(list)
 
     # migration_ids that have completed CLEANUP_SOURCE.
-    cleanup_source_done: List[str] = default_factory(list)
+    cleanup_source_done: list[str] = default_factory(list)
 
     # Written by the main orchestrator after bdev_lvol_batch_final_step.
     # None = call not yet made; True = success; False = failure.
-    batch_result: Optional[bool] = None
+    batch_result: bool | None = None
 
     # Current orchestration phase — drives worker state transitions.
     phase: str = PHASE_PRE_CREATED
@@ -136,12 +135,12 @@ class LVolMigrationGroup(BaseModel):
     def member_count(self) -> int:
         return len(self.members)
 
-    def leader_migration_id(self) -> Optional[str]:
+    def leader_migration_id(self) -> str | None:
         """migration_id of the member with the lowest ns_id (the master lvol)."""
         if not self.members:
             return None
         return min(self.members, key=lambda m: m['ns_id'])['migration_id']
 
-    def ordered_migration_ids(self) -> List[str]:
+    def ordered_migration_ids(self) -> list[str]:
         """migration_ids sorted by ns_id ascending — the SPDK batch order."""
         return [m['migration_id'] for m in sorted(self.members, key=lambda m: m['ns_id'])]

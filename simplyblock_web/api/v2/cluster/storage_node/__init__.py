@@ -1,5 +1,4 @@
 from threading import Thread
-from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -13,6 +12,7 @@ from ... import util as util
 from ..._dependencies import Cluster, StorageNode
 from .device import api as device_api
 from ..._dtos import StorageNodeDTO, TaskDTO
+import builtins
 
 
 api = APIRouter()
@@ -20,7 +20,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-nodes:list')
-def list(cluster: Cluster) -> List[StorageNodeDTO]:
+def list(cluster: Cluster) -> list[StorageNodeDTO]:
     data = []
     for storage_node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
         node_stat_obj = None
@@ -34,14 +34,14 @@ def list(cluster: Cluster) -> List[StorageNodeDTO]:
 class StorageNodeParams(BaseModel):
     node_address: str
     interface_name: str
-    max_snapshots: Optional[int] = 500
-    ha_jm: Optional[bool] = True
-    test_device: Optional[bool] = False
-    spdk_image: Optional[str] = ""
+    max_snapshots: int | None = 500
+    ha_jm: bool | None = True
+    test_device: bool | None = False
+    spdk_image: str | None = ""
     spdk_debug: bool = False
-    data_nics: List[str] = []
+    data_nics: builtins.list[str] = []
     namespace: str = 'default'
-    id_device_by_nqn: Optional[bool] = False
+    id_device_by_nqn: bool | None = False
     jm_percent: util.Percent = 3
     partitions: int = 1
     iobuf_small_pool_count: int = 0
@@ -49,11 +49,11 @@ class StorageNodeParams(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
-    ha_jm_count: Optional[int] = None
+    ha_jm_count: int | None = None
     format_4k: bool = False
-    spdk_proxy_image: Optional[str] = None
-    spdk_sys_mem: Optional[str] = None
-    failure_domain: Optional[int] = None
+    spdk_proxy_image: str | None = None
+    spdk_sys_mem: str | None = None
+    failure_domain: int | None = None
     expand: bool = False
 
 
@@ -142,7 +142,7 @@ def delete(
 
 
 @instance_api.get('/capacity', name='clusters:storage-nodes:capacity')
-def capacity(cluster: Cluster, storage_node: StorageNode, history: Optional[str] = None):
+def capacity(cluster: Cluster, storage_node: StorageNode, history: str | None = None):
     records_or_false = storage_node_ops.get_node_iostats_history(
         storage_node.get_id(),
         history,
@@ -155,7 +155,7 @@ def capacity(cluster: Cluster, storage_node: StorageNode, history: Optional[str]
 
 
 @instance_api.get('/iostats', name='clusters:storage-nodes:iostats')
-def iostats(cluster: Cluster, storage_node: StorageNode, history: Optional[str] = None):
+def iostats(cluster: Cluster, storage_node: StorageNode, history: str | None = None):
     records_or_false = storage_node_ops.get_node_iostats_history(
             storage_node.get_id(),
             history,
@@ -252,8 +252,8 @@ def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -
 class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
-    node_address: Optional[str] = None
-    new_ssd_pcie: List[str] = []
+    node_address: str | None = None
+    new_ssd_pcie: builtins.list[str] = []
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_restart_concurrent_ops.py - stress tests for concurrent CRUD operations
 during restart, exercising the sync delete / registration gate mechanism.
@@ -18,7 +17,6 @@ import random
 import threading
 import time
 from dataclasses import dataclass
-from typing import List
 from unittest.mock import patch
 
 
@@ -55,7 +53,7 @@ class GateAuditor:
     """Wraps wait_or_delay_for_restart_gate to log all calls."""
 
     def __init__(self):
-        self.events: List[GateEvent] = []
+        self.events: list[GateEvent] = []
         self.lock = threading.Lock()
         self._original_fn = storage_node_ops.wait_or_delay_for_restart_gate
 
@@ -122,8 +120,8 @@ class StressRunner:
         self.duration = duration_sec
         self._stop = threading.Event()
         self._entered = threading.Barrier(num_threads + 1)
-        self._threads: List[threading.Thread] = []
-        self._results: List[dict] = []
+        self._threads: list[threading.Thread] = []
+        self._results: list[dict] = []
         self._lock = threading.Lock()
         self._vol_counter = 0
 

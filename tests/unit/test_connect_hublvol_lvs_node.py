@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_connect_hublvol_lvs_node.py — pins the ``lvs_node`` parameter on
 ``StorageNode.connect_to_hublvol`` and verifies it routes LVS metadata

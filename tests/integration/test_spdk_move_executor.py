@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for ``cluster_expansion.executor.SpdkMoveExecutor``.
 
 Mocks the DB, RPC client, and the existing primitives

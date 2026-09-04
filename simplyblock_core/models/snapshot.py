@@ -1,4 +1,3 @@
-# coding=utf-8
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
 from simplyblock_core.models.lvol_model import LVol, LVolMini

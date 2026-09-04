@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the JobSchedule task lease (tasks_controller.claim_task).
 
 These exercise the claim/staleness decision logic without a live FoundationDB

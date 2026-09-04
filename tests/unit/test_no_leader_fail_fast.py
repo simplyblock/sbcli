@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the no-leader fail-fast gate (2026-07-15).
 
 Mass create/delete run 20260712-231123 left LVS_1 leaderless for hours after a

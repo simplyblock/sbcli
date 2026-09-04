@@ -1,4 +1,3 @@
-# coding=utf-8
 """Pin the widened restart-gate semantics for lvol/snapshot/resize fan-out.
 
 Prior to this fix, ``check_non_leader_for_operation`` returned ``"skip"``

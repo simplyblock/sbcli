@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 tasks_runner_backup.py - background task runner for S3 backup operations.
 

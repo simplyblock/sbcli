@@ -1,4 +1,3 @@
-# coding=utf-8
 """calculate_core_allocations() must colocate lvol_poller_core with
 jc_singleton_core whenever the config doesn't give lvol_poller its own
 dedicated core (colocate_lvs=True, i.e. below 32 vCPU) — this is what lets

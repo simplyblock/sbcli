@@ -1,4 +1,3 @@
-# coding=utf-8
 """Release-specific upgrade plug-ins.
 
 Some releases need one-off steps around ``cluster update`` that must not

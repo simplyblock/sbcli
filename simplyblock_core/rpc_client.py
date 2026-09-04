@@ -5,7 +5,7 @@ import threading
 from collections import OrderedDict
 from enum import IntEnum
 from json import JSONDecodeError
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 import jsonschema
 import requests
@@ -197,7 +197,7 @@ class RPCSessionPool:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._sessions: "OrderedDict[tuple, requests.Session]" = OrderedDict()
+        self._sessions: OrderedDict[tuple, requests.Session] = OrderedDict()
 
     @staticmethod
     def _fingerprint(password: SecretStr) -> str:
@@ -374,7 +374,7 @@ class RPCClient:
     def subsystem_list(self) -> list[dict]:
         return self._request3("nvmf_get_subsystems")
 
-    def subsystem_get(self, nqn: str) -> Optional[dict]:
+    def subsystem_get(self, nqn: str) -> dict | None:
         try:
             return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
         except RPCRemoteError as e:

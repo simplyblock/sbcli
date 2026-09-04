@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_hublvol_unit.py – Unit tests for StorageNode hublvol methods.
 

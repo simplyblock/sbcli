@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/clusters/{id}/tasks endpoints."""
 
 from simplyblock_core.models.job_schedule import JobSchedule

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 migration_controller.py – control-plane logic for live volume migration.
 

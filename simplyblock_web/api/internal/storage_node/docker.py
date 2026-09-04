@@ -1,11 +1,10 @@
-# encoding: utf-8
 import json
 import math
 import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any
 
 import docker
 import psutil
@@ -75,21 +74,21 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: Optional[List[str]] = Field(None)
-    spdk_debug: Optional[bool] = Field(False)
-    l_cores: Optional[str] = Field(None)
+    ssd_pcie: list[str] | None = Field(None)
+    spdk_debug: bool | None = Field(False)
+    l_cores: str | None = Field(None)
     spdk_mem: int = Field(core_utils.parse_size('4GiB'))
-    total_mem: Optional[Union[int, str]] = Field('')
-    multi_threading_enabled: Optional[bool] = Field(False)
-    timeout: Optional[int] = Field(5 * 60)
-    spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-    cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
+    total_mem: int | str | None = Field('')
+    multi_threading_enabled: bool | None = Field(False)
+    timeout: int | None = Field(5 * 60)
+    spdk_image: str | None = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_proxy_image: str | None = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    cluster_ip: str | None = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
-    socket: Optional[int] = Field(None, ge=0)
+    socket: int | None = Field(None, ge=0)
     firewall_port: int = Field(constants.FW_PORT_START)
     cluster_id: str
-    mcp_max_unavailable: Optional[int] = Field(None)  # OpenShift-only (MCP); ignored here
+    mcp_max_unavailable: int | None = Field(None)  # OpenShift-only (MCP); ignored here
 
 
 @api.post('/spdk_process_start', responses={
@@ -356,7 +355,7 @@ def _spdk_thread_sample(pid):
     try:
         for tid in os.listdir(f"/proc/{pid}/task"):
             t = f"/proc/{pid}/task/{tid}"
-            entry: Dict[str, Any] = {"tid": tid}
+            entry: dict[str, Any] = {"tid": tid}
             for field, path in (("comm", "comm"), ("wchan", "wchan")):
                 try:
                     with open(f"{t}/{path}") as fh:
@@ -786,26 +785,26 @@ def bind_device_to_spdk(body: utils.DeviceParams):
 
 
 class PersistNodeConfigParams(BaseModel):
-    max_lvol: Optional[int] = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
-    huge_page_memory: Optional[int] = Field(None, ge=0)
+    max_lvol: int | None = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
+    huge_page_memory: int | None = Field(None, ge=0)
     # small/large_pool_count are written alongside huge_page_memory whenever
     # add_node recalculates it against the cluster's real max_lvol/core count
     # -- they are what that memory figure was derived from (calculate_pool_count
     # -> calculate_minimum_hp_memory), so they must never drift from it.
-    small_pool_count: Optional[int] = Field(None, ge=0)
-    large_pool_count: Optional[int] = Field(None, ge=0)
-    numa_node: Optional[int] = Field(None, ge=0)
-    ssd_list: Optional[List[str]] = Field(None)
+    small_pool_count: int | None = Field(None, ge=0)
+    large_pool_count: int | None = Field(None, ge=0)
+    numa_node: int | None = Field(None, ge=0)
+    ssd_list: list[str] | None = Field(None)
     # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
     # storage_node_ops.apply_cluster_vcpu_count). Written together, once, by
     # the same caller -- never partially, so the file never holds a mask from
     # one layout next to a distribution from another.
-    cpu_mask: Optional[str] = None
-    isolated: Optional[List[int]] = None
-    l_cores: Optional[str] = None
-    distribution: Optional[dict] = None
-    core_to_index: Optional[dict] = None
-    number_of_distribs: Optional[int] = Field(None, ge=0)
+    cpu_mask: str | None = None
+    isolated: list[int] | None = None
+    l_cores: str | None = None
+    distribution: dict | None = None
+    core_to_index: dict | None = None
+    number_of_distribs: int | None = Field(None, ge=0)
 
 
 @api.post('/persist_node_config', responses={
@@ -859,7 +858,7 @@ def persist_node_config(body: PersistNodeConfigParams):
     # list changes here is exactly the kind of drift that bites whoever
     # trusts them next. Recompute unconditionally; cheap, and correct
     # regardless of which field this call actually changed.
-    all_isolated_cores: Set[int] = set()
+    all_isolated_cores: set[int] = set()
     for n in node_info["nodes"]:
         all_isolated_cores.update(n.get("isolated") or [])
     node_info["isolated_cores"] = sorted(all_isolated_cores)
@@ -1100,8 +1099,8 @@ def read_allowed_list():
 
 
 class CoresParams(BaseModel):
-    cores: Optional[List[int]] = Field(default=None)
-    number_of_alceml_devices: Optional[int] = Field(None, ge=0)
+    cores: list[int] | None = Field(default=None)
+    number_of_alceml_devices: int | None = Field(None, ge=0)
 
 
 @api.post('/recalculate_cores_distribution', responses={

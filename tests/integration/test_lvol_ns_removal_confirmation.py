@@ -1,4 +1,3 @@
-# coding=utf-8
 """Empty-subsystem deletion in ``_remove_lvol_subsys_from_node``.
 
 Moved from tests/unit/test_lvol_ns_removal_confirmation.py: since 37751bfe4

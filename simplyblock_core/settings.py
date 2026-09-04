@@ -1,6 +1,6 @@
 import ssl
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
 from pydantic import BeforeValidator, Field, PlainSerializer, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
         Field(description="Connect to internal services via TLS."),
     ] = "disabled"
     tls_provider: Annotated[
-        Optional[Literal["openshift", "cert-manager"]],
+        Literal["openshift", "cert-manager"] | None,
         Field(description="Provider for TLS certificates in the cluster."),
         BeforeValidator(lambda x: None if x == "None" else x),
     ] = None

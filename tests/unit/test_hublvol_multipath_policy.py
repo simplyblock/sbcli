@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_hublvol_multipath_policy.py — pins ``ensure_hublvol_active_active``.
 

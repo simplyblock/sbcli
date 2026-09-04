@@ -1,4 +1,3 @@
-from typing import List
 
 from fastapi import APIRouter
 
@@ -13,7 +12,7 @@ db = DBController()
 
 
 @api.get('/', name='management_nodes:list')
-def list(cluster: Cluster) -> List[ManagementNodeDTO]:
+def list(cluster: Cluster) -> list[ManagementNodeDTO]:
     return [
         ManagementNodeDTO.from_model(management_node)
         for management_node

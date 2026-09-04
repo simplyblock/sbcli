@@ -16,9 +16,7 @@ import string
 import re
 import subprocess
 import shlex
-import socket
 from collections import defaultdict
-from typing import Optional, List
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
@@ -32,7 +30,7 @@ if _key_name:
 elif os.environ.get("K8S_LOCAL_KUBECTL", "").lower() in ("1", "true", "yes"):
     SSH_KEY_LOCATION = ""
 else:
-    raise EnvironmentError(
+    raise OSError(
         "KEY_NAME env var is required for SSH access to nodes. "
         "Set KEY_NAME or use K8S_LOCAL_KUBECTL=1 for k8s-native tests."
     )
@@ -96,14 +94,14 @@ class SshUtils:
         self.ssh_pass = None
         self.distrib_dump_paths = {}
 
-    def _candidate_usernames(self, explicit_user) -> List[str]:
+    def _candidate_usernames(self, explicit_user) -> list[str]:
         if explicit_user:
             if isinstance(explicit_user, (list, tuple)):
                 return list(explicit_user)
             return [str(explicit_user)]
         return ["ec2-user", "ubuntu", "rocky", "root"]
     
-    def _load_private_keys(self) -> List[paramiko.PKey]:
+    def _load_private_keys(self) -> list[paramiko.PKey]:
         """
         Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
         Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
@@ -135,7 +133,7 @@ class SshUtils:
             raise FileNotFoundError("No usable SSH private key found and SSH_PASS not set.")
         return keys
 
-    def _try_connect(self, host: str, username: str, pkey: Optional[paramiko.PKey], password: Optional[str], sock=None, timeout=30):
+    def _try_connect(self, host: str, username: str, pkey: paramiko.PKey | None, password: str | None, sock=None, timeout=30):
         cli = paramiko.SSHClient()
         cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         cli.connect(
@@ -302,14 +300,14 @@ class SshUtils:
         self.ssh_pass = None
         self.distrib_dump_paths = {}
 
-    def _candidate_usernames(self, explicit_user) -> List[str]:
+    def _candidate_usernames(self, explicit_user) -> list[str]:
         if explicit_user:
             if isinstance(explicit_user, (list, tuple)):
                 return list(explicit_user)
             return [str(explicit_user)]
         return ["ec2-user", "ubuntu", "rocky", "root"]
     
-    def _load_private_keys(self) -> List[paramiko.PKey]:
+    def _load_private_keys(self) -> list[paramiko.PKey]:
         """
         Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
         Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
@@ -341,7 +339,7 @@ class SshUtils:
             raise FileNotFoundError("No usable SSH private key found and SSH_PASS not set.")
         return keys
 
-    def _try_connect(self, host: str, username: str, pkey: Optional[paramiko.PKey], password: Optional[str], sock=None, timeout=30):
+    def _try_connect(self, host: str, username: str, pkey: paramiko.PKey | None, password: str | None, sock=None, timeout=30):
         cli = paramiko.SSHClient()
         cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         cli.connect(
@@ -804,7 +802,7 @@ class SshUtils:
 
                     return out, err
 
-                except (EOFError, paramiko.SSHException, paramiko.buffered_pipe.PipeTimeout, socket.error) as e:
+                except (OSError, EOFError, paramiko.SSHException, paramiko.buffered_pipe.PipeTimeout) as e:
                     retry += 1
                     self.logger.error(f"SSH command failed ({type(e).__name__}): {e}. Retrying ({retry}/{max_retries})...")
                     time.sleep(min(2 * retry, 5))

@@ -1,10 +1,9 @@
-# coding=utf-8
 import datetime
 import os
 import logging
 import uuid
 import time
-from typing import Optional, Dict, Any
+from typing import Any
 
 import requests
 
@@ -21,7 +20,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 logger = logging.getLogger()
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode, alert_config: Optional[Dict[str, Any]] = None):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode, alert_config: dict[str, Any] | None = None):
 
     try:
         headers = {'Authorization': f'{cluster_id} {cluster_secret.get_secret_value()}'}

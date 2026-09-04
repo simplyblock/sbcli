@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_jm_rep_wait.py — pins the bounds on wait_for_jm_rep_tasks_to_finish.
 

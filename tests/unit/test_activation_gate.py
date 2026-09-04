@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_activation_gate.py — regression tests for the auto-reactivation races
 fixed in ``simplyblock_core/services/storage_node_monitor.py`` after incident

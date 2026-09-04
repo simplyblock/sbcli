@@ -1,11 +1,11 @@
-# coding=utf-8
 import pprint
 
 import json
 from inspect import ismethod, isfunction
 import sys
 from types import UnionType
-from typing import Callable, ClassVar, Mapping, Type, TypeVar, Union, cast, get_args, get_origin
+from typing import ClassVar, TypeVar, Union, cast, get_args, get_origin
+from collections.abc import Callable, Mapping
 from collections import ChainMap
 
 from pydantic import SecretBytes, SecretStr
@@ -67,7 +67,7 @@ def _detached(value: _T) -> _T:
     return value
 
 
-class BaseModel(object):
+class BaseModel:
 
     _STATUS_CODE_MAP: ClassVar[dict] = {}
 
@@ -87,7 +87,7 @@ class BaseModel(object):
         self.from_dict(data)
 
     @classmethod
-    def all_annotations(cls) -> Mapping[str, Type]:
+    def all_annotations(cls) -> Mapping[str, type]:
         """Returns a dictionary-like ChainMap that includes annotations for all
            attributes defined in cls or inherited from superclasses."""
         if sys.version_info >= (3, 10):

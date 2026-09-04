@@ -1,5 +1,5 @@
 import uuid
-from typing import ContextManager
+from contextlib import AbstractContextManager
 from unittest.mock import patch
 
 import pytest
@@ -111,7 +111,7 @@ def test_humanbytes(args, expected):
     (2 ** 70, 'ZiB', 1.),
 ])
 def test_convert_size(size, unit, expected):
-    if isinstance(expected, ContextManager):
+    if isinstance(expected, AbstractContextManager):
         with expected:
             utils.convert_size(size, unit)
     else:
@@ -154,7 +154,7 @@ def test_single_or_none():
     ("0-5:-1", pytest.raises(ValueError)),
 ])
 def test_parse_thread_siblings_list(input, expected):
-    if isinstance(expected, ContextManager):
+    if isinstance(expected, AbstractContextManager):
         with expected:
             parse_thread_siblings_list(input)
     else:

@@ -1,4 +1,4 @@
-from typing import Annotated, Union
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, HTTPException
@@ -196,7 +196,7 @@ Subsystem = Annotated[str, Depends(_lookup_subsystem)]
 
 def _lookup_subsystem_migration(
     migration_id: UUID, cluster: Cluster, subsystem: Subsystem,
-) -> Union[LVolMigration, LVolMigrationGroup]:
+) -> LVolMigration | LVolMigrationGroup:
     """Resolve *migration_id* under subsystem `nqn`, as either a single-lvol
     migration or a batch (shared-namespace) migration group — whichever it
     actually is. Group lookup is tried first since a group id and a plain
@@ -225,7 +225,7 @@ def _lookup_subsystem_migration(
 
 
 SubsystemMigration = Annotated[
-    Union[LVolMigration, LVolMigrationGroup], Depends(_lookup_subsystem_migration)
+    LVolMigration | LVolMigrationGroup, Depends(_lookup_subsystem_migration)
 ]
 
 

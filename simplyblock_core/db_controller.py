@@ -1,4 +1,3 @@
-# coding=utf-8
 import datetime
 import json
 import logging
@@ -6,7 +5,7 @@ import os.path
 import time
 
 import fdb
-from typing import Any, ClassVar, List, Optional
+from typing import Any, ClassVar
 
 from simplyblock_core import constants, utils
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
@@ -66,7 +65,7 @@ class Singleton(type):
         if cls in cls._instances:
             return cls._instances[cls]
         else:
-            ins = super(Singleton, cls).__call__(*args, **kwargs)
+            ins = super().__call__(*args, **kwargs)
             if ins is not None and ins.kv_store is not None:
                 cls._instances[cls] = ins
             return ins
@@ -140,12 +139,12 @@ class DBController(metaclass=Singleton):
         except Exception:
             logger.exception("FDB initialization failed")
 
-    def get_storage_nodes(self) -> List[StorageNode]:
+    def get_storage_nodes(self) -> list[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
         return ret
 
-    def get_storage_nodes_by_cluster_id(self, cluster_id: str) -> List[StorageNode]:
+    def get_storage_nodes_by_cluster_id(self, cluster_id: str) -> list[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
@@ -153,14 +152,14 @@ class DBController(metaclass=Singleton):
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_storage_nodes_by_system_id(self, system_id: str) -> List[StorageNode]:
+    def get_storage_nodes_by_system_id(self, system_id: str) -> list[StorageNode]:
         return [
             node for node
             in StorageNode().read_from_db(self.kv_store)
             if node.system_uuid == system_id
         ]
 
-    def get_storage_nodes_by_hostname(self, hostname: str) -> List[StorageNode]:
+    def get_storage_nodes_by_hostname(self, hostname: str) -> list[StorageNode]:
         return [
             node for node
             in self.get_storage_nodes()
@@ -187,7 +186,7 @@ class DBController(metaclass=Singleton):
         return device
 
 
-    def get_pools(self, cluster_id: Optional[str] = None) -> List[Pool]:
+    def get_pools(self, cluster_id: str | None = None) -> list[Pool]:
         pools = []
         if cluster_id:
             for pool in Pool().read_from_db(self.kv_store):
@@ -224,7 +223,7 @@ class DBController(metaclass=Singleton):
             else self.get_pool_by_name(id_or_name)
         )
 
-    def get_lvols(self, cluster_id: Optional[str] = None) -> List[LVol]:
+    def get_lvols(self, cluster_id: str | None = None) -> list[LVol]:
         lvols = self.get_all_lvols()
         lvols = [lvol for lvol in lvols if lvol.status != LVol.STATUS_DELETED]
         if not cluster_id:
@@ -241,7 +240,7 @@ class DBController(metaclass=Singleton):
 
         return cluster_lvols
 
-    def get_all_lvols(self) -> List[LVol]:
+    def get_all_lvols(self) -> list[LVol]:
         start_time = time.time()
         lvols = LVol().read_from_db(self.kv_store)
         ret = sorted(lvols, key=lambda x: x.create_dt)
@@ -249,21 +248,21 @@ class DBController(metaclass=Singleton):
         logger.debug(f"time taken to read all LVols: {round(end_time - start_time, 2)}s")
         return ret
 
-    def get_lvols_by_node_id(self, node_id: str) -> List[LVol]:
+    def get_lvols_by_node_id(self, node_id: str) -> list[LVol]:
         lvols = []
         for lvol in self.get_lvols():
             if lvol.node_id == node_id:
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
-    def get_lvols_by_pool_id(self, pool_id: str) -> List[LVol]:
+    def get_lvols_by_pool_id(self, pool_id: str) -> list[LVol]:
         lvols = []
         for lvol in self.get_lvols():
             if lvol.pool_uuid == pool_id:
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
-    def get_hostnames_by_pool_id(self, pool_id: str) -> List[str]:
+    def get_hostnames_by_pool_id(self, pool_id: str) -> list[str]:
         lvols = self.get_lvols_by_pool_id(pool_id)
         hostnames = []
         for lv in lvols:
@@ -271,7 +270,7 @@ class DBController(metaclass=Singleton):
                 hostnames.append(lv.hostname)
         return hostnames
 
-    def get_snapshots(self, cluster_id: Optional[str] = None) -> List[SnapShot]:
+    def get_snapshots(self, cluster_id: str | None = None) -> list[SnapShot]:
         start_time = time.time()
         snaps = SnapShot().read_from_db(self.kv_store)
         if cluster_id:
@@ -281,7 +280,7 @@ class DBController(metaclass=Singleton):
         logger.debug(f"time taken to read all SnapShots: {round(end_time - start_time, 2)}s")
         return ret
 
-    def get_mini_lvols(self) -> List[LVolMini]:
+    def get_mini_lvols(self) -> list[LVolMini]:
         start_time = time.time()
         lvols = LVolMini().read_from_db(self.kv_store)
         ret = sorted(lvols, key=lambda x: x.create_dt)
@@ -289,7 +288,7 @@ class DBController(metaclass=Singleton):
         logger.debug(f"time taken to read all mini lvols: {round(end_time - start_time, 2)}s")
         return ret
 
-    def get_mini_snapshots(self) -> List[SnapShotMini]:
+    def get_mini_snapshots(self) -> list[SnapShotMini]:
         start_time = time.time()
         snaps = SnapShotMini().read_from_db(self.kv_store)
         ret = sorted(snaps, key=lambda x: x.created_at)
@@ -313,7 +312,7 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'LVol {id} not found')
         return lvol
 
-    def get_lvol_replication_objects(self) -> List[LVolReplication]:
+    def get_lvol_replication_objects(self) -> list[LVolReplication]:
         ret = LVolReplication().read_from_db(self.kv_store)
         return sorted(ret, key=lambda x: x.create_dt)
 
@@ -337,7 +336,7 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'ManagementNode {id} not found')
         return node
 
-    def get_mgmt_nodes(self, cluster_id: Optional[str] = None) -> List[MgmtNode]:
+    def get_mgmt_nodes(self, cluster_id: str | None = None) -> list[MgmtNode]:
         nodes = MgmtNode().read_from_db(self.kv_store)
         if cluster_id:
             nodes = [n for n in nodes if n.cluster_id == cluster_id]
@@ -349,48 +348,48 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'No management node found for hostname {hostname}')
         return node
 
-    def get_lvol_stats(self, lvol, limit=20) -> List[LVolStatObject]:
+    def get_lvol_stats(self, lvol, limit=20) -> list[LVolStatObject]:
         if isinstance(lvol, str):
             lvol = self.get_lvol_by_id(lvol)
         stats = LVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol.pool_uuid, lvol.uuid), limit=limit,
                                               reverse=True)
         return stats
 
-    def get_cached_lvol_stats(self, lvol_id, limit=20) -> List[CachedLVolStatObject]:
+    def get_cached_lvol_stats(self, lvol_id, limit=20) -> list[CachedLVolStatObject]:
         stats = CachedLVolStatObject().read_from_db(self.kv_store, id="%s/%s" % (lvol_id, lvol_id), limit=limit,
                                                     reverse=True)
         return stats
 
-    def get_pool_stats(self, pool, limit=20) -> List[PoolStatObject]:
+    def get_pool_stats(self, pool, limit=20) -> list[PoolStatObject]:
         stats = PoolStatObject().read_from_db(self.kv_store, id="%s/%s" % (pool.get_id(), pool.get_id()), limit=limit,
                                               reverse=True)
         return stats
 
-    def get_cluster_stats(self, cluster, limit=20) -> List[ClusterStatObject]:
+    def get_cluster_stats(self, cluster, limit=20) -> list[ClusterStatObject]:
         return self.get_cluster_capacity(cluster, limit)
 
-    def get_node_stats(self, node, limit=20) -> List[NodeStatObject]:
+    def get_node_stats(self, node, limit=20) -> list[NodeStatObject]:
         return self.get_node_capacity(node, limit)
 
-    def get_device_stats(self, device, limit=20) -> List[DeviceStatObject]:
+    def get_device_stats(self, device, limit=20) -> list[DeviceStatObject]:
         return self.get_device_capacity(device, limit)
 
-    def get_cluster_capacity(self, cl, limit=1) -> List[ClusterStatObject]:
+    def get_cluster_capacity(self, cl, limit=1) -> list[ClusterStatObject]:
         stats = ClusterStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (cl.get_id(), cl.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_node_capacity(self, node, limit=1) -> List[NodeStatObject]:
+    def get_node_capacity(self, node, limit=1) -> list[NodeStatObject]:
         stats = NodeStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (node.cluster_id, node.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_device_capacity(self, device, limit=1) -> List[DeviceStatObject]:
+    def get_device_capacity(self, device, limit=1) -> list[DeviceStatObject]:
         stats = DeviceStatObject().read_from_db(
             self.kv_store, id="%s/%s" % (device.cluster_id, device.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_clusters(self) -> List[Cluster]:
+    def get_clusters(self) -> list[Cluster]:
         return Cluster().read_from_db(self.kv_store)
 
     def get_deploy_config(self) -> DeployConfig:
@@ -407,19 +406,19 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Cluster {cluster_id} not found')
         return cluster
 
-    def get_port_stats(self, node_id: str, port_id: str, limit: int = 20) -> List[PortStat]:
+    def get_port_stats(self, node_id: str, port_id: str, limit: int = 20) -> list[PortStat]:
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)
         return stats
 
-    def get_events(self, event_id: str = " ", limit: int = 0, reverse: bool = False) -> List[EventObj]:
+    def get_events(self, event_id: str = " ", limit: int = 0, reverse: bool = False) -> list[EventObj]:
         return EventObj().read_from_db(self.kv_store, id=event_id, limit=limit, reverse=reverse)
 
-    def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0) -> List[JobSchedule]:
+    def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0) -> list[JobSchedule]:
         ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
         return sorted(ret, key=lambda x: x.date)
 
 
-    def get_active_migration_tasks(self, cluster_id: str) -> List[JobSchedule]:
+    def get_active_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
         """Return all non-done FN_LVOL_MIG tasks for the given cluster (single FDB scan)."""
         return [
             t for t in self.get_job_tasks(cluster_id, reverse=False)
@@ -433,7 +432,7 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Task {task_id} not found')
         return task
 
-    def get_snapshots_by_node_id(self, node_id: str) -> List[SnapShot]:
+    def get_snapshots_by_node_id(self, node_id: str) -> list[SnapShot]:
         ret = []
         snaps = self.get_snapshots()
         for snap in snaps:
@@ -441,7 +440,7 @@ class DBController(metaclass=Singleton):
                 ret.append(snap)
         return sorted(ret, key=lambda x: x.create_dt)
 
-    def get_snapshots_by_pool_id(self, pool_id: str) -> List[SnapShot]:
+    def get_snapshots_by_pool_id(self, pool_id: str) -> list[SnapShot]:
         ret = []
         snaps = self.get_snapshots()
         for snap in snaps:
@@ -449,7 +448,7 @@ class DBController(metaclass=Singleton):
                 ret.append(snap)
         return sorted(ret, key=lambda x: x.create_dt)
 
-    def get_snapshots_by_lvol_id(self, lvol_id: str) -> List[SnapShot]:
+    def get_snapshots_by_lvol_id(self, lvol_id: str) -> list[SnapShot]:
         return [s for s in self.get_snapshots() if s.lvol and s.lvol.get_id() == lvol_id]
 
     def get_snode_size(self, node_id: str) -> int:
@@ -466,7 +465,7 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'JMDevice {jm_id} not found')
         return device
 
-    def get_primary_storage_nodes_by_cluster_id(self, cluster_id: str) -> List[StorageNode]:
+    def get_primary_storage_nodes_by_cluster_id(self, cluster_id: str) -> list[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
@@ -474,7 +473,7 @@ class DBController(metaclass=Singleton):
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_primary_storage_nodes_by_secondary_node_id(self, node_id: str) -> List[StorageNode]:
+    def get_primary_storage_nodes_by_secondary_node_id(self, node_id: str) -> list[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for node in ret:
@@ -482,7 +481,7 @@ class DBController(metaclass=Singleton):
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_qos(self, cluster_id: Optional[str] = None) -> List[QOSClass]:
+    def get_qos(self, cluster_id: str | None = None) -> list[QOSClass]:
         classes = []
         if cluster_id:
             for qos in QOSClass().read_from_db(self.kv_store):
@@ -492,7 +491,7 @@ class DBController(metaclass=Singleton):
             classes = QOSClass().read_from_db(self.kv_store)
         return sorted(classes, key=lambda x: x.class_id)
 
-    def get_migrations(self, cluster_id: Optional[str] = None) -> List[LVolMigration]:
+    def get_migrations(self, cluster_id: str | None = None) -> list[LVolMigration]:
         """Return all LVolMigration records, optionally filtered by cluster."""
         prefix = cluster_id if cluster_id else " "
         return LVolMigration().read_from_db(self.kv_store, id=prefix)
@@ -503,12 +502,12 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'LVolMigration {migration_id} not found')
         return migration
 
-    def get_migration_by_lvol_id(self, lvol_id: str) -> Optional[LVolMigration]:
+    def get_migration_by_lvol_id(self, lvol_id: str) -> LVolMigration | None:
         return single_or_none(
             m for m in self.get_migrations() if m.lvol_id == lvol_id and m.is_active()
         )
 
-    def get_migration_groups(self, cluster_id: Optional[str] = None) -> List[LVolMigrationGroup]:
+    def get_migration_groups(self, cluster_id: str | None = None) -> list[LVolMigrationGroup]:
         """Return all LVolMigrationGroup records, optionally filtered by cluster."""
         prefix = cluster_id if cluster_id else " "
         return LVolMigrationGroup().read_from_db(self.kv_store, id=prefix)
@@ -519,7 +518,7 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'LVolMigrationGroup {group_id} not found')
         return group
 
-    def get_active_batch_migration_tasks(self, cluster_id: str) -> List[JobSchedule]:
+    def get_active_batch_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
         """Return all non-done FN_LVOL_BATCH_MIG tasks for the given cluster."""
         return [
             t for t in self.get_job_tasks(cluster_id, reverse=False)
@@ -527,10 +526,10 @@ class DBController(metaclass=Singleton):
             and t.status != JobSchedule.STATUS_DONE
         ]
 
-    def get_lvol_del_lock(self, node_id: str) -> Optional[NodeLVolDelLock]:
+    def get_lvol_del_lock(self, node_id: str) -> NodeLVolDelLock | None:
         return single_or_none(NodeLVolDelLock().read_from_db(self.kv_store, id=node_id))
 
-    def get_backup_chain_lock(self, snapshot_id: str) -> Optional[BackupChainLock]:
+    def get_backup_chain_lock(self, snapshot_id: str) -> BackupChainLock | None:
         return single_or_none(BackupChainLock().read_from_db(self.kv_store, id=snapshot_id))
 
     def _acquire_backup_chain_locks_tx(self, tr, snapshot_ids, requested_snapshot_id, lvol_id):
@@ -586,7 +585,7 @@ class DBController(metaclass=Singleton):
 
     # ---- Cluster node-add mesh lock (Single FDB Transaction) ----
 
-    def get_cluster_add_lock(self, cluster_id: str) -> Optional[ClusterAddNodeLock]:
+    def get_cluster_add_lock(self, cluster_id: str) -> ClusterAddNodeLock | None:
         return single_or_none(ClusterAddNodeLock().read_from_db(self.kv_store, id=cluster_id))
 
     def _try_acquire_cluster_add_lock_tx(self, tr, cluster_id, owner, now):
@@ -1375,7 +1374,7 @@ class DBController(metaclass=Singleton):
 
     # ---- S3 Backup ----
 
-    def get_backups(self, cluster_id: Optional[str] = None) -> List[Backup]:
+    def get_backups(self, cluster_id: str | None = None) -> list[Backup]:
         prefix = cluster_id if cluster_id else " "
         return Backup().read_from_db(self.kv_store, id=prefix)
 
@@ -1385,13 +1384,13 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Backup {backup_id} not found')
         return backup
 
-    def get_backups_by_lvol_id(self, lvol_id: str) -> List[Backup]:
+    def get_backups_by_lvol_id(self, lvol_id: str) -> list[Backup]:
         return [b for b in self.get_backups() if b.lvol_id == lvol_id]
 
-    def get_backups_by_snapshot_id(self, snapshot_id: str) -> List[Backup]:
+    def get_backups_by_snapshot_id(self, snapshot_id: str) -> list[Backup]:
         return [b for b in self.get_backups() if b.snapshot_id == snapshot_id]
 
-    def get_backup_chain(self, backup_id: str) -> List[Backup]:
+    def get_backup_chain(self, backup_id: str) -> list[Backup]:
         """Return the full backup chain ending at backup_id, oldest first."""
         backups = self.get_backups()  # Avoid retrieving all backups multiple times
 
@@ -1407,7 +1406,7 @@ class DBController(metaclass=Singleton):
         chain.reverse()
         return chain
 
-    def get_replication_targets(self, cluster_id: Optional[str] = None) -> List[ReplicationTarget]:
+    def get_replication_targets(self, cluster_id: str | None = None) -> list[ReplicationTarget]:
         prefix = cluster_id if cluster_id else " "
         return ReplicationTarget().read_from_db(self.kv_store, id=prefix)
 
@@ -1430,7 +1429,7 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'ReplicationTarget {name} not found on cluster {cluster_id}')
         return target
 
-    def get_replication_policies(self, cluster_id: Optional[str] = None) -> List[ReplicationPolicy]:
+    def get_replication_policies(self, cluster_id: str | None = None) -> list[ReplicationPolicy]:
         prefix = cluster_id if cluster_id else " "
         return ReplicationPolicy().read_from_db(self.kv_store, id=prefix)
 
@@ -1452,7 +1451,7 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'ReplicationPolicy {name} not found on cluster {cluster_id}')
         return policy
 
-    def get_replication_policy_for_lvol(self, lvol) -> Optional[ReplicationPolicy]:
+    def get_replication_policy_for_lvol(self, lvol) -> ReplicationPolicy | None:
         """The policy a volume follows, or None when it is not policy-managed."""
         if not getattr(lvol, 'replication_policy_id', ''):
             return None
@@ -1461,7 +1460,7 @@ class DBController(metaclass=Singleton):
         except KeyError:
             return None
 
-    def get_lvols_by_replication_policy(self, policy_id: str) -> List[LVol]:
+    def get_lvols_by_replication_policy(self, policy_id: str) -> list[LVol]:
         wanted = policy_id.split('/')[-1] if policy_id else ""
         if not wanted:
             return []
@@ -1470,7 +1469,7 @@ class DBController(metaclass=Singleton):
             if getattr(lvol, 'replication_policy_id', '').split('/')[-1] == wanted
         ]
 
-    def get_backup_policies(self, cluster_id: Optional[str] = None) -> List[BackupPolicy]:
+    def get_backup_policies(self, cluster_id: str | None = None) -> list[BackupPolicy]:
         prefix = cluster_id if cluster_id else " "
         return BackupPolicy().read_from_db(self.kv_store, id=prefix)
 
@@ -1480,11 +1479,11 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'BackupPolicy {policy_id} not found')
         return policy
 
-    def get_backup_policy_attachments(self, cluster_id: Optional[str] = None) -> List[BackupPolicyAttachment]:
+    def get_backup_policy_attachments(self, cluster_id: str | None = None) -> list[BackupPolicyAttachment]:
         prefix = cluster_id if cluster_id else " "
         return BackupPolicyAttachment().read_from_db(self.kv_store, id=prefix)
 
-    def get_policy_for_lvol(self, lvol) -> Optional[BackupPolicy]:
+    def get_policy_for_lvol(self, lvol) -> BackupPolicy | None:
         """Get the effective backup policy for an lvol.
         LVol-level policy overrides pool-level policy."""
         attachments = self.get_backup_policy_attachments(lvol.pool_uuid.split('/')[0] if '/' in lvol.pool_uuid else None)

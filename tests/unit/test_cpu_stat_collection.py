@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for CPU stat collection in the capacity-and-stats collector.
 
 The counters are persisted raw. SPDK reports reactor and thread busy/idle

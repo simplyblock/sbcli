@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_restart_scenarios.py – comprehensive FTT=2 restart tests.
 

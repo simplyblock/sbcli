@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_delete_lvol_intent.py — regression tests for the early-IN_DELETION
 persistence in ``simplyblock_core.controllers.lvol_controller.delete_lvol``.

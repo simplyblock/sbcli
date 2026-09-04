@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_spdk_proxy_e2e.py – mocked end-to-end tests for spdk_http_proxy_server.
 

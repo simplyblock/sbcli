@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_migration_flow.py – integration tests for the live volume migration feature.
 

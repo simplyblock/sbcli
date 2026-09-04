@@ -1,4 +1,3 @@
-# coding=utf-8
 """reassign_l_cores_for_restart(): restart-time index->physical placement.
 
 A restart must never change a role's INDEX SET (its core count, and any

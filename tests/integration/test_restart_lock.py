@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_restart_lock.py – unit tests for the pre-restart FDB transaction guard.
 

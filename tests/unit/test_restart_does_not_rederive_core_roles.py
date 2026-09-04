@@ -1,4 +1,3 @@
-# coding=utf-8
 """Restart must not re-derive the node's core-role allocation.
 
 alceml_cpu_cores/distrib_cpu_cores/poller_cpu_cores and every derived mask

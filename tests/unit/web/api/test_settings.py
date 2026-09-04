@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_web_settings.py – unit tests for simplyblock_web.settings.
 """

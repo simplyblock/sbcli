@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/clusters/{id}/storage-pools endpoints (pool_controller mocked)."""
 
 from simplyblock_core.models.pool import Pool

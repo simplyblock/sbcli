@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_jm_event_collector.py — JM events reach the cluster event log, once each.
 
 jm_get_events returns everything the JM holds on every call; there is no

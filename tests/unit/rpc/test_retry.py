@@ -1,4 +1,3 @@
-# coding=utf-8
 """Regression tests for RPCClient HTTP retry policy.
 
 SPDK JSON-RPC sends every call (including non-idempotent mutations) as a POST.

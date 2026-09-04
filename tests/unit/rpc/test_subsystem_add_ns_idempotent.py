@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_subsystem_add_ns_idempotent.py — unit tests for the idempotent
 behavior of ``RPCClient.nvmf_subsystem_add_ns``.

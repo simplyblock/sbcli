@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -24,16 +24,16 @@ db = DBController()
 class TargetParams(BaseModel):
     target_name: str
     target_cluster_id: UUID
-    target_pool_id: Optional[UUID] = None
-    timeout_sec: Optional[util.Unsigned] = None
+    target_pool_id: UUID | None = None
+    timeout_sec: util.Unsigned | None = None
 
 
 class PolicyParams(BaseModel):
     policy_name: str
     target_id: UUID
     interval_min: util.Unsigned = 1
-    mode: Optional[ReplicationMode] = None
-    keep_replicated: Optional[Annotated[int, Field(ge=2)]] = None
+    mode: ReplicationMode | None = None
+    keep_replicated: Annotated[int, Field(ge=2)] | None = None
 
 
 def _config_error(e: ReplicationConfigError):
@@ -44,7 +44,7 @@ targets_api = APIRouter()
 
 
 @targets_api.get('/', name='clusters:replication:targets:list')
-def list_targets(cluster: Cluster) -> List[ReplicationTargetDTO]:
+def list_targets(cluster: Cluster) -> list[ReplicationTargetDTO]:
     return [
         ReplicationTargetDTO.from_model(target)
         for target in replication_policy_controller.list_targets(cluster.get_id())
@@ -94,7 +94,7 @@ def delete_target(cluster: Cluster, target: ReplicationTarget) -> Response:
 
 
 @target_instance_api.post('/failover', name='clusters:replication:targets:failover')
-def failover_target(cluster: Cluster, target: ReplicationTarget) -> List[FailoverResultDTO]:
+def failover_target(cluster: Cluster, target: ReplicationTarget) -> list[FailoverResultDTO]:
     """Fail over EVERY volume replicating to this target.
 
     A site loss has to move all volumes at once; doing it volume by volume was
@@ -111,7 +111,7 @@ policies_api = APIRouter()
 
 
 @policies_api.get('/', name='clusters:replication:policies:list')
-def list_policies(cluster: Cluster) -> List[ReplicationPolicyDTO]:
+def list_policies(cluster: Cluster) -> list[ReplicationPolicyDTO]:
     return [
         ReplicationPolicyDTO.from_model(policy)
         for policy in replication_policy_controller.list_policies(cluster.get_id())
@@ -161,7 +161,7 @@ def delete_policy(cluster: Cluster, policy: ReplicationPolicy) -> Response:
 
 
 @policy_instance_api.post('/failover', name='clusters:replication:policies:failover')
-def failover_policy(cluster: Cluster, policy: ReplicationPolicy) -> List[FailoverResultDTO]:
+def failover_policy(cluster: Cluster, policy: ReplicationPolicy) -> list[FailoverResultDTO]:
     return [
         FailoverResultDTO(**result)
         for result in replication_policy_controller.failover_policy(policy.get_id())
