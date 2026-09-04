@@ -5414,8 +5414,15 @@ class TestLvolSecurityMgmtNodeReboot(SecurityTestBase):
         dep_out, _ = k8s._exec_kubectl(
             f"kubectl get deployments -n {k8s.namespace} --no-headers "
             f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true")
-        deps = [d.strip() for d in (dep_out or "").splitlines()
-                if "operator" in d.lower()]
+        names = [d.strip() for d in (dep_out or "").splitlines() if d.strip()]
+        # Match the simplyblock operator specifically. A bare "operator" in
+        # the name is far too loose: this namespace also carries
+        # `mongodb-kubernetes-operator`, and restarting a third-party operator
+        # mid-suite is collateral damage that has nothing to do with DHCHAP.
+        deps = [d for d in names if d == "simplyblock-operator"]
+        if not deps:
+            deps = [d for d in names
+                    if "operator" in d.lower() and "simplyblock" in d.lower()]
         if not deps:
             self.logger.warning(
                 f"{TOK_COVERAGE_LOST} TC-SEC-081: no operator deployment "
