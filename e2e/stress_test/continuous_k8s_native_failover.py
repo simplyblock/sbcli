@@ -3315,11 +3315,42 @@ class K8sNativeFailoverTest(TestClusterBase):
                 )
         else:
             fio_timeout = self.FIO_RUNTIME + 300  # extra buffer over FIO runtime
-            for pvc_name, pvc_info in self.pvc_details.items():
-                self.k8s_utils.validate_fio_job(pvc_info["job_name"], timeout=fio_timeout)
 
-            for clone_name, clone_info in self.clone_details.items():
-                self.k8s_utils.validate_fio_job(clone_info["job_name"], timeout=fio_timeout)
+            # Validate EVERY volume before failing, and report them all.
+            # Previously the first RuntimeError aborted the loop, so a run
+            # was blamed on a single job while the rest went unchecked. In
+            # run k8s_native_failover_ha-20260904-151143 that hid the real
+            # shape of the failure: 22 of ~28 FIO pods had I/O errors (689
+            # write, 2 read), all inside one outage window, but only the
+            # first was reported -- which made a cluster-wide data-path
+            # problem look like one bad volume.
+            failures = []
+            for label, details in (("pvc", self.pvc_details),
+                                   ("clone", self.clone_details)):
+                for name, info in details.items():
+                    job = info.get("job_name")
+                    if not job:
+                        continue
+                    try:
+                        self.k8s_utils.validate_fio_job(job, timeout=fio_timeout)
+                    except Exception as exc:
+                        failures.append((label, name, job, exc))
+                        self.logger.error(
+                            f"[validate_fio] {label} {name!r} (job {job}): {exc}")
+
+            if failures:
+                total = len(self.pvc_details) + len(self.clone_details)
+                lines = [
+                    f"  {label} {name} (job {job}): {exc}"
+                    for label, name, job, exc in failures
+                ]
+                raise AssertionError(
+                    f"FIO validation failed on {len(failures)} of {total} "
+                    f"volume(s):" + chr(10) + chr(10).join(lines))
+            self.logger.info(
+                f"[validate_fio] all "
+                f"{len(self.pvc_details) + len(self.clone_details)} "
+                f"volume(s) validated clean")
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 

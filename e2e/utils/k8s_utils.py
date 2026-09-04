@@ -2650,12 +2650,28 @@ class K8sUtils:
             if not logs:
                 continue
             logs_lower = logs.lower()
-            # Check for FIO numeric error codes (e.g. err=110, err=5)
-            err_match = re.search(r'\berr=([1-9]\d*)\b', logs)
-            if err_match:
+            # FIO numeric error codes (e.g. err=110, err=5). Report ALL of
+            # them plus a sample of the io_u lines: one error code alone says
+            # nothing about how much of the volume was affected, and the
+            # read/write split is the first thing needed to tell a failover
+            # path problem from a data-placement one.
+            #
+            # Note this check is reached even when the Job status is
+            # "succeeded" -- FIO can exit 0 for the Job while having reported
+            # I/O errors internally, which is exactly how a cluster-wide
+            # write failure once looked like a single unlucky volume.
+            err_codes = sorted(set(re.findall(r'\berr= ?([1-9]\d*)\b', logs)))
+            if err_codes:
+                io_u = re.findall(r'io_u error[^\n]*', logs)
+                reads = sum(1 for line in io_u if "read offset" in line)
+                writes = sum(1 for line in io_u if "write offset" in line)
+                sample = chr(10).join(f"      {line}" for line in io_u[:3])
                 raise RuntimeError(
                     f"FIO Job '{job_name}' pod '{pod_name}' reported "
-                    f"err={err_match.group(1)}"
+                    f"err={','.join(err_codes)} "
+                    f"({len(io_u)} io_u error line(s): {reads} read, "
+                    f"{writes} write)"
+                    + (f"{chr(10)}{sample}" if sample else "")
                 )
             fail_words = ["error", "fail", "interrupt", "terminate"]
             for word in fail_words:
