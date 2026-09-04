@@ -5606,6 +5606,31 @@ class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
     TC-SEC-092  Trigger 30s network interrupt on a storage node
     TC-SEC-093  Wait for interrupt to end; verify FIO completed without errors
     TC-SEC-094  Disconnect + reconnect with DHCHAP creds; verify auth still works
+
+    K8s: SKIPPED. Two reasons, both specific to K8s-native.
+
+    1. The FIO workload and the outage target are the same machine. In
+       docker they are not: FIO runs on a separate client host while the
+       outage hits a storage node. In K8s-native the storage nodes ARE the
+       worker nodes (10.0.0.10-15 == worker-0..5 on the OpenShift bed), the
+       FIO pod is pinned to ``_dhchap_allowed_nodes[0]`` (worker-0) because
+       DHCHAP requires an allowed node, and the outage targets
+       ``primary_nodes[0]`` — very likely the same worker. Blacking out that
+       host kills the FIO pod's own connectivity, so the test would be
+       measuring its own fixture rather than the product.
+
+    2. A full ``iptables -A INPUT/OUTPUT -j DROP`` is far harsher than the
+       ``sn shutdown`` the other outage classes use. Shutdown stops the SPDK
+       service and leaves the worker and its pods alive with HA covering the
+       volume; the blackout also severs kubelet from the API server (the node
+       goes NotReady in ~40s), which makes the liveness check read a stale
+       ``Running`` and leaves the run one failed ``iptables -F`` away from a
+       stranded worker.
+
+    Fixing (1) is easy — pick an outage target whose K8s node differs from
+    the FIO pod's node. It is deliberately not done here: the class has never
+    executed, and it carries the largest blast radius in the suite, so it
+    should be re-enabled on its own rather than inside a full-suite run.
     """
 
     def __init__(self, **kwargs):
@@ -5615,6 +5640,24 @@ class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityNetworkInterrupt START ===")
+
+        if self.k8s_test:
+            self.logger.warning(
+                f"{TOK_SKIPPED_K8S} TestLvolSecurityNetworkInterrupt: in "
+                f"K8s-native the storage nodes are the worker nodes, so the "
+                f"outage target and the FIO pod's host are the same machine "
+                f"— the blackout would sever the FIO pod's own connectivity "
+                f"and kubelet's link to the API server, and the test would "
+                f"measure its fixture rather than the product. "
+                f"{TOK_COVERAGE_LOST}: fabric-loss survival and DHCHAP "
+                f"re-authentication on reconnect (TC-SEC-092/093/094) are not "
+                f"covered in K8s. Re-enable by selecting an outage target "
+                f"whose K8s node differs from the FIO pod's node, and run it "
+                f"on its own — it has the largest blast radius in the suite.")
+            self.logger.info(
+                "=== TestLvolSecurityNetworkInterrupt SKIPPED (k8s) ===")
+            return
+
         self._normalize_fio_node()
 
         # TC-SEC-090: DHCHAP pool + host + HA lvol
