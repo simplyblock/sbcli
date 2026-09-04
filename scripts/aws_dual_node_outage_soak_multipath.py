@@ -794,7 +794,7 @@ class SoakRunner:
             check=True, label=label)
         for line in reversed((stdout_text or "").splitlines()):
             line = line.strip()
-            if line.startswith("[") or line.startswith("{"):
+            if line.startswith(("[", "{")):
                 try:
                     return json.loads(line)
                 except json.JSONDecodeError:
