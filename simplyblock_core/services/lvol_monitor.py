@@ -403,6 +403,25 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
 
             deletions_processed += 1
 
+            # RECORD-ONLY deletion: a retired landing volume's record carries
+            # an EMPTY bdev_stack on purpose -- its blob lives on as the
+            # converted, chained snapshot and must never be deleted. When the
+            # retirement sequence in snapshot_replication is interrupted
+            # between emptying the stack and removing the record, the record
+            # is left in_deletion here; the delete flow below then has nothing
+            # to issue, the status poll returns 4 ("no async delete request")
+            # forever (856x/30min, run 20260825_125156), and every cleanup
+            # that waits for lvols to drain times out behind it. Nothing on
+            # any node belongs to this record any more: retire it.
+            if not lvol.bdev_stack:
+                logger.info(
+                    f"LVol {lvol.get_id()} ({lvol.lvol_name}) is in_deletion "
+                    f"with an empty bdev stack (retired landing volume); "
+                    f"removing the record only -- its blob lives on as the "
+                    f"converted snapshot")
+                process_lvol_delete_finish(cluster, lvol)
+                continue
+
             # The FULL delete of a chain member — the async delete, its
             # completion wait, and the sync deletes that follow — is one
             # atomic sequence per LVS+chain: a delete swap-merges segments
@@ -590,12 +609,25 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
         if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
             continue
 
+        if not getattr(lvol, "from_source", True):
+            # The retired SOURCE of a fail-over: its namespace was removed
+            # deliberately (_retire_source_data_path) and the record only
+            # survives as the fail-back delta base. Checking it always fails,
+            # and the self-heal below would register the namespace back —
+            # resurrecting the stale device the retirement removed.
+            continue
+
         if snode.lvstore_status != "ready":
             continue
 
         passed = True
         try:
-            passed &= health_controller.check_subsystem(lvol.nqn, rpc_client=snode.rpc_client(), ns_uuid=lvol.uuid)
+            # Verify against the WIRE identity: after a fail-back the record
+            # uuid differs from the namespace's advertised uuid, and checking
+            # the record uuid here marked healthy volumes unhealthy and drove
+            # the self-heal below into re-registering the wrong identity.
+            passed &= health_controller.check_subsystem(
+                lvol.nqn, rpc_client=snode.rpc_client(), ns_uuid=lvol.get_ns_uuid())
         except Exception as e:
             logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
             logger.error(e)
@@ -609,7 +641,8 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                     try:
                         ret = health_controller.check_subsystem(
-                            lvol.nqn, rpc_client=sec_node.rpc_client(), ns_uuid=lvol.uuid)
+                            lvol.nqn, rpc_client=sec_node.rpc_client(),
+                            ns_uuid=lvol.get_ns_uuid())
                         if not ret:
                             passed = False
                             # Explicit, greppable degraded-path signal. Without

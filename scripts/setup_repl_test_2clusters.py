@@ -19,6 +19,7 @@ IMPORTANT (deploying the async-replication code under test):
 """
 import os
 import json
+import sys
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -39,12 +40,18 @@ STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 # tasks_runner_replication_final, replication_final_step, cluster
 # add-replication), so main is what we test; the default
 # SIMPLY_BLOCK_DOCKER_IMAGE (simplyblock/simplyblock:main) matches it.
-BRANCH = "main"
+# Overridable for the repl_soak.py one-liner: SBCLI_BRANCH selects the sbcli
+# checkout installed on every node (and the hotfix source), SPDK_IMAGE the
+# pinned ultra image, SIMPLYBLOCK_DOCKER_IMAGE the control-plane image.
+BRANCH = os.environ.get("SBCLI_BRANCH", "replication-features")
 
 SN_TYPE = "i3en.2xlarge"
 MGMT_TYPE = "m6i.2xlarge"
 CLIENT_TYPE = "m6in.8xlarge"
-CLIENT_COUNT = 1                            # client(s) used by the test process
+CLIENT_COUNT = 2                            # client(s) used by the test process
+#: 2, not 1: case 7 spreads 20 namespaced volumes across at least two
+#: clients, and growing an existing lab with `add_client` after the fact
+#: is an extra manual step before every namespaced run.
 
 USER = "ec2-user"
 IFACE = "eth0"
@@ -56,15 +63,18 @@ MAX_LVOL = "75"
 # The FIRST cluster (bootstrap=True) is created with `cluster create`; every
 # other cluster is attached to the same CP with `cluster add`.
 CLUSTERS = [
+    # THREE nodes per cluster, everywhere. Two-node clusters are not a
+    # supported configuration (product minimum is 3), and the 2026-08-24/25
+    # campaign showed exactly why: with one node down the survivor holds 1 of
+    # 2 journal members and the JC aborts it, and the restart rebalance has no
+    # third failure domain to place into, so its device_migration loops on
+    # "no allowed placement" forever and pins the cluster in REBALANCING.
     {
-        "name": "src",            # 1+1 HA pair
-        "nodes": 2,
+        "name": "src",
+        "nodes": 3,
         "ndcs": 1,                # data-chunks-per-stripe
         "npcs": 1,                # parity-chunks-per-stripe (FT=1)
-        # None => let the CP resolve the required count (3 for FT=1). An explicit
-        # 2 is now rejected by resolve_ha_jm_count(); a 2-node cluster simply
-        # ends up with the 2 host-disjoint journals it can place.
-        "ha_jm_count": None,
+        "ha_jm_count": 3,
         "bootstrap": True,        # `cluster create`
         "pool": "pool_src",
     },
@@ -83,10 +93,10 @@ CLUSTERS = [
     # only run cases 1-3/5/6.
     {
         "name": "fresh",
-        "nodes": 2,
+        "nodes": 3,
         "ndcs": 1,
         "npcs": 1,
-        "ha_jm_count": None,
+        "ha_jm_count": 3,
         "bootstrap": False,
         "pool": "pool_fresh",
     },
@@ -100,9 +110,17 @@ REPLICATION = {"source": "src", "target": "tgt", "timeout": 3600}
 # parallel reads, spdk R26.3 bdd97c1d8/ce876a169) exist only from the
 # 2026-08-22 build onward, and ultra:main-latest's manifest list has a live
 # race that leaves its amd64 entry pointing at the PREVIOUS build (observed
-# 2026-08-17, -21 and -22). This digest = main-d89a595c-amd64, 2026-08-22.
-SPDK_IMAGE = ("public.ecr.aws/simply-block/ultra@"
-              "sha256:8a007dca5bf6a1fa89cc96945f43164539cac65f0cdafa56d5ee44961e9902af")
+# 2026-08-17, -21 and -22). This digest = main-d91ff03a-amd64, 2026-08-25:
+# the first ultra build FROM spdk-core:master-latest (spdk master = R26.3
+# merged + the ANA-transition change reverted). NOTE the digest printed in
+# the CI push log is docker.io's; ECR's differs -- resolve it against
+# public.ecr.aws (docker manifest inspect -v <tag>). Previous pin --
+# the first build carrying the promotion-window ANA-transition fix
+# (spdk R26.3 554c80f11), verified built FROM spdk-core:R26.3-latest
+# whose manifest was created 18:41:57, before this ultra build started.
+SPDK_IMAGE = os.environ.get(
+    "SPDK_IMAGE",
+    "public.ecr.aws/simply-block/ultra@sha256:d929b4d7ececee0fa0e1ad5973f87fa4e4cf79f7079cdf454bfbb27e2df51cb6")
 
 SN_COUNT = sum(c["nodes"] for c in CLUSTERS)
 SBCTL = "sudo /usr/local/bin/sbctl"
@@ -368,7 +386,38 @@ def add_nodes_to_cluster(mgmt_ip, cluster_uuid, priv_ips, ha_jm_count):
 
 
 # --------------------------------------------------------------------------- #
+CLIENT_PREP_CMDS = [
+    "sudo dnf install nvme-cli fio -y",
+    "sudo modprobe nvme-tcp",
+    "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
+]
+
+
+def add_client():
+    """Add one client instance to an EXISTING deployment (case 7 needs >= 2
+    clients; redeploying a healthy two-cluster lab for that is wasteful)."""
+    with open("cluster_metadata_repl.json") as f:
+        metadata = json.load(f)
+    print("Launching 1 additional client...")
+    clients = launch_instances("SB-Repl-Client", CLIENT_TYPE, 1)
+    for inst in clients:
+        inst.wait_until_running()
+        inst.reload()
+    ip = clients[0].public_ip_address
+    wait_for_ssh(ip)
+    print(f"Prepping client {ip}...")
+    ssh_exec(ip, CLIENT_PREP_CMDS, check=True)
+    metadata.setdefault("clients", []).append(
+        {"public_ip": ip, "private_ip": clients[0].private_ip_address})
+    with open("cluster_metadata_repl.json", "w") as f:
+        json.dump(metadata, f, indent=4)
+    print(f"Client added: {ip} ({len(metadata['clients'])} clients in metadata).")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "add_client":
+        add_client()
+        return
     print(f"Launching control plane + {SN_COUNT} storage nodes + {CLIENT_COUNT} client(s)...")
     mgmt = launch_instances("SB-Repl-Mgmt", MGMT_TYPE, 1, with_net=False)
     sns = launch_instances("SB-Repl-Storage", SN_TYPE, SN_COUNT)
@@ -487,11 +536,7 @@ def main():
     # --- Phase 6: prep clients ---
     if client_pub_ips:
         print("Prepping clients...")
-        client_cmds = [
-            "sudo dnf install nvme-cli fio -y",
-            "sudo modprobe nvme-tcp",
-            "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
-        ]
+        client_cmds = CLIENT_PREP_CMDS
         for ip in client_pub_ips:
             wait_for_ssh(ip)
         with ThreadPoolExecutor(max_workers=max(1, len(client_pub_ips))) as ex:

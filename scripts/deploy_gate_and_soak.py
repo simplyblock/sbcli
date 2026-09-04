@@ -32,7 +32,16 @@ SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
 #: mtime: the ultra Dockerfile bakes `git log` of the spdk repo into
 #: /root/spdk/git_log.txt, which pins the image to a commit. See the SPDK_IMAGE
 #: pin in setup_perf_test_multipath.py for why this is checked, not assumed.
-EXPECT_SPDK_COMMIT = "a311a6852"
+EXPECT_SPDK_COMMIT = "554c80f11"
+#: The ultra commit that must be running. b44de698 defers the JC leadership
+#: signal until the parity-desynchronisation check completes. Before it, a
+#: reactively promoted distrib announced leadership while parity was still
+#: desynchronised, so reads served in that window came off desynchronised
+#: parity and returned arbitrary bytes -- the 2026-08-24 iteration-12 "bad
+#: magic" failures, whose received magics were random rather than fio's
+#: 0xacca, ruling out stale-but-valid data. Without this pin the run would
+#: re-test the build that already failed.
+EXPECT_ULTRA_COMMIT = "b44de698"
 #: Lines probe_bin.sh must print, with what their absence would mean. These
 #: distinguish upstream d528e1a67 (zeroes retry state at the submission entry
 #: point) from the superseded local attempt that zeroed it at completion and so
@@ -123,6 +132,11 @@ def gate(mgmt, sn):
             f"— /root/spdk/git_log.txt names a different commit, so the node is "
             f"on a stale image. Check the SPDK_IMAGE pin and that the "
             f"spdk-core R26.3 tags finished rebuilding (amd64 included).")
+    if EXPECT_ULTRA_COMMIT not in out:
+        raise RuntimeError(
+            f"GATE FAILED: image was not built from ultra "
+            f"{EXPECT_ULTRA_COMMIT} — the parity-desync leadership fix under "
+            f"test is absent, so the run would prove nothing.")
     for fragment, why in REQUIRED_FIX_LINES:
         if fragment not in out:
             raise RuntimeError(f"GATE FAILED: {why} ({fragment!r} absent)")

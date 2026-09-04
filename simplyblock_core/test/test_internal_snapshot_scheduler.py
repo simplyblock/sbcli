@@ -85,6 +85,11 @@ def test_take_due_internal_snapshots_creates_internal_type(monkeypatch):
         def get_mini_snapshots(self):
             return []
 
+        def get_replication_policies(self, cluster_id=None):
+            # The scheduler partitions consistency-group policies out of the
+            # per-volume loop; this scenario has none.
+            return []
+
     calls = []
 
     class _SnapCtl:

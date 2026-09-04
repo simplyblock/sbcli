@@ -65,6 +65,12 @@ def _lvol_for_add(uuid, namespace="", nqn=None):
     lv.ha_type = "single"
     lv.nqn = nqn or ("nqn.test:cluster-1:lvol:" + uuid)
     lv.namespace = namespace
+    # Create-flow invariant (see add_lvol): ns_id is 0 = "not assigned yet"
+    # until the PRIMARY namespace add persists SPDK's assignment. The model
+    # default is 1 — a legitimate nsid — and a non-zero ns_id reads as
+    # "dictated by a migration/fail-over caller", which forbids the -32602
+    # re-claim these tests exercise.
+    lv.ns_id = 0
     lv.allowed_hosts = []
     lv.fabric = "tcp"
     lv.max_namespace_per_subsys = 32

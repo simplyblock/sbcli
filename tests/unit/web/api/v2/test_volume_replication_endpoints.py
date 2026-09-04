@@ -203,7 +203,33 @@ class TestCutover:
 
         assert response.status_code == 204
         assert response.content == b''
-        lvol_controller.replicate_lvol_on_target_cluster.assert_called_once_with(VOLUME_ID)
+        lvol_controller.replicate_lvol_on_target_cluster.assert_called_once_with(
+            VOLUME_ID, generation=0)
+
+    def test_failover_forwards_the_requested_generation(self, client, db, volume,
+                                                        lvol_controller):
+        """``generation`` selects which retained point-in-time to come up on.
+
+        It has to reach the controller: dropping it silently fails the volume
+        over to the NEWEST copy, which in the case this parameter exists for —
+        recovering from a logical corruption — is the copy that faithfully
+        replicated the corruption.
+        """
+        lvol_controller.replicate_lvol_on_target_cluster.return_value = {
+            'lvol_id': TARGET_VOLUME_ID, 'nqn': 'nqn.x', 'ns_id': 1, 'connection_strings': [],
+        }
+
+        response = client.post(REPLICATION_URL + 'failover?generation=2')
+
+        assert response.status_code == 204
+        lvol_controller.replicate_lvol_on_target_cluster.assert_called_once_with(
+            VOLUME_ID, generation=2)
+
+    def test_negative_generation_rejected(self, client, db, volume, lvol_controller):
+        response = client.post(REPLICATION_URL + 'failover?generation=-1')
+
+        assert response.status_code == 400
+        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
 
     def test_failed_failover_is_an_error(self, client, db, volume, lvol_controller):
         lvol_controller.replicate_lvol_on_target_cluster.return_value = (False, 'node is not online')

@@ -2,6 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from simplyblock_core.controllers import lvol_controller, replication_policy_controller
@@ -107,17 +108,34 @@ def trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
 @api.post('/failover', name='clusters:storage-pools:volumes:replication:failover',
           status_code=204, responses={204: {"content": None}})
-def failover(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
+             generation: int = 0) -> Response:
     """Bring the volume up on the target cluster.
 
     The counterpart's id is read back from this volume's replication
     relationship, its connection paths from the target volume's `connect`.
+
+    ``generation`` selects WHICH retained point-in-time to come up on: 0 (the
+    default) is the newest, 1 the one before it, and so on through the
+    history a retention schedule keeps. Failing over to an older generation
+    is the recovery path for a logical corruption, which the newest copy has
+    faithfully replicated.
     """
-    result = lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
+    if generation < 0:
+        raise HTTPException(400, 'generation cannot be negative')
+    result = lvol_controller.replicate_lvol_on_target_cluster(
+        volume.get_id(), generation=generation)
     if isinstance(result, tuple):  # (False, error)
         raise HTTPException(500, str(result[1]))
     if not result:
         raise HTTPException(500, 'Failed to fail the volume over to the target cluster')
+
+    # Consistency groups: an older generation may not match current
+    # membership; the operator must SEE that, so warnings turn the empty 204
+    # into a 200 with a body (requirement: API response, not only a log).
+    if isinstance(result, dict) and result.get("warnings"):
+        return JSONResponse(status_code=200,
+                            content={"warnings": result["warnings"]})
 
     return Response(status_code=204)
 

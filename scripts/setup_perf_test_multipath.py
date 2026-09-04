@@ -87,7 +87,7 @@ BRANCH       = "main"
 #: itself, so a stale pin fails loudly instead of running old code quietly.
 #: 8d2e5215 = ultra main "Build main on the R26.3 spdk-core base", built on
 #: spdk-core R26.3 a311a6852 which carries upstream d528e1a67 (spdk/spdk#3686).
-SPDK_IMAGE   = "public.ecr.aws/simply-block/ultra:main-8d2e5215-amd64"
+SPDK_IMAGE   = "public.ecr.aws/simply-block/ultra:main-b44de698-amd64"
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
 DATA_NICS    = ["eth1", "eth2"]          # Names the OS assigns to ENI index 1, 2

@@ -29,8 +29,14 @@ class _Base(unittest.TestCase):
 
     def setUp(self):
         self.rpc = MagicMock(name="rpc")
-        self.rpc.nvmf_subsystem_add_ns2.return_value = ("7", None)
-        self.rpc.nvmf_subsystem_add_ns.return_value = "7"
+        # SPDK echoes the nsid it actually used: the requested one when the
+        # caller asked for a specific number, its own pick otherwise. A fake
+        # that always answers "7" hides a mismatch between the claim and the
+        # persisted value.
+        self.rpc.nvmf_subsystem_add_ns2.side_effect = (
+            lambda *a, **kw: (str(kw.get("nsid") or 7), None))
+        self.rpc.nvmf_subsystem_add_ns.side_effect = (
+            lambda *a, **kw: str(kw.get("nsid") or 7))
         self.rpc.get_bdevs.return_value = [
             {"uuid": "lvol-bdev-uuid",
              "driver_specific": {"lvol": {"blobid": 33}}}]
@@ -63,7 +69,7 @@ class _Base(unittest.TestCase):
             patch.object(lvol_controller, "DBController"),
             patch.object(
                 lvol_controller, "_fail_after_bdev",
-                side_effect=lambda lvol, rpc, msg: (False, msg)),
+                side_effect=lambda lvol, rpc, msg, is_primary=True: (False, msg)),
             patch(
                 "simplyblock_core.controllers.migration_controller"
                 ".get_active_migration_for_nqn",
@@ -86,6 +92,19 @@ class TestCreatePathNsid(_Base):
                           "the primary add must let the target assign the nsid")
         self.assertEqual(self.lvol.ns_id, 7,
                          "the assigned nsid must be persisted for the replicas")
+
+    def test_primary_honours_a_control_plane_claim(self):
+        """A fail-over copy arrives with an nsid claimed across the target HA
+        set; the primary must add it at exactly that number instead of
+        auto-assigning from its own partial view (soak case 7)."""
+        self.lvol.ns_id = 8
+        ret, err = lvol_controller.add_lvol_on_node(self.lvol, self.snode)
+        self.assertIsNone(err)
+        kwargs = self.rpc.nvmf_subsystem_add_ns2.call_args.kwargs
+        self.assertEqual(kwargs.get("nsid"), 8,
+                         "the primary must use the control-plane claim")
+        self.assertEqual(self.lvol.ns_id, 8,
+                         "the claim must survive the add for the replicas")
 
     def test_replica_reuses_primary_assigned_nsid(self):
         self.lvol.ns_id = 7

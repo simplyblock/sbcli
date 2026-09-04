@@ -1100,6 +1100,40 @@ def _search_for_partitions(rpc_client, nvme_device):
     return partitioned_devices
 
 
+def apply_jc_dual_node(cluster_id):
+    """Keep every node's JC dual-node flag in step with the cluster size.
+
+    The journal component ABORTS its whole SPDK application when reachable
+    journal members drop below jc_ha_nmin_jms(), which is 2 normally and 1
+    when the dual-node flag is set. A 2-node cluster that loses its peer is
+    left with 1 of 2 JMs, so without the flag the SURVIVING node aborts
+    itself the instant its partner stops: one graceful `sn shutdown` takes
+    the entire cluster down, every client path disappears at once and
+    filesystems shut down (soak case 6, 2026-08-24 -- "JC detected a network
+    outage nd=1 njms=2", "JC aborts the node due to network outage", core
+    dumped). The fork implements the tolerance and exposes jc_set_dual_node;
+    nothing in the control plane ever called it.
+
+    Keyed on MEMBERSHIP, not on how many nodes are online: a 3-node cluster
+    with one node down must keep requiring 2 journals. Only a cluster whose
+    whole membership is 2 is a dual-node cluster.
+    """
+    db_controller = DBController()
+    members = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+               if n.status != StorageNode.STATUS_REMOVED]
+    enable = len(members) == 2
+    for node in members:
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            node.rpc_client().jc_set_dual_node(enable)
+            logger.info("JC dual-node=%s applied on %s (cluster membership %d)",
+                        enable, node.get_id(), len(members))
+        except Exception as e:                  # noqa: BLE001 - best effort
+            logger.warning("Could not set JC dual-node=%s on %s: %s",
+                           enable, node.get_id(), e)
+
+
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
@@ -1502,6 +1536,11 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
 
         snode.jm_device = jm_device
 
+    # Applied cluster-wide, not just to this node: a cluster growing 2 -> 3
+    # must also CLEAR the flag on the two nodes that already have it, and one
+    # shrinking 3 -> 2 must set it on the survivors.
+    apply_jc_dual_node(snode.cluster_id)
+
     snode.nvme_devices = new_devices
     return True
 
@@ -1680,6 +1719,10 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
         jm_device.status = JMDevice.STATUS_ONLINE
         snode.jm_device = jm_device
         snode.write_to_db()
+
+    # A restarted node comes up with the JC default (dual-node off), so the
+    # flag has to be re-applied on every bring-up, not only at node-add.
+    apply_jc_dual_node(snode.cluster_id)
 
     return True
 
@@ -11093,14 +11136,18 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
             return False, msg
 
     # Add NS to subsystem (idempotent: skip if already bound with matching NSID).
+    # Probe and register by the WIRE identity (get_ns_uuid), never the record
+    # uuid: after a fail-back the two differ, and re-adding under the record
+    # uuid presents an identity the client's multipath head rejects ("IDs
+    # don't match for shared namespace N"), severing its paths.
     if _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                             bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                             bdev_name=lvol.top_bdev, uuid=lvol.get_ns_uuid()):
         logger.info("Namespace nsid=%s already on subsystem %s, skipping add_ns",
                     lvol.ns_id, lvol.nqn)
     else:
         logger.info("Add BDev to subsystem " + f"{lvol.vuid:016X}")
         if not rpc_client.nvmf_subsystem_add_ns(
-                lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id):
+                lvol.nqn, lvol.top_bdev, lvol.get_ns_uuid(), lvol.guid, nsid=lvol.ns_id):
             # An add_ns error is not by itself a reason to abandon the whole
             # registration. What matters for the client is whether the
             # namespace is on the subsystem now — it may already have been,
@@ -11116,7 +11163,8 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
             # Re-read the subsystem and only give up if the namespace is
             # genuinely absent.
             if _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                                          bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                                          bdev_name=lvol.top_bdev,
+                                          uuid=lvol.get_ns_uuid()):
                 logger.warning(
                     "add_ns for nsid=%s (%s) on %s reported failure but the "
                     "namespace is present; continuing to listener setup",
@@ -11146,9 +11194,10 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
     # path loss the control plane never flagged, re-refused by the lvol-monitor
     # repair loop on every cycle.
     if not _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                                      bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                                      bdev_name=lvol.top_bdev,
+                                      uuid=lvol.get_ns_uuid()):
         msg = (f"Subsystem {lvol.nqn} on {snode.get_id()} has no namespace "
-               f"nsid={lvol.ns_id} ({lvol.top_bdev}, uuid={lvol.uuid}) after "
+               f"nsid={lvol.ns_id} ({lvol.top_bdev}, uuid={lvol.get_ns_uuid()}) after "
                f"registration; refusing to add a listener for an empty subsystem")
         logger.error(msg)
         return False, msg
@@ -11261,6 +11310,12 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
     if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
         return False, (f"LVol {lvol.get_id()} status is {lvol.status}, "
                        f"not repairing registration")
+    if not getattr(lvol, "from_source", True):
+        # Retired fail-over source: its namespace was removed deliberately
+        # (_retire_source_data_path). Registering it back republishes the
+        # superseded data path the fail-over just fenced.
+        return False, (f"LVol {lvol.get_id()} is the retired source of a "
+                       f"fail-over, not re-registering its namespace")
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
     if rpc_client.subsystem_get(lvol.nqn) is None:

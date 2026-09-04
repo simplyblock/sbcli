@@ -1739,6 +1739,36 @@ class RPCClient:
             "remote_bdev": bdev,
         })
 
+    def jc_set_dual_node(self, enable):
+        """Tell the journal component whether this is a DUAL-NODE cluster.
+
+        The JC aborts its whole SPDK application when the number of reachable
+        journal members drops below jc_ha_nmin_jms(), which is 2 unless the
+        dual-node flag is set, and 1 when it is. On a 2-node cluster losing
+        the peer leaves exactly 1 of 2 JMs, so without this flag the SURVIVING
+        node aborts itself the moment its partner stops -- a single graceful
+        `sn shutdown` takes the entire cluster down (soak case 6: "JC detected
+        a network outage nd=1 njms=2" / "JC aborts the node due to network
+        outage" / core dump, every client path gone, XFS shut down).
+        The fork implements the tolerance; nothing ever switched it on.
+        """
+        return self._request2("jc_set_dual_node", {"enable": bool(enable)})
+
+    def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
+        """One crash-consistent snapshot per consistency-group member.
+
+        ``snapshots`` is a list of {"lvol_name": "LVS_1/LVOL_5",
+        "snapshot_name": "SNAP_123"}; all members must be in ``lvs_name``.
+        IO on every member is frozen before the first snapshot and released
+        after the last; a mid-sequence failure unfreezes first and then
+        garbage-collects the snapshots already taken (SPDK side).
+        Returns [{"lvol_name", "snapshot_name", "uuid"}, ...] or False.
+        """
+        return self._request2("bdev_lvol_snapshot_group", {
+            "lvs_name": lvs_name,
+            "snapshots": snapshots,
+        })
+
     def jc_suspend_compression(self, jm_vuid, suspend=False):
         params = {
             "jm_vuid": jm_vuid,
@@ -1923,22 +1953,43 @@ class RPCClient:
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
         return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
-    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0):
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
+                           allow_partial=False):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
 
         Returns the RPC result (truthy on success) or None on error.
         Poll progress with :meth:`bdev_lvol_transfer_stat`.
+
+        *allow_partial* opts this transfer into the dirty-bitmap delta path: the
+        SPDK side then ships only the ranges written since the previous snapshot
+        instead of every allocated cluster. It is a REQUEST, not a guarantee --
+        the fork gates the bitmap path on the snapshot carrying a COMPLETE
+        dirty generation and silently sends a full transfer whenever it does
+        not, so passing it can never produce less data than the destination
+        needs *from this transfer*.
+
+        What it does NOT excuse is the destination's starting content: a partial
+        transfer only ships the delta, so everything outside the delta must
+        already be on the destination. Pass it only when the landing volume is a
+        clone of the destination's copy of the PREVIOUS snapshot. Passing it for
+        a transfer into a fresh empty volume would silently drop every cluster
+        the delta does not cover.
         """
-        return self._request("bdev_lvol_transfer", {
+        params = {
             "lvol_name": name,
             "lvol_id": lvol_id,
             "offset": offset,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
             "operation": operation,
-        })
+        }
+        # Send the key only when opting in: the RPC parameter is optional on the
+        # SPDK side, so every existing caller keeps its exact current wire form.
+        # if allow_partial:
+        #     params["allow_partial"] = True
+        return self._request("bdev_lvol_transfer", params)
 
     def bdev_lvol_transfer_stat(self, name):
         """

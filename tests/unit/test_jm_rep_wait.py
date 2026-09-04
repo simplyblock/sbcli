@@ -49,6 +49,8 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("connection refused")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_OFFLINE), \
+                patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(node.wait_for_jm_rep_tasks_to_finish(10))
         sleep.assert_not_called()
@@ -64,6 +66,8 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("timeout")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_ONLINE), \
+                patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(
                 node.wait_for_jm_rep_tasks_to_finish(10, retry=4, delay=5))
@@ -77,6 +81,8 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("connection refused")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_ONLINE), \
+                patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
                 patch("simplyblock_core.models.storage_node.time.sleep"):
             result = node.wait_for_jm_rep_tasks_to_finish(10, retry=2, delay=1)
         self.assertFalse(result)  # returned, did not raise
@@ -85,7 +91,9 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = []
         node = _node(rpc=rpc)
-        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+        with patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
+                patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertTrue(node.wait_for_jm_rep_tasks_to_finish(10))
         sleep.assert_not_called()
         rpc.jc_get_jm_status.assert_not_called()
@@ -98,7 +106,9 @@ class TestJmRepWaitBounds(unittest.TestCase):
             {"jm_a": True, "jm_b": True},    # free
         ]
         node = _node(rpc=rpc)
-        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+        with patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
+                patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertTrue(node.wait_for_jm_rep_tasks_to_finish(10, delay=7))
         self.assertEqual(sleep.call_count, 1)
         sleep.assert_called_once_with(7)
@@ -108,7 +118,9 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
         rpc.jc_get_jm_status.return_value = {"jm_a": False}
         node = _node(rpc=rpc)
-        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+        with patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
+                patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(
                 node.wait_for_jm_rep_tasks_to_finish(10, retry=3, delay=2))
         self.assertEqual(rpc.jc_get_jm_status.call_count, 3)
@@ -122,6 +134,8 @@ class TestJmRepWaitBounds(unittest.TestCase):
         node = _node(rpc=rpc)
         with patch("simplyblock_core.db_controller.DBController",
                    side_effect=RuntimeError("fdb down")), \
+                patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(
                 node.wait_for_jm_rep_tasks_to_finish(10, retry=3, delay=1))

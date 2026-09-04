@@ -680,7 +680,17 @@ class CLIWrapperBase:
         return replication_policy_controller.add_policy(
             args.cluster_id, args.name, args.target,
             interval_min=args.interval_min, mode=args.mode,
-            keep_replicated=args.keep_replicated)
+            keep_replicated=args.keep_replicated,
+            retention_schedule=args.retention_schedule,
+            consistency_group=args.consistency_group)
+
+    def cluster__replication_policy_snapshot(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller
+        snap_ids, err = consistency_group_controller.create_group_snapshot(
+            args.policy_id)
+        if err:
+            return f"Group snapshot failed: {err}"
+        return utils.print_table([{"Snapshot": s} for s in snap_ids])
 
     def cluster__replication_policy_list(self, sub_command, args):
         data = [{
@@ -690,6 +700,8 @@ class CLIWrapperBase:
             "Interval (min)": p.interval_min,
             "Mode": p.mode,
             "Keep": p.keep_replicated,
+            "Retention": p.retention_schedule or "-",
+            "CG": "yes" if getattr(p, "consistency_group", False) else "-",
             "Status": p.status,
         } for p in replication_policy_controller.list_policies(args.cluster_id)]
         return _format_result(data, json=args.json)
@@ -707,12 +719,16 @@ class CLIWrapperBase:
             return _format_json(results)
         if not results:
             return "No volumes to fail over"
-        return utils.print_table([{
+        table = utils.print_table([{
             "Volume": r.get("lvol_id", ""),
             "Status": r.get("status", ""),
             "Target Volume": r.get("target_lvol_id", "") or "-",
             "Detail": r.get("detail", "") or "",
         } for r in results])
+        warnings = [w for r in results for w in (r.get("warnings") or [])]
+        if warnings:
+            table += chr(10) + chr(10).join("WARNING: " + w for w in warnings)
+        return table
 
     def volume__replication_policy_set(self, sub_command, args):
         return replication_policy_controller.attach_policy(args.volume_id, args.policy)

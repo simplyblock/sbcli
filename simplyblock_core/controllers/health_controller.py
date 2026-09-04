@@ -456,6 +456,10 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             duplicate_ips = (storage_node_ops.duplicate_attached_paths(ret)
                              if hub_bdev else set())
             if duplicate_ips:
+                logger.error(
+                    "Hublvol %s on %s has duplicate path(s) %s -- node is NOT "
+                    "healthy; repair_multipath_controller will prune them",
+                    primary_node.hublvol.bdev_name, node.get_id(), duplicate_ips)
                 # Detecting this without acting on it is what made the
                 # 2026-09-01 multipath soak unrunnable: LVS_4/hublvol carried
                 # peer 98.248 three times (97.36 twice, cntlid 1002 and 1003),
@@ -1144,7 +1148,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
                 bdev_check = check_bdev(lvol.top_bdev, rpc_client=rpc_client)
             passed &= bdev_check
 
-        passed &= check_subsystem(lvol.nqn, rpc_client=rpc_client, ns_uuid=lvol.uuid)
+        # The namespace advertises the WIRE identity, which differs from the
+        # record uuid after a fail-back — checking the record uuid flags every
+        # failed-back volume unhealthy and triggers the monitor's self-heal.
+        passed &= check_subsystem(lvol.nqn, rpc_client=rpc_client, ns_uuid=lvol.get_ns_uuid())
 
     except Exception as e:
         logger.error(e)
