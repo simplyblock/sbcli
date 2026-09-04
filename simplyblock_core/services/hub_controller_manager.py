@@ -59,6 +59,7 @@ from typing import Optional
 
 from simplyblock_core import utils
 from simplyblock_core.models.hub_cooldown import HubDetachCooldown
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -203,7 +204,7 @@ class HubControllerManager:
                     f"src={key[0][:8]} tgt={key[1][:8]}"
                 )
                 return entry
-        except Exception:
+        except RPCException:
             logger.exception(
                 f"[HubMgr] failed to validate cached hub entry {entry.ctrl_name}; "
                 "treating as stale and re-attaching"
@@ -216,11 +217,7 @@ class HubControllerManager:
 
     def _get_attach_lock(self, key) -> threading.Lock:
         with self._lock:
-            lock = self._attach_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._attach_locks[key] = lock
-            return lock
+            return self._attach_locks.setdefault(key, threading.Lock())
 
     def detach_now(self, src_node_id: str, tgt_node_id: str, src_rpc=None):
         """
