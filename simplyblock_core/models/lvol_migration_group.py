@@ -68,6 +68,13 @@ class LVolMigrationGroup(BaseModel):
     source_node_id: str = ""
     target_node_id: str = ""
 
+    # Node to actually issue source-side RPCs against. Equals source_node_id
+    # (the primary) unless the primary was offline at create_batch_migration()
+    # time, in which case this is the online secondary/tertiary replica chosen
+    # as the effective source. Resolved once at create time and never
+    # re-derived afterward — the runner only ever reads it.
+    active_source_node_id: str = ""
+
     # Shared NVMe-oF NQN created on the target during PRECREATE.
     target_nqn: str = ""
 

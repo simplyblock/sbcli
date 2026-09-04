@@ -56,6 +56,13 @@ class LVolMigration(BaseModel):
     source_node_id: str = ""
     target_node_id: str = ""
 
+    # Node to actually issue source-side RPCs against. Equals source_node_id
+    # (the primary) unless the primary was offline at create_migration() time,
+    # in which case this is the online secondary/tertiary replica that was
+    # chosen as the effective source. Resolved once at create time and never
+    # re-derived afterward — the runner only ever reads it.
+    active_source_node_id: str = ""
+
     # --- Phase tracking ---
     phase: str = ""
 

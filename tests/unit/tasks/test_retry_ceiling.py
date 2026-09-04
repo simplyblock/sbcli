@@ -442,6 +442,12 @@ def _spec_batch_migration(runner, monkeypatch):
     group = MagicMock()
     group.phase = LVolMigrationGroup.PHASE_SNAP_COPY
     group.source_node_id = "src-1"
+    # MagicMock auto-creates a truthy attribute for anything unset; without
+    # this, `group.active_source_node_id or group.source_node_id` in the
+    # runner picks the mock object instead of "src-1", silently routing node
+    # lookups to the tgt_node branch below and masking the source-offline
+    # retry path this test exercises.
+    group.active_source_node_id = "src-1"
     group.target_node_id = "tgt-1"
     group.cluster_id = "cl-1"
     group.members = [{"migration_id": "mig-1"}]

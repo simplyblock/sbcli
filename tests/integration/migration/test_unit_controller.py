@@ -12,10 +12,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.exceptions import PreconditionError
 
 # Module under test (import after patching, but top-level import is fine since
 # we patch the db attribute before each individual call).
@@ -692,6 +694,55 @@ class TestStartMigrationPreconditions(unittest.TestCase):
             with pytest.raises(ValueError, match="Target node is not online"):
                 ctl.start_migration("mig-uuid")
 
+    def test_reject_degraded_cluster_for_non_fallback_source(self):
+        # Primary is the active source (no fallback) -- a DEGRADED cluster
+        # must still be rejected here, matching the pre-existing strict
+        # ACTIVE-only gate for ordinary migrations.
+        mig = self._pre_created()
+        lvol = _lvol("lvol-1", "node-src")
+        src = _node("node-src")
+        tgt = _node("node-tgt")
+        mock_db = self._base_db(mig, lvol, src, tgt)
+        mock_db.get_cluster_by_id.return_value.status = Cluster.STATUS_DEGRADED
+        with patch.object(ctl, 'db', mock_db):
+            with pytest.raises(PreconditionError, match="not active"):
+                ctl.start_migration("mig-uuid")
+
+    def test_allow_degraded_cluster_for_fallback_source(self):
+        # Primary is offline; active_source_node_id was pinned to the
+        # secondary at create_migration() time. The primary being down is
+        # exactly what drives the cluster to DEGRADED, so DEGRADED must be
+        # allowed here or the fallback feature could never actually run.
+        mig = self._pre_created()
+        mig.active_source_node_id = "node-sec"
+        lvol = _lvol("lvol-1", "node-src")
+        src = _node("node-src", status=StorageNode.STATUS_OFFLINE)
+        sec = _node("node-sec")
+        tgt = _node("node-tgt")
+
+        mock_db = MagicMock()
+        mock_db.get_migration_by_id.return_value = mig
+        mock_db.get_lvol_by_id.return_value = lvol
+        nodes_by_id = {"node-src": src, "node-sec": sec, "node-tgt": tgt}
+        mock_db.get_storage_node_by_id.side_effect = lambda nid: nodes_by_id[nid]
+        mock_db.get_snapshots_by_node_id.return_value = [
+            _snap("s1", "lvol-1", "node-src")]
+        cluster = Cluster()
+        cluster.uuid = "cluster-1"
+        cluster.status = Cluster.STATUS_DEGRADED
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_job_tasks.return_value = []
+        mock_db.kv_store = MagicMock()
+
+        with patch.object(ctl, 'db', mock_db), \
+             patch('simplyblock_core.controllers.migration_controller.tasks_controller') as tc, \
+             patch('simplyblock_core.controllers.migration_controller.migration_events'):
+            tc.add_lvol_mig_task.return_value = "task-uuid"
+            tc.get_active_node_mig_task.return_value = None
+            result = ctl.start_migration("mig-uuid")
+
+        assert result == "mig-uuid"
+
     def test_success_creates_task(self):
         mig = self._pre_created()
         lvol = _lvol("lvol-1", "node-src")
@@ -714,3 +765,59 @@ class TestStartMigrationPreconditions(unittest.TestCase):
 
         assert result == "mig-uuid"
         tc.add_lvol_mig_task.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# start_batch_migration – precondition validation (same DEGRADED/fallback
+# gate as start_migration, applied to LVolMigrationGroup)
+# ---------------------------------------------------------------------------
+
+class TestStartBatchMigrationPreconditions(unittest.TestCase):
+
+    def _group(self, active_source_node_id=""):
+        g = LVolMigrationGroup()
+        g.uuid = "group-uuid"
+        g.cluster_id = "cluster-1"
+        g.source_node_id = "node-src"
+        g.target_node_id = "node-tgt"
+        g.active_source_node_id = active_source_node_id
+        g.members = []
+        g.snap_owners = {}
+        g.phase = LVolMigrationGroup.PHASE_PRE_CREATED
+        return g
+
+    def test_reject_degraded_cluster_for_non_fallback_source(self):
+        group = self._group()  # active_source_node_id empty -> falls back to source_node_id
+        src = _node("node-src")
+        mock_db = MagicMock()
+        mock_db.get_migration_group_by_id.return_value = group
+        mock_db.get_storage_node_by_id.return_value = src
+        cluster = Cluster()
+        cluster.uuid = "cluster-1"
+        cluster.status = Cluster.STATUS_DEGRADED
+        mock_db.get_cluster_by_id.return_value = cluster
+        with patch.object(ctl, 'db', mock_db):
+            with pytest.raises(PreconditionError, match="not active"):
+                ctl.start_batch_migration("group-uuid")
+
+    def test_allow_degraded_cluster_for_fallback_source(self):
+        group = self._group(active_source_node_id="node-sec")
+        sec = _node("node-sec")
+        mock_db = MagicMock()
+        mock_db.get_migration_group_by_id.return_value = group
+        mock_db.get_storage_node_by_id.return_value = sec
+        cluster = Cluster()
+        cluster.uuid = "cluster-1"
+        cluster.status = Cluster.STATUS_DEGRADED
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_job_tasks.return_value = []
+        mock_db.kv_store = MagicMock()
+
+        with patch.object(ctl, 'db', mock_db), \
+             patch('simplyblock_core.controllers.migration_controller.tasks_controller') as tc:
+            tc.get_active_node_mig_task.return_value = None
+            tc.add_batch_mig_task.return_value = "task-uuid"
+            result = ctl.start_batch_migration("group-uuid")
+
+        assert result == "group-uuid"
+        tc.add_batch_mig_task.assert_called_once()
