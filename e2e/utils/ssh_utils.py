@@ -1244,7 +1244,6 @@ class SshUtils:
             days (int): The number of days beyond which folders should be deleted.
         """
         # Get the current date from the remote machine
-        pass
         # get_date_command = "date +%s"
         # remote_timestamp, error = self.exec_command(node, get_date_command)
         

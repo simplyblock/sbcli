@@ -1836,8 +1836,7 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             all_lvols = self.sbcli_utils.list_lvols()
             test_lvols = [
                 name for name in all_lvols
-                if name.startswith("ns-") or name.startswith("cln-")
-                or name.startswith("snap-")
+                if name.startswith(("ns-", "cln-", "snap-"))
             ]
             self.logger.info(
                 f"[cleanup] Deleting {len(test_lvols)}/{len(all_lvols)} "
@@ -3020,8 +3019,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             all_lvols = self.sbcli_utils.list_lvols()
             test_lvols = [
                 name for name in all_lvols
-                if name.startswith("ns-") or name.startswith("cln-")
-                or name.startswith("snap-")
+                if name.startswith(("ns-", "cln-", "snap-"))
             ]
             self.logger.info(
                 f"[cleanup] Deleting {len(test_lvols)}/{len(all_lvols)} "

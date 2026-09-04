@@ -428,7 +428,7 @@ def upload_from_remote(ssh: paramiko.SSHClient, node: str, node_type: str):
         stdout, _ = exec_command(ssh, f"ls -1 {remote_path} 2>/dev/null || true")
         files = [x for x in stdout.split("\n") if x.strip()]
         for remote_file in files:
-            subfolder = "dump" if (remote_file.startswith("/etc/simplyblock/") or remote_file.startswith("/var/simplyblock/")) else "root-logs"
+            subfolder = "dump" if remote_file.startswith(("/etc/simplyblock/", "/var/simplyblock/")) else "root-logs"
             key = f"{UPLOAD_FOLDER}/{node}-{node_type}/{subfolder}/{os.path.basename(remote_file)}"
             upload_pairs.append([remote_file, key])
 

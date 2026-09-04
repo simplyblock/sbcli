@@ -25,7 +25,7 @@ def _samples(body, name):
     prefix = name + '{'
     return [
         line for line in body.splitlines()
-        if line.startswith(prefix) or line.startswith(name + ' ')
+        if line.startswith((prefix, name + ' '))
     ]
 
 
