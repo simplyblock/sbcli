@@ -109,6 +109,13 @@ _DENIAL_REASONS = (
     "nodeaffinity check failed",
     "no matching nodeselectorterms",
     "not found in allowed hosts",
+    # Provisioning-time rejection. With the operator StorageClass the
+    # volume may never be provisioned for a disallowed node at all:
+    # allowedTopologies keys off the pool label, which the CSI plugin
+    # only reports on allowed nodes, so the provisioner refuses before
+    # any mount is attempted.
+    "is not in requisite",
+    "volume node affinity conflict",
 )
 
 # Event substrings that mean the pod failed for a reason that has NOTHING to do
@@ -117,7 +124,12 @@ _DENIAL_REASONS = (
 _DISQUALIFYING_REASONS = (
     "multi-attach",
     "volume is already exclusively attached",
-    "failedscheduling",
+    # NOTE: "failedscheduling" is deliberately NOT here. With the
+    # operator StorageClass (WaitForFirstConsumer + allowedTopologies) a
+    # genuinely denied node produces FailedScheduling as its real,
+    # correct symptom, so treating it as an impostor would reject valid
+    # evidence. It is caught instead by requiring a positive denial
+    # reason, with a bare FailedScheduling logged as weak evidence.
     "errimagepull",
     "imagepullbackoff",
     "createcontainerconfigerror",
@@ -187,6 +199,13 @@ class SecurityTestBase(TestClusterBase):
         # Volumes for which a positive control has already succeeded. A denial
         # assertion refuses to run without one -- see _assert_host_denied.
         self._dhchap_positive_control: set = set()
+        # Operator StorageClass of a second, encrypted DHCHAP pool.
+        # storageClassParameters is immutable per pool, so encryption needs
+        # its own StoragePool rather than another class on the main one.
+        self._encrypted_sc_name: str = None
+        self._encrypted_pool_crd: str = None
+        self._encrypted_pool_label: str = None
+        self._encrypted_pool_name: str = None
         # Chosen once per test so docker and K8s exercise the same filesystem.
         self._fs_type: str = None
 
@@ -401,7 +420,8 @@ class SecurityTestBase(TestClusterBase):
     # These allow the same test logic to run in both Docker (SSH) and K8s
     # (CRD/PVC/Job) modes, following the pattern from BackupTestBase.
 
-    def _ensure_pool_and_sc(self, dhchap=False, allowed_nodes=None):
+    def _ensure_pool_and_sc(self, dhchap=False, allowed_nodes=None,
+                            encryption=False):
         """Create (or reuse) a storage pool and StorageClass.
 
         In Docker mode: uses ssh_obj.add_storage_pool(dhchap=True).
@@ -413,9 +433,17 @@ class SecurityTestBase(TestClusterBase):
                 dhchap=dhchap)
             return
 
+        # The operator builds this pool's StorageClass from these. We do
+        # NOT create our own class -- the operator's is the documented
+        # customer path and it already sets dhchap_node_label itself.
+        scp = {
+            "encryption": bool(encryption),
+            "filesystem": self._pick_fs_type(),
+        }
         actual = self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name, dhchap=dhchap,
-            allowed_nodes=allowed_nodes)
+            allowed_nodes=allowed_nodes,
+            storage_class_parameters=scp)
         if actual and actual != self.pool_name:
             self.logger.info(
                 f"[pool] Requested '{self.pool_name}' but using '{actual}'")
@@ -424,8 +452,7 @@ class SecurityTestBase(TestClusterBase):
         self._dhchap_node_label = (
             self._k8s_pool_node_label(allowed_nodes) if dhchap else None
         )
-        self._pick_fs_type()
-        self._k8s_setup_storage_class()
+        self._k8s_setup_storage_class(allowed_nodes=allowed_nodes)
 
     def _k8s_resolve_pool_crd(self, dhchap, allowed_nodes):
         """Return the StoragePool CRD's metadata.name for the current pool.
@@ -555,42 +582,64 @@ class SecurityTestBase(TestClusterBase):
         self.logger.info(f"[dhchap] pool node label: {label}")
         return label
 
-    def _k8s_setup_storage_class(self):
-        """In k8s mode, create StorageClass for security tests.
+    def _k8s_setup_storage_class(self, allowed_nodes=None):
+        """Adopt the StorageClass the operator generated for this pool.
 
-        HACK (undocumented deviation from the K8s security doc, 2026-09-04):
-        the documented flow is to consume the StorageClass the *operator*
-        generates for a DHCHAP pool (``simplyblock-<ns>-<cluster>-<pool>``).
-        We deliberately do NOT use it, because as shipped it provisions
-        nothing: it sets ``allowedTopologies`` on the pool label, but the CSI
-        node driver only snapshots node labels as topology keys at
-        registration time, so a pool created while the driver is running is
-        invisible to it and every PVC fails with
-        ``ProvisioningFailed ... is not in requisite``. Verified on both
-        Talos and OpenShift; verified to start working after
-        ``kubectl rollout restart daemonset simplyblock-csi-node``.
+        We deliberately do NOT create our own class. The operator emits one
+        per StoragePool, named
+        ``simplyblock-{namespace}-{clusterName}-{poolCRDname}``, and it
+        already carries ``dhchap_node_label`` -- the parameter that makes CSI
+        write a matching ``nodeAffinity`` onto every PV, which is what
+        actually enforces allowedNodes at mount. Encryption and filesystem
+        come from the pool's ``spec.storageClassParameters``, set in
+        ``_ensure_pool_and_sc``.
 
-        So we hand-roll an equivalent class that copies the one parameter
-        that actually drives enforcement (``dhchap_node_label`` -> CSI writes
-        a matching ``nodeAffinity`` onto the PV) while omitting
-        ``allowedTopologies`` and using ``Immediate`` binding. Remove this
-        hack and switch to the operator's class once the operator either
-        triggers a driver re-register after labelling nodes, or drops
-        allowedTopologies. See k8s_dhchap_enforcement_rca_20260904.md.
+        One product workaround is unavoidable here. The operator's class also
+        sets ``allowedTopologies`` keyed on the pool label, and the CSI node
+        plugin only snapshots node labels as topology keys at REGISTRATION
+        time. A pool created while the driver is already running is therefore
+        invisible to it and every PVC fails with::
+
+            ProvisioningFailed: topology map[topology.kubernetes.io/zone:...]
+            from selected node "worker-0" is not in requisite:
+            [map[simplyblock.io/pool....:allowed]]
+
+        So we restart the CSI node daemonset once per pool to force a
+        re-register. Customers following the documented flow hit exactly this
+        and need the same step -- it belongs in the docs until the operator
+        either triggers the re-register itself after labelling nodes, or drops
+        ``allowedTopologies`` (``dhchap_node_label`` alone already enforces,
+        which this suite proves).
         """
         if not self.k8s_test:
             return
         k8s = self._ensure_k8s_utils()
-        k8s.create_storage_class(
-            name=self._storage_class_name,
-            cluster_id=self.cluster_id,
-            pool_name=self.pool_name,
-            dhchap_node_label=getattr(self, "_dhchap_node_label", None),
-            fs_type=self._pick_fs_type(),
-        )
+
+        self._storage_class_name = k8s.operator_storage_class_name(
+            self._pool_crd_name)
+        assert k8s.wait_storage_class_exists(self._storage_class_name), (
+            f"{TOK_COVERAGE_LOST}: the operator did not generate "
+            f"StorageClass {self._storage_class_name!r} for pool "
+            f"{self._pool_crd_name!r}. Without it there is nothing to "
+            f"provision from.")
+        self.logger.info(
+            f"[k8s] using operator StorageClass {self._storage_class_name!r}")
+
+        # Make the pool label a CSI topology key, or allowedTopologies cannot
+        # be satisfied and nothing provisions.
+        if self._dhchap_node_label:
+            ok = k8s.restart_csi_node_driver(
+                expect_topology_key=self._dhchap_node_label,
+                expect_on_nodes=list(allowed_nodes or []))
+            if not ok:
+                self.logger.warning(
+                    f"{TOK_K8S_LIMITATION}: CSI re-register did not surface "
+                    f"{self._dhchap_node_label!r} as a topology key; "
+                    f"provisioning from the operator StorageClass may fail")
+
         # Aliases the inherited cluster_test_base dual helpers key off, so
         # _create_snapshot_dual / _create_clone_dual / _resize_lvol_dual all
-        # operate against THIS DHCHAP class and clones inherit its
+        # operate against the operator class and clones inherit its
         # dhchap_node_label (and therefore its enforcement).
         self._k8s_storage_class_name = self._storage_class_name
         try:
@@ -600,6 +649,36 @@ class SecurityTestBase(TestClusterBase):
             self.logger.warning(
                 f"[k8s] VolumeSnapshotClass "
                 f"{self._k8s_snapshot_class_name!r}: {exc}")
+
+    def _k8s_encrypted_storage_class(self):
+        """Return the operator StorageClass of a DHCHAP pool with encryption.
+
+        ``storageClassParameters`` is immutable once the class exists -- the
+        CRD says to create a new StoragePool to change it -- so an encrypted
+        volume needs its own pool rather than a second class on this one.
+        Created lazily and cached, with the same allowedNodes as the main
+        pool so the allowed/denied matrix still holds.
+        """
+        if self._encrypted_sc_name:
+            return self._encrypted_sc_name
+        saved = (self.pool_name, self._storage_class_name,
+                 self._dhchap_node_label, self._pool_crd_name)
+        try:
+            self.pool_name = "secenc"
+            self._ensure_pool_and_sc(
+                dhchap=True, allowed_nodes=list(self._dhchap_allowed_nodes),
+                encryption=True)
+            self._encrypted_sc_name = self._storage_class_name
+            self._encrypted_pool_crd = self._pool_crd_name
+            self._encrypted_pool_label = self._dhchap_node_label
+            self._encrypted_pool_name = self.pool_name
+            self.logger.info(
+                f"[k8s] encrypted DHCHAP pool {self.pool_name!r} -> "
+                f"StorageClass {self._encrypted_sc_name!r}")
+        finally:
+            (self.pool_name, self._storage_class_name,
+             self._dhchap_node_label, self._pool_crd_name) = saved
+        return self._encrypted_sc_name
 
     def _k8s_verify_pod_scheduling(self, pvc_name, node_name, expect_success,
                                     pod_prefix="dhchap"):
@@ -621,17 +700,17 @@ class SecurityTestBase(TestClusterBase):
         in-band NVMe authentication — the connect then fails on an allowed
         node too, which is an environment limit rather than a test failure.
 
-        HACK (coupled to the hand-rolled StorageClass in
-        ``_k8s_setup_storage_class``): pinning with ``spec.nodeName``
-        bypasses the scheduler entirely, which is only sound because our
-        class uses ``Immediate`` binding. Against the operator's documented
-        ``WaitForFirstConsumer`` class this produces a FALSE NEGATIVE — the
-        claim sits at "waiting for first consumer" and the pod never runs
-        whether the node is allowed or not, so the negative assertion below
-        would pass vacuously. If this ever moves to the operator's class,
-        switch to ``nodeSelector`` so the scheduler participates, and expect
-        ``FailedScheduling ... didn't find available persistent volumes to
-        bind`` instead of ``FailedMount``.
+        Pinning uses ``spec.nodeSelector``, never ``spec.nodeName``. The
+        operator's StorageClass binds ``WaitForFirstConsumer``, and only the
+        scheduler triggers that binding -- a nodeName-pinned pod bypasses the
+        scheduler, so the claim would sit at "waiting for first consumer" and
+        the pod would never run whether the node is allowed or not, making the
+        negative assertion pass vacuously.
+
+        Because the operator's class also carries ``allowedTopologies``, a
+        denial can now surface at PROVISIONING time (``is not in requisite``)
+        as well as at mount time (``NodeAffinity check failed``); both are in
+        ``_DENIAL_REASONS``.
         """
         k8s = self._ensure_k8s_utils()
         pod_name = f"{pod_prefix}-{_rand_suffix().lower()}"
@@ -639,7 +718,9 @@ class SecurityTestBase(TestClusterBase):
         # deletes the pod. A surviving pod pins kubernetes.io/pvc-protection
         # on its claim and leaves the PVC stuck Terminating for hours.
         self.created_pods.append(pod_name)
-        k8s.create_utility_pod(pod_name, pvc_name, node_name=node_name)
+        # nodeSelector, not nodeName: the operator StorageClass binds
+        # WaitForFirstConsumer, and only the scheduler triggers that.
+        k8s.create_utility_pod(pod_name, pvc_name, node_selector=node_name)
 
         if expect_success:
             try:
@@ -789,18 +870,15 @@ class SecurityTestBase(TestClusterBase):
 
         saved = (self.pool_name, self._storage_class_name,
                  self._dhchap_node_label, self._pool_crd_name)
-        canary_sc = f"sc-canary-{_rand_suffix().lower()}"
         canary_pvc = None
         try:
             self.pool_name = f"canary{_rand_suffix().lower()}"[:20]
-            self._storage_class_name = canary_sc
             allowed = [w[0] for w in workers[:-1]]
             disallowed = [workers[-1][0]]
             self.logger.info(
                 f"[canary] verifying DHCHAP enforcement is wired: "
                 f"allowed={allowed} excluded={disallowed}")
             self._ensure_pool_and_sc(dhchap=True, allowed_nodes=allowed)
-            self.created_storage_classes.append(self._storage_class_name)
 
             # L1-L4 minus the PV: this is the whole silent-failure class.
             self._k8s_assert_dhchap_wiring(allowed, disallowed)
@@ -809,7 +887,9 @@ class SecurityTestBase(TestClusterBase):
             k8s.create_pvc(name=canary_pvc, size="1Gi",
                            storage_class=self._storage_class_name)
             self.created_pvcs.append(canary_pvc)
-            k8s.wait_pvc_bound(canary_pvc)
+            # WaitForFirstConsumer: needs a scheduled pod to bind.
+            self._dhchap_allowed_nodes = allowed
+            self._k8s_bind_pvc(canary_pvc, node=allowed[0])
             self._k8s_assert_pv_node_affinity(canary_pvc, tc="canary")
 
             self.logger.info(
@@ -833,12 +913,8 @@ class SecurityTestBase(TestClusterBase):
                         self.created_pvcs.remove(name)
                 except Exception as exc:
                     self.logger.warning(f"[canary] cleanup {name}: {exc}")
-            try:
-                k8s.delete_storage_class(canary_sc)
-                if canary_sc in self.created_storage_classes:
-                    self.created_storage_classes.remove(canary_sc)
-            except Exception as exc:
-                self.logger.warning(f"[canary] cleanup {canary_sc}: {exc}")
+            # No StorageClass to clean up: the operator owns it and
+            # removes it with the pool below.
             # Delete the canary's StoragePool too. Without this it outlives
             # the check and, because it asks for the same dhchap +
             # allowedNodes as _k8s_setup_dhchap_pool_subset does,
@@ -1376,6 +1452,35 @@ class SecurityTestBase(TestClusterBase):
         self.logger.info(
             f"[{tc}] filesystem verified as {expect_fs_type}: {line.strip()}")
 
+    def _k8s_bind_pvc(self, pvc_name, node=None, timeout=420):
+        """Force a WaitForFirstConsumer PVC to bind, then release it.
+
+        The operator's StorageClass uses ``volumeBindingMode:
+        WaitForFirstConsumer``, so a freshly created PVC stays Pending until a
+        pod referencing it is scheduled -- provisioning is deliberately
+        deferred so the volume lands in the right topology. Every caller here
+        needs the bound PV up front (for the volumeHandle and for the
+        per-volume nodeAffinity assertion), so schedule a short-lived binder
+        pod on an allowed node to trigger it.
+
+        The binder is pinned with ``nodeSelector``, never ``nodeName``:
+        nodeName bypasses the scheduler, and it is the scheduler that triggers
+        WaitForFirstConsumer binding, so a nodeName-pinned pod would leave the
+        claim Pending forever.
+        """
+        k8s = self._ensure_k8s_utils()
+        node = node or (self._dhchap_allowed_nodes[0]
+                        if self._dhchap_allowed_nodes else None)
+        binder = f"bind-{_rand_suffix().lower()}"
+        self.created_pods.append(binder)
+        try:
+            k8s.create_utility_pod(binder, pvc_name, node_selector=node)
+            k8s.wait_pvc_bound(pvc_name, timeout=timeout)
+            self.logger.info(
+                f"[k8s] PVC {pvc_name!r} bound via binder pod on {node!r}")
+        finally:
+            self._k8s_release_pod(binder, pvc_name=pvc_name)
+
     def _k8s_release_pod(self, pod_name, pvc_name=None):
         """Delete a pod and wait until its volume is genuinely detached.
 
@@ -1598,22 +1703,14 @@ class SecurityTestBase(TestClusterBase):
             pvc_name = self._k8s_normalize_name(name)
             sc_name = self._storage_class_name
             if encrypt:
-                sc_name = f"sc-{pvc_name}"
-                # Carry dhchap_node_label through to the crypto SC too, or an
-                # encrypted volume in a DHCHAP pool gets no nodeAffinity and
-                # any node can mount it.
-                k8s.create_storage_class(
-                    name=sc_name, cluster_id=self.cluster_id,
-                    pool_name=self.pool_name, encryption=True,
-                    dhchap_node_label=getattr(self, "_dhchap_node_label", None),
-                    fs_type=self._pick_fs_type())
-                self.created_storage_classes.append(sc_name)
+                # Operator SC of a dedicated encrypted DHCHAP pool.
+                sc_name = self._k8s_encrypted_storage_class()
             pvc_size = size if "Gi" in size else size.replace("G", "Gi")
             k8s.create_pvc(name=pvc_name, size=pvc_size,
                            storage_class=sc_name)
-            k8s.wait_pvc_bound(pvc_name)
-            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
             self.created_pvcs.append(pvc_name)
+            self._k8s_bind_pvc(pvc_name)
+            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
             return pvc_name, lvol_id
 
         out, err = self.ssh_obj.create_sec_lvol(
@@ -1762,7 +1859,7 @@ class SecurityTestBase(TestClusterBase):
             )
 
             k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config,
-                               node_name=node_name)
+                               node_selector=node_name)
             self.created_fio_jobs.append(job_name)
             self.created_configmaps.append(cm_name)
 
@@ -1851,7 +1948,7 @@ class SecurityTestBase(TestClusterBase):
                 f"nrfiles=4\n"
             )
             k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config,
-                               node_name=node_name)
+                               node_selector=node_name)
             self.created_fio_jobs.append(job_name)
             self.created_configmaps.append(cm_name)
             self.logger.info(
@@ -5851,20 +5948,19 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
                  self._dhchap_node_label, self._pool_crd_name)
         try:
             if self.k8s_test:
-                actual = self.sbcli_utils.add_storage_pool(
-                    pool_name=plain_pool, dhchap=False)
-                self.pool_name = actual or plain_pool
+                # Non-DHCHAP pool, and again the operator generates its
+                # StorageClass -- which should carry NO
+                # dhchap_node_label and no allowedTopologies, so its
+                # volumes mount anywhere.
+                self.pool_name = plain_pool
                 self._dhchap_node_label = None
-                self._pool_crd_name = None
-                self._storage_class_name = f"sc-plain-{_rand_suffix().lower()}"
-                k8s = self._ensure_k8s_utils()
-                k8s.create_storage_class(
-                    name=self._storage_class_name,
-                    cluster_id=self.cluster_id,
-                    pool_name=self.pool_name,
-                    dhchap_node_label=None,
-                    fs_type=self._pick_fs_type())
-                self.created_storage_classes.append(self._storage_class_name)
+                self._ensure_pool_and_sc(dhchap=False)
+                sc_label = self._k8s_sc_dhchap_label(
+                    self._storage_class_name)
+                assert not sc_label, (
+                    f"TC-SEC-103: the operator gave a non-DHCHAP pool a "
+                    f"StorageClass carrying dhchap_node_label={sc_label!r} "
+                    f"— a pool without dhchap must produce no enforcement")
             else:
                 self.ssh_obj.add_storage_pool(
                     self.mgmt_nodes[0], plain_pool, self.cluster_id,

@@ -1734,7 +1734,8 @@ class K8sUtils:
                        cleanup_before_fio: bool = False,
                        avoid_node: str = None,
                        warmup_config: str = None,
-                       node_name: str = None):
+                       node_name: str = None,
+                       node_selector: str = None):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
@@ -1798,7 +1799,17 @@ class K8sUtils:
         node_affinity_block = ""
         tolerations_block = ""
         node_name_line = f"      nodeName: {node_name}\n" if node_name else ""
-        client_nodes_exist = not node_name and self.has_client_nodes()
+        if node_selector and node_name:
+            raise ValueError(
+                "create_fio_job: pass node_name OR node_selector, not both")
+        if node_selector:
+            # nodeSelector keeps the scheduler in the loop, which a
+            # WaitForFirstConsumer StorageClass requires in order to bind.
+            node_name_line = (
+                "      nodeSelector:\n"
+                f"        kubernetes.io/hostname: {node_selector}\n")
+        client_nodes_exist = (
+            not node_name and not node_selector and self.has_client_nodes())
         if client_nodes_exist:
             # Hard-pin FIO pods to client-role nodes
             node_affinity_block = (
@@ -1821,7 +1832,7 @@ class K8sUtils:
                 f"[K8sUtils] Client nodes detected — FIO job '{job_name}' "
                 f"pinned to client nodes (with toleration)"
             )
-        elif not node_name and avoid_node:
+        elif not node_name and not node_selector and avoid_node:
             # No client nodes — at least avoid the primary storage node
             node_affinity_block = (
                 f"        nodeAffinity:\n"
@@ -3003,7 +3014,8 @@ class K8sUtils:
     def create_utility_pod(self, pod_name: str, pvc_name: str,
                            mount_path: str = "/spdkvol",
                            namespace: str = None,
-                           node_name: str = None):
+                           node_name: str = None,
+                           node_selector: str = None):
         """Create an alpine utility pod that mounts a PVC for checksum operations.
 
         node_name: hard-pin the pod to this node via ``spec.nodeName``, bypassing
@@ -3012,13 +3024,28 @@ class K8sUtils:
             outside a DHCHAP pool's allowedNodes. When set, the client-node
             affinity/toleration block below is skipped — nodeName already forces
             exact placement.
+        node_selector: pin via ``spec.nodeSelector`` on
+            ``kubernetes.io/hostname`` instead, which keeps the SCHEDULER in the
+            loop. Required for a StorageClass using
+            ``volumeBindingMode: WaitForFirstConsumer`` -- with nodeName the
+            scheduler never runs, so the claim stays at "waiting for first
+            consumer" and the pod never starts whether the node is allowed or
+            not, making a negative assertion pass vacuously. Mutually exclusive
+            with node_name.
         """
         ns = namespace or self.namespace
         node_name_line = f"  nodeName: {node_name}\n" if node_name else ""
+        if node_selector and node_name:
+            raise ValueError(
+                "create_utility_pod: pass node_name OR node_selector, not both")
+        if node_selector:
+            node_name_line = (
+                "  nodeSelector:\n"
+                f"    kubernetes.io/hostname: {node_selector}\n")
         # Build tolerations + nodeAffinity to match FIO job scheduling
         tolerations_block = ""
         node_affinity_block = ""
-        if not node_name and self.has_client_nodes():
+        if not node_name and not node_selector and self.has_client_nodes():
             node_affinity_block = (
                 "    nodeAffinity:\n"
                 "      requiredDuringSchedulingIgnoredDuringExecution:\n"
@@ -3154,6 +3181,128 @@ class K8sUtils:
             )
         else:
             self.delete_resource("pod", pod_name, namespace=ns)
+
+    def operator_storage_class_name(self, pool_crd_name: str,
+                                    cluster_cr_name: str = None,
+                                    namespace: str = None) -> str:
+        """Return the StorageClass name the operator generates for a pool.
+
+        Documented format: ``simplyblock-{namespace}-{clusterName}-{poolName}``
+        where poolName is the StoragePool CRD's metadata.name. Verified on
+        OpenShift 2026-09-04.
+        """
+        ns = namespace or self.namespace
+        if not cluster_cr_name:
+            out, _ = self._exec_kubectl(
+                f"kubectl get storageclusters -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true",
+                supress_logs=True,
+            )
+            names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
+            cluster_cr_name = names[0] if names else "simplyblock-cluster"
+        return f"simplyblock-{ns}-{cluster_cr_name}-{pool_crd_name}"
+
+    def wait_storage_class_exists(self, sc_name: str, timeout: int = 300) -> bool:
+        """Wait for the operator to generate *sc_name*."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get storageclass {sc_name} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if (out or "").strip():
+                self.logger.info(
+                    f"[K8sUtils] operator StorageClass {sc_name!r} is present")
+                return True
+            time.sleep(5)
+        self.logger.warning(
+            f"[K8sUtils] operator StorageClass {sc_name!r} did not appear "
+            f"within {timeout}s")
+        return False
+
+    def get_csi_topology_keys(self, node_name: str,
+                              driver: str = "csi.simplyblock.io") -> list:
+        """Return the topology keys the CSI node plugin registered on a node."""
+        out, _ = self._exec_kubectl(
+            f"kubectl get csinode {node_name} -o "
+            f"jsonpath='{{.spec.drivers[?(@.name==\"{driver}\")].topologyKeys}}' "
+            f"2>/dev/null || true",
+            supress_logs=True,
+        )
+        raw = (out or "").strip()
+        if not raw.startswith("["):
+            return []
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+
+    def restart_csi_node_driver(self, expect_topology_key: str = None,
+                                expect_on_nodes: list = None,
+                                timeout: int = 420) -> bool:
+        """Re-register the CSI node driver so it picks up new node labels.
+
+        The node plugin snapshots node labels as topology keys at REGISTRATION
+        time only. A DHCHAP pool created afterwards labels its allowed nodes,
+        but that label is not yet a topology domain -- so the operator's
+        generated StorageClass, whose ``allowedTopologies`` keys off exactly
+        that label, fails to provision with::
+
+            ProvisioningFailed: topology map[topology.kubernetes.io/zone:...]
+            from selected node "worker-0" is not in requisite:
+            [map[simplyblock.io/pool....:allowed]]
+
+        Restarting the daemonset makes every plugin re-register and report the
+        pool label. Verified on OpenShift 2026-09-04: afterwards the allowed
+        nodes carry the pool label as a topology key and non-allowed nodes do
+        not.
+
+        This is a workaround for a product gap, not a normal operation -- the
+        operator ideally triggers the re-register itself after labelling, or
+        omits allowedTopologies (dhchap_node_label alone already enforces at
+        mount via the PV's nodeAffinity).
+        """
+        ns = self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get ds -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true")
+        names = [n.strip() for n in (out or "").splitlines() if n.strip()]
+        ds = next((n for n in names
+                   if "csi" in n.lower() and "node" in n.lower()), None)
+        if not ds:
+            self.logger.warning(
+                f"[K8sUtils] no CSI node daemonset found in {ns}; "
+                f"cannot re-register (daemonsets={names})")
+            return False
+
+        self.logger.info(f"[K8sUtils] restarting CSI node daemonset {ds!r}")
+        self._exec_kubectl(f"kubectl rollout restart daemonset {ds} -n {ns}")
+        self._exec_kubectl(
+            f"kubectl rollout status daemonset {ds} -n {ns} --timeout={timeout}s")
+
+        if not expect_topology_key:
+            return True
+
+        deadline = time.time() + 180
+        pending = list(expect_on_nodes or [])
+        while time.time() < deadline and pending:
+            still = [n for n in pending
+                     if expect_topology_key not in self.get_csi_topology_keys(n)]
+            if not still:
+                pending = []
+                break
+            pending = still
+            time.sleep(5)
+        if pending:
+            self.logger.warning(
+                f"[K8sUtils] after re-register, {expect_topology_key!r} is "
+                f"still not a topology key on {pending}")
+            return False
+        self.logger.info(
+            f"[K8sUtils] {expect_topology_key!r} is now a CSI topology key on "
+            f"{expect_on_nodes}")
+        return True
 
     def get_volume_attachments(self, pv_name: str = None) -> list:
         """Return VolumeAttachments, optionally filtered to a single PV.
@@ -3694,7 +3843,8 @@ class K8sSbcliUtils:
         return self.list_storage_pools().get(pool_name)
 
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
-                         max_r_mbytes=0, max_w_mbytes=0, dhchap=False, allowed_nodes=None):
+                         max_r_mbytes=0, max_w_mbytes=0, dhchap=False, allowed_nodes=None,
+                         storage_class_parameters=None):
         """Use an existing pool if any exist; only create via kubectl if none exist.
 
         Returns the actual pool name to use (may differ from *pool_name* if an
@@ -3715,7 +3865,7 @@ class K8sSbcliUtils:
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
-        dedicated = bool(dhchap or allowed_nodes)
+        dedicated = bool(dhchap or allowed_nodes or storage_class_parameters)
         if existing and dedicated:
             # A caller with a specific dhchap/allowedNodes requirement must
             # NOT get an arbitrary existing pool handed back — reuse is only
@@ -3735,8 +3885,17 @@ class K8sSbcliUtils:
             matched = False
             for crd in crds:
                 spec = crd.get("spec", {})
+                wanted_scp = {
+                    k: ("true" if v is True else "false" if v is False else str(v))
+                    for k, v in (storage_class_parameters or {}).items()
+                }
+                have_scp = {
+                    k: ("true" if v is True else "false" if v is False else str(v))
+                    for k, v in (spec.get("storageClassParameters") or {}).items()
+                }
                 if (bool(spec.get("dhchap")) == bool(dhchap)
-                        and sorted(spec.get("allowedNodes", []) or []) == wanted_nodes):
+                        and sorted(spec.get("allowedNodes", []) or []) == wanted_nodes
+                        and have_scp == wanted_scp):
                     actual = next(iter(existing))
                     self.logger.info(
                         f"[pool] Existing CRD '{crd['metadata']['name']}' "
@@ -3925,6 +4084,17 @@ class K8sSbcliUtils:
                 yaml_content += "  allowedNodes:\n"
                 for node_name in allowed_nodes:
                     yaml_content += f"    - {node_name}\n"
+            if storage_class_parameters:
+                # The operator builds the pool's StorageClass from these,
+                # including encryption and csi.storage.k8s.io/fstype. They
+                # are IMMUTABLE once the SC exists (the CRD says to create
+                # a new StoragePool to change them), so a caller wanting
+                # both plain and encrypted volumes needs two pools.
+                yaml_content += "  storageClassParameters:\n"
+                for _k, _v in storage_class_parameters.items():
+                    if isinstance(_v, bool):
+                        _v = "true" if _v else "false"
+                    yaml_content += f"    {_k}: {_v}\n"
 
             self.logger.info(
                 f"[pool] Creating '{pool_name}' "
