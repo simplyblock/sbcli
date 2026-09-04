@@ -809,6 +809,110 @@ def _delete_old_logs(events: list[EventObj], cluster_id: str):
             event.remove(db.kv_store)
 
 
+def _maybe_enable_shared_placement(cluster, cluster_id, current_cluster_status):
+    """One-shot auto-migration to shared (per-chunk) data placement.
+
+    Runs only for a settled cluster (ACTIVE, not rebalancing, every storage
+    node ONLINE) whose shared_placement is still off, and fires on either of
+    two triggers:
+
+      * shared_placement_migration_pending — armed at cluster creation on
+        releases that still created legacy clusters, and by
+        `sbctl cluster upgrade-complete` after an upgrade's rolling restart;
+      * a data-plane capability probe
+        (cluster_ops.all_nodes_support_shared_placement): every node's
+        running SPDK advertises the runtime shared-placement RPCs. This
+        retro-heals clusters whose upgrade never armed the flag — the
+        original arming sat behind an update_cluster(restart=True) path no
+        CLI invocation reaches, which stranded every CLI-upgraded cluster on
+        per-page placement (customer incident 2026-09-04).
+
+    Why not fire on a bare shared_placement==False: during a rolling upgrade
+    the cluster passes through transient ACTIVE / all-online windows between
+    node restarts. The capability probe is what makes evaluating those
+    windows safe — a node still on a pre-shared-placement image does not
+    expose the RPCs, so the flip waits for the last restart; and
+    set_shared_placement aborts wholesale (nothing persisted) if any node
+    rejects the runtime RPC, so a race lost anyway cannot half-flip the
+    cluster. On success the flip is self-terminating: shared_placement=True
+    ends the condition for good.
+    """
+    if (cluster.shared_placement
+            or current_cluster_status != Cluster.STATUS_ACTIVE
+            or cluster.is_re_balancing):
+        return
+    sp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    if not sp_nodes or any(n.status != StorageNode.STATUS_ONLINE for n in sp_nodes):
+        return
+    armed = cluster.shared_placement_migration_pending
+    if not armed and not cluster_ops.all_nodes_support_shared_placement(sp_nodes):
+        return
+    logger.info(
+        "Auto-enabling shared (per-chunk) placement on cluster %s: %s, "
+        "ACTIVE, all nodes online, not rebalancing", cluster_id,
+        "armed" if armed else "data plane capable")
+    try:
+        if cluster_ops.set_shared_placement(cluster_id, enable=True):
+            # set_shared_placement persisted shared_placement=True; disarm the
+            # request so it runs exactly once. Atomic so it doesn't clobber a
+            # concurrent cluster.status change.
+            db.atomic_update(
+                db.get_cluster_by_id(cluster_id),
+                lambda c: setattr(c, "shared_placement_migration_pending", False))
+            logger.info("shared_placement enabled on cluster %s", cluster_id)
+        else:
+            logger.warning(
+                "set_shared_placement returned False for cluster %s; "
+                "will retry next monitor cycle", cluster_id)
+    except Exception:
+        logger.exception(
+            "Auto shared_placement enable raised for cluster %s", cluster_id)
+
+
+def _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status):
+    """One-shot auto-migration to v2 distrib write protection — the exact
+    sibling of _maybe_enable_shared_placement above; see there for the full
+    trigger rationale.
+
+    update_cluster deliberately stamps write_protection_v2 back to False
+    before an upgrade's rolling restart, so after EVERY upgrade the runtime
+    switch has to run again. It used to be a manual
+    `sbctl cluster switch-write-protection`; the monitor now runs it once the
+    cluster settles, fired by the pending flag (armed by upgrade-complete) or
+    by the data-plane capability probe (which also heals clusters whose
+    upgrade never armed it). switch_write_protection aborts wholesale if any
+    online node rejects the runtime RPC and is idempotent, so a lost race is
+    a plain retry on the next cycle.
+    """
+    if (cluster.write_protection_v2
+            or current_cluster_status != Cluster.STATUS_ACTIVE
+            or cluster.is_re_balancing):
+        return
+    wp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    if not wp_nodes or any(n.status != StorageNode.STATUS_ONLINE for n in wp_nodes):
+        return
+    armed = cluster.write_protection_migration_pending
+    if not armed and not cluster_ops.all_nodes_support_write_protection_v2(wp_nodes):
+        return
+    logger.info(
+        "Auto-switching write protection to v2 on cluster %s: %s, ACTIVE, "
+        "all nodes online, not rebalancing", cluster_id,
+        "armed" if armed else "data plane capable")
+    try:
+        if cluster_ops.switch_write_protection(cluster_id):
+            db.atomic_update(
+                db.get_cluster_by_id(cluster_id),
+                lambda c: setattr(c, "write_protection_migration_pending", False))
+            logger.info("write-protection v2 enabled on cluster %s", cluster_id)
+        else:
+            logger.warning(
+                "switch_write_protection returned False for cluster %s; "
+                "will retry next monitor cycle", cluster_id)
+    except Exception:
+        logger.exception(
+            "Auto write-protection switch raised for cluster %s", cluster_id)
+
+
 def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -883,42 +987,8 @@ def _update_cluster_status_impl(cluster_id):
             except Exception:
                 logger.exception("Suspend-recovery drive failed for cluster %s", cluster_id)
 
-    # One-shot auto-migration to shared (per-chunk) data placement.
-    # Armed (shared_placement_migration_pending) by exactly two events:
-    #   * cluster creation — for brand-new clusters
-    #   * cluster_ops.update_cluster, only AFTER every node's upgrade restart
-    #     has completed — never mid rolling-restart
-    # We require that explicit flag rather than firing on a bare
-    # shared_placement==False, because during a rolling upgrade the cluster
-    # passes through transient ACTIVE / not-rebalancing / all-online windows
-    # between node restarts; switching then would race the still-restarting
-    # nodes. With the flag set only at upgrade completion, switching here is
-    # safe once the cluster has settled.
-    if (cluster.shared_placement_migration_pending
-            and not cluster.shared_placement
-            and current_cluster_status == Cluster.STATUS_ACTIVE
-            and not cluster.is_re_balancing):
-        sp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
-        if sp_nodes and all(n.status == StorageNode.STATUS_ONLINE for n in sp_nodes):
-            logger.info(
-                "Auto-enabling shared (per-chunk) placement on cluster %s: "
-                "armed, ACTIVE, all nodes online, not rebalancing", cluster_id)
-            try:
-                if cluster_ops.set_shared_placement(cluster_id, enable=True):
-                    # set_shared_placement persisted shared_placement=True;
-                    # disarm the request so it runs exactly once. Atomic so it
-                    # doesn't clobber a concurrent cluster.status change.
-                    db.atomic_update(
-                        db.get_cluster_by_id(cluster_id),
-                        lambda c: setattr(c, "shared_placement_migration_pending", False))
-                    logger.info("shared_placement enabled on cluster %s", cluster_id)
-                else:
-                    logger.warning(
-                        "set_shared_placement returned False for cluster %s; "
-                        "will retry next monitor cycle", cluster_id)
-            except Exception:
-                logger.exception(
-                    "Auto shared_placement enable raised for cluster %s", cluster_id)
+    _maybe_enable_shared_placement(cluster, cluster_id, current_cluster_status)
+    _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status)
 
     if current_cluster_status == Cluster.STATUS_IN_ACTIVATION:
         # Don't drive transitions while an activation is in flight, but check

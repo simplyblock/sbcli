@@ -2010,6 +2010,14 @@ class RPCClient:
         }
         return self._request("bdev_raid_get_bdevs", params)
 
+    def rpc_get_methods(self):
+        """Names of every RPC method the node's running SPDK app exposes
+        (standard SPDK ``rpc_get_methods``). Used to probe data-plane
+        capabilities without side effects — e.g. whether the image carries
+        the runtime shared-placement RPCs (see
+        cluster_ops.all_nodes_support_shared_placement)."""
+        return self._request("rpc_get_methods")
+
     def bdev_lvs_dump_tree(self, lvstore_uuid):
         params = {
             "uuid": lvstore_uuid

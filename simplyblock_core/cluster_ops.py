@@ -1929,6 +1929,44 @@ def cluster_set_active(cl_id) -> None:
                     device_controller.device_set_online(dev.get_id())
 
 
+# The runtime RPCs the data-plane migrations dispatch per node. A data plane
+# whose SPDK advertises them (rpc_get_methods) can be migrated at runtime.
+SHARED_PLACEMENT_RUNTIME_RPCS = ("distr_shared_placement", "jm_set_shared_placement")
+WRITE_PROTECTION_RUNTIME_RPCS = ("distr_write_protection_v2",)
+
+
+def _all_nodes_support_rpcs(nodes, required) -> bool:
+    """True when every given storage node's RUNNING SPDK advertises every RPC
+    in ``required``.
+
+    This is the data-plane capability gate for the post-upgrade
+    auto-migrations (shared placement, write-protection v2): during a rolling
+    upgrade, nodes still on an incapable image do not list the methods, so
+    the probe holds the migration off until the LAST node has restarted onto
+    a capable image. Any unreachable node counts as unsupported — a migration
+    must only run against a fully settled cluster, and its own per-node RPC
+    dispatch would abort on that node anyway.
+    """
+    for node in nodes:
+        try:
+            methods = node.rpc_client(timeout=5, retry=1).rpc_get_methods() or []
+        except Exception as e:
+            logger.debug("rpc_get_methods failed on node %s: %s",
+                         node.get_id()[:8], e)
+            return False
+        if any(rpc not in methods for rpc in required):
+            return False
+    return True
+
+
+def all_nodes_support_shared_placement(nodes) -> bool:
+    return _all_nodes_support_rpcs(nodes, SHARED_PLACEMENT_RUNTIME_RPCS)
+
+
+def all_nodes_support_write_protection_v2(nodes) -> bool:
+    return _all_nodes_support_rpcs(nodes, WRITE_PROTECTION_RUNTIME_RPCS)
+
+
 def set_shared_placement(cl_id, enable=True, force=False) -> bool:
     """Flip the cluster-wide shared_placement flag for distrib bdevs.
 
@@ -2724,7 +2762,23 @@ def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pe
 
 
 def get_cluster(cl_id) -> dict:
-    return db_controller.get_cluster_by_id(cl_id).get_clean_dict()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    data = cluster.get_clean_dict()
+    # Derived, human-readable placement-migration state; the raw flags are
+    # shared_placement / shared_placement_migration_pending.
+    if cluster.shared_placement:
+        data['data_placement'] = 'per-chunk'
+    elif cluster.shared_placement_migration_pending:
+        data['data_placement'] = 'per-page (migration pending)'
+    else:
+        data['data_placement'] = 'per-page (legacy)'
+    if cluster.write_protection_v2:
+        data['write_protection'] = 'v2'
+    elif cluster.write_protection_migration_pending:
+        data['write_protection'] = 'v1 (migration pending)'
+    else:
+        data['write_protection'] = 'v1 (legacy)'
+    return data
 
 
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
@@ -2923,18 +2977,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.error(f"Failed to restart node: {node.get_id()}")
                 return
 
-    # All storage nodes have been restarted onto the upgraded SPDK image.
-    # Arm the one-shot per-chunk placement migration now — and only now,
-    # after the full rolling restart — so storage_node_monitor switches the
-    # cluster once it settles (ACTIVE, not rebalancing, all nodes online).
-    # Skipped on the early-return failure path above, so a partial/failed
-    # upgrade never arms it. No-op if the cluster is already on per-chunk.
-    upgraded = db_controller.get_cluster_by_id(cluster_id)
-    if not upgraded.shared_placement and not upgraded.shared_placement_migration_pending:
-        upgraded.shared_placement_migration_pending = True
-        upgraded.write_to_db(db_controller.kv_store)
-        logger.info("Armed shared_placement migration for cluster %s post-upgrade", cluster_id)
-
+    # The shared-placement migration is NOT armed here any more. This tail
+    # only runs for restart=True callers, which no CLI invocation ever sets,
+    # so arming here stranded every CLI-upgraded cluster on per-page
+    # placement (customer incident 2026-09-04). It is armed by
+    # upgrade_complete below, and storage_node_monitor additionally
+    # self-heals via a data-plane capability probe
+    # (all_nodes_support_shared_placement).
     logger.info("Done")
 
 
@@ -2946,6 +2995,36 @@ def upgrade_complete(cluster_id) -> bool:
     cluster = db_controller.get_cluster_by_id(cluster_id)
     for message in release_upgrades.run_upgrade_complete(cluster):
         logger.info(message)
+
+    # Arm the one-shot per-chunk placement migration for clusters upgraded
+    # from a pre-shared-placement release. upgrade-complete is the documented
+    # final step of every upgrade, i.e. after the full rolling node restart —
+    # exactly when the migration may start. storage_node_monitor performs the
+    # actual flip once the cluster settles (ACTIVE, not rebalancing, all
+    # nodes online) and disarms the flag; it also self-heals clusters whose
+    # upgrade predates this arming via a data-plane capability probe.
+    # No-op for clusters already on per-chunk (including all newly created
+    # ones, which are born shared).
+    if not cluster.shared_placement and not cluster.shared_placement_migration_pending:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "shared_placement_migration_pending", True))
+        logger.info("Armed shared_placement migration for cluster %s "
+                    "post-upgrade", cluster_id)
+
+    # Same for write-protection v2: update_cluster deliberately stamps the
+    # generation back to v1 before the rolling restart, so after every
+    # upgrade the runtime switch has to run again. Previously that was a
+    # manual `sbctl cluster switch-write-protection`; now the monitor runs it
+    # once the cluster settles (and self-heals via the capability probe even
+    # when this arming was never reached). The CLI command remains as the
+    # manual override.
+    if not cluster.write_protection_v2 and not cluster.write_protection_migration_pending:
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c: setattr(c, "write_protection_migration_pending", True))
+        logger.info("Armed write-protection v2 migration for cluster %s "
+                    "post-upgrade", cluster_id)
     return True
 
 
