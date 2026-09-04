@@ -155,7 +155,6 @@ ignore = [
     "UP007",
     "UP022",
     "UP031",
-    "UP036",
 ]
 
 [tool.ruff.lint.per-file-ignores]
