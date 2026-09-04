@@ -59,6 +59,7 @@ from typing import Optional
 
 from simplyblock_core import utils
 from simplyblock_core.models.hub_cooldown import HubDetachCooldown
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -105,6 +106,13 @@ class HubControllerManager:
         self._db = db_controller
         self._lock = threading.Lock()
         self._entries: dict = {}     # (src_node_id, tgt_node_id) → _HubEntry
+        # Per-(src, tgt) lock, held across the (possibly slow) attach RPC so
+        # concurrent acquire() calls for the SAME cold key serialize onto a
+        # single attach instead of racing -- see acquire()'s docstring for
+        # the incident this replaced. Keyed the same as _entries; created
+        # lazily and never removed (bounded by the number of distinct
+        # (src, tgt) pairs a process ever touches, i.e. node-pair count).
+        self._attach_locks: dict = {}
         self._gc_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
@@ -120,30 +128,40 @@ class HubControllerManager:
 
         Returns (ctrl_name, hub_bdev, error).  On transient cooldown the error
         string starts with "HUB_COOLDOWN:" so callers can log it distinctly.
+
+        Concurrency: the controller name (``tgt_node.transfer_hublvol.bdev_name``)
+        is fixed per target node -- every caller attaching to the same (src, tgt)
+        pair gets the identical name, there is no such thing as "my own"
+        controller to tell apart from anyone else's. A cold key (no cached
+        entry yet) therefore serializes on ``_attach_locks[key]`` across this
+        whole check-attach-store sequence, so only ONE caller ever issues the
+        attach RPC; every other concurrent caller for the same key simply
+        blocks and then reuses the resulting entry. This replaced an earlier
+        version that raced the attach outside any lock and had the losing
+        caller "clean up its duplicate" by detaching `ctrl_name` -- since that
+        name is shared, the loser was actually detaching the WINNER's live,
+        already-in-use controller out from under whichever sibling caller got
+        there first (incident 2026-08-31: a 5-member batch group's transfers
+        collapsed massively when this fired mid-transfer). Detaching a hub is
+        now something ONLY the GC thread's idle-timeout sweep ever does; no
+        caller-facing code path issues bdev_nvme_detach_controller itself.
         """
         key = (src_node_id, tgt_node.get_id())
 
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                try:
-                    if src_rpc.get_bdevs(entry.hub_bdev):
-                        entry.last_used = time.monotonic()
-                        entry.src_rpc = src_rpc
-                        logger.info(
-                            f"[HubMgr] reusing {entry.ctrl_name} "
-                            f"src={src_node_id[:8]} tgt={tgt_node.get_id()[:8]}"
-                        )
-                        return entry.ctrl_name, entry.hub_bdev, None
-                except Exception:
-                    logger.exception(
-                        f"[HubMgr] failed to validate cached hub entry {entry.ctrl_name}; "
-                        "treating as stale and re-attaching"
-                    )
-                logger.info(f"[HubMgr] stale entry for {entry.ctrl_name}; re-attaching")
-                del self._entries[key]
+        entry = self._try_reuse(key, src_rpc)
+        if entry is not None:
+            return entry.ctrl_name, entry.hub_bdev, None
 
-            # Enforce cooldown before any fresh attach
+        # Cold (or just-invalidated) key: serialize the attach per-key so
+        # concurrent callers for this SAME pair wait for one attach instead of
+        # racing their own. Different keys never contend with each other.
+        attach_lock = self._get_attach_lock(key)
+        with attach_lock:
+            # Re-check: whoever held the lock before us may have just attached.
+            entry = self._try_reuse(key, src_rpc)
+            if entry is not None:
+                return entry.ctrl_name, entry.hub_bdev, None
+
             cooldown_remaining = self._cooldown_remaining(key)
             if cooldown_remaining > 0:
                 msg = (
@@ -153,42 +171,53 @@ class HubControllerManager:
                 logger.info(f"[HubMgr] {msg}")
                 return None, None, msg
 
-        # Attach outside the lock so we don't block the GC thread
-        ctrl_name, hub_bdev, err = self._attach(src_rpc, tgt_node, trtype)
-        if err:
-            return None, None, err
-
-        with self._lock:
-            # Another thread may have attached concurrently — prefer the winner
-            existing = self._entries.get(key)
-            if existing is not None:
-                try:
-                    if src_rpc.get_bdevs(existing.hub_bdev):
-                        existing.last_used = time.monotonic()
-                        existing.src_rpc = src_rpc
-                        try:
-                            src_rpc.bdev_nvme_detach_controller(ctrl_name)
-                        except Exception as e:
-                            logger.warning(
-                                f"[HubMgr] best-effort detach of duplicate controller failed "
-                                f"(ctrl={ctrl_name}, src={src_node_id[:8]} tgt={tgt_node.get_id()[:8]}): {e}"
-                            )
-                        return existing.ctrl_name, existing.hub_bdev, None
-                except Exception as exc:
-                    logger.debug(
-                        f"[HubMgr] failed to validate concurrently attached controller "
-                        f"{existing.ctrl_name}: {exc}"
-                    )
+            ctrl_name, hub_bdev, err = self._attach(src_rpc, tgt_node, trtype)
+            if err:
+                return None, None, err
 
             entry = _HubEntry(ctrl_name, hub_bdev, src_rpc, tgt_node)
-            self._entries[key] = entry
-            self._ensure_gc_running()
+            with self._lock:
+                self._entries[key] = entry
+                self._ensure_gc_running()
 
         logger.info(
             f"[HubMgr] attached {ctrl_name} "
             f"src={src_node_id[:8]} tgt={tgt_node.get_id()[:8]}"
         )
         return ctrl_name, hub_bdev, None
+
+    def _try_reuse(self, key, src_rpc) -> Optional["_HubEntry"]:
+        """Return the cached entry for *key* if it's still live, refreshing its
+        idle timer. Drops (and returns None for) a stale entry that no longer
+        validates -- the caller then falls through to a fresh attach."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+        try:
+            if src_rpc.get_bdevs(entry.hub_bdev):
+                with self._lock:
+                    entry.last_used = time.monotonic()
+                    entry.src_rpc = src_rpc
+                logger.info(
+                    f"[HubMgr] reusing {entry.ctrl_name} "
+                    f"src={key[0][:8]} tgt={key[1][:8]}"
+                )
+                return entry
+        except RPCException:
+            logger.exception(
+                f"[HubMgr] failed to validate cached hub entry {entry.ctrl_name}; "
+                "treating as stale and re-attaching"
+            )
+        logger.info(f"[HubMgr] stale entry for {entry.ctrl_name}; re-attaching")
+        with self._lock:
+            if self._entries.get(key) is entry:
+                del self._entries[key]
+        return None
+
+    def _get_attach_lock(self, key) -> threading.Lock:
+        with self._lock:
+            return self._attach_locks.setdefault(key, threading.Lock())
 
     def detach_now(self, src_node_id: str, tgt_node_id: str, src_rpc=None):
         """
