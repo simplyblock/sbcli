@@ -4,6 +4,8 @@ from abc import abstractmethod
 from contextlib import AbstractContextManager
 from types import TracebackType
 
+from pydantic import SecretStr
+
 
 class KMS(AbstractContextManager):
     def __exit__(  # Has to be defined to make the type-checker happy
@@ -19,11 +21,13 @@ class KMS(AbstractContextManager):
         raise NotImplementedError
 
     @abstractmethod
-    def import_data_encryption_keys(self, path: str, kek_name: str, keys: tuple[str, str]) -> None:
+    def import_data_encryption_keys(
+        self, path: str, kek_name: str, keys: tuple[SecretStr, SecretStr],
+    ) -> None:
         pass
 
     @abstractmethod
-    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[str, str]:
+    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[SecretStr, SecretStr]:
         pass
 
     @abstractmethod

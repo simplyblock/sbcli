@@ -24,7 +24,6 @@ import ast
 import importlib
 import pathlib
 import unittest
-from typing import ClassVar
 
 from simplyblock_core.services import __main__ as dispatcher
 
@@ -113,23 +112,11 @@ class TestPathInvocationContract(unittest.TestCase):
 
 
 class TestServicesHaveMain(unittest.TestCase):
-    """Each service should expose ``main()`` so it is callable and testable.
-
-    ``spdk_http_proxy_server`` is deliberately exempt: its module body builds the
-    shared state ``ServerHandler`` and ``rpc_call`` read as globals (``TIMEOUT``,
-    ``MAX_CONCURRENT_SPDK``, ``spdk_semaphore``, ``rpc_sock``) and its
-    ``get_env_var(..., is_required=True)`` calls raise at import time, so wrapping
-    it changes binding semantics on the storage-node data path. The dispatcher
-    runs it through ``runpy``, which needs no ``main()``.
-    """
-
-    EXEMPT: ClassVar[str] = {"spdk_http_proxy_server"}
+    """Each service should expose ``main()`` so it is callable and testable."""
 
     def test_every_service_defines_main(self):
         for name in dispatcher._service_names():
             module = name.replace("-", "_")
-            if module in self.EXEMPT:
-                continue
             with self.subTest(service=name):
                 tree = ast.parse(_module_path(name).read_text())
                 self.assertTrue(

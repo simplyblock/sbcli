@@ -1,4 +1,6 @@
 # coding=utf-8
+from pydantic import SecretStr
+
 from simplyblock_core import constants, utils
 from simplyblock_core.db_controller import DBController
 
@@ -36,8 +38,8 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
     key_names = {}
 
     for key_type, key_value in (
-        ("dhchap_key", pool.dhchap_key.get_secret_value()),
-        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key.get_secret_value()),
+        ("dhchap_key", pool.dhchap_key),
+        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key),
     ):
         if not key_value:
             continue
@@ -79,7 +81,9 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
         if not key_value:
             continue
         key_name = f"{key_type}_{safe_host}"
-        result, error = snode_api.write_key_file(key_name, key_value)
+        # allowed_hosts is a list of plain dicts, so the key material arrives
+        # untyped; wrap it here or it reaches SNodeClient's request log in clear.
+        result, error = snode_api.write_key_file(key_name, SecretStr(key_value))
         if error:
             logger.error("Failed to write key file %s on node %s: %s", key_name, snode.get_id(), error)
             continue

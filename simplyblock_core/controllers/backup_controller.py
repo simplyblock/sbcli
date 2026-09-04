@@ -465,7 +465,9 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     else:
         crypto_key = None
 
-    logger.info(f"Backup allowed hosts: {backup.allowed_hosts}")
+    logger.info("Backup allowed hosts: %s",
+                [h["nqn"] if isinstance(h, dict) else h
+                 for h in (backup.allowed_hosts or [])])
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,

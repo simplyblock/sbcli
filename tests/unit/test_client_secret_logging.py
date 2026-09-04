@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.utils.secrets import MASK
 from simplyblock_core.snode_client import SNodeClient
 
 
@@ -80,6 +81,56 @@ def test_rpc_client_response_body_logged_when_flag_on(rpc_client, caplog, monkey
     assert "RESPVALUE" in _captured_logs_text(caplog)
 
 
+def test_rpc_client_masks_plaintext_crypto_keys_by_param_name(rpc_client, caplog):
+    """``lvol_crypto_key_create`` is now typed on ``SecretStr``, but the v1 API
+    hands controllers plain ``str`` from raw JSON. The name-based redactor is
+    what covers the values the type system cannot see."""
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client._request2("accel_crypto_key_create", {
+            "cipher": "AES_XTS",
+            "name": "key_lvol_1",
+            "key": "DEKPLAINONE",
+            "key2": "DEKPLAINTWO",
+        })
+
+    posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
+    parsed = json.loads(posted_body)
+    assert parsed["params"]["key"] == "DEKPLAINONE"
+    assert parsed["params"]["key2"] == "DEKPLAINTWO"
+
+    logs = _captured_logs_text(caplog)
+    assert "DEKPLAINONE" not in logs
+    assert "DEKPLAINTWO" not in logs
+    assert MASK in logs
+    assert "accel_crypto_key_create" in logs
+    assert "AES_XTS" in logs
+
+
+def test_rpc_client_request3_masks_secrets_by_param_name(rpc_client, caplog):
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client.bdev_s3_create(
+            name="s3bdev",
+            local_endpoint="http://minio:9000",
+            access_key_id="AKIAIDENTIFIER",
+            secret_access_key=SecretStr("S3PLAIN"),
+        )
+
+    posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
+    assert json.loads(posted_body)["params"]["secret_access_key"] == "S3PLAIN"
+
+    logs = _captured_logs_text(caplog)
+    assert "S3PLAIN" not in logs
+    assert "AKIAIDENTIFIER" in logs
+
+
 @pytest.fixture
 def snode_client():
     with patch("simplyblock_core.snode_client.requests.session") as session_factory:
@@ -113,3 +164,67 @@ def test_snode_response_body_hidden_when_flag_off(snode_client, caplog, monkeypa
     with caplog.at_level(logging.DEBUG):
         snode_client._request("GET", "info")
     assert "RESPVAL" not in _captured_logs_text(caplog)
+
+
+def test_snode_write_key_file_masks_pool_key(snode_client, caplog):
+    """The pool path passes the model's ``SecretStr`` through rather than unwrapping it."""
+    from simplyblock_core.controllers import host_auth
+
+    pool = MagicMock()
+    pool.get_id.return_value = "pool-1"
+    pool.dhchap_key = SecretStr("DHHC-1:00:POOLKEY:")
+    pool.dhchap_ctrlr_key = SecretStr("")
+
+    snode = MagicMock()
+    snode.get_id.return_value = "node-1"
+    snode.client.return_value = snode_client
+    snode_client._fake_session.request.return_value = _make_json_response(
+        {"results": "/etc/simplyblock/dhchap/pool_key"})
+
+    rpc_client = MagicMock()
+    rpc_client._request2.return_value = ({"ok": True}, None)
+
+    with caplog.at_level(logging.DEBUG):
+        key_names = host_auth._register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
+
+    assert key_names == {"dhchap_key": "pool_pool_1_dhchap_key"}
+
+    posted_body = snode_client._fake_session.request.call_args.kwargs["data"]
+    assert json.loads(posted_body)["content"] == "DHHC-1:00:POOLKEY:"
+
+    logs = _captured_logs_text(caplog)
+    assert "POOLKEY" not in logs
+    assert "pool_pool_1_dhchap_key" in logs
+
+
+def test_snode_write_key_file_masks_per_host_key(snode_client, caplog):
+    """The per-host path reads key material out of ``lvol.allowed_hosts``, a list of
+    plain dicts, so nothing wraps it for us — ``host_auth`` has to."""
+    from simplyblock_core.controllers import host_auth
+
+    snode = MagicMock()
+    snode.get_id.return_value = "node-1"
+    snode.client.return_value = snode_client
+    snode_client._fake_session.request.return_value = _make_json_response(
+        {"results": "/etc/simplyblock/dhchap/host_key"})
+
+    rpc_client = MagicMock()
+    rpc_client._request2.return_value = ({"ok": True}, None)
+
+    with caplog.at_level(logging.DEBUG):
+        key_names = host_auth._register_dhchap_keys_on_node(
+            snode, "nqn.2014-08.org.nvmexpress:uuid:host1",
+            {"dhchap_key": "DHHC-1:00:HOSTKEY:", "psk": "NVMeTLSkey-1:01:PSKPLAIN:"},
+            rpc_client,
+        )
+
+    assert set(key_names) == {"dhchap_key", "psk"}
+
+    posted = [json.loads(call.kwargs["data"])
+              for call in snode_client._fake_session.request.call_args_list]
+    assert {entry["content"] for entry in posted} == {
+        "DHHC-1:00:HOSTKEY:", "NVMeTLSkey-1:01:PSKPLAIN:"}
+
+    logs = _captured_logs_text(caplog)
+    assert "HOSTKEY" not in logs
+    assert "PSKPLAIN" not in logs

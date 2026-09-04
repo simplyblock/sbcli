@@ -67,8 +67,6 @@ def _run_restart(env):
     from simplyblock_core.db_controller import DBController
     node = env['nodes'][RESTART_NODE]
     patches = patch_externals()
-    for p in patches:
-        p.start()
     try:
         db = DBController()
         snode = db.get_storage_node_by_id(node.uuid)
@@ -82,8 +80,7 @@ def _run_restart(env):
         updated = db.get_storage_node_by_id(node.uuid)
         return result, updated
     finally:
-        for p in patches:
-            p.stop()
+        patches.close()
 
 
 def _assert_restart_ok(result, node):
@@ -257,14 +254,11 @@ class TestPreRestartGuard:
         prepare_node_for_restart(env, RESTART_NODE)
 
         patches = patch_externals()
-        for p in patches:
-            p.start()
         try:
             result = storage_node_ops.restart_storage_node(env['nodes'][0].uuid)
             assert result is False
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
             n1.status = StorageNode.STATUS_ONLINE
             n1.write_to_db(db.kv_store)
 
@@ -278,15 +272,12 @@ class TestPreRestartGuard:
         prepare_node_for_restart(env, RESTART_NODE)
 
         patches = patch_externals()
-        for p in patches:
-            p.start()
         try:
             result = storage_node_ops.restart_storage_node(env['nodes'][0].uuid)
             assert result is False, \
                 "Restart must be rejected when peer is IN_SHUTDOWN"
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
             n1.status = StorageNode.STATUS_ONLINE
             n1.write_to_db(db.kv_store)
 

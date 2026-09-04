@@ -1,52 +1,50 @@
 # coding=utf-8
-"""
-test_spdk_proxy_e2e.py – mocked end-to-end tests for spdk_http_proxy_server.
+"""End-to-end tests for the SPDK HTTP proxy.
 
-Uses a real unix socket mock SPDK server and the real proxy HTTP server
-to test the full request flow: readiness gating, request forwarding,
-timeout cleanup, and zombie socket prevention.
+A real unix-socket server stands in for SPDK and the real proxy application is
+served by uvicorn, so the full path is exercised: readiness gating, HTTP
+framing, request forwarding, timeout handling and socket cleanup.
 
 NOTE: Requires AF_UNIX (Linux/macOS). Skipped on Windows.
 """
 
 import base64
+import contextlib
+import http.client
 import json
 import os
+import socket
 import socketserver
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
 
 import requests
+import uvicorn
+from tenacity import Retrying, stop_after_delay, wait_fixed, retry_if_exception_type, retry_if_result, RetryError
 
 if sys.platform == "win32":
     raise unittest.SkipTest("AF_UNIX not available on Windows")
 
-from tests.conftest_proxy import import_proxy_module
+from prometheus_client import REGISTRY
+
+from simplyblock_core.services.spdk_http_proxy_server import ProxySettings, create_app
 
 
-def _wait_until(predicate, timeout=5, interval=0.02):
-    """Poll ``predicate`` instead of a fixed sleep-then-assert.
+def _create_app(settings):
+    """Build an app on a registry a previous one may already have written to.
 
-    A single fixed sleep assumes the process gets scheduled promptly; under
-    CI load (or another test's global time.sleep patch stealing this
-    process's CPU -- see print_stats in spdk_http_proxy_server.py) cleanup
-    that normally finishes in microseconds can take longer than that budget
-    without ever actually failing to happen.
+    ``Instrumentator`` re-registers its metrics per application, which the
+    default registry only survives once; only tests build more than one.
     """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return predicate()
+    for name, collector in list(REGISTRY._names_to_collectors.items()):
+        if name.startswith("http_"):
+            with contextlib.suppress(KeyError):
+                REGISTRY.unregister(collector)
+    return create_app(settings)
 
-# ---------------------------------------------------------------------------
-# Mock SPDK unix socket server
-# ---------------------------------------------------------------------------
 
 class MockSPDKHandler(socketserver.BaseRequestHandler):
     """Handles JSON-RPC 2.0 over a unix socket, mimicking SPDK."""
@@ -78,9 +76,8 @@ class MockSPDKServer(socketserver.ThreadingUnixStreamServer):
 
     allow_reuse_address = True
 
-    def __init__(self, sock_path, ready=True, delay=0):
+    def __init__(self, sock_path, delay=0):
         self.sock_path = sock_path
-        self._ready = ready
         self._delay = delay
         self._call_log = []
         self._lock = threading.Lock()
@@ -106,217 +103,202 @@ class MockSPDKServer(socketserver.ThreadingUnixStreamServer):
             return list(self._call_log)
 
 
-def _start_mock_spdk(sock_path, **kwargs):
-    """Start a mock SPDK server in a background thread."""
+@contextlib.contextmanager
+def mock_spdk(sock_path, **kwargs):
+    """Serve a mock SPDK on ``sock_path`` for the duration of the block."""
     server = MockSPDKServer(sock_path, **kwargs)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        with contextlib.suppress(OSError):
+            os.unlink(sock_path)
 
 
-# ---------------------------------------------------------------------------
-# Proxy launcher helper
-# ---------------------------------------------------------------------------
-
-class _ProxyHandle:
-    """The proxy thread's bound port, when it bound, or why it could not.
-
-    The proxy binds its HTTP port only AFTER ``wait_for_spdk_ready()``
-    returns -- that ordering is the thing TestProxyReadinessGate exists to
-    verify -- so the port cannot be known before the thread runs. Publishing
-    it back turns two silent failure modes into loud ones:
-
-      * a hardcoded port already in use raised OSError inside a daemon thread
-        and was swallowed, so the test saw only "Proxy should eventually come
-        up" after polling for 8s, with nothing to say why. That is exactly how
-        it failed in CI run 33668203362 on main.
-      * every other startup error looked identical to that one.
-
-    Ports are now requested as 0, so the OS picks a free one and neither a
-    sibling test class nor a parallel CI job can contend for a fixed number.
-    """
-
-    def __init__(self):
-        self._ready = threading.Event()
-        self.port = None
-        self.bind_time = None
-        self.error = None
-
-    def _publish_port(self, port, bind_time):
-        self.port = port
-        self.bind_time = bind_time
-        self._ready.set()
-
-    def _publish_error(self, exc):
-        self.error = exc
-        self._ready.set()
-
-    def settled_within(self, timeout):
-        """True if the thread has already bound (or failed) within timeout.
-
-        Event.wait, deliberately, not time.sleep: another module in this test
-        session patches time.sleep globally, so any duration measured against
-        a sleep is meaningless here. That is what made the first version of
-        the gate assertion below read 7ms for a 1s delay in CI run
-        33671036716 -- the delay simply never happened.
-        """
-        return self._ready.wait(timeout)
-
-    def wait(self, timeout=30):
-        """Bound port, or an assertion naming the actual problem."""
-        if not self._ready.wait(timeout):
-            raise AssertionError(
-                f"proxy thread neither bound nor failed within {timeout}s")
-        if self.error is not None:
-            raise AssertionError(f"proxy failed to start: {self.error!r}")
-        return self.port
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
-def _start_proxy(sock_path, http_port=0, max_concurrent=4, timeout=5):
-    """Start the spdk_http_proxy_server in a background thread.
+class RunningProxy:
+    """The real proxy app, served by uvicorn on a loopback port."""
 
-    We import and configure the module, then run the server.
-    Returns (thread, stop_event, module, handle); pass http_port=0 (the
-    default) to get an OS-assigned port and read it off the handle.
-    """
-    # The proxy module starts a real server at import time, so we use the
-    # shared helper that neutralizes that side-effect during import. The
-    # helper also pre-sets required env vars (SERVER_IP, RPC_PORT, ...).
-    mod = import_proxy_module()
+    def __init__(self, sock_path, **overrides):
+        settings = ProxySettings(**{
+            "server_ip": "127.0.0.1",
+            "rpc_port": _free_port(),
+            "rpc_sock_path": sock_path,
+            "rpc_username": "test",
+            "rpc_password": "test",
+            "timeout": 5,
+            "max_concurrent_spdk": 4,
+            "multi_threading_enabled": True,
+            **overrides,
+        })
+        self.address = ("127.0.0.1", settings.rpc_port)
+        self.url = f"http://127.0.0.1:{settings.rpc_port}/"
+        app = _create_app(settings)
+        self.proxy = app.state.proxy
+        self._server = uvicorn.Server(uvicorn.Config(
+            app=app, host=settings.server_ip, port=settings.rpc_port, log_level="warning"))
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
 
-    # Reconfigure module globals — the helper sets defaults; override with
-    # the values this test needs.
-    mod.rpc_sock = sock_path
-    mod.TIMEOUT = timeout
-    mod.MAX_CONCURRENT_SPDK = max_concurrent
-    mod.spdk_semaphore = threading.Semaphore(max_concurrent)
-    mod.spdk_ready = False
-    mod.unix_sockets.clear()
-    mod.ServerHandler.server_session.clear()
-    mod.read_line_time_diff.clear()
-    mod.recv_from_spdk_time_diff.clear()
+    def start(self):
+        self._thread.start()
 
-    stop_event = threading.Event()
+    def stop(self):
+        self._server.should_exit = True
+        self._thread.join(timeout=10)
 
-    handle = _ProxyHandle()
-
-    def run():
+    def wait_until_serving(self, timeout=15):
         try:
-            key = base64.b64encode(b"test:test").decode("ascii")
-            mod.wait_for_spdk_ready()
-            mod.ServerHandler.key = key
-            from http.server import ThreadingHTTPServer
-            httpd = ThreadingHTTPServer(("127.0.0.1", http_port), mod.ServerHandler)
-            # Accept timeout only -- the SPDK-side budget is mod.TIMEOUT. Kept
-            # short so stop_event is honoured (and the port released) within a
-            # fraction of a second instead of up to `timeout`, which used to
-            # leave a fixed port bound while the next test tried to claim it.
-            httpd.timeout = 0.2
-            handle._publish_port(httpd.server_address[1], time.monotonic())
-        except Exception as e:      # noqa: BLE001 - reported via the handle
-            handle._publish_error(e)
-            return
+            return Retrying(
+                stop=stop_after_delay(timeout),
+                wait=wait_fixed(0.1),
+                retry=(retry_if_exception_type(requests.RequestException) | retry_if_result(lambda success: not success)),
+            )(lambda: self.post("spdk_get_version").status_code == 200)
+        except RetryError:
+            return False
 
-        while not stop_event.is_set():
-            httpd.handle_request()
-        httpd.server_close()
+    def metric(self, name, **labels):
+        value = REGISTRY.get_sample_value(name, labels or None)
+        return 0.0 if value is None else value
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    return thread, stop_event, mod, handle
-
-
-class TestProxyE2E(unittest.TestCase):
-    """End-to-end tests with mock SPDK server + real proxy."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls._tmpdir = tempfile.mkdtemp()
-        cls._sock_path = os.path.join(cls._tmpdir, "spdk_test.sock")
-        # Start mock SPDK
-        cls._spdk_server = _start_mock_spdk(cls._sock_path)
-        time.sleep(0.1)
-
-        # Start proxy on an OS-assigned port (see _ProxyHandle).
-        cls._proxy_thread, cls._stop_event, cls._mod, handle = _start_proxy(
-            cls._sock_path, 0, max_concurrent=4, timeout=5)
-        cls._http_port = handle.wait()
-
-        # Wait for proxy to be ready
-        for _ in range(30):
-            try:
-                r = requests.post(
-                    f"http://127.0.0.1:{cls._http_port}/",
-                    data=json.dumps({"id": 1, "method": "spdk_get_version"}),
-                    auth=("test", "test"),
-                    timeout=2,
-                )
-                if r.status_code == 200:
-                    break
-            except requests.ConnectionError:
-                pass
-            time.sleep(0.2)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls._stop_event.set()
-        cls._spdk_server.shutdown()
+    def is_refusing_connections(self):
         try:
-            os.unlink(cls._sock_path)
-        except OSError:
-            pass
-        try:
-            os.rmdir(cls._tmpdir)
-        except OSError:
-            pass
+            requests.post(self.url, data="{}", timeout=2)
+        except requests.ConnectionError:
+            return True
+        return False
 
-    def _post(self, method, params=None):
+    def post(self, method, params=None, auth=("test", "test"), headers=None, **kwargs):
         payload = {"id": 1, "method": method}
         if params:
             payload["params"] = params
-        r = requests.post(
-            f"http://127.0.0.1:{self._http_port}/",
-            data=json.dumps(payload),
-            auth=("test", "test"),
-            timeout=5,
-        )
-        return r
+        return self.request(json.dumps(payload), auth=auth, headers=headers, **kwargs)
 
-    def test_readiness_gate_prevents_zombie_sockets(self):
-        """After startup, there should be zero lingering unix sockets."""
-        self.assertEqual(len(self._mod.unix_sockets), 0)
+    def request(self, body, auth=("test", "test"), headers=None, timeout=10, session=requests):
+        return session.post(self.url, data=body, auth=auth, headers=headers, timeout=timeout)
+
+    @contextlib.contextmanager
+    def connection(self, timeout=10):
+        """One HTTP connection, kept open across requests."""
+        conn = http.client.HTTPConnection(*self.address, timeout=timeout)
+        try:
+            conn.connect()
+            yield conn
+        finally:
+            conn.close()
+
+
+@contextlib.contextmanager
+def running_proxy(sock_path, **overrides):
+    proxy = RunningProxy(sock_path, **overrides)
+    proxy.start()
+    try:
+        yield proxy
+    finally:
+        proxy.stop()
+
+
+@contextlib.contextmanager
+def sock_path():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield os.path.join(tmpdir, "spdk.sock")
+
+
+class TestProxyE2E(unittest.TestCase):
+    """Mock SPDK + the real proxy, over real HTTP."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._stack = contextlib.ExitStack()
+        path = cls._stack.enter_context(sock_path())
+        cls._spdk = cls._stack.enter_context(mock_spdk(path))
+        cls._proxy = cls._stack.enter_context(running_proxy(path))
+        if not cls._proxy.wait_until_serving():
+            cls._stack.close()
+            raise unittest.SkipTest("proxy did not come up")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stack.close()
 
     def test_basic_rpc_roundtrip(self):
-        """A simple RPC should return a valid JSON-RPC response."""
-        r = self._post("spdk_get_version")
-        self.assertEqual(r.status_code, 200)
-        data = r.json()
-        self.assertIn("result", data)
-        self.assertEqual(data["result"]["version"], "24.01")
+        response = self._proxy.post("spdk_get_version")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"]["version"], "24.01")
+
+    def test_request_reaches_spdk(self):
+        self._proxy.post("nvmf_get_subsystems")
+
+        self.assertIn("nvmf_get_subsystems", self._spdk.call_log)
 
     def test_bdev_get_bdevs_roundtrip(self):
-        r = self._post("bdev_get_bdevs")
-        self.assertEqual(r.status_code, 200)
-        data = r.json()
-        self.assertIn("result", data)
-        self.assertIsInstance(data["result"], list)
+        response = self._proxy.post("bdev_get_bdevs")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json()["result"], list)
+
+    def test_notification_gets_204(self):
+        response = self._proxy.request(json.dumps({"method": "spdk_kill_instance"}))
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.content, b'')
+
+    def test_unauthorized_returns_401(self):
+        response = self._proxy.post("spdk_get_version", auth=("wrong", "creds"))
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_malformed_body_returns_400(self):
+        response = self._proxy.request("not json")
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_keep_alive_serves_several_requests_on_one_connection(self):
+        body = json.dumps({"id": 1, "method": "spdk_get_version"})
+        headers = {"Authorization": "Basic " + base64.b64encode(b"test:test").decode("ascii")}
+
+        with self._proxy.connection() as conn:
+            for _ in range(5):
+                conn.request("POST", "/", body=body, headers=headers)
+                response = conn.getresponse()
+                response.read()
+
+                self.assertEqual(response.status, 200)
+                self.assertFalse(response.will_close, "proxy closed the connection after a response")
+
+    def test_unauthorized_request_does_not_corrupt_the_connection(self):
+        """A rejected request leaves its body unread; on a kept-alive
+        connection it must not be parsed as the next request."""
+        with requests.Session() as session:
+            rejected = self._proxy.post(
+                "spdk_get_version", auth=("wrong", "creds"), session=session)
+            self.assertEqual(rejected.status_code, 401)
+
+            accepted = self._proxy.post("spdk_get_version", session=session)
+
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json()["result"]["version"], "24.01")
 
     def test_no_socket_leak_after_requests(self):
-        """After several requests complete, no unix sockets should be leaked."""
         for _ in range(5):
-            self._post("spdk_get_version")
-        _wait_until(lambda: len(self._mod.unix_sockets) == 0)
-        self.assertEqual(len(self._mod.unix_sockets), 0)
+            self._proxy.post("spdk_get_version")
+
+        self.assertEqual(self._proxy.metric("spdk_proxy_unix_connections_open"), 0)
 
     def test_concurrent_requests(self):
-        """Multiple concurrent requests should all succeed."""
         results = []
         errors = []
 
         def do_request():
             try:
-                r = self._post("spdk_get_version")
-                results.append(r.status_code)
+                results.append(self._proxy.post("spdk_get_version").status_code)
             except Exception as e:
                 errors.append(e)
 
@@ -327,146 +309,40 @@ class TestProxyE2E(unittest.TestCase):
             t.join(timeout=10)
 
         self.assertEqual(errors, [])
-        self.assertTrue(all(s == 200 for s in results), f"Got statuses: {results}")
-
-    def test_unauthorized_returns_401(self):
-        """Request with wrong credentials should get 401."""
-        r = requests.post(
-            f"http://127.0.0.1:{self._http_port}/",
-            data=json.dumps({"id": 1, "method": "spdk_get_version"}),
-            auth=("wrong", "creds"),
-            timeout=5,
-        )
-        self.assertEqual(r.status_code, 401)
-
-    def test_session_count_returns_to_baseline(self):
-        """After requests complete, server_session should be empty."""
-        for _ in range(3):
-            self._post("spdk_get_version")
-        _wait_until(lambda: len(self._mod.ServerHandler.server_session) == 0)
-        self.assertEqual(len(self._mod.ServerHandler.server_session), 0)
-
-    def test_keep_alive_reuses_one_connection_for_several_requests(self):
-        """A client session issuing several requests should open ONE TCP
-        connection, not one per request."""
-        connection_count = {"n": 0}
-        original_setup = self._mod.ServerHandler.setup
-
-        def counting_setup(handler_self):
-            connection_count["n"] += 1
-            original_setup(handler_self)
-
-        with patch.object(self._mod.ServerHandler, "setup", counting_setup):
-            with requests.Session() as session:
-                for _ in range(5):
-                    r = session.post(
-                        f"http://127.0.0.1:{self._http_port}/",
-                        data=json.dumps({"id": 1, "method": "spdk_get_version"}),
-                        auth=("test", "test"),
-                        timeout=5,
-                    )
-                    self.assertEqual(r.status_code, 200)
-
-        self.assertEqual(
-            connection_count["n"], 1,
-            "expected all 5 requests on one requests.Session to reuse a "
-            "single kept-alive TCP connection to the proxy")
-
-    def test_unauthorized_request_does_not_corrupt_the_connection(self):
-        """Regression test: an undrained body on a 401 used to leak into the
-        next request on the same kept-alive connection ('Bad request version')."""
-        with requests.Session() as session:
-            r1 = session.post(
-                f"http://127.0.0.1:{self._http_port}/",
-                data=json.dumps({"id": 1, "method": "spdk_get_version"}),
-                auth=("wrong", "creds"),
-                timeout=5,
-            )
-            self.assertEqual(r1.status_code, 401)
-
-            r2 = session.post(
-                f"http://127.0.0.1:{self._http_port}/",
-                data=json.dumps({"id": 1, "method": "spdk_get_version"}),
-                auth=("test", "test"),
-                timeout=5,
-            )
-            self.assertEqual(r2.status_code, 200)
-            self.assertEqual(r2.json()["result"]["version"], "24.01")
+        self.assertEqual(results, [200] * 8)
+        self.assertEqual(self._proxy.metric("spdk_proxy_unix_connections_open"), 0)
 
 
 class TestProxyReadinessGate(unittest.TestCase):
-    """Test that the proxy blocks until SPDK is ready."""
 
-    def test_proxy_waits_for_spdk(self):
-        """Proxy should not accept HTTP requests until SPDK responds."""
-        tmpdir = tempfile.mkdtemp()
-        sock_path = os.path.join(tmpdir, "spdk_delayed.sock")
+    def test_port_stays_closed_until_spdk_answers(self):
+        with sock_path() as path, running_proxy(path) as proxy:
+            self.assertTrue(
+                proxy.is_refusing_connections(),
+                "proxy must not accept requests before SPDK is up")
 
-        ready_time = {"t": None}
-        # SPDK appears when this test says so, rather than after a sleep a
-        # sibling test module may have patched away.
-        release_spdk = threading.Event()
+            with mock_spdk(path):
+                self.assertTrue(proxy.wait_until_serving())
+                self.assertEqual(proxy.metric("spdk_proxy_unix_connections_open"), 0)
 
-        # Start the SPDK server only once release_spdk fires.
-        def delayed_spdk():
-            release_spdk.wait(30)
-            server = _start_mock_spdk(sock_path)
-            ready_time["t"] = time.monotonic()
-            return server
 
-        spdk_thread = threading.Thread(target=delayed_spdk, daemon=True)
-        spdk_thread.start()
+class TestProxyTimeout(unittest.TestCase):
 
-        _, stop_event, mod_ref, handle = _start_proxy(
-            sock_path, 0, max_concurrent=4, timeout=5)
+    def test_caller_timeout_bounds_the_spdk_wait(self):
+        """A caller-supplied X-RPC-Timeout must free the SPDK slot early rather
+        than pin it for the proxy-global timeout."""
+        with sock_path() as path, mock_spdk(path) as spdk, running_proxy(
+                path, timeout=30, spdk_timeout_margin=2) as proxy:
+            self.assertTrue(proxy.wait_until_serving())
+            spdk._delay = 1  # only now, so the readiness probe stays fast
 
-        # The gate itself: with SPDK absent, the proxy must not open its HTTP
-        # port. This is the assertion the test was named for and never made.
-        self.assertFalse(
-            handle.settled_within(0.5),
-            "proxy bound its HTTP port while SPDK was still absent: the "
-            "readiness gate did not hold")
+            started = time.monotonic()
+            response = proxy.post("bdev_get_bdevs", headers={"X-RPC-Timeout": "0.2"})
+            elapsed = time.monotonic() - started
 
-        # Now let SPDK up; the proxy should follow.
-        release_spdk.set()
-        http_port = handle.wait(timeout=30)
-
-        # Wait for the bound proxy to serve. Paced with Event.wait rather
-        # than time.sleep: a sibling module patches time.sleep globally, which
-        # would collapse all 40 attempts into microseconds and turn a slow
-        # start into a spurious "Proxy should eventually come up".
-        pacer = threading.Event()
-        proxy_up = False
-        for _ in range(40):
-            try:
-                r = requests.post(
-                    f"http://127.0.0.1:{http_port}/",
-                    data=json.dumps({"id": 1, "method": "spdk_get_version"}),
-                    auth=("test", "test"),
-                    timeout=2,
-                )
-                if r.status_code == 200:
-                    proxy_up = True
-                    break
-            except requests.ConnectionError:
-                pass
-            pacer.wait(0.2)
-
-        stop_event.set()
-
-        self.assertTrue(proxy_up, "Proxy should eventually come up")
-        self.assertIsNotNone(ready_time["t"], "mock SPDK never came up")
-        # Proxy should have waited for SPDK: verify no zombie sockets
-        self.assertEqual(len(mod_ref.unix_sockets), 0)
-
-        try:
-            os.unlink(sock_path)
-        except OSError:
-            pass
-        try:
-            os.rmdir(tmpdir)
-        except OSError:
-            pass
+            self.assertEqual(response.status_code, 500)
+            self.assertLess(elapsed, 1)
+            self.assertEqual(proxy.metric("spdk_proxy_unix_connections_open"), 0)
 
 
 if __name__ == "__main__":

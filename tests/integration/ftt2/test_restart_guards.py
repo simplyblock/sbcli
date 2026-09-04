@@ -25,8 +25,6 @@ def _run_restart(env, node_idx=0):
     from simplyblock_core.db_controller import DBController
     node = env['nodes'][node_idx]
     patches = patch_externals()
-    for p in patches:
-        p.start()
     try:
         db = DBController()
         snode = db.get_storage_node_by_id(node.uuid)
@@ -40,8 +38,7 @@ def _run_restart(env, node_idx=0):
         updated = db.get_storage_node_by_id(node.uuid)
         return result, updated
     finally:
-        for p in patches:
-            p.stop()
+        patches.close()
 
 
 # ###########################################################################
@@ -61,14 +58,11 @@ class TestRestartRestartOverlap:
 
         prepare_node_for_restart(env, RESTART_NODE)
         patches = patch_externals()
-        for p in patches:
-            p.start()
         try:
             result = storage_node_ops.restart_storage_node(env['nodes'][0].uuid)
             assert result is False, "Restart must be rejected"
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
             n1.status = StorageNode.STATUS_ONLINE
             n1.write_to_db(db.kv_store)
 
@@ -108,8 +102,6 @@ class TestRestartRestartOverlap:
         # leave a MagicMock permanently installed (e.g. set_node_status), which
         # then breaks every subsequent test in the process.
         patches = patch_externals()
-        for p in patches:
-            p.start()
         try:
             t0 = threading.Thread(target=_restart_node, args=(0,))
             t1 = threading.Thread(target=_restart_node, args=(1,))
@@ -118,8 +110,7 @@ class TestRestartRestartOverlap:
             t0.join(timeout=60)
             t1.join(timeout=60)
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
 
         # At most one should succeed (the FDB transaction prevents both)
         successes = sum(1 for r in results if r is True)
@@ -143,14 +134,11 @@ class TestRestartShutdownOverlap:
 
         prepare_node_for_restart(env, RESTART_NODE)
         patches = patch_externals()
-        for p in patches:
-            p.start()
         try:
             result = storage_node_ops.restart_storage_node(env['nodes'][0].uuid)
             assert result is False, "Restart must be rejected during peer shutdown"
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
             n1.status = StorageNode.STATUS_ONLINE
             n1.write_to_db(db.kv_store)
 
@@ -164,14 +152,11 @@ class TestRestartShutdownOverlap:
 
         # Try to shut down n1
         patches = patch_externals()
-        for p in patches:
-            p.start()
         try:
             result = storage_node_ops.shutdown_storage_node(env['nodes'][1].uuid)
             assert result is False, "Shutdown must be rejected during peer restart"
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
             n0.status = StorageNode.STATUS_ONLINE
             n0.write_to_db(db.kv_store)
 
@@ -184,14 +169,11 @@ class TestRestartShutdownOverlap:
         n0.write_to_db(db.kv_store)
 
         patches = patch_externals()
-        for p in patches:
-            p.start()
         try:
             result = storage_node_ops.shutdown_storage_node(env['nodes'][1].uuid)
             assert result is False, "Shutdown must be rejected during peer shutdown"
         finally:
-            for p in patches:
-                p.stop()
+            patches.close()
             n0.status = StorageNode.STATUS_ONLINE
             n0.write_to_db(db.kv_store)
 

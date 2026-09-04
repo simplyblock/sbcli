@@ -107,6 +107,7 @@ Key rules:
 - **v2 DTOs**: Use `@field_serializer('field', when_used='json')` to unwrap for JSON wire responses while keeping wrappers in Python-mode `model_dump()`.
 - **CLI arguments**: Declare the argument type as `secret` in `cli-reference.yaml`. The generator produces `SecretStr` as the argparse type converter, so the value is wrapped at parse time.
 - **Logging**: Never log unwrapped secret values. Response-body logging is gated by `Settings().log_response_bodies` (env `SB_LOG_RESPONSE_BODIES`, default `False`). External libraries that log HTTP bodies (`urllib3`, `kubernetes.client.rest`) are silenced to WARNING. The web access log records only `request.url.path`, never the query string.
+- **Downstream of the unwrap**: `services/spdk_http_proxy_server.py` receives JSON-RPC bodies that have already been through `unwrap_secrets_for_send`, so no `SecretStr` survives to mask by. Log those through `redact_rpc_params` from `simplyblock_core/utils/secrets.py`, which masks by parameter name (`SENSITIVE_RPC_PARAMS`). An RPC that carries new key material or a new credential adds its parameter name to that set — masking by type in `rpc_client` alone does not reach the proxy.
 - **Comparison**: Use `hmac.compare_digest(secret.get_secret_value(), other)` for timing-safe comparison.
 - **Testing**: New secret-bearing code needs masking, wire-delivery, and FDB round-trip tests. See `tests/AGENTS.md` § Secret-handling tests for the required assertions and canonical examples.
 
