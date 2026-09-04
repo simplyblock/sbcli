@@ -1167,7 +1167,7 @@ class _DeviceFailureMigrationBase:
         if not candidates:
             return None
 
-        return sorted(candidates)[0]
+        return min(candidates)
 
     def _count_active_fio(self):
         """Count active FIO processes on the client node (Docker variant)."""

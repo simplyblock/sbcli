@@ -790,11 +790,10 @@ class SnapshotCloneScaleRun:
         with open(csv_path, "w", encoding="utf-8") as h:
             h.write("index,name,uuid,create_elapsed_s,create_error,"
                     "delete_elapsed_s,delete_error\n")
-            for r in self.state.clones:
-                h.write(f"{r.index},{r.name},{r.uuid},{r.create_elapsed:.4f},"
+            h.writelines(f"{r.index},{r.name},{r.uuid},{r.create_elapsed:.4f},"
                         f"{1 if r.create_error else 0},"
                         f"{r.delete_elapsed:.4f},"
-                        f"{1 if r.delete_error else 0}\n")
+                        f"{1 if r.delete_error else 0}\n" for r in self.state.clones)
         self.logger.log(f"per-clone CSV → {csv_path}")
 
         # Human-readable bucket table.

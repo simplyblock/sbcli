@@ -177,7 +177,7 @@ def _is_target_remote_controller_healthy(device_obj, event_node_obj):
     else:
         remote_bdev = f"remote_{device_obj.alceml_bdev}n1"
 
-    ctrl_name = remote_bdev[:-2] if remote_bdev.endswith("n1") else remote_bdev
+    ctrl_name = remote_bdev.removesuffix("n1")
     ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(ctrl_name)
     if not ret:
         return False

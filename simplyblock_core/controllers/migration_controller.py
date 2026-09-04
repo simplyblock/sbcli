@@ -792,13 +792,12 @@ def cleanup_migration_target(migration_id):
         except KeyError:
             continue
         short = snap.snap_bdev.split('/', 1)[-1]
-        if short.endswith(_MIG_SUFFIX):
-            short = short[:-len(_MIG_SUFFIX)]
+        short = short.removesuffix(_MIG_SUFFIX)
         protected_short_bases.add(short)
 
     for stored_path in reversed(migration.target_snap_bdevs):
         lvstore, short_m = stored_path.rsplit('/', 1)
-        short_base = short_m[:-len(_MIG_SUFFIX)] if short_m.endswith(_MIG_SUFFIX) else short_m
+        short_base = short_m.removesuffix(_MIG_SUFFIX)
 
         if short_base in protected_short_bases:
             skipped.append({"type": "snap_bdev", "stored_path": stored_path,
