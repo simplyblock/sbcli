@@ -62,9 +62,29 @@ def _detached(value: _T) -> _T:
     return value
 
 
+def _looks_like_container_repr(value: str) -> bool:
+    """Whether ``value`` is the ``repr`` of a list or dict rather than real data.
+
+    Only consulted for fields named in
+    ``_LEGACY_STRINGIFIED_CONTAINER_FIELDS``, so it never has to second-guess
+    a legitimate string that happens to start with a bracket.
+    """
+    value = value.strip()
+    return (
+        (value.startswith('[') and value.endswith(']'))
+        or (value.startswith('{') and value.endswith('}'))
+    )
+
+
 class BaseModel(object):
 
     _STATUS_CODE_MAP: ClassVar[dict] = {}
+
+    #: Fields whose stored records may still carry a *stringified* container
+    #: ("[]", "[{...}]") from a release where the field was declared as a
+    #: list or dict. ``from_dict`` replaces such a value with the field's
+    #: default instead of treating it as real data.
+    _LEGACY_STRINGIFIED_CONTAINER_FIELDS: ClassVar[frozenset] = frozenset()
 
     id: str = ""
     uuid: str = ""
@@ -167,11 +187,33 @@ class BaseModel(object):
                 dtype = value_dict['type']
                 value = data[attr]
                 if dtype in [int, float, str, bool]:
-                    try:
-                        value = dtype(value)
-                    except Exception:
-                        if type(value) is list and dtype is int:
-                            value = len(value)
+                    if isinstance(value, (list, tuple, set, dict)):
+                        # A record written before the field's shape changed
+                        # from a container to a scalar. `dtype(value)` would
+                        # NOT raise for str/bool: `str([])` is the truthy
+                        # string "[]", which then reads as a real value
+                        # (a node UUID, a name) everywhere downstream and is
+                        # re-persisted on the next write_to_db. Fall back to
+                        # the declared default instead -- an absent value is
+                        # what a stale record actually means.
+                        value = (
+                            len(value) if dtype is int   # documented list -> count migration
+                            else value_dict['default']
+                        )
+                    else:
+                        try:
+                            value = dtype(value)
+                        except Exception:
+                            value = value_dict['default']
+                        if (
+                            dtype is str
+                            and attr in self._LEGACY_STRINGIFIED_CONTAINER_FIELDS
+                            and _looks_like_container_repr(value)
+                        ):
+                            # Already re-persisted as "[]" by a build that ran
+                            # before the guard above existed. Heal on read; the
+                            # next write_to_db drops the bogus string for good.
+                            value = value_dict['default']
 
                 elif dtype is SecretStr:
                     value = value if isinstance(value, SecretStr) else SecretStr(value or "")

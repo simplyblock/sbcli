@@ -27,6 +27,13 @@ class StorageNode(BaseNodeObject):
     RESTART_PHASE_BLOCKED = "blocked"
     RESTART_PHASE_POST_UNBLOCK = "post_unblock"
 
+    # Declared as List[dict] up to and including R26.2-PRE, so a node that was
+    # never anyone's LVS peer has a literal [] in its stored record. See
+    # BaseModel.from_dict.
+    _LEGACY_STRINGIFIED_CONTAINER_FIELDS = frozenset({
+        'lvstore_stack_secondary',
+        'lvstore_stack_tertiary',
+    })
 
     alceml_cpu_cores: List[int] = default_factory(list)
     alceml_cpu_index: int = 0
