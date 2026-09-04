@@ -4,13 +4,18 @@ import pprint
 import json
 from inspect import ismethod, isfunction
 import sys
-from typing import Callable, ClassVar, Mapping, Type, TypeVar, Union, cast, get_origin
+from types import UnionType
+from typing import Callable, ClassVar, Mapping, Type, TypeVar, Union, cast, get_args, get_origin
 from collections import ChainMap
 
 from pydantic import SecretBytes, SecretStr
 
 
 _T = TypeVar('_T')
+
+#: `typing.Union[X, Y]` and `X | Y` are distinct objects before 3.14, where
+#: `types.UnionType` became `typing.Union`.
+_UNION_ORIGINS = (Union, UnionType)
 
 
 class _DefaultFactory:
@@ -165,6 +170,13 @@ class BaseModel(object):
             value = value_dict['default']
             if data is not None and attr in data:
                 dtype = value_dict['type']
+                # `get_origin` is the only spelling-independent way to ask what
+                # a generic annotation is: a PEP 604 union (`X | None`) carries
+                # no `__origin__` before 3.14, and a bare `list` carries none on
+                # any version.
+                generic_origin = get_origin(dtype)
+                origin = generic_origin or dtype
+                args = get_args(dtype)
                 value = data[attr]
                 if dtype in [int, float, str, bool]:
                     try:
@@ -183,39 +195,44 @@ class BaseModel(object):
                     else:
                         value = SecretBytes((value or "").encode())
 
-                elif hasattr(dtype, '__origin__'):
-                    if dtype.__origin__ is list:
-                        if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
-                            value = [dtype.__args__[0]().from_dict(item) for item in data[attr]]
-                        else:
-                            value = data[attr]
-                    elif dtype.__origin__ == Mapping:
-                        if hasattr(dtype, "__args__") and hasattr(dtype.__args__[1], "from_dict"):
-                            value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
-                        else:
-                            value = value_dict['type'](data[attr])
-                    elif dtype.__origin__ is Union:
-                        if data[attr] is None:
-                            value = None
-                        else:
-                            inner_types = [t for t in dtype.__args__ if t is not type(None)]
-                            inner = inner_types[0] if inner_types else None
-                            if inner is not None and hasattr(inner, "from_dict"):
-                                value = inner().from_dict(data[attr])
-                            elif inner is SecretStr:
-                                value = data[attr] if isinstance(data[attr], SecretStr) else SecretStr(data[attr] or "")
-                            elif inner is SecretBytes:
-                                raw = data[attr]
-                                if isinstance(raw, SecretBytes):
-                                    value = raw
-                                elif isinstance(raw, (bytes, bytearray)):
-                                    value = SecretBytes(bytes(raw))
-                                else:
-                                    value = SecretBytes((raw or "").encode())
-                            elif inner is not None:
-                                value = inner(data[attr])
+                elif origin is list:
+                    if args and hasattr(args[0], "from_dict"):
+                        value = [args[0]().from_dict(item) for item in data[attr]]
+                    else:
+                        value = data[attr]
+                elif origin is Mapping:
+                    if args and hasattr(args[1], "from_dict"):
+                        value = {item: args[1]().from_dict(data[attr][item]) for item in data[attr]}
+                    else:
+                        value = dtype(data[attr])
+                elif origin in _UNION_ORIGINS:
+                    if data[attr] is None:
+                        value = None
+                    else:
+                        inner_types = [t for t in args if t is not type(None)]
+                        inner = inner_types[0] if inner_types else None
+                        if inner is not None and hasattr(inner, "from_dict"):
+                            value = inner().from_dict(data[attr])
+                        elif inner is SecretStr:
+                            value = data[attr] if isinstance(data[attr], SecretStr) else SecretStr(data[attr] or "")
+                        elif inner is SecretBytes:
+                            raw = data[attr]
+                            if isinstance(raw, SecretBytes):
+                                value = raw
+                            elif isinstance(raw, (bytes, bytearray)):
+                                value = SecretBytes(bytes(raw))
+                            else:
+                                value = SecretBytes((raw or "").encode())
+                        elif inner is not None:
+                            value = inner(data[attr])
+                elif generic_origin is not None:
+                    # A parameterized generic with no rule of its own
+                    # (`dict[str, str]`, `tuple[int, ...]`): the payload is
+                    # already the right shape, and the alias is not always
+                    # callable — `typing.Dict[str, str]()` raises.
+                    value = data[attr]
                 else:
-                    value = value_dict['type'](data[attr])
+                    value = dtype(data[attr])
 
                 value = _detached(value)
             setattr(self, attr, value)
