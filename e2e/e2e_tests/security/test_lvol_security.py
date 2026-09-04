@@ -438,6 +438,22 @@ class SecurityTestBase(TestClusterBase):
         with a specific allowedNodes subset.
         """
         k8s = self._ensure_k8s_utils()
+
+        # Authoritative source first: `pool get` reports the CRD name it was
+        # reconciled from as ``cr_name``. Verified on OpenShift 2026-09-04.
+        try:
+            details = self.sbcli_utils.get_pool_by_id(self._get_pool_id())
+            if isinstance(details, list):
+                details = details[0] if details else {}
+            cr_name = (details or {}).get("cr_name")
+            if cr_name:
+                self.logger.info(
+                    f"[pool] StoragePool CRD from pool.cr_name: {cr_name!r}")
+                return cr_name
+        except Exception as exc:
+            self.logger.info(
+                f"[pool] cr_name unavailable ({exc}) — matching on spec")
+
         wanted = sorted(allowed_nodes or [])
         out, _ = k8s._exec_kubectl(
             f"kubectl get storagepools -n {k8s.namespace} -o json "
@@ -919,6 +935,9 @@ class SecurityTestBase(TestClusterBase):
         Each break is then attributable to a stage, instead of surfacing 20
         minutes later as an unexplained "pod never reached Running":
 
+          L0 Pool keys -- the pool reports ``dhchap: true`` and carries both
+             a ``dhchap_key`` and a ``dhchap_ctrlr_key``. The only check here
+             that is about authentication rather than placement.
           L1 StoragePool CRD -- spec.dhchap is true, spec.allowedNodes is what
              we asked for, and status.allowedNodes mirrors it (i.e. the
              operator has actually reconciled).
@@ -982,6 +1001,38 @@ class SecurityTestBase(TestClusterBase):
         self.logger.info(
             f"[dhchap L2] label {label}=allowed on exactly {sorted(labelled)}; "
             f"absent from {sorted(disallowed or [])}")
+
+        # L0 — the pool really has DHCHAP provisioned.
+        #
+        # This is the ONLY assertion in the K8s path that is specific to
+        # DH-HMAC-CHAP rather than to node placement: it checks the pool
+        # carries actual host and controller keys. Everything below (labels,
+        # nodeAffinity, mount outcome) would hold equally for a pool with
+        # dhchap:false that happened to carry the same node label, because
+        # nodeAffinity is a scheduling gate and not authentication.
+        pool_details = None
+        try:
+            pool_details = self.sbcli_utils.get_pool_by_id(self._get_pool_id())
+            if isinstance(pool_details, list):
+                pool_details = pool_details[0] if pool_details else {}
+        except Exception as exc:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} [dhchap L0] could not read pool "
+                f"details: {exc}")
+        if isinstance(pool_details, dict) and pool_details:
+            assert pool_details.get("dhchap") is True, (
+                f"L0: pool {self.pool_name!r} reports dhchap="
+                f"{pool_details.get('dhchap')!r}, expected True")
+            for key in ("dhchap_key", "dhchap_ctrlr_key"):
+                val = pool_details.get(key) or ""
+                assert val.startswith("DHHC-"), (
+                    f"L0: pool {self.pool_name!r} has no usable {key} "
+                    f"(got {val[:12]!r}...). Without a provisioned key there "
+                    f"is no in-band authentication to enforce, whatever the "
+                    f"node labels say.")
+            self.logger.info(
+                "[dhchap L0] pool has dhchap=true with both a host and a "
+                "controller key provisioned")
 
         # L3 — backend allowed hosts == derived NQNs of the allowed nodes
         nqn_by_node = dict(self._get_k8s_worker_nqns())
