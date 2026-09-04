@@ -42,6 +42,18 @@ from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
 
 
+# Selects every node that is NOT a control-plane node.
+#
+# Do not use ``-l node-role.kubernetes.io/worker`` here: Talos does not put a
+# role label on workers at all (verified -- worker-1..4 have no
+# node-role.kubernetes.io/* label, only control-plane does), so that selector
+# matches nothing, exits 0, and silently yields an EMPTY worker list. The
+# previous "|| kubectl get nodes" fallback was worse: it returned every node,
+# control-plane included, which is exactly how a control-plane node can end up
+# in the storage plane.
+_NON_CP_SELECTOR = "node-role.kubernetes.io/control-plane!="
+
+
 def _rand_seq(length: int = 6) -> str:
     first = random.choice(string.ascii_lowercase)
     rest = "".join(random.choices(string.ascii_lowercase + string.digits, k=length - 1))
@@ -628,10 +640,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                            if n.strip()]
         else:
             out, _ = self.k8s_utils._exec_kubectl(
-                "kubectl get nodes -l node-role.kubernetes.io/worker "
-                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
-                "kubectl get nodes --no-headers "
-                "-o custom-columns=NAME:.metadata.name",
+                "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true",
                 supress_logs=True,
             )
             worker_names = [n.strip() for n in (out or "").replace("'", "").split()
@@ -900,10 +910,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                            if n.strip()]
         else:
             out, _ = self.k8s_utils._exec_kubectl(
-                "kubectl get nodes -l node-role.kubernetes.io/worker "
-                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
-                "kubectl get nodes --no-headers "
-                "-o custom-columns=NAME:.metadata.name",
+                "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true",
                 supress_logs=True,
             )
             worker_names = [n.strip() for n in (out or "").replace("'", "").split()
@@ -2498,8 +2506,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 first_worker = worker_nodes_env.split(",")[0].strip()
             else:
                 out, _ = self.k8s_utils._exec_kubectl(
-                    "kubectl get nodes -l node-role.kubernetes.io/worker "
-                    "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
+                    "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                    "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true"
                 )
                 first_worker = (out or "").replace("'", "").strip()
 
@@ -2552,9 +2560,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         else:
             self.logger.warning("WORKER_NODES env not set, attempting to derive from K8s")
             out, _ = self.k8s_utils._exec_kubectl(
-                "kubectl get nodes -l node-role.kubernetes.io/worker "
-                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
-                "kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name"
+                "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true"
             )
             for node_name in (out or "").replace("'", "").split():
                 node_name = node_name.strip()
@@ -3217,10 +3224,8 @@ class K8sNativeMajorUpgradeDualNode(K8sNativeMajorUpgrade):
                 "WORKER_NODES env not set, attempting to derive from K8s"
             )
             out, _ = self.k8s_utils._exec_kubectl(
-                "kubectl get nodes -l node-role.kubernetes.io/worker "
-                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
-                "kubectl get nodes --no-headers "
-                "-o custom-columns=NAME:.metadata.name"
+                "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true"
             )
             for node_name in (out or "").replace("'", "").split():
                 node_name = node_name.strip()

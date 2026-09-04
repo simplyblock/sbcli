@@ -926,6 +926,29 @@ jobs:
           set -euxo pipefail
           echo "=== Labeling worker nodes for R25 storage plane ==="
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+
+          # Refuse to put a control-plane node into the storage plane. The
+          # storage-node DaemonSet selects purely on this label, so a
+          # control-plane name in worker_nodes silently schedules SPDK/CSI
+          # onto it -- which is how a Talos run ended up running
+          # simplyblock-storage-node-ds on control-plane. The last known-good
+          # run (33070003566) passed only worker-1..worker-4. Fail here rather
+          # than let it surface later as an unexplained extra storage node.
+          BAD=""
+          for NODE in "${NODES[@]}"; do
+            if kubectl get node "$NODE" -o jsonpath='{.metadata.labels}' 2>/dev/null | grep -q "node-role.kubernetes.io/control-plane"; then
+              BAD="$BAD $NODE"
+            fi
+          done
+          if [ -n "$BAD" ]; then
+            echo "ERROR: worker_nodes contains control-plane node(s):$BAD"
+            echo "They carry node-role.kubernetes.io/control-plane and must not be"
+            echo "labelled io.simplyblock.node-type=simplyblock-storage-plane."
+            echo "Remove them from the worker_nodes input and re-dispatch."
+            kubectl get nodes -L node-role.kubernetes.io/control-plane
+            exit 1
+          fi
+
           for NODE in "${NODES[@]}"; do
             kubectl label node "$NODE" io.simplyblock.node-type=simplyblock-storage-plane --overwrite
             echo "Labeled $NODE with io.simplyblock.node-type=simplyblock-storage-plane"
