@@ -1772,6 +1772,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.logger.info("All storage nodes restarted successfully")
         self.runner_k8s_log.restart_logging()
 
+        # Step 7b/7c: activate v2 write protection, then restart again
+        self._switch_write_protection_and_restart(
+            storage_node_list, label="Step 7b")
+
         # Post-upgrade validation
         self.logger.info("Step 8: Post-upgrade validation")
         self._assert_all_nodes_healthy()
@@ -2827,6 +2831,80 @@ spec:
 
         self.logger.info("All storage nodes restarted successfully")
 
+    def _switch_write_protection_and_restart(self, storage_node_list,
+                                             label="Post-upgrade"):
+        """Activate v2 distrib write protection cluster-wide, then restart
+        every storage node again with ``--force``.
+
+        An upgraded cluster's existing distribs stay on **v1** write
+        protection -- only freshly created clusters start on v2. ``sbctl
+        cluster switch-write-protection`` sends the runtime RPC to every
+        online node and records v2 only once they all accept it, so it has to
+        run after the upgrade and after every node is back online. The second
+        round of restarts then verifies the v2 generation was persisted and
+        that nodes come back cleanly under it.
+
+        ``--force`` is required on this second restart: the nodes are already
+        online and healthy, so a plain restart is refused as unnecessary.
+
+        Mirrors TEMP Step 11b/11c in the docker upgrade
+        (``e2e_tests/upgrade_tests/major_upgrade.py``).
+        """
+        sbcli = "sbctl"
+        self.logger.info(
+            f"{label} Step A: sbctl cluster switch-write-protection "
+            f"{self.cluster_id}"
+        )
+        out, err = self.k8s_utils.exec_sbcli(
+            f"{sbcli} -d cluster switch-write-protection {self.cluster_id}"
+        )
+        blob = f"{out or ''}{err or ''}"
+        assert "Error" not in blob and "Traceback" not in blob, (
+            f"switch-write-protection failed: out={out!r} err={err!r}"
+        )
+        self.logger.info(f"  switch-write-protection: {(out or '').strip()}")
+        sleep_n_sec(30)
+
+        self.logger.info(
+            f"{label} Step B: restarting all {len(storage_node_list)} storage "
+            f"nodes again post-switch (--force)"
+        )
+        for idx, node in enumerate(storage_node_list):
+            node_id = node["id"]
+            self.logger.info(
+                f"  Post-switch restart of node {node_id} "
+                f"({idx + 1}/{len(storage_node_list)})"
+            )
+            restart_ts = int(datetime.now().timestamp()) - 120
+
+            self.k8s_utils.exec_sbcli(
+                f"{sbcli} -d --dev sn restart {node_id} --force"
+            )
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_id=node_id, status="online", timeout=1000,
+            )
+            self.k8s_utils.wait_spdk_pods_ready(
+                expected_count=len(storage_node_list), timeout=600,
+            )
+            self.logger.info(f"  Node {node_id} back online post-switch")
+
+            try:
+                self.validate_migration_for_node(
+                    restart_ts, 1800, None, 60, no_task_ok=True
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"  Post-switch migration validation for {node_id}: {exc}"
+                )
+
+            if idx < len(storage_node_list) - 1:
+                sleep_n_sec(30)
+
+        self.logger.info(
+            f"{label}: write-protection switched to v2 and all nodes "
+            f"restarted successfully"
+        )
+
     def _run_maintenance_upgrade(self, storage_node_list: list[dict]):
         """Full R25→R26 maintenance window upgrade path."""
         self.logger.info(
@@ -2999,6 +3077,11 @@ spec:
             self.sbcli_utils.wait_for_storage_node_status(
                 node_id=node["id"], status="online", timeout=600,
             )
+
+        # Step 10b/10c: activate v2 write protection cluster-wide, then
+        # restart every node again to verify it persists.
+        self._switch_write_protection_and_restart(
+            storage_node_list, label="Step 10b")
 
         # ── End maintenance window ──
         self.logger.info("=" * 40 + " MAINTENANCE WINDOW END " + "=" * 40)

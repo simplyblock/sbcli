@@ -984,6 +984,46 @@ if [ $TIMEOUT -le 0 ]; then
 fi
 ```
 
+### Step 10.2 — Activate v2 Write Protection, Then Restart Nodes Again
+
+**Required after every R25 to R26 upgrade.** An upgraded cluster's existing
+distribs stay on **v1** write protection — only freshly created clusters start
+on v2. Activating it is a two-part step: switch, then restart every node once
+more so the v2 generation is persisted and the nodes come back under it.
+
+Run this only after Step 10.1 reports the cluster `ACTIVE` and every node
+healthy — `switch-write-protection` sends the runtime RPC to all online nodes
+and records v2 only once every one of them accepts it.
+
+```bash
+CLUSTER_ID=$(sbctl cluster list --json | jq -r '.[0].UUID')
+
+# 1. Switch the cluster to v2 write protection
+sbctl cluster switch-write-protection "$CLUSTER_ID"
+sleep 30
+
+# 2. Restart every storage node again, one at a time.
+#    --force is REQUIRED here: the nodes are already online and healthy, so a
+#    plain restart is refused as unnecessary.
+for NODE_ID in $(sbctl sn list --json | jq -r '.[].UUID'); do
+    echo "Post-switch restart of $NODE_ID"
+    sbctl --dev -d sn restart "$NODE_ID" --force
+
+    # wait for it to come back before moving to the next node
+    while [ "$(sbctl sn list --json | jq -r --arg id "$NODE_ID"               '.[] | select(.UUID==$id) | .Status')" != "online" ]; do
+        sleep 10
+    done
+    echo "  $NODE_ID back online"
+    sleep 30
+done
+
+# 3. Confirm the cluster is active again
+sbctl cluster list
+```
+
+If any node fails to come back online, stop and investigate before continuing —
+do not proceed to Step 11 with a node down.
+
 ### Step 11 — Restart Workload Pods
 
 Once all storage nodes are online and the cluster is active, restart application
