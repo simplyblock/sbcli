@@ -1,3 +1,4 @@
+import builtins
 
 from fastapi import APIRouter
 
@@ -13,7 +14,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:tasks:list')
-def list(cluster: Cluster) -> list[TaskDTO]:
+def list(cluster: Cluster) -> builtins.list[TaskDTO]:
     cluster_tasks = db.get_job_tasks(cluster.get_id(), limit=0)
     data = []
     for t in cluster_tasks:

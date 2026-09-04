@@ -1,3 +1,4 @@
+import builtins
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -17,7 +18,6 @@ from .replication import (
     apply_policy as apply_replication_policy,
     collection_api as replication_collection_api,
 )
-import builtins
 
 
 api = APIRouter()
@@ -25,7 +25,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-pools:volumes:list')
-def list(request: Request, cluster: Cluster, pool: StoragePool) -> list[VolumeDTO]:
+def list(request: Request, cluster: Cluster, pool: StoragePool) -> builtins.list[VolumeDTO]:
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
         stat_obj = None

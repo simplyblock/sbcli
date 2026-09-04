@@ -1,4 +1,5 @@
 import base64
+import builtins
 import json
 import os
 import re
@@ -36,7 +37,6 @@ from simplyblock_core.prom_client import PromClient
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.utils import pull_docker_image_with_retry
 from simplyblock_core.settings import Settings
-import builtins
 
 logger = utils.get_logger(__name__)
 
@@ -1827,7 +1827,7 @@ def cluster_expand(cl_id) -> None:
     logger.info("Cluster expanded successfully")
 
 
-def get_cluster_status(cl_id) -> list[dict]:
+def get_cluster_status(cl_id) -> builtins.list[dict]:
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     return sorted([
@@ -2213,7 +2213,7 @@ def switch_write_protection(cl_id) -> bool:
     return True
 
 
-def list() -> list[dict]:
+def list() -> builtins.list[dict]:
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
 

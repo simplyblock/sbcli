@@ -1,3 +1,4 @@
+import builtins
 
 from fastapi import APIRouter, Response
 
@@ -12,7 +13,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage_nodes:devices:list')
-def list(cluster: Cluster, storage_node: StorageNode) -> list[DeviceDTO]:
+def list(cluster: Cluster, storage_node: StorageNode) -> builtins.list[DeviceDTO]:
     data = []
     for device in storage_node.nvme_devices:
         stat_obj = None

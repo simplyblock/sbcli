@@ -1,3 +1,4 @@
+import builtins
 from typing import Annotated
 from uuid import UUID
 
@@ -22,7 +23,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-pools:list')
-def list(cluster: Cluster) -> list[StoragePoolDTO]:
+def list(cluster: Cluster) -> builtins.list[StoragePoolDTO]:
     return [
         StoragePoolDTO.from_model(pool, single_or_none(db.get_pool_stats(pool, limit=1)))
         for pool in db.get_pools(cluster.get_id())
