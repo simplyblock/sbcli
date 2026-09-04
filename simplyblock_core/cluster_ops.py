@@ -2807,15 +2807,73 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
 
 
 
+def _grace_shutdown_skipped(node) -> bool:
+    """Nodes a full-cluster shutdown must not touch.
+
+    See the rationale in cluster_grace_shutdown's loop.
+    """
+    return node.status in (StorageNode.STATUS_REMOVED,
+                           StorageNode.STATUS_IN_REMOVAL)
+
+
 def cluster_grace_shutdown(cl_id) -> None:
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
+        # REMOVED is terminal and must survive a cluster shutdown. Without
+        # this filter the sweep force-shuts-down every record it can see,
+        # and shutdown_storage_node drives in_shutdown -> offline, so a node
+        # that was deliberately removed comes back as a plain offline member
+        # (live 2026-09-03: one graceful-shutdown resurrected all four nodes
+        # removed earlier that day). That is not cosmetic --
+        # failure_domain_host_map skips only STATUS_REMOVED, so those records
+        # start counting toward FD host balance again, and the next
+        # activation or startup acts on nodes whose devices are already
+        # failed_and_migrated and which own no lvstore.
+        #
+        # IN_REMOVAL is skipped because node_removal_orchestrate has already
+        # shut that node down and owns the rest of its lifecycle.
+        # PENDING_REMOVAL is deliberately NOT skipped -- the node is still up
+        # and serving at that point, so a full-cluster shutdown must stop it
+        # like any other member.
+        if _grace_shutdown_skipped(node):
+            logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
+            continue
         logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id(), force=True)
         logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+
+    # Settle check. The sweep is serial, so a node it already passed can come
+    # back up behind it -- that is exactly what happened on 2026-09-03, when
+    # queued restart rows put s7457 and zdgtb back ONLINE seconds after the
+    # sweep had shut them down, and the command still returned as if the
+    # cluster were down. shutdown_storage_node now reaps those rows, but this
+    # verifies the end state rather than assuming it: anything that resurrects
+    # a node by another route is caught and stopped here, once.
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    stragglers = [n for n in st
+                  if not _grace_shutdown_skipped(n)
+                  and n.status != StorageNode.STATUS_OFFLINE]
+    for node in stragglers:
+        logger.warning(
+            f"Node {node.get_id()} is {node.status} after the shutdown sweep; "
+            f"shutting it down again")
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    still_up = [n.get_id() for n in st
+                if not _grace_shutdown_skipped(n)
+                and n.status != StorageNode.STATUS_OFFLINE]
+    if still_up:
+        # Deliberately not raising: the caller asked for a shutdown and most
+        # of the cluster is down, so failing here would be less useful than
+        # saying precisely which nodes are not. An operator following up with
+        # `sn shutdown` needs the list, not a traceback.
+        logger.error(
+            f"Graceful shutdown finished with {len(still_up)} node(s) not "
+            f"offline: {still_up}")
 
 
 def cluster_restart(cl_id) -> None:

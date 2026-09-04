@@ -524,26 +524,38 @@ def add_node_to_auto_restart(node):
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)
 
 
-def cancel_pending_node_restart_tasks(cluster_id, node_id):
+def cancel_pending_node_restart_tasks(cluster_id, node_id, exclude_task_id=None,
+                                      reason="node back online"):
     # Called from set_node_status the moment a node transitions to ONLINE.
     # Without this, an obsolete FN_NODE_RESTART row left over from the
     # outage stays in `new`/`running` and blocks every subsequent restart
     # via the dedup guard in `_validate_new_task_node_restart` until the
     # task runner happens to pick it up — observed as a 5-minute window
     # of failing manual restarts after the node was already back online.
+    #
+    # Also called from shutdown_storage_node on the opposite transition, so a
+    # row queued before the deliberate stop cannot fire afterwards and undo it.
+    #
+    # exclude_task_id: the caller's OWN task, left alone. The restart runner
+    # drives shutdown_storage_node as its kill step
+    # (tasks_runner_restart.py:542, passing current_restart_task_id), so a
+    # blanket cancel there would abort the very restart doing the shutting
+    # down. Compared against the bare task uuid, matching the convention in
+    # check_node_shutdown_preconditions.
     canceled = 0
     for task in db.get_job_tasks(cluster_id):
         if (task.function_name == JobSchedule.FN_NODE_RESTART
                 and task.node_id == node_id
                 and task.status != JobSchedule.STATUS_DONE
-                and not task.canceled):
+                and not task.canceled
+                and (exclude_task_id is None or task.uuid != exclude_task_id)):
             task.canceled = True
             task.status = JobSchedule.STATUS_DONE
-            task.function_result = "canceled: node back online"
+            task.function_result = f"canceled: {reason}"
             task.write_to_db(db.kv_store)
             canceled += 1
             logger.info(
-                f"Canceled obsolete node_restart task {task.get_id()} (node {node_id} back online)")
+                f"Canceled obsolete node_restart task {task.get_id()} (node {node_id}: {reason})")
     return canceled
 
 
