@@ -15,10 +15,14 @@ from http.server import BaseHTTPRequestHandler
 from simplyblock_core.settings import Settings
 
 
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
-logger.addHandler(logger_handler)
+if __name__ == "__main__":
+    # Attach the stdout handler only when running as the proxy script.
+    # Attaching on IMPORT handed every importer (e.g. the test suite) a
+    # duplicate root handler, doubling every log line in the process.
+    logger_handler = logging.StreamHandler(stream=sys.stdout)
+    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+    logger.addHandler(logger_handler)
 logger.setLevel(logging.INFO)
 
 read_line_time_diff: dict = {}
@@ -319,4 +323,13 @@ spdk_semaphore = threading.Semaphore(MAX_CONCURRENT_SPDK)
 logger.info(f"SPDK concurrency limit: {MAX_CONCURRENT_SPDK}")
 
 is_threading_enabled = bool(is_threading_enabled)
-run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)
+
+if __name__ == "__main__":
+    # Start ONLY when executed as the proxy script (deploy_spdk.yaml and the
+    # docker snode path both run this file directly). Starting on import made
+    # every importer spawn the print_stats daemon thread too: after the proxy
+    # e2e tests ran, that thread logged every 3s for the rest of the pytest
+    # session and could hold the stderr buffer lock at interpreter shutdown —
+    # "Fatal Python error: _enter_buffered_busy", SIGABRT, a red CI run with
+    # 1227/1227 tests passed (2026-09-04).
+    run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)
