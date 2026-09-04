@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core import rpc_client
 from simplyblock_core.controllers import events_controller
 from simplyblock_core.models.events import EventObj
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import main_distr_event_collector as collector
 
 
@@ -149,13 +150,47 @@ class TestCollectorsRunInParallel(unittest.TestCase):
         collector.threads_maps.clear()
         collector.jm_unsupported_nodes.clear()
 
-    def _nodes(self, *ids):
+    def _nodes(self, *ids, status=StorageNode.STATUS_ONLINE):
         nodes = []
         for node_id in ids:
             node = MagicMock()
             node.get_id.return_value = node_id
+            node.status = status
             nodes.append(node)
         return nodes
+
+    def test_a_removed_node_gets_no_collectors(self):
+        # Removal leaves the record in place with status=removed, so without an
+        # explicit check we keep (re)spawning collectors that RPC a node whose
+        # SPDK is gone. Live 2026-09-02: 1036 "Failed to process JM events ...
+        # connection error" in the 1.5h after one removal, still climbing.
+        with patch.object(collector.threading, "Thread") as thread:
+            collector.ensure_collectors(
+                self._nodes("gone", status=StorageNode.STATUS_REMOVED))
+        thread.assert_not_called()
+        self.assertNotIn("gone:distr", collector.threads_maps)
+        self.assertNotIn("gone:jm", collector.threads_maps)
+
+    def test_removal_also_forgets_a_node_that_already_had_collectors(self):
+        # The loops exit on removal themselves, but this function would restart
+        # anything not alive within ~5s, so the map entries have to go too.
+        collector.threads_maps["gone:distr"] = MagicMock()
+        collector.threads_maps["gone:jm"] = MagicMock()
+        with patch.object(collector.threading, "Thread") as thread:
+            collector.ensure_collectors(
+                self._nodes("gone", status=StorageNode.STATUS_REMOVED))
+        thread.assert_not_called()
+        self.assertNotIn("gone:distr", collector.threads_maps)
+        self.assertNotIn("gone:jm", collector.threads_maps)
+
+    def test_an_online_node_alongside_a_removed_one_is_unaffected(self):
+        nodes = (self._nodes("live")
+                 + self._nodes("gone", status=StorageNode.STATUS_REMOVED))
+        with patch.object(collector.threading, "Thread") as thread:
+            collector.ensure_collectors(nodes)
+        self.assertEqual(thread.call_count, 2, "live node still needs distr+jm")
+        self.assertIn("live:distr", collector.threads_maps)
+        self.assertNotIn("gone:jm", collector.threads_maps)
 
     def test_each_node_gets_a_thread_per_source(self):
         with patch.object(collector.threading, "Thread") as thread:

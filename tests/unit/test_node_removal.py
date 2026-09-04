@@ -16,6 +16,7 @@ All data-plane RPCs / device-controller / DB access is mocked — these are
 pure control-flow + bookkeeping tests.
 """
 
+import logging
 import unittest
 from unittest.mock import DEFAULT, MagicMock, call, patch
 
@@ -48,9 +49,15 @@ def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, mode="docker",
 def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
           secondary_id="", tertiary_id="",
           stack_secondary="", stack_tertiary="", n_devices=0, with_jm=False,
-          failure_domain=-1, mgmt_ip=None, jm_vuid=0):
+          failure_domain=-1, mgmt_ip=None, jm_vuid=0,
+          is_secondary_node=False, physical_label=0):
     n = MagicMock(spec=StorageNode)
     n.uuid = node_id
+    # Defaults matching the real model: without them these come back as
+    # truthy child mocks, which silently steers placement code down the
+    # dedicated-secondary-node / physical-label branches.
+    n.is_secondary_node = is_secondary_node
+    n.physical_label = physical_label
     n.get_id = MagicMock(return_value=node_id)
     n.status = status
     n.cluster_id = "cluster-1"
@@ -255,6 +262,24 @@ class TestRelocationFeasibility(unittest.TestCase):
         self.assertIn("n1", kwargs["exclude_ids"])
         self.assertIn("n9", kwargs["exclude_ids"])
 
+    def test_extra_exclude_ids_forwarded_to_candidate_search(self):
+        # Regression coverage for the 2026-08-28 finding: _relocate_replica_
+        # between's nested vacate must be able to rule out a node beyond
+        # just the one being removed (specifically, the primary mid-
+        # relocation in the enclosing call) -- see extra_exclude_ids'
+        # docstring.
+        cl = _cluster()
+        primary = _node("p1", secondary_id="n1", tertiary_id="n9")
+        removed = _node("n1")
+        db = FakeDB(cl, [primary, removed])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["n5"]) as gsn:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db, extra_exclude_ids=("n7",))
+        self.assertEqual(got, "n5")
+        _, kwargs = gsn.call_args
+        self.assertIn("n7", kwargs["exclude_ids"])
+
 
 # ---------------------------------------------------------------------------
 # _find_splice_target_for_relocation — the removal-repair fallback used when
@@ -327,15 +352,110 @@ class TestFindSpliceTargetForRelocation(unittest.TestCase):
         got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
         self.assertIsNone(got)
 
+    def test_hard_excludes_edge_where_p_shares_strandeds_domain(self):
+        # Once spliced, p.<field> is repointed onto stranded itself (see
+        # _relocate_replica_between) -- if p's own domain matches
+        # stranded's, p ends up with a role-target in its own domain, the
+        # same violation X's domain is already hard-excluded against. This
+        # must refuse (None) even when it's the ONLY candidate edge --
+        # degrading a node uninvolved in this removal is worse than
+        # refusing the relocation (2026-08-28 finding: this was only ever
+        # soft-scored before, and a live splice let it through).
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, mgmt_ip="10.0.0.9")
+        p = _node("p", secondary_id="x", failure_domain=3, mgmt_ip="10.0.0.1")  # same domain as stranded
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [stranded, p, x])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertIsNone(got)
+
     def test_tertiary_edge_respects_secondary_host_disjointness(self):
         cl = _cluster(enable_failure_domain=True)
         stranded = _node("s", failure_domain=0, secondary_id="s_sec", mgmt_ip="10.0.0.9")
         s_sec = _node("s_sec", failure_domain=1, mgmt_ip="10.0.0.50")
-        p = _node("p", tertiary_id="x", failure_domain=0, mgmt_ip="10.0.0.60")
+        p = _node("p", tertiary_id="x", failure_domain=2, mgmt_ip="10.0.0.60")
         x = _node("x", failure_domain=1, mgmt_ip="10.0.0.61")
         db = FakeDB(cl, [stranded, s_sec, p, x])
         got = storage_node_ops._find_splice_target_for_relocation(stranded, "tertiary", db)
         self.assertEqual(got, ("p", "x"))
+
+    # -----------------------------------------------------------------
+    # P's OWN other role is PREFERRED to stay diverse from stranded once
+    # P's `field` is repointed onto it, but this is a soft preference, not
+    # a hard filter -- regression coverage for the 2026-08-27 live finding:
+    # splicing kc25l into 56mg5's secondary slot collided with 56mg5's
+    # pre-existing, untouched tertiary in the same domain, when another
+    # edge elsewhere in the ring was collision-free the whole time. The old
+    # avoid_domains-only check had no way to prefer it (it only ever looked
+    # at X's domain, never P's) -- but an outright reject would have been
+    # more restrictive than useful, since a real cluster usually has
+    # several candidate edges and one of them is typically clean.
+    # -----------------------------------------------------------------
+
+    def test_prefers_edge_whose_p_stays_diverse_over_one_that_collides(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, tertiary_id="s_ter", mgmt_ip="10.0.0.9")
+        s_ter = _node("s_ter", failure_domain=4, mgmt_ip="10.0.0.10")
+        # bad_p's own domain differs from stranded's (so it isn't hard-
+        # excluded), but its OWN tertiary shares stranded's domain (3) --
+        # splicing stranded into bad_p's secondary slot would collide with
+        # bad_p's own untouched tertiary.
+        bad_p = _node("bad_p", secondary_id="bad_x", tertiary_id="bad_p_ter",
+                       failure_domain=1, mgmt_ip="10.0.0.1")
+        bad_p_ter = _node("bad_p_ter", failure_domain=3, mgmt_ip="10.0.0.11")
+        bad_x = _node("bad_x", failure_domain=2, mgmt_ip="10.0.0.2")
+        # good_p's own tertiary does NOT collide -- same domain-mismatch
+        # score as bad_p/bad_x (both ends unlike stranded's domain), tied
+        # only broken by the other-role preference, so it must still win.
+        good_p = _node("good_p", secondary_id="good_x", tertiary_id="good_p_ter",
+                        failure_domain=2, mgmt_ip="10.0.0.3")
+        good_p_ter = _node("good_p_ter", failure_domain=1, mgmt_ip="10.0.0.13")
+        good_x = _node("good_x", failure_domain=4, mgmt_ip="10.0.0.4")
+        db = FakeDB(cl, [stranded, s_ter, bad_p, bad_p_ter, bad_x, good_p, good_p_ter, good_x])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertEqual(got, ("good_p", "good_x"))
+
+    def test_falls_back_to_colliding_edge_with_warning_when_its_the_only_one(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, tertiary_id="s_ter", mgmt_ip="10.0.0.9")
+        s_ter = _node("s_ter", failure_domain=4, mgmt_ip="10.0.0.10")
+        p = _node("p", secondary_id="x", tertiary_id="p_ter", failure_domain=1, mgmt_ip="10.0.0.1")
+        p_ter = _node("p_ter", failure_domain=3, mgmt_ip="10.0.0.20")
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [stranded, s_ter, p, p_ter, x])
+        with patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertEqual(got, ("p", "x"))
+        log.warning.assert_called_once()
+
+    def test_uses_edge_when_ps_other_role_does_not_collide(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, tertiary_id="s_ter", mgmt_ip="10.0.0.9")
+        s_ter = _node("s_ter", failure_domain=4, mgmt_ip="10.0.0.10")
+        p = _node("p", secondary_id="x", tertiary_id="p_ter", failure_domain=1, mgmt_ip="10.0.0.1")
+        p_ter = _node("p_ter", failure_domain=2, mgmt_ip="10.0.0.20")  # no collision
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [stranded, s_ter, p, p_ter, x])
+        with patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertEqual(got, ("p", "x"))
+        log.warning.assert_not_called()
+
+    def test_falls_back_to_colliding_tertiary_edge_when_its_the_only_one(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, secondary_id="s_sec", mgmt_ip="10.0.0.9")
+        s_sec = _node("s_sec", failure_domain=4, mgmt_ip="10.0.0.10")
+        # p's OWN secondary shares stranded's domain (3) -- splicing stranded
+        # into p's tertiary slot collides with p's own untouched secondary,
+        # but it's the only edge available, so it's used anyway.
+        p = _node("p", tertiary_id="x", secondary_id="p_sec", failure_domain=1, mgmt_ip="10.0.0.60")
+        p_sec = _node("p_sec", failure_domain=3, mgmt_ip="10.0.0.70")
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.61")
+        db = FakeDB(cl, [stranded, s_sec, p, p_sec, x])
+        with patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._find_splice_target_for_relocation(stranded, "tertiary", db)
+        self.assertEqual(got, ("p", "x"))
+        log.warning.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +528,112 @@ class TestPickReplicaRelocationSpliceFallback(unittest.TestCase):
                 primary, removed, "secondary", db)
         self.assertEqual(got, "free1")
         finder.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _pick_replica_relocation_node — full pairwise diversity across
+# {primary, secondary, tertiary}.
+#
+# Regression coverage for the 2026-08-27 finding: the old logic only ever
+# enforced ">=1 cross-domain role" -- once the OTHER already-assigned role
+# happened to be cross-domain, the role actually being relocated was placed
+# on cands[0] with zero domain check, so it could land in the primary's own
+# domain or in the other role's domain. These tests cover the tiered
+# replacement: (1) prefer a direct candidate diverse from BOTH the primary
+# and the other role, (2) splice for the same full diversity, (3) relax to
+# the old weaker floor (diverse from the primary alone) only when full
+# diversity is unreachable anywhere, logging the degraded outcome.
+# ---------------------------------------------------------------------------
+
+class TestPickReplicaRelocationFullDiversity(unittest.TestCase):
+
+    def test_prefers_direct_candidate_diverse_from_both_primary_and_other_role(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", tertiary_id="t1",
+                         failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        other = _node("t1", failure_domain=1, mgmt_ip="10.0.0.50")
+        same_as_other = _node("bad", failure_domain=1, mgmt_ip="10.0.0.2")
+        fully_diverse = _node("good", failure_domain=2, mgmt_ip="10.0.0.3")
+        db = FakeDB(cl, [primary, removed, other, same_as_other, fully_diverse])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["bad", "good"]):
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "good")
+
+    def test_falls_back_to_splice_for_full_diversity_when_direct_only_matches_other_role(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", tertiary_id="t1",
+                         failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        other = _node("t1", failure_domain=1, mgmt_ip="10.0.0.50")
+        same_as_other = _node("bad", failure_domain=1, mgmt_ip="10.0.0.2")
+        edge_p = _node("edge_p", secondary_id="edge_x", failure_domain=3, mgmt_ip="10.0.0.10")
+        edge_x = _node("edge_x", failure_domain=2, mgmt_ip="10.0.0.11")
+        db = FakeDB(cl, [primary, removed, other, same_as_other, edge_p, edge_x])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["bad"]):
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "edge_x")
+
+    def test_relaxes_to_weaker_floor_with_warning_when_full_diversity_unreachable(self):
+        # Only domains 0 (primary) and 1 (other role + every candidate)
+        # exist -- no direct candidate or splice target can be diverse from
+        # BOTH roles, so this must relax to "diverse from the primary alone"
+        # rather than refuse the relocation outright.
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", tertiary_id="t1",
+                         failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        other = _node("t1", failure_domain=1, mgmt_ip="10.0.0.50")
+        weak_cand = _node("weak_cand", failure_domain=1, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [primary, removed, other, weak_cand])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["weak_cand"]), \
+             patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "weak_cand")
+        log.warning.assert_called_once()
+
+    def test_relaxes_to_weaker_splice_with_warning_when_full_diversity_unreachable(self):
+        # No direct candidate at all; the only splice target's far end sits
+        # in the other role's domain, so full diversity is unreachable --
+        # must relax to the weaker splice (diverse from the primary alone)
+        # instead of returning None.
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", tertiary_id="t1",
+                         failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        other = _node("t1", failure_domain=1, mgmt_ip="10.0.0.50")
+        edge_p = _node("edge_p", secondary_id="edge_x", failure_domain=3, mgmt_ip="10.0.0.10")
+        edge_x = _node("edge_x", failure_domain=1, mgmt_ip="10.0.0.11")
+        db = FakeDB(cl, [primary, removed, other, edge_p, edge_x])
+        with patch.object(storage_node_ops, "get_secondary_nodes", return_value=[]), \
+             patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "edge_x")
+        log.warning.assert_called_once()
+
+    def test_no_relaxation_warning_when_no_other_role_is_assigned(self):
+        # With no other role placed yet, full_avoid == weak_avoid already --
+        # this is the ordinary single-constraint case, not a degraded
+        # fallback, so no warning should fire.
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        cand = _node("cand", failure_domain=1, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [primary, removed, cand])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["cand"]), \
+             patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "cand")
+        log.warning.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +1076,31 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertEqual(rec.call_count, 2)  # occupant's rebuild + stranded's own rebuild
         self.assertEqual(removed.lvstore_stack_secondary, "")
 
+    def test_relocate_via_splice_repairs_occupants_other_role_afterwards(self):
+        # Wiring check: after a successful splice, _relocate_one_replica must
+        # call _repair_occupants_other_role_after_splice so occupant's OTHER,
+        # untouched role gets a chance to be moved away from a collision with
+        # stranded's domain (see that function's own docstring/tests for the
+        # actual repair logic).
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer"), \
+             patch.object(storage_node_ops,
+                          "_repair_occupants_other_role_after_splice") as repair:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        repair.assert_called_once_with("occupant", "stranded", "secondary", db)
+
     def test_relocate_via_splice_repoints_lvol_nodes_for_both_moved_primaries(self):
         # Regression: BOTH moves this splice performs -- occupant's replica
         # x -> stranded, and stranded's own replica n1 -> x -- must repoint
@@ -1028,7 +1279,7 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         free_node = _node("free", lvstore="LVS_free")  # genuinely unclaimed
         db = FakeDB(cl, [removed, stranded, occupant, x, z, free_node])
 
-        def pick_side_effect(primary, exclude_node, role, db_controller):
+        def pick_side_effect(primary, exclude_node, role, db_controller, extra_exclude_ids=()):
             if primary.get_id() == "stranded":
                 self.assertEqual(exclude_node.get_id(), "n1")
                 return "x"
@@ -1061,6 +1312,47 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertEqual(rec.call_count, 3)  # z's + occupant's + stranded's own rebuild
         self.assertEqual(drp.call_count, 2)  # old z copy off stranded, old occupant copy off x
 
+    def test_relocate_via_splice_vacate_excludes_the_in_flight_occupant(self):
+        # 2026-08-28 finding: occupant is being spliced onto stranded in
+        # THIS call, but stranded already hosts z. Picking z's new target
+        # must rule out occupant explicitly -- occupant can't simultaneously
+        # be the thing moving onto stranded AND the target z vacates onto.
+        # Without passing that exclusion through, the picker's one and only
+        # candidate can BE occupant, and the whole splice dead-ends
+        # retrying the identical failure forever instead of looking past it.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded",
+                          stack_secondary="z")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        z = _node("z", secondary_id="stranded", lvstore="LVS_z")
+        free_node = _node("free", lvstore="LVS_free")
+        db = FakeDB(cl, [removed, stranded, occupant, x, z, free_node])
+
+        def pick_side_effect(primary, exclude_node, role, db_controller, extra_exclude_ids=()):
+            if primary.get_id() == "stranded":
+                return "x"
+            if primary.get_id() == "z":
+                # The exclusion must be in place BEFORE the search runs, not
+                # discovered as a dead end after the fact.
+                self.assertIn("occupant", extra_exclude_ids)
+                return "free"
+            raise AssertionError(f"unexpected pick for {primary.get_id()}")
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          side_effect=pick_side_effect), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer"):
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        self.assertEqual(z.secondary_node_id, "free")
+        self.assertEqual(stranded.secondary_node_id, "x")
+        self.assertEqual(occupant.secondary_node_id, "stranded")
+
     def test_relocate_via_splice_refuses_when_preexisting_occupant_has_no_target(self):
         # Same setup, but z has nowhere to go. Must fail closed -- refuse the
         # whole splice rather than overload stranded's single-value slot.
@@ -1073,7 +1365,7 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         z = _node("z", secondary_id="stranded", lvstore="LVS_z")
         db = FakeDB(cl, [removed, stranded, occupant, x, z])
 
-        def pick_side_effect(primary, exclude_node, role, db_controller):
+        def pick_side_effect(primary, exclude_node, role, db_controller, extra_exclude_ids=()):
             if primary.get_id() == "stranded":
                 return "x"
             if primary.get_id() == "z":
@@ -1139,7 +1431,7 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         free_node = _node("free", lvstore="LVS_free")
         db = FakeDB(cl, [removed, stranded, occupant, x, z, free_node])
 
-        def pick_side_effect(primary, exclude_node, role, db_controller):
+        def pick_side_effect(primary, exclude_node, role, db_controller, extra_exclude_ids=()):
             self.assertEqual(role, "tertiary")
             if primary.get_id() == "stranded":
                 return "x"
@@ -1188,6 +1480,372 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         rec.assert_called_once()
         self.assertEqual(primary.secondary_node_id, "n3")
         self.assertEqual(free_node.lvstore_stack_secondary, "p1")
+
+
+# ---------------------------------------------------------------------------
+# Plan-driven phase 3b — with failure domains on, relocation goes through the
+# global planner (simplyblock_core.controllers.replica_placement) instead of
+# the per-replica greedy picker. The planner is unit-tested on its own in
+# tests/unit/test_replica_placement.py; what matters here is the wiring:
+# which clusters it takes, which it declines, and that the moves it plans are
+# actually executed against the DB bookkeeping.
+# ---------------------------------------------------------------------------
+
+def _fd_cluster_nodes(domains=4, per_domain=3, ftt=2):
+    """A cluster laid out the way cluster_activate leaves it: nodes
+    round-robined across domains, secondary/tertiary one and two steps along
+    that order, so every LVS starts fully domain-diverse."""
+    order = [f"d{d}n{i}" for i in range(per_domain) for d in range(domains)]
+    nodes = {}
+    for node_id in order:
+        nodes[node_id] = _node(
+            node_id, lvstore=f"LVS_{node_id}",
+            failure_domain=int(node_id[1]),
+            mgmt_ip=f"10.0.{node_id[1]}.{node_id[-1]}")
+    size = len(order)
+    for k, node_id in enumerate(order):
+        sec = order[(k + 1) % size]
+        tert = order[(k + 2) % size] if ftt >= 2 else ""
+        nodes[node_id].secondary_node_id = sec
+        nodes[node_id].tertiary_node_id = tert
+        nodes[sec].lvstore_stack_secondary = node_id
+        if tert:
+            nodes[tert].lvstore_stack_tertiary = node_id
+    return nodes
+
+
+def _layout_of(db, ftt=2):
+    return {
+        n.get_id(): (n.secondary_node_id, n.tertiary_node_id if ftt >= 2 else "")
+        for n in db.nodes.values()
+        if n.status != StorageNode.STATUS_REMOVED
+    }
+
+
+class TestRelocationPlannerApplicability(unittest.TestCase):
+
+    def _db(self, **cluster_kwargs):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True, **cluster_kwargs)
+        nodes = _fd_cluster_nodes()
+        return cl, FakeDB(cl, list(nodes.values())), nodes
+
+    def test_takes_an_fd_enabled_cluster(self):
+        cl, db, nodes = self._db()
+        got = storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db)
+        self.assertIsNotNone(got)
+        surviving_ids, fd_by_node, host_by_node, _, current_layout, ftt = got
+        self.assertNotIn("d0n0", surviving_ids)
+        self.assertEqual(len(surviving_ids), 11)
+        self.assertEqual(ftt, 2)
+        self.assertEqual(fd_by_node["d1n0"], 1)
+        self.assertEqual(host_by_node["d1n0"], nodes["d1n0"].mgmt_ip)
+        # the layout is read raw, still naming the node being removed
+        self.assertIn("d0n0", [pl.secondary for pl in current_layout.values()])
+
+    def test_declines_when_failure_domains_are_off(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=False)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        self.assertIsNone(
+            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+
+    def test_declines_on_a_node_without_a_domain(self):
+        cl, db, nodes = self._db()
+        nodes["d2n1"].failure_domain = -1
+        self.assertIsNone(
+            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+
+    def test_declines_when_a_dedicated_secondary_node_exists(self):
+        # Such a node may host more than one replica, breaking the
+        # one-slot-per-node permutation the planner is built on.
+        cl, db, nodes = self._db()
+        nodes["d2n1"].is_secondary_node = True
+        self.assertIsNone(
+            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+
+    def test_declines_when_a_peer_is_not_online(self):
+        cl, db, nodes = self._db()
+        nodes["d2n1"].status = StorageNode.STATUS_OFFLINE
+        self.assertIsNone(
+            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+
+    def test_already_removed_nodes_are_not_survivors(self):
+        cl, db, nodes = self._db()
+        nodes["d3n2"].status = StorageNode.STATUS_REMOVED
+        got = storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db)
+        self.assertIsNotNone(got)
+        self.assertNotIn("d3n2", got[0])
+
+    def test_ftt1_cluster_ignores_the_tertiary(self):
+        cl = _cluster(npcs=1, ft=1, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes(ftt=1)
+        db = FakeDB(cl, list(nodes.values()))
+        got = storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db)
+        self.assertEqual(got[5], 1)
+        self.assertTrue(all(pl.tertiary == "" for pl in got[4].values()))
+
+
+class TestPlanDrivenRelocation(unittest.TestCase):
+    """The reported case end to end against the DB bookkeeping: 4 domains x 3
+    hosts, FTT2 ("2+2"), removing one host per domain. Every surviving LVS
+    must keep primary/secondary/tertiary in three distinct domains -- the
+    guarantee the per-replica picker could not hold, because the repair it
+    needs (swapping two replicas that are both already placed) is not
+    expressible one stranded role at a time."""
+
+    def _run_removal(self, db, nodes, victim_id, ftt=2):
+        victim = nodes[victim_id]
+        # phase 3a: the victim's own LVS replicas come down.
+        for field, backref in (("secondary_node_id", "lvstore_stack_secondary"),
+                               ("tertiary_node_id", "lvstore_stack_tertiary")):
+            peer_id = getattr(victim, field)
+            if peer_id and getattr(nodes[peer_id], backref) == victim_id:
+                setattr(nodes[peer_id], backref, "")
+            setattr(victim, field, "")
+        victim.status = StorageNode.STATUS_IN_REMOVAL
+
+        moved = []
+
+        def _fake_move(primary_id, old_host_id, new_host_id, role, _db, _seen=None):
+            field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
+            backref = ("lvstore_stack_secondary" if role == "secondary"
+                       else "lvstore_stack_tertiary")
+            self.assertEqual(getattr(nodes[new_host_id], backref), "",
+                             f"planned move onto an occupied {role} slot on {new_host_id}")
+            moved.append((primary_id, role, old_host_id, new_host_id))
+            setattr(nodes[primary_id], field, new_host_id)
+            setattr(nodes[new_host_id], backref, primary_id)
+            if getattr(nodes[old_host_id], backref) == primary_id:
+                setattr(nodes[old_host_id], backref, "")
+            return True
+
+        with patch.object(storage_node_ops, "_relocate_replica_between",
+                          side_effect=_fake_move):
+            ret = storage_node_ops._relocate_replicas_hosted_on(victim)
+        self.assertTrue(ret)
+
+        victim.status = StorageNode.STATUS_REMOVED
+        del db.nodes[victim_id]
+        del nodes[victim_id]
+        return moved
+
+    def _assert_fully_diverse(self, nodes, ftt=2):
+        for node_id, node in nodes.items():
+            domains = [node.failure_domain, nodes[node.secondary_node_id].failure_domain]
+            if ftt >= 2:
+                domains.append(nodes[node.tertiary_node_id].failure_domain)
+            self.assertEqual(
+                len(set(domains)), len(domains),
+                f"{node_id} roles share a domain: sec={node.secondary_node_id} "
+                f"tert={node.tertiary_node_id} domains={domains}")
+        for field, backref in (("secondary_node_id", "lvstore_stack_secondary"),
+                               ("tertiary_node_id", "lvstore_stack_tertiary")):
+            if ftt < 2 and field == "tertiary_node_id":
+                continue
+            holders = [getattr(n, field) for n in nodes.values()]
+            self.assertCountEqual(holders, list(nodes), f"{field} is not a permutation")
+            for node_id, node in nodes.items():
+                self.assertEqual(getattr(nodes[getattr(node, field)], backref), node_id)
+
+    def test_one_removal_per_domain_keeps_full_diversity(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            for domain in range(4):
+                self._run_removal(db, nodes, f"d{domain}n0")
+                self._assert_fully_diverse(nodes)
+        self.assertEqual(len(nodes), 8)
+
+    def test_the_removed_nodes_backrefs_are_cleared(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        victim = nodes["d0n0"]
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            self._run_removal(db, nodes, "d0n0")
+        self.assertEqual(victim.lvstore_stack_secondary, "")
+        self.assertEqual(victim.lvstore_stack_tertiary, "")
+
+    def test_a_failed_move_fails_the_phase_for_retry(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        victim = nodes["d0n0"]
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_relocate_replica_between",
+                          return_value=False):
+            ret = storage_node_ops._relocate_replicas_hosted_on(victim)
+        self.assertFalse(ret)
+        # nothing cleared -> the retry re-plans from the same state
+        self.assertNotEqual(victim.lvstore_stack_secondary, "")
+
+    def test_an_already_correct_cluster_plans_no_moves(self):
+        # Removing a node whose slots are already free and whose own replicas
+        # are already torn down must not churn the rest of the cluster.
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            moved = self._run_removal(db, nodes, "d0n0")
+        # exactly the two roles the victim hosted, plus whatever re-shuffle
+        # full diversity needs -- never the whole cluster.
+        self.assertLess(len(moved), 8, moved)
+        self.assertGreaterEqual(len(moved), 2, moved)
+
+    def test_falls_back_to_the_greedy_path_when_the_planner_declines(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=False)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        victim = nodes["d0n0"]
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_relocate_one_replica",
+                          return_value=True) as one:
+            ret = storage_node_ops._relocate_replicas_hosted_on(victim)
+        self.assertTrue(ret)
+        self.assertEqual(one.call_count, 2)
+
+
+class TestFeasibilityUsesThePlanner(unittest.TestCase):
+
+    def test_admits_a_removal_the_planner_can_satisfy(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes()
+        db = FakeDB(cl, list(nodes.values()))
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node") as pick:
+            ok, reason = storage_node_ops._check_replica_relocation_feasible(
+                nodes["d0n0"], db)
+        self.assertTrue(ok, reason)
+        pick.assert_not_called()
+
+    def test_admits_but_warns_when_full_diversity_is_unreachable(self):
+        # 2 domains at FTT2: a tertiary can never avoid both the primary's
+        # and the secondary's domain. Admitted (host-disjointness still
+        # holds) but every degraded LVS is named in the log.
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes(domains=2, per_domain=3)
+        db = FakeDB(cl, list(nodes.values()))
+        with self.assertLogs(storage_node_ops.logger, level="WARNING") as logs:
+            ok, _ = storage_node_ops._check_replica_relocation_feasible(
+                nodes["d0n0"], db)
+        self.assertTrue(ok)
+        self.assertTrue(any("cannot be made fully domain-diverse" in line
+                            for line in logs.output))
+
+    def test_refuses_when_no_host_disjoint_layout_exists(self):
+        cl = _cluster(npcs=2, ft=2, enable_failure_domain=True)
+        nodes = _fd_cluster_nodes(domains=3, per_domain=1)
+        db = FakeDB(cl, list(nodes.values()))
+        ok, reason = storage_node_ops._check_replica_relocation_feasible(
+            nodes["d0n0"], db)
+        self.assertFalse(ok)
+        self.assertTrue(reason)
+
+
+# ---------------------------------------------------------------------------
+# _repair_occupants_other_role_after_splice — a splice edge protects the node
+# actually being relocated (and, since the diversity fix, prefers one where
+# the occupant it repoints stays diverse too) but still accepts a colliding
+# edge as a last resort. This actively closes that gap: after the splice,
+# check whether occupant's OTHER, untouched role now shares a domain with
+# the node it was just repointed onto, and if so, relocate that role too via
+# the same picker + mover (2026-08-28 finding, following directly from the
+# "prefer, don't require" splice fix).
+# ---------------------------------------------------------------------------
+
+class TestRepairOccupantsOtherRoleAfterSplice(unittest.TestCase):
+
+    def test_no_op_when_occupants_other_role_does_not_collide(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        ter = _node("ter", failure_domain=2)  # no collision with primary's domain(3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="ter")
+        db = FakeDB(cl, [primary, ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node") as pick, \
+             patch.object(storage_node_ops, "_relocate_replica_between") as move:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        pick.assert_not_called()
+        move.assert_not_called()
+
+    def test_relocates_occupants_other_role_when_it_collides(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        old_ter = _node("old_ter", failure_domain=3)  # collides with primary's domain
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="old_ter")
+        db = FakeDB(cl, [primary, old_ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="replacement") as pick, \
+             patch.object(storage_node_ops, "_relocate_replica_between",
+                          return_value=True) as move:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        pick.assert_called_once_with(occupant, old_ter, "tertiary", db)
+        move.assert_called_once_with("occupant", "old_ter", "replacement", "tertiary", db)
+
+    def test_tertiary_role_checks_secondary_as_the_other_role(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        old_sec = _node("old_sec", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, tertiary_id="primary", secondary_id="old_sec")
+        db = FakeDB(cl, [primary, old_sec, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="replacement") as pick, \
+             patch.object(storage_node_ops, "_relocate_replica_between",
+                          return_value=True) as move:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "tertiary", db)
+        pick.assert_called_once_with(occupant, old_sec, "secondary", db)
+        move.assert_called_once_with("occupant", "old_sec", "replacement", "secondary", db)
+
+    def test_logs_warning_when_no_replacement_found(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        old_ter = _node("old_ter", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="old_ter")
+        db = FakeDB(cl, [primary, old_ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node", return_value=None), \
+             patch.object(storage_node_ops, "_relocate_replica_between") as move, \
+             patch.object(storage_node_ops, "logger") as log:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        move.assert_not_called()
+        log.warning.assert_called_once()
+
+    def test_logs_warning_when_relocation_itself_fails(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        old_ter = _node("old_ter", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="old_ter")
+        db = FakeDB(cl, [primary, old_ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="replacement"), \
+             patch.object(storage_node_ops, "_relocate_replica_between", return_value=False), \
+             patch.object(storage_node_ops, "logger") as log:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        log.warning.assert_called_once()
+
+    def test_no_op_when_fd_disabled(self):
+        cl = _cluster(enable_failure_domain=False)
+        primary = _node("primary", failure_domain=3)
+        old_ter = _node("old_ter", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="old_ter")
+        db = FakeDB(cl, [primary, old_ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node") as pick:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        pick.assert_not_called()
+
+    def test_no_op_when_occupant_has_no_other_role_assigned(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary")  # no tertiary at all
+        db = FakeDB(cl, [primary, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node") as pick:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        pick.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -2183,6 +2841,767 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
         self.assertFalse(
             self._run_gate(Cluster.STATUS_SUSPENDED),
             "the gate must still hold for genuinely non-serving clusters")
+
+
+# ---------------------------------------------------------------------------
+# _relocate_replica_between — vacating one role must not tear down the stack
+# when the SAME node still holds the OTHER role for the SAME primary.
+#
+# Live regression (2026-09-01, 12-node/4-domain FTT2). The global planner
+# emits both of a primary's roles in one removal; for pq8h9/LVS_45 it emitted
+#   1. secondary: 94dht -> fvgtl   (fvgtl already held LVS_45 as tertiary)
+#   2. tertiary:  fvgtl -> nq2mm
+# Step 2's teardown fired on fvgtl because it only consulted
+# lvstore_stack_tertiary, and bdev_raid_delete(raid0_45) removed the very
+# replica step 1 had just promoted -- 1s after nq2mm's copy was built:
+#   14:50:26 nq2mm bdev_raid_create raid0_45
+#   14:50:27 fvgtl bdev_raid_delete raid0_45
+# pq8h9 was left recorded as FTT2 with a single physical replica. Secondary
+# and tertiary of one primary are ONE stack (raid0_<vuid> + LVS_<vuid>), so
+# the guard has to be per-primary, not per-role.
+# ---------------------------------------------------------------------------
+class TestRelocateReplicaBetweenSamePrimaryOtherRole(unittest.TestCase):
+
+    def _run(self, x_stack_secondary, x_stack_tertiary, role="tertiary"):
+        cl = _cluster()
+        primary = _node("P", lvstore="LVS_P", secondary_id="X", tertiary_id="X")
+        x = _node("X", stack_secondary=x_stack_secondary, stack_tertiary=x_stack_tertiary)
+        y = _node("Y")
+        db = FakeDB(cl, [primary, x, y])
+        with patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp, \
+             patch.object(storage_node_ops,
+                          "_teardown_lvol_subsystems_on_vacated_peer") as tls, \
+             patch.object(storage_node_ops, "_prune_stale_lvstore_ports") as psp, \
+             patch.object(storage_node_ops, "_update_lvol_nodes_for_replica_move"):
+            ret = storage_node_ops._relocate_replica_between("P", "X", "Y", role, db)
+        return ret, x, primary, drp, tls, psp
+
+    def test_keeps_stack_when_node_still_holds_other_role_for_same_primary(self):
+        # Moving P's TERTIARY off X while X is still P's SECONDARY.
+        ret, x, primary, drp, tls, psp = self._run(
+            x_stack_secondary="P", x_stack_tertiary="P", role="tertiary")
+
+        self.assertTrue(ret)
+        drp.assert_not_called()
+        tls.assert_not_called()
+        psp.assert_not_called()
+        # Only the role being vacated is cleared; the other stays.
+        self.assertEqual(x.lvstore_stack_tertiary, "")
+        self.assertEqual(x.lvstore_stack_secondary, "P")
+        self.assertEqual(primary.tertiary_node_id, "Y")
+
+    def test_keeps_stack_in_the_mirror_case_moving_secondary_away(self):
+        # Same shape with the roles swapped: moving P's SECONDARY off X while
+        # X remains P's TERTIARY.
+        ret, x, primary, drp, tls, psp = self._run(
+            x_stack_secondary="P", x_stack_tertiary="P", role="secondary")
+
+        self.assertTrue(ret)
+        drp.assert_not_called()
+        tls.assert_not_called()
+        psp.assert_not_called()
+        self.assertEqual(x.lvstore_stack_secondary, "")
+        self.assertEqual(x.lvstore_stack_tertiary, "P")
+        self.assertEqual(primary.secondary_node_id, "Y")
+
+    def test_still_tears_down_when_node_holds_no_other_role(self):
+        # Control: the ordinary case must be unchanged.
+        ret, x, _p, drp, tls, psp = self._run(
+            x_stack_secondary="", x_stack_tertiary="P", role="tertiary")
+
+        self.assertTrue(ret)
+        drp.assert_called_once()
+        tls.assert_called_once()
+        psp.assert_called_once()
+        self.assertEqual(x.lvstore_stack_tertiary, "")
+
+    def test_still_tears_down_when_other_role_belongs_to_a_different_primary(self):
+        # The guard must compare the PRIMARY, not merely "other backref set".
+        # X hosting some unrelated primary's secondary shares no stack with P,
+        # so P's tertiary copy on X must still be torn down.
+        ret, x, _p, drp, tls, psp = self._run(
+            x_stack_secondary="OTHER", x_stack_tertiary="P", role="tertiary")
+
+        self.assertTrue(ret)
+        drp.assert_called_once()
+        tls.assert_called_once()
+        psp.assert_called_once()
+        self.assertEqual(x.lvstore_stack_tertiary, "")
+        self.assertEqual(x.lvstore_stack_secondary, "OTHER")
+
+
+# ---------------------------------------------------------------------------
+# replica_stack_violations / _verify_replica_stacks — the invariant whose
+# absence let the bug above ship silently. Bookkeeping agreed with itself at
+# every layer; only the device knew.
+# ---------------------------------------------------------------------------
+class TestReplicaStackViolations(unittest.TestCase):
+
+    def _cluster_nodes(self):
+        # P1 hosted by A (secondary) and B (tertiary); P2 hosted by A (tertiary).
+        p1 = _node("P1", lvstore="LVS_1", secondary_id="A", tertiary_id="B")
+        p2 = _node("P2", lvstore="LVS_2", tertiary_id="A")
+        a = _node("A", lvstore="LVS_A", stack_secondary="P1", stack_tertiary="P2")
+        b = _node("B", lvstore="LVS_B", stack_tertiary="P1")
+        return [p1, p2, a, b]
+
+    def test_no_violations_when_every_claimed_stack_is_present(self):
+        nodes = self._cluster_nodes()
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations(nodes, lambda n, lvs: True), [])
+
+    def test_flags_a_claimed_but_absent_stack(self):
+        nodes = self._cluster_nodes()
+
+        def present(node, lvstore):
+            # Exactly the live failure: A is recorded as P1's secondary but
+            # LVS_1 is not on it.
+            return not (node.get_id() == "A" and lvstore == "LVS_1")
+
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations(nodes, present),
+            [("A", "LVS_1", "P1", "secondary")])
+
+    def test_reports_every_missing_stack_not_just_the_first(self):
+        nodes = self._cluster_nodes()
+        found = storage_node_ops.replica_stack_violations(nodes, lambda n, lvs: False)
+        self.assertEqual(
+            sorted(found),
+            sorted([("A", "LVS_1", "P1", "secondary"),
+                    ("A", "LVS_2", "P2", "tertiary"),
+                    ("B", "LVS_1", "P1", "tertiary")]))
+
+    def test_ignores_nodes_that_claim_nothing(self):
+        idle = _node("idle", lvstore="LVS_idle")
+        calls = []
+
+        def present(node, lvstore):
+            calls.append((node.get_id(), lvstore))
+            return True
+
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations([idle], present), [])
+        self.assertEqual(calls, [], "a node with no back-references must not be probed")
+
+    def test_ignores_a_backref_whose_owner_has_no_lvstore(self):
+        # Nothing to probe for -- a different kind of bookkeeping problem, and
+        # reporting it here would be a false positive on the stack invariant.
+        owner = _node("P", lvstore="")
+        host = _node("H", stack_secondary="P")
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations([owner, host],
+                                                      lambda n, lvs: False), [])
+
+    def test_ignores_a_backref_to_a_node_not_in_the_online_set(self):
+        host = _node("H", stack_secondary="gone")
+        self.assertEqual(
+            storage_node_ops.replica_stack_violations([host], lambda n, lvs: False), [])
+
+
+class TestVerifyReplicaStacks(unittest.TestCase):
+
+    def _db(self, probe_result):
+        cl = _cluster()
+        p = _node("P", lvstore="LVS_P", secondary_id="A")
+        a = _node("A", lvstore="LVS_A", stack_secondary="P")
+        a.rpc_client.return_value.bdev_lvol_get_lvstores = MagicMock(**probe_result)
+        return FakeDB(cl, [p, a]), a
+
+    def test_reports_a_missing_stack(self):
+        db, _a = self._db({"return_value": []})
+        self.assertEqual(
+            storage_node_ops._verify_replica_stacks("cluster-1", db),
+            [("A", "LVS_P", "P", "secondary")])
+
+    def test_clean_when_the_probe_finds_the_stack(self):
+        db, _a = self._db({"return_value": [{"name": "LVS_P"}]})
+        self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
+
+    def test_an_unreachable_node_is_not_reported_as_a_violation(self):
+        # Absence of proof is not proof of absence. A probe that cries wolf on
+        # a transient RPC error is a check people learn to ignore.
+        db, _a = self._db({"side_effect": RPCConnectionError("node unreachable")})
+        self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
+
+    def test_offline_nodes_are_not_probed(self):
+        cl = _cluster()
+        p = _node("P", lvstore="LVS_P", secondary_id="A")
+        a = _node("A", status=StorageNode.STATUS_OFFLINE, stack_secondary="P")
+        a.rpc_client.return_value.bdev_lvol_get_lvstores = MagicMock(return_value=[])
+        db = FakeDB(cl, [p, a])
+        self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
+
+
+# ---------------------------------------------------------------------------
+# jc_remove_jm — hand the JM back to JC before deleting its bdev.
+#
+# JC holds an open descriptor + IO channel on the JM bdev. Deleting the bdev
+# first leaves JC naming something that no longer exists (observed live
+# 2026-09-02: a peer's JC member list carried a remote_jm_* absent from that
+# node's own bdev_get_bdevs). jc_remove_jm closes JC's side, and its -22 is
+# positive proof that some jm_vuid still references the JM -- including one the
+# control plane cannot enumerate, because a vuid whose primary was already
+# removed appears in no `decisions` entry and under no back-reference.
+# ---------------------------------------------------------------------------
+class TestJcRemoveJmBeforeBdevDelete(unittest.TestCase):
+
+    def _rpc(self, jc_remove_jm):
+        rpc = MagicMock()
+        rpc.jc_remove_jm = jc_remove_jm
+        rpc.jc_replace_jm = MagicMock(return_value=True)
+        rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
+        rpc.get_bdevs = MagicMock(return_value=[])
+        return rpc
+
+    def _run(self, jc_remove_jm, replica_peer_ids=("peer",)):
+        """Drive _decommission_node_jm with one peer that needs its JM replaced.
+
+        ``replica_peer_ids`` defaults to naming the peer, because jc_remove_jm
+        is only issued for a node that carries the removed node's OWN lvstore
+        group -- its secondary or tertiary. Everywhere else a replace alone
+        already drops the JM from JC and the release would be a no-op.
+        """
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=9, lvstore="LVS_9", failure_domain=1)
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
+        spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41", failure_domain=3)
+        peer.jm_ids = ["jm-dead", "jm-peer"]
+        removed.jm_ids = ["jm-dead"]
+        spare.jm_ids = ["jm-spare"]
+        rd = RemoteJMDevice()
+        rd.uuid = "jm-dead"
+        rd.remote_bdev = "remote_jm_deadn1"
+        peer.remote_jm_devices = [rd]
+        rpc = self._rpc(jc_remove_jm)
+        peer.rpc_client = MagicMock(return_value=rpc)
+
+        db = FakeDB(cl, [removed, peer, spare])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                  "jm-peer": peer.jm_device,
+                                  "jm-spare": spare.jm_device}.get(i))
+        new_rd = RemoteJMDevice()
+        new_rd.uuid = "jm-spare"
+        new_rd.remote_bdev = "remote_jm_sparen1"
+        # Faithful to _connect_to_remote_jm_devs' delta mode: it carries the
+        # existing different-owner entries over untouched and adds the new one.
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=["jm-spare"]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[rd, new_rd]):
+            storage_node_ops._decommission_node_jm(
+                removed, replica_peer_ids=replica_peer_ids)
+        return rpc, peer
+
+    def test_a_node_with_another_group_using_the_jm_replaces_and_never_removes(self):
+        # Mutually exclusive: this peer's own vuid 37 uses the dead JM, so the
+        # replace covers everything (leftover included) and remove is not
+        # called at all -- on the secondary/tertiary just as much as anywhere.
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=True))
+        rpc.jc_replace_jm.assert_called_once()
+        rpc.jc_remove_jm.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_same_holds_for_a_node_carrying_no_leftover_group(self):
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=True),
+                              replica_peer_ids=())
+        rpc.jc_remove_jm.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+
+# ---------------------------------------------------------------------------
+# Replace and remove are mutually exclusive per node (SPDK team, 2026-09-02):
+# if any OTHER group on the node uses the dead JM, one jc_replace_jm covers
+# them all plus the leftover; if the leftover group is the only user, it is
+# jc_remove_jm alone. Secondary/tertiary matters only in that those are the
+# nodes that carry a leftover group at all.
+# ---------------------------------------------------------------------------
+class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
+
+    def _run(self, replica_peer_ids, jc_replace_jm=None, peer_jm_ids=None):
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2", failure_domain=1)
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
+        spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41", failure_domain=3)
+        removed.jm_ids = ["jm-dead"]
+        peer.jm_ids = list(peer_jm_ids) if peer_jm_ids else ["jm-dead", "jm-peer"]
+        spare.jm_ids = ["jm-spare"]
+        rd = RemoteJMDevice()
+        rd.uuid = "jm-dead"
+        rd.remote_bdev = "remote_jm_deadn1"
+        peer.remote_jm_devices = [rd]
+        rpc = MagicMock()
+        rpc.jc_replace_jm = jc_replace_jm or MagicMock(return_value=True)
+        rpc.jc_remove_jm = MagicMock(return_value=True)
+        rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
+        rpc.get_bdevs = MagicMock(return_value=[])
+        peer.rpc_client = MagicMock(return_value=rpc)
+
+        db = FakeDB(cl, [removed, peer, spare])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                  "jm-peer": peer.jm_device,
+                                  "jm-spare": spare.jm_device}.get(i))
+        new_rd = RemoteJMDevice()
+        new_rd.uuid = "jm-spare"
+        new_rd.remote_bdev = "remote_jm_sparen1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=["jm-spare"]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[rd, new_rd]):
+            storage_node_ops._decommission_node_jm(
+                removed, replica_peer_ids=replica_peer_ids)
+        return rpc
+
+    def test_the_leftover_is_never_a_replace_target(self):
+        # The removed primary's lvstore is being destroyed, so its group gets
+        # no replacement member -- only the peer's own surviving vuid 37 is in
+        # the batch, even though this peer IS the secondary/tertiary.
+        rpc = self._run(("peer",))
+        rpc.jc_replace_jm.assert_called_once()
+        kw = rpc.jc_replace_jm.call_args.kwargs
+        vuids = sorted(r["jm_vuid"] for r in kw["replacements"])
+        self.assertEqual(vuids, [37])
+        self.assertEqual(kw["name_old"], "remote_jm_deadn1")
+
+    def test_and_then_remove_is_not_called_at_all(self):
+        # Mutually exclusive: the replace already covered every user, so JC has
+        # dropped the JM and a release would be a guaranteed no-op.
+        rpc = self._run(("peer",))
+        rpc.jc_remove_jm.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+
+    def test_a_node_with_no_leftover_group_covers_only_its_own_vuids(self):
+        rpc = self._run(("someone-else",))
+        vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
+        self.assertEqual(vuids, [37])
+        rpc.jc_remove_jm.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+
+    def test_removed_node_whose_own_jm_ids_lack_the_dead_jm_does_not_abort_phase_2(self):
+        # Regression, found live 2026-09-02. The removed node is itself in
+        # live_nodes (status in_removal), so if the leftover replacement is
+        # stored in `decisions` it becomes a normal Pass-2 consumer -- and the
+        # unguarded node.jm_ids.remove(removed_jm_id) then raised ValueError,
+        # aborting phase 2 before ANY peer was patched. Strictly worse than the
+        # gap it was meant to close.
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2", failure_domain=1)
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
+        spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41", failure_domain=3)
+        # The removed node's OWN jm_ids does NOT list its own dying JM.
+        removed.jm_ids = ["jm-other-a", "jm-other-b"]
+        removed.status = StorageNode.STATUS_IN_REMOVAL
+        peer.jm_ids = ["jm-dead", "jm-peer"]
+        spare.jm_ids = ["jm-spare"]
+        rd = RemoteJMDevice()
+        rd.uuid = "jm-dead"
+        rd.remote_bdev = "remote_jm_deadn1"
+        peer.remote_jm_devices = [rd]
+        rpc = MagicMock()
+        rpc.jc_replace_jm = MagicMock(return_value=True)
+        rpc.jc_remove_jm = MagicMock(return_value=True)
+        rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
+        rpc.get_bdevs = MagicMock(return_value=[])
+        peer.rpc_client = MagicMock(return_value=rpc)
+
+        db = FakeDB(cl, [removed, peer, spare])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                  "jm-peer": peer.jm_device,
+                                  "jm-spare": spare.jm_device}.get(i))
+        new_rd = RemoteJMDevice()
+        new_rd.uuid = "jm-spare"
+        new_rd.remote_bdev = "remote_jm_sparen1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=["jm-spare"]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[rd, new_rd]):
+            # Must not raise.
+            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
+
+        # And the peer must still have been patched for its surviving group.
+        # The leftover is not a replace target.
+        rpc.jc_replace_jm.assert_called_once()
+        vuids = sorted(r["jm_vuid"] for r in rpc.jc_replace_jm.call_args.kwargs["replacements"])
+        self.assertEqual(vuids, [37])
+        rpc.jc_remove_jm.assert_not_called()
+        self.assertEqual(removed.jm_ids, ["jm-other-a", "jm-other-b"],
+                         "the removed node's unrelated jm_ids must be left alone")
+
+
+class TestOrchestratorCapturesReplicaPeersBeforeTeardown(unittest.TestCase):
+
+    def test_peer_ids_are_captured_before_phase_3a_clears_them(self):
+        # phase 3a clears snode.secondary_node_id/_tertiary_node_id, so the
+        # capture has to happen first or phase 2 gets an empty tuple.
+        cl = _cluster()
+        snode = _node("dead", secondary_id="sec", tertiary_id="ter",
+                      with_jm=True, jm_vuid=2, lvstore="LVS_2")
+        sec = _node("sec", stack_secondary="dead")
+        ter = _node("ter", stack_tertiary="dead")
+        db = FakeDB(cl, [snode, sec, ter])
+        seen = {}
+
+        def fake_teardown(node):
+            # emulate phase 3a wiping the pointers
+            snode.secondary_node_id = ""
+            snode.tertiary_node_id = ""
+            return True
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "cluster_ops"), \
+             patch.object(storage_node_ops, "shutdown_storage_node", return_value=True), \
+             patch.object(storage_node_ops, "set_node_status"), \
+             patch.object(storage_node_ops, "_teardown_replicas_of_primary",
+                          side_effect=fake_teardown), \
+             patch.object(storage_node_ops, "_decommission_node_jm",
+                          side_effect=lambda n, replica_peer_ids=(): seen.update(
+                              ids=replica_peer_ids)), \
+             patch.object(storage_node_ops, "_relocate_replicas_hosted_on", return_value=True), \
+             patch.object(storage_node_ops, "_verify_replica_stacks", return_value=[]), \
+             patch.object(storage_node_ops, "_finalize_node_removal"), \
+             patch.object(storage_node_ops, "_decommission_node_devices", return_value=True):
+            storage_node_ops.node_removal_orchestrate("dead")
+
+        self.assertEqual(sorted(seen.get("ids", ())), ["sec", "ter"])
+
+
+# ---------------------------------------------------------------------------
+# The no-targets branch: a node that has the dying JM connected but no vuid
+# this removal can patch. Until now it fell straight through -- no release, no
+# delete -- while the jc_remove_jm below the replace ran only where a replace
+# had already made it a no-op (-13). Redundant where it fired, absent where it
+# mattered.
+# ---------------------------------------------------------------------------
+class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
+
+    def _run(self, jc_remove_jm):
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2", failure_domain=1)
+        # peer holds the dying JM but NONE of its vuids reference it, so Pass 2
+        # produces no targets for it.
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37", failure_domain=2)
+        removed.jm_ids = ["jm-dead"]
+        peer.jm_ids = ["jm-peer"]
+        rd = RemoteJMDevice()
+        rd.uuid = "jm-dead"
+        rd.remote_bdev = "remote_jm_deadn1"
+        peer.remote_jm_devices = [rd]
+        rpc = MagicMock()
+        rpc.jc_remove_jm = jc_remove_jm
+        rpc.jc_replace_jm = MagicMock(return_value=True)
+        rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
+        peer.rpc_client = MagicMock(return_value=rpc)
+        db = FakeDB(cl, [removed, peer])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                  "jm-peer": peer.jm_device}.get(i))
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
+        return rpc, peer
+
+    def test_release_is_attempted_even_though_no_replace_happened(self):
+        rpc, _peer = self._run(jc_remove_jm=MagicMock(return_value=True))
+        rpc.jc_replace_jm.assert_not_called()
+        rpc.jc_remove_jm.assert_called_once_with("remote_jm_deadn1")
+
+    def test_successful_release_deletes_the_bdev_and_drops_bookkeeping(self):
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=True))
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_minus_22_here_keeps_the_bdev(self):
+        # The leftover vuid genuinely still references it -- exactly the case
+        # this branch exists to surface.
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCRemoteError("in use", -22)))
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+        self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_unsupported_build_still_cleans_up(self):
+        from simplyblock_core.rpc_client import RPC_UNSUPPORTED
+        rpc, peer = self._run(jc_remove_jm=MagicMock(return_value=RPC_UNSUPPORTED))
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_minus_13_not_used_by_jc_is_the_success_path(self):
+        # JC already has no record of the JM, so there is nothing to release
+        # and the bdev is safe to delete. Treating it as a failure would strand
+        # the controller and its bookkeeping entry.
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCRemoteError("not used by JC", -13)))
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("remote_jm_dead")
+        self.assertNotIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_other_jc_error_codes_keep_the_bdev(self):
+        for code in (-3, -6, -10, -12, -21):
+            with self.subTest(code=code):
+                rpc, peer = self._run(
+                    jc_remove_jm=MagicMock(side_effect=RPCRemoteError("nope", code)))
+                rpc.bdev_nvme_detach_controller.assert_not_called()
+                self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_a_raised_exception_keeps_the_bdev(self):
+        rpc, peer = self._run(
+            jc_remove_jm=MagicMock(side_effect=RPCConnectionError("unreachable")))
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+        self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
+
+    def test_node_without_the_dying_jm_is_left_completely_alone(self):
+        cl = _cluster()
+        removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2")
+        peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37")
+        removed.jm_ids = ["jm-dead"]
+        peer.jm_ids = ["jm-peer"]
+        peer.remote_jm_devices = []          # never had it
+        rpc = MagicMock()
+        peer.rpc_client = MagicMock(return_value=rpc)
+        db = FakeDB(cl, [removed, peer])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device}.get(i))
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
+        rpc.jc_remove_jm.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_not_called()
+
+
+class TestJcRemoveJmClient(unittest.TestCase):
+    """The client wrapper's contract: success / unsupported / coded error."""
+
+    def _client(self, response):
+        from simplyblock_core import rpc_client as rc
+        c = rc.RPCClient.__new__(rc.RPCClient)
+        c._request2 = MagicMock(return_value=response)  # type: ignore[method-assign]
+        return c
+
+    def test_success_returns_the_result(self):
+        self.assertTrue(self._client((True, None)).jc_remove_jm("remote_jm_xn1"))
+
+    def test_method_not_found_returns_the_unsupported_sentinel(self):
+        from simplyblock_core.rpc_client import RPC_UNSUPPORTED
+        c = self._client((None, {"code": -32601, "message": "Method not found"}))
+        self.assertEqual(c.jc_remove_jm("remote_jm_xn1"), RPC_UNSUPPORTED)
+
+    def test_still_in_use_raises_with_code_22(self):
+        c = self._client((None, {"code": -22, "message": "still in use"}))
+        with self.assertRaises(RPCRemoteError) as ctx:
+            c.jc_remove_jm("remote_jm_xn1")
+        self.assertEqual(ctx.exception.code, -22)
+
+    def test_other_errors_raise_with_their_code(self):
+        c = self._client((None, {"code": -12, "message": "another removal in progress"}))
+        with self.assertRaises(RPCRemoteError) as ctx:
+            c.jc_remove_jm("remote_jm_xn1")
+        self.assertEqual(ctx.exception.code, -12)
+
+
+class TestDecommissionSkipsTheNodeBeingRemoved(unittest.TestCase):
+    """The node being removed must never become a jc_* patch target itself.
+
+    Regression for live 2026-09-03, removing s25dl. ``live_nodes`` filtered
+    STATUS_REMOVED, but at phase 2 the node is IN_REMOVAL, so it stayed in the
+    sweep. Phase 3b had not yet relocated the replicas it hosts *for other
+    primaries*, so its lvstore_stack_* backrefs still pointed at live primaries
+    and Pass 2 adopted it as a target for a hosted primary's vuid:
+
+        no recorded bdev name for removed JM 601dae11...; cannot call
+        jc_replace_jm -- affected targets=[(1, 'a91a2d46...')]
+
+    It stayed harmless only by accident: a node's OWN JM never appears in its
+    own remote_jm_devices, so the name lookup failed and short-circuited the
+    call. With a name recorded it would have issued jc_replace_jm against the
+    pod phase 1 had already killed -- exactly what the REMOVED filter exists
+    to prevent.
+    """
+
+    def _run(self):
+        cl = _cluster()
+        # 'dead' is mid-removal and still hosts 'other''s replica: phase 3a
+        # clears a node's own secondary/tertiary pointers, not the backrefs
+        # recording what it hosts. Phase 3b does that, and runs after phase 2.
+        removed = _node("dead", status=StorageNode.STATUS_IN_REMOVAL,
+                        with_jm=True, jm_vuid=9, lvstore="LVS_9",
+                        failure_domain=1, stack_secondary="other")
+        other = _node("other", with_jm=True, jm_vuid=1, lvstore="LVS_1",
+                      failure_domain=2)
+        spare = _node("spare", with_jm=True, jm_vuid=41, lvstore="LVS_41",
+                      failure_domain=3)
+        other.jm_ids = ["jm-dead", "jm-other"]
+        removed.jm_ids = ["jm-dead"]
+        spare.jm_ids = ["jm-spare"]
+
+        rd = RemoteJMDevice()
+        rd.uuid, rd.remote_bdev = "jm-dead", "remote_jm_deadn1"
+        other.remote_jm_devices = [rd]
+        # The removed node carries no remote entry for its OWN jm -- the shape
+        # that made the live failure log an error instead of issuing an RPC.
+        removed.remote_jm_devices = []
+
+        dead_rpc = MagicMock()
+        other_rpc = MagicMock()
+        for r in (dead_rpc, other_rpc):
+            r.jc_replace_jm = MagicMock(return_value=True)
+            r.jc_remove_jm = MagicMock(return_value=True)
+            r.bdev_nvme_detach_controller = MagicMock(return_value=True)
+            r.get_bdevs = MagicMock(return_value=[])
+        removed.rpc_client = MagicMock(return_value=dead_rpc)
+        other.rpc_client = MagicMock(return_value=other_rpc)
+
+        db = FakeDB(cl, [removed, other, spare])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-dead": removed.jm_device,
+                                   "jm-other": other.jm_device,
+                                   "jm-spare": spare.jm_device}.get(i))
+        new_rd = RemoteJMDevice()
+        new_rd.uuid, new_rd.remote_bdev = "jm-spare", "remote_jm_sparen1"
+
+        # Capture the module's log records: the live symptom was an ERROR, not
+        # a stray RPC. Sweeping the removed node only failed to issue one
+        # because a node's own JM is absent from its own remote_jm_devices, so
+        # asserting "no RPC" alone passes with the bug still in place.
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        cap = _Capture()
+        storage_node_ops.logger.addHandler(cap)
+        try:
+            with patch.object(storage_node_ops, "DBController", return_value=db), \
+                 patch.object(storage_node_ops, "device_controller"), \
+                 patch.object(storage_node_ops, "get_sorted_ha_jms",
+                              return_value=["jm-spare"]), \
+                 patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                              return_value=[new_rd]):
+                storage_node_ops._decommission_node_jm(removed, replica_peer_ids=())
+        finally:
+            storage_node_ops.logger.removeHandler(cap)
+        return dead_rpc, other_rpc, records
+
+    def test_the_node_being_removed_is_never_adopted_as_a_target(self):
+        dead_rpc, _, records = self._run()
+        errors = [r.getMessage() for r in records if r.levelno >= logging.ERROR]
+        self.assertEqual(errors, [], "phase 2 tried to patch the node it is removing")
+        dead_rpc.jc_replace_jm.assert_not_called()
+        dead_rpc.jc_remove_jm.assert_not_called()
+
+    def test_a_surviving_consumer_is_still_patched(self):
+        # The exclusion must not cost the live peer its replacement.
+        _, other_rpc, _ = self._run()
+        other_rpc.jc_replace_jm.assert_called_once()
+
+
+class TestCheckPeerDisconnectedMgmtStatus(unittest.TestCase):
+    """The mgmt-status short-circuit of _check_peer_disconnected.
+
+    Regression for live 2026-09-03: while removing 2vk79, its peer hxmr8 was
+    rebuilding as the tertiary of another primary (s7457/LVS_21) and picked
+    its deferred hublvol failover target by asking whether LVS_21's secondary
+    was alive. That secondary *was* 2vk79 — already shut down by phase 1 and
+    in IN_REMOVAL — but IN_REMOVAL was missing from the short-circuit, so the
+    check fell through to the JM-quorum path, which abstained ("0/0 peers
+    report disconnected") and voted "connected". The attach then failed with
+    -5 against a dead SPDK:
+
+        Failed to add deferred hublvol failover path to ddbf964e... for LVS_21
+
+    The verdict has to come from the control plane's own intent, not from a
+    data-plane probe that cannot tell "gone" from "nobody voted".
+    """
+
+    def _probe(self, peer_status, quorum_verdict=False):
+        """Run the check against a single peer, returning (verdict, probed).
+
+        The peer id embeds the status so that cases sharing one test method
+        (subTest loops) get distinct quorum-cache keys — the cache is cleared
+        per test, not per subTest, so a reused id would serve the first case's
+        cached verdict to the second and leave its mock uncalled.
+        """
+        peer = _node(f"PEER-{peer_status}", status=peer_status)
+        db = FakeDB(_cluster(), [peer])
+        quorum = MagicMock(return_value=quorum_verdict)
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+                patch("simplyblock_core.services.storage_node_monitor"
+                      ".is_node_data_plane_disconnected_quorum", quorum):
+            verdict = storage_node_ops._check_peer_disconnected(peer)
+        return verdict, quorum.called
+
+    def test_in_removal_is_disconnected_without_probing_the_data_plane(self):
+        # The exact bug: quorum would have voted "connected" (False).
+        verdict, probed = self._probe(StorageNode.STATUS_IN_REMOVAL,
+                                      quorum_verdict=False)
+        self.assertTrue(verdict)
+        self.assertFalse(probed, "IN_REMOVAL must not reach the quorum probe")
+
+    def test_the_states_mgmt_has_given_up_on_all_short_circuit(self):
+        for status in (StorageNode.STATUS_OFFLINE,
+                       StorageNode.STATUS_REMOVED,
+                       StorageNode.STATUS_UNREACHABLE,
+                       StorageNode.STATUS_IN_REMOVAL):
+            with self.subTest(status=status):
+                verdict, probed = self._probe(status, quorum_verdict=False)
+                self.assertTrue(verdict)
+                self.assertFalse(probed)
+
+    def test_pending_removal_still_consults_the_data_plane(self):
+        # Deliberately NOT short-circuited: the task runner sets
+        # PENDING_REMOVAL before phase 1 shuts the node down, so it is still
+        # up and serving and still needs its port-block.
+        verdict, probed = self._probe(StorageNode.STATUS_PENDING_REMOVAL,
+                                      quorum_verdict=False)
+        self.assertFalse(verdict)
+        self.assertTrue(probed, "PENDING_REMOVAL must fall through to the probe")
+
+    def test_transient_runner_owned_states_still_consult_the_data_plane(self):
+        # Preempting another node's leadership during its own restart would
+        # be incorrect, so these keep asking the data plane.
+        for status in (StorageNode.STATUS_IN_SHUTDOWN,
+                       StorageNode.STATUS_RESTARTING):
+            with self.subTest(status=status):
+                verdict, probed = self._probe(status, quorum_verdict=False)
+                self.assertFalse(verdict)
+                self.assertTrue(probed)
+
+    def test_the_data_plane_can_still_condemn_an_online_peer(self):
+        verdict, probed = self._probe(StorageNode.STATUS_ONLINE,
+                                      quorum_verdict=True)
+        self.assertTrue(verdict)
+        self.assertTrue(probed)
+
+    def test_a_peer_gone_from_fdb_is_disconnected(self):
+        db = FakeDB(_cluster(), [])
+        quorum = MagicMock(return_value=False)
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+                patch("simplyblock_core.services.storage_node_monitor"
+                      ".is_node_data_plane_disconnected_quorum", quorum):
+            self.assertTrue(storage_node_ops._check_peer_disconnected(
+                _node("PEER")))
+        self.assertFalse(quorum.called)
+
+    def test_a_node_in_removal_is_not_fabric_connected(self):
+        # _is_fabric_connected / _count_fabric_disconnected_nodes are the two
+        # wrappers callers use to pick targets; both must inherit the fix.
+        peer = _node("PEER", status=StorageNode.STATUS_IN_REMOVAL)
+        db = FakeDB(_cluster(), [peer])
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            self.assertFalse(storage_node_ops._is_fabric_connected(peer))
+            self.assertEqual(
+                storage_node_ops._count_fabric_disconnected_nodes([peer]), 1)
 
 
 if __name__ == "__main__":

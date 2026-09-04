@@ -915,20 +915,30 @@ def check_node(node_id, with_devices=True):
             for remote_device in snode.remote_jm_devices:
 
                 name = remote_device.remote_bdev
-                bdev_info = rpc_client.get_bdevs(name)
-                logger.log(INFO if bdev_info else ERROR,
-                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                # Owner resolved BEFORE the probe, not after. Previously the
+                # RPC went out unconditionally and the ERROR line was logged
+                # before anything knew the owner was gone -- so a removed
+                # node's stale entry cost one RPC per cycle and left an ERROR
+                # in the log that the very next line classified as expected,
+                # and never retracted. Live 2026-09-02: 1797 such hits on one
+                # removed node's JM.
                 try:
                     jm_owner = db_controller.get_storage_node_by_id(remote_device.node_id)
                 except KeyError:
                     jm_owner = None
-                if _peer_connections_relevant(jm_owner):
-                    node_remote_devices_check &= bool(bdev_info)
-                elif not bdev_info:
+                owner_relevant = _peer_connections_relevant(jm_owner)
+                if not owner_relevant:
                     logger.info(
-                        "Remote JM %s missing, but owning node %s is %s — expected, "
-                        "not failing health", name, remote_device.node_id,
+                        "Remote JM %s belongs to node %s (%s); not probing and not "
+                        "failing health", name, remote_device.node_id,
                         jm_owner.status if jm_owner else "not-found")
+                    connected_jms.append(remote_device.get_id())
+                    continue
+
+                bdev_info = rpc_client.get_bdevs(name)
+                logger.log(INFO if bdev_info else ERROR,
+                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                node_remote_devices_check &= bool(bdev_info)
                 connected_jms.append(remote_device.get_id())
 
                 controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
@@ -1082,6 +1092,26 @@ def check_remote_device(device_id, target_node=None):
     except KeyError:
         logger.exception("node not found")
         return False
+
+    # The device's OWNER decides whether a remote connection to it is even
+    # expected. Skip the probe entirely when it is not -- same rule, and the
+    # same reason, as the remote-JM loop above: a missing connection to a
+    # departed owner is the expected consequence of its teardown.
+    #
+    # Gating only the verdict is not enough. The caller already discards the
+    # result for an irrelevant owner, but it calls this function first, so the
+    # two RPCs below still went out on every cycle for every surviving node.
+    # For a REMOVED node's devices that never stops: each miss makes SPDK log
+    # `*ERROR*: ctrlr 'remote_alceml_<uuid>' does not exist`, measured at
+    # 3-15 errors/min still climbing 35 minutes after the removal that made
+    # those devices failed_and_migrated (2026-09-03, devices 04fce724 /
+    # b0ada39d / ddf660f5 of the removed 2vk79, probed by 9 surviving nodes).
+    # Real faults then drown in a permanent error stream.
+    if not _peer_connections_relevant(snode):
+        logger.info(
+            "Remote device %s belongs to node %s (%s); not probing and not "
+            "failing health", device_id, device.node_id, snode.status)
+        return True
 
     result = True
     if target_node:
