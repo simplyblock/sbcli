@@ -47,6 +47,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,17 @@ except ImportError:
 
 # Maximum records per single Graylog search page.
 PAGE_SIZE = 1000
+
+# OpenSearch scroll batch size — deliberately separate from the Graylog page
+# size: Graylog's REST search caps pages around 1000, but the scroll API
+# comfortably serves 10k-hit pages. Sharing the Graylog value meant ~87,165
+# strictly serial round trips for one 87.16M-line container (run 2026-09-03);
+# 10k pages cut that by 90%.
+OS_PAGE_SIZE = 10_000
+
+# Attempts per scroll continuation before declaring the file partial. The
+# scroll context lives 2m, so short backoffs fit comfortably inside it.
+OS_SCROLL_RETRIES = 3
 
 # OpenSearch max_result_window is set to 100 000 during cluster initialisation
 # (see simplyblock_core/cluster_ops.py :: _set_max_result_window).
@@ -564,24 +576,31 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
     # Use query_string wildcards so partial names work:
     #   "WebAppAPI"  matches "simplyblock_WebAppAPI.1.abc123"
     #   "spdk_8080"  matches "/spdk_8080"
-    must_clauses: list[Any] = [
+    filter_clauses: list[Any] = [
         {"range": {ts_f: {"gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}},
     ]
     if container_name:
         esc = container_name.replace("/", "\\/").replace(":", "\\:")
-        must_clauses.append({
+        # Anchor the name at the end or at a separator instead of matching any
+        # substring: '*WebAppAPI*' also matched WebAppAPI2/3/4/5 and duplicated
+        # their logs into this file. The anchored variants still cover every
+        # runtime naming scheme — exact/suffix ('/spdk_4428'), Swarm
+        # ('simplyblock_WebAppAPI.1.<hash>'), and compose
+        # ('simplyblock_WebAppAPI_1' / 'simplyblock-WebAppAPI-1').
+        filter_clauses.append({
             "query_string": {
                 "default_field": cname_f,
-                "query": f"*{esc}*",
+                "query": f"*{esc} OR *{esc}.* OR *{esc}_* OR *{esc}-*",
                 "analyze_wildcard": True,
             }
         })
     if pod_name:
         esc_pod = pod_name.replace("/", "\\/").replace(":", "\\:")
-        must_clauses.append({
+        # Pod names only use '-' as a separator; same anchoring rationale.
+        filter_clauses.append({
             "query_string": {
                 "default_field": "kubernetes_pod_name",
-                "query": f"*{esc_pod}*",
+                "query": f"*{esc_pod} OR *{esc_pod}-*",
                 "analyze_wildcard": True,
             }
         })
@@ -591,14 +610,14 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
         # When it is a list we OR them so any matching format succeeds.
         candidates = source if isinstance(source, (list, tuple)) else [source]
         if len(candidates) == 1:
-            must_clauses.append({
+            filter_clauses.append({
                 "query_string": {
                     "default_field": "source",
                     "query": f'"{candidates[0]}"',
                 }
             })
         else:
-            must_clauses.append({
+            filter_clauses.append({
                 "bool": {
                     "should": [
                         {"query_string": {"default_field": "source",
@@ -610,9 +629,12 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
             })
 
     body = {
-        "query": {"bool": {"must": must_clauses}},
+        # Filter context, not must: none of these clauses needs relevance
+        # scoring (the output is ordered by the timestamp sort), and filters
+        # skip scoring and are cacheable across the per-container queries.
+        "query": {"bool": {"filter": filter_clauses}},
         "sort": [{ts_f: {"order": "asc"}}],
-        "size": PAGE_SIZE,
+        "size": OS_PAGE_SIZE,
         "_source": [ts_f, "source", cname_f, "level", "message"],
     }
 
@@ -652,21 +674,34 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
                     src["container_name"] = src.get(cname_f, "")
                 fh.write(_fmt(src) + "\n")
                 written += 1
-            if len(hits) < PAGE_SIZE or not scroll_id:
+            if not scroll_id:
                 break
-            try:
-                sc_r = session.post(
-                    f"{os_url}/_search/scroll",
-                    json={"scroll": "2m", "scroll_id": scroll_id},
-                    timeout=60,
-                )
-                sc_r.raise_for_status()
-                sc_data = sc_r.json()
-                scroll_id = sc_data.get("_scroll_id", scroll_id)
-                hits = sc_data.get("hits", {}).get("hits", [])
-            except requests.RequestException as exc:
-                print(f"    WARN: scroll continuation failed: {exc}", file=sys.stderr)
-                break
+            # The scroll protocol terminates with an EMPTY page. A short page
+            # is legitimate mid-stream (shard boundaries), so stopping on one
+            # silently truncated the file; keep going until hits is empty.
+            hits = []
+            for attempt in range(1, OS_SCROLL_RETRIES + 1):
+                try:
+                    sc_r = session.post(
+                        f"{os_url}/_search/scroll",
+                        json={"scroll": "2m", "scroll_id": scroll_id},
+                        timeout=60,
+                    )
+                    sc_r.raise_for_status()
+                    sc_data = sc_r.json()
+                    scroll_id = sc_data.get("_scroll_id", scroll_id)
+                    hits = sc_data.get("hits", {}).get("hits", [])
+                    break
+                except requests.RequestException as exc:
+                    if attempt == OS_SCROLL_RETRIES:
+                        # Loud and specific: a silent partial bundle costs a
+                        # support round trip to discover.
+                        print(f"    ERROR: scroll continuation failed after "
+                              f"{OS_SCROLL_RETRIES} attempts: {exc}\n"
+                              f"           {out_path} is PARTIAL "
+                              f"({written}/{total} entries)", file=sys.stderr)
+                    else:
+                        time.sleep(2 * attempt)
 
     # Release scroll context
     if scroll_id:
