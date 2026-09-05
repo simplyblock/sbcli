@@ -4,7 +4,7 @@ import time
 import logging
 import uuid
 
-from simplyblock_core import distr_controller, utils, storage_node_ops
+from simplyblock_core import constants, distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -284,6 +284,20 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
     if state == NVMeDevice.STATUS_READONLY and device.status == NVMeDevice.STATUS_UNAVAILABLE:
         return False
 
+    if state == NVMeDevice.STATUS_ONLINE and (device.repair_attempts or device.last_repair_tsc):
+        # Reaching ONLINE ends the unavailability episode, so the repair budget
+        # is spent. This is the ONLY reset, and it is deliberately route-blind:
+        # `sn restart-device`, a node restart (which sets its devices online on
+        # the way back up), a successful self-repair and an operator fixing the
+        # network all land here. Without it, five failed attempts against a
+        # cause that later cleared would strand a healthy device for good.
+        logger.info(
+            "Device %s back online: clearing repair budget (was %d/%d attempts)",
+            device_id, device.repair_attempts,
+            len(constants.DEVICE_REPAIR_BACKOFF_SEC))
+        device.repair_attempts = 0
+        device.last_repair_tsc = 0.0
+
     if device.status != state:
         device.previous_status = device.status
         device.status = state
@@ -295,6 +309,8 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
             "flap_count": device.flap_count,
             "last_flap_tsc": device.last_flap_tsc,
             "retries_exhausted": device.retries_exhausted,
+            "repair_attempts": device.repair_attempts,
+            "last_repair_tsc": device.last_repair_tsc,
             "deleted": device.deleted,
         }
 
@@ -370,6 +386,176 @@ def device_set_online(device_id, cause=CAUSE_OTHER, connect_peers=True):
         if task_id:
             logger.info(f"Task id: {task_id}")
     return ret
+
+
+def probe_device_stack(device_obj, snode, rpc_client=None):
+    """Report which layers of a device's stack are present, bottom-up.
+
+    Returns (present: dict[str, bool], missing: list[str]).
+
+    The point is to distinguish a device whose LOCAL stack has lost a layer
+    from one that is intact and unavailable for a remote reason. The
+    `unavailable` verdict is reached by consensus -- more than half the nodes
+    failing to reach the device over NVMe-oF -- so a network fault between
+    nodes produces exactly the same verdict as a deleted bdev. Rebuilding a
+    stack that is already whole cannot fix the former, and must not consume a
+    repair attempt.
+
+    Every probe is a single bounded RPC and nothing here retries, so a wedged
+    layer cannot make the repair itself hang.
+    """
+    rpc_client = rpc_client or snode.rpc_client()
+    present: dict = {}
+
+    def _safe(label, fn):
+        try:
+            present[label] = bool(fn())
+        except Exception as e:
+            logger.warning("probe %s for device %s raised: %s",
+                           label, device_obj.get_id(), e)
+            present[label] = False
+
+    _safe("nvme_controller",
+          lambda: rpc_client.bdev_nvme_controller_list(device_obj.nvme_controller))
+    if device_obj.alceml_bdev:
+        _safe("alceml", lambda: rpc_client.get_bdevs(device_obj.alceml_bdev))
+        _safe("pt", lambda: rpc_client.get_bdevs(f"{device_obj.alceml_bdev}_PT"))
+    if device_obj.nvmf_nqn:
+        subsys: list = []
+
+        def _get_subsys():
+            subsys.extend(rpc_client.subsystem_get(device_obj.nvmf_nqn) or [])
+            return subsys
+
+        _safe("subsystem", _get_subsys)
+        if subsys:
+            entry = subsys[0] if isinstance(subsys[0], dict) else {}
+            present["listener"] = bool(entry.get("listen_addresses"))
+            present["namespace"] = bool(entry.get("namespaces"))
+        else:
+            present["listener"] = False
+            present["namespace"] = False
+
+    missing = [k for k, v in present.items() if not v]
+    return present, missing
+
+
+def device_repair(device_id, force=False):
+    """Bounded, differential self-repair of an `unavailable` device.
+
+    Deliberately NOT restart_device(): that tears the subsystem, PT and alceml
+    down before rebuilding, which forces every consumer to disconnect. Here we
+    probe first and let _def_create_device_stack() -- which is additive, every
+    layer guarded by an existence check -- fill in only what is missing.
+
+    Attempts are budgeted by constants.DEVICE_REPAIR_BACKOFF_SEC (immediate,
+    10s, 60s, 3m, 10m) and the budget is cleared the moment the device reaches
+    ONLINE by any route. An attempt is only counted when there was something
+    local to rebuild: a fully intact stack means the device is unavailable for
+    a remote reason and no number of local rebuilds will change that.
+
+    Returns True if the device was brought back online.
+    """
+    db_controller = DBController()
+    device = db_controller.get_storage_device_by_id(device_id)
+    if not device:
+        logger.error("device not found: %s", device_id)
+        return False
+    snode = db_controller.get_storage_node_by_id(device.node_id)
+
+    if device.status != NVMeDevice.STATUS_ONLINE and device.retries_exhausted and not force:
+        logger.debug("Device %s repair budget exhausted; not retrying", device_id)
+        return False
+
+    device_obj = next((d for d in snode.nvme_devices if d.get_id() == device_id), None)
+    if not device_obj:
+        logger.error("device %s not on node %s", device_id, snode.get_id())
+        return False
+
+    rpc_client = snode.rpc_client()
+    present, missing = probe_device_stack(device_obj, snode, rpc_client)
+    logger.info("Device %s repair probe: present=%s missing=%s",
+                device_id, present, missing)
+
+    if not missing:
+        # Intact locally. The unavailability is remote (consensus) and a
+        # rebuild would be a no-op, so do not spend an attempt on it.
+        logger.info(
+            "Device %s local stack is intact; unavailability is remote "
+            "(consensus) -- not counting a repair attempt", device_id)
+        return False
+
+    attempts = device.repair_attempts
+    logger.warning("Device %s repairing, attempt %d/%d, missing: %s",
+                   device_id, attempts + 1,
+                   len(constants.DEVICE_REPAIR_BACKOFF_SEC), ", ".join(missing))
+
+    ok = True
+    if not present.get("nvme_controller", False):
+        # Bottom layer gone: rebind the PCIe function before anything above it
+        # can be rebuilt.
+        try:
+            snode.client(timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
+            rpc_client.bdev_nvme_controller_attach(device_obj.nvme_controller,
+                                                   device_obj.pcie_address)
+            rpc_client.bdev_examine(f"{device_obj.nvme_controller}n1")
+            rpc_client.bdev_wait_for_examine()
+        except Exception as e:
+            logger.error("Device %s: re-attaching the nvme controller failed: %s",
+                         device_id, e)
+            ok = False
+
+    if ok:
+        try:
+            ok = bool(_def_create_device_stack(device_obj, snode))
+        except Exception as e:
+            logger.error("Device %s: stack recreate raised: %s", device_id, e)
+            ok = False
+
+    if ok:
+        _present2, missing2 = probe_device_stack(device_obj, snode, rpc_client)
+        if missing2:
+            logger.error("Device %s still missing after repair: %s",
+                         device_id, ", ".join(missing2))
+            ok = False
+
+    if ok:
+        logger.info("Device %s repaired; setting online", device_id)
+        device_set_io_error(device_id, False)
+        # connect_peers=True is what re-establishes the remote NVMe-oF clients.
+        device_set_online(device_id, cause=CAUSE_DEVICE_RESTART, connect_peers=True)
+        return True
+
+    # Count the failed attempt and arm the next backoff step.
+    attempts += 1
+    exhausted = attempts >= len(constants.DEVICE_REPAIR_BACKOFF_SEC)
+
+    def _apply(d, _a=attempts, _t=time.time(), _e=exhausted):
+        d.repair_attempts = _a
+        d.last_repair_tsc = _t
+        if _e:
+            d.retries_exhausted = True
+        return True
+
+    _atomic_device_set(db_controller, snode.get_id(), device_id, _apply)
+    if exhausted:
+        logger.error(
+            "Device %s: %d repair attempts failed; giving up. It stays "
+            "unavailable until it is failed or repaired by hand (a device "
+            "restart or a node restart clears the budget).",
+            device_id, attempts)
+    return False
+
+
+def device_repair_due(device):
+    """True when an unavailable device is due its next repair attempt."""
+    if device.status != NVMeDevice.STATUS_UNAVAILABLE or device.retries_exhausted:
+        return False
+    schedule = constants.DEVICE_REPAIR_BACKOFF_SEC
+    if device.repair_attempts >= len(schedule):
+        return False
+    wait = schedule[device.repair_attempts]
+    return (time.time() - device.last_repair_tsc) >= wait
 
 
 def get_alceml_name(alceml_id):

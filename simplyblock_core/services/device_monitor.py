@@ -40,6 +40,26 @@ def main():
                                               NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                             logger.warning(f"Device status is not recognised, id: {dev.get_id()}, status: {dev.status}")
                             continue
+                        # Bounded self-repair of an `unavailable` device.
+                        # Runs regardless of cluster status, and without
+                        # requiring dev.io_error: a device marked unavailable by
+                        # CONSENSUS (more than half the nodes failing to reach it
+                        # over NVMe-oF) carries no io_error -- device_set_unavailable
+                        # only sets state -- and the branch below sits in an `elif`
+                        # that never runs while the cluster is ACTIVE. Between them
+                        # those two conditions meant a consensus-unavailable device
+                        # was never repaired at all, and the verdict persisted even
+                        # when its cause was a transient network problem.
+                        #
+                        # device_repair() probes first and only rebuilds what is
+                        # actually missing, so an intact stack costs nothing and
+                        # does not consume an attempt.
+                        if device_controller.device_repair_due(dev):
+                            try:
+                                device_controller.device_repair(dev.get_id())
+                            except Exception as e:
+                                logger.error(f"Device repair failed for {dev.get_id()}: {e}")
+
                         if cluster.status == Cluster.STATUS_ACTIVE:
                             if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                                 dev_stat = db.get_device_stats(dev, 1)
