@@ -98,6 +98,19 @@ CAUSE_OTHER = "other"
 CAUSE_LOCAL_FAILURE = "local_failure"
 CAUSE_DEVICE_RESTART = "device_restart"
 CAUSE_FAILURE_MIGRATION = "failure_migration"
+# CAUSE_ADMIN_REMOVE: the operator asked for the device to go away
+# (`sn remove-device`, or the v1/v2 API remove endpoints). It is the ONLY
+# removal that self-repair refuses to undo -- see device_repair_due(). Every
+# other route to STATUS_REMOVED is an unsolicited SPDK removal and is a
+# candidate for repair, because SPDK also unregisters a bdev for reasons that
+# have nothing to do with the device being gone: the ALCEML stuck-IO watchdog
+# unregisters on stalled queue heads, and it cannot tell a device that has
+# stopped completing IO from a poller thread that has not been scheduled
+# (2026-09-05: a starved host stalled the distrib reactors for 6-7s, the
+# watchdog attributed it to the device at 4s and unregistered a drive that was
+# demonstrably healthy -- the JM alceml on the same physical SSD never
+# faltered. 6 migration tasks then span for hours on "only 7 devices online").
+CAUSE_ADMIN_REMOVE = "admin_remove"
 # Network-outage recovery (tasks_runner_port_allow): the node is provably
 # reachable again (mgmt + data-NIC gates passed) but its FDB status flips
 # ONLINE only after the port unblock — re-admitting its devices must happen
@@ -332,6 +345,18 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
         device.repair_attempts = 0
         device.last_repair_tsc = 0.0
 
+    if state == NVMeDevice.STATUS_ONLINE:
+        # A device that is online is neither deleted nor operator-removed.
+        # STATUS_REMOVED sets deleted=True above, so a repair (or an operator
+        # re-adding the device) has to clear it here or the record stays
+        # logically deleted while serving IO.
+        if device.deleted or device.admin_removed:
+            logger.info(
+                "Device %s back online: clearing deleted/admin_removed flags",
+                device_id)
+        device.deleted = False
+        device.admin_removed = False
+
     if device.status != state:
         device.previous_status = device.status
         device.status = state
@@ -345,6 +370,7 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
             "retries_exhausted": device.retries_exhausted,
             "repair_attempts": device.repair_attempts,
             "last_repair_tsc": device.last_repair_tsc,
+            "admin_removed": device.admin_removed,
             "deleted": device.deleted,
         }
 
@@ -497,6 +523,14 @@ def device_repair(device_id, force=False):
         return False
     snode = db_controller.get_storage_node_by_id(device.node_id)
 
+    if device.admin_removed:
+        # Not overridable by force: force forgives the retry budget, it does
+        # not overrule an operator who asked for this device to be removed.
+        logger.info(
+            "Device %s was removed by operator request; not repairing",
+            device_id)
+        return False
+
     if device.status != NVMeDevice.STATUS_ONLINE and device.retries_exhausted and not force:
         logger.debug("Device %s repair budget exhausted; not retrying", device_id)
         return False
@@ -582,9 +616,30 @@ def device_repair(device_id, force=False):
     return False
 
 
+#: States a device can be self-repaired out of.
+#:
+#: STATUS_UNAVAILABLE is a consensus verdict -- more than half the nodes failed
+#: to reach the device over NVMe-oF -- and can be produced by a purely remote
+#: cause such as a network problem.
+#:
+#: STATUS_REMOVED means SPDK unregistered the bdev and the control plane tore
+#: the rest of the stack down after it. That is equally repairable, and for the
+#: same reason: an unsolicited SPDK removal is not proof the hardware is gone.
+#: The exception is a removal the operator asked for, which admin_removed
+#: records and which is never undone here.
+DEVICE_REPAIRABLE_STATES = (
+    NVMeDevice.STATUS_UNAVAILABLE,
+    NVMeDevice.STATUS_REMOVED,
+)
+
+
 def device_repair_due(device):
-    """True when an unavailable device is due its next repair attempt."""
-    if device.status != NVMeDevice.STATUS_UNAVAILABLE or device.retries_exhausted:
+    """True when a device is due its next self-repair attempt."""
+    if device.status not in DEVICE_REPAIRABLE_STATES or device.retries_exhausted:
+        return False
+    if device.admin_removed:
+        # The operator removed this device on purpose. Never resurrect it --
+        # not on any attempt, and not under force.
         return False
     schedule = constants.DEVICE_REPAIR_BACKOFF_SEC
     if device.repair_attempts >= len(schedule):
@@ -987,6 +1042,24 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
         logger.error(f"Unsupported device status: {device.status}")
         if force is False:
             return False
+
+    # Record operator intent BEFORE the teardown, and durably: everything below
+    # can fail or be interrupted, and if the device ends up REMOVED anyway the
+    # monitor must still see that a human asked for it. Written atomically
+    # because the flag lives inside the StorageNode record.
+    admin = (cause == CAUSE_ADMIN_REMOVE)
+    if admin != device.admin_removed:
+        def _mark(d, _a=admin):
+            d.admin_removed = _a
+            return True
+
+        _atomic_device_set(db_controller, snode.get_id(), device_id, _mark)
+        device.admin_removed = admin
+    if admin:
+        logger.info(
+            "Device %s removal is operator-initiated; self-repair will not "
+            "bring it back (use `sn add-device` / `sn restart-device`)",
+            device_id)
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:

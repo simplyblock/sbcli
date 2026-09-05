@@ -187,9 +187,26 @@ def main():
                         node = db.get_storage_node_by_id(node.get_id())
 
                     for dev in node.nvme_devices:
+                        # Evaluated BEFORE the status filter below, which drops
+                        # everything that is not online/unavailable/readonly/
+                        # cannot-allocate. STATUS_REMOVED lands in that gap: on
+                        # 2026-09-05 a device SPDK had unregistered logged
+                        # "Device status is not recognised ... status: removed"
+                        # 505 times over several hours while six migration
+                        # tasks sat on "only 7 devices online", because nothing
+                        # downstream of that `continue` could ever see it.
+                        # device_repair_due() is the single authority on which
+                        # states are repairable and whether the removal was the
+                        # operator's doing.
+                        if device_controller.device_repair_due(dev):
+                            try:
+                                device_controller.device_repair(dev.get_id())
+                            except Exception as e:
+                                logger.error(f"Device repair failed for {dev.get_id()}: {e}")
+
                         if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
                                               NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                            logger.warning(f"Device status is not recognised, id: {dev.get_id()}, status: {dev.status}")
+                            logger.debug(f"Device not actionable here, id: {dev.get_id()}, status: {dev.status}")
                             continue
                         # Bounded self-repair of an `unavailable` device.
                         # Runs regardless of cluster status, and without

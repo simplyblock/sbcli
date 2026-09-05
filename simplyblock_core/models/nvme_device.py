@@ -75,6 +75,13 @@ class NVMeDevice(BaseModel):
     #: Wall-clock epoch (seconds) of the last counted repair attempt, for the
     #: backoff schedule in constants.DEVICE_REPAIR_BACKOFF_SEC.
     last_repair_tsc: float = 0.0
+    #: True when the device reached STATUS_REMOVED by an explicit operator
+    #: request (CLI `sn remove-device`, API v1/v2 remove) rather than by an
+    #: unsolicited SPDK removal. Self-repair must never resurrect a device the
+    #: operator removed on purpose, so this is the one removal that is not
+    #: repairable. Cleared when the device next reaches ONLINE, which is what
+    #: `sn add-device` / a node restart do after the operator puts it back.
+    admin_removed: bool = False
     serial_number: str = ""
     size: int = -1
     # NVMe per-block metadata size in bytes, as reported by the bound SPDK bdev.
