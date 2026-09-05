@@ -1,4 +1,3 @@
-# coding=utf-8
 """Every port-blocked peer must be drained before the journal is synchronised
 and leadership moves -- not just the acting leader.
 
