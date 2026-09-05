@@ -1412,6 +1412,7 @@ def node_port_check_fun(snode):
     node_port_check = True
     if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
+        port_lvs_owner: dict = {}
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status != "ready":
@@ -1438,15 +1439,21 @@ def node_port_check_fun(snode):
                     if tert and tert.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
                         skip = True
                 if not skip:
-                    ports.append(n.get_lvol_subsys_port(n.lvstore))
+                    _p = n.get_lvol_subsys_port(n.lvstore)
+                    ports.append(_p)
+                    port_lvs_owner[_p] = n.get_id()
         if not snode.is_secondary_node:
-            ports.append(snode.get_lvol_subsys_port(snode.lvstore))
+            _p = snode.get_lvol_subsys_port(snode.lvstore)
+            ports.append(_p)
+            port_lvs_owner[_p] = snode.get_id()
 
         # Batched: one nvmf_get_blocked_ports fetch answers every port.
         try:
-            for port, ret in health_controller.check_ports_on_node(snode, ports).items():
+            port_results = health_controller.check_ports_on_node(snode, ports)
+            for port, ret in port_results.items():
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
+            _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner)
         except Exception as e:
             for port in ports:
                 health_controller._log_port_check_failure(db, snode, port, e)
@@ -1550,6 +1557,116 @@ def _rpc_hang_seconds(node_id):
     with _rpc_hang_lock:
         now = time.monotonic()
         return now - _rpc_hang_since.setdefault(node_id, now)
+
+
+#: A client LVS port that SPDK fenced and nobody lifted. Keyed by
+#: (node_id, port) -> monotonic time first seen blocked.
+_blocked_port_since: dict = {}
+
+#: How long a port must stay blocked on an ONLINE node before the monitor
+#: treats it as a leak. Long enough that a legitimate in-flight fence (the
+#: restart flow holds one for well under a second, and SPDK's own conflict
+#: fence is expected to be resolved by the control plane) is never touched,
+#: far short of the client's ctrl_loss_tmo (30 x 2s = 60s) after which the
+#: kernel deletes the controller and the namespace starts failing IO.
+STALE_PORT_BLOCK_SEC = 25.0
+
+
+def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
+    """Lift a client port that SPDK fenced and nothing ever released.
+
+    SPDK blocks lvs->subsystem_port on a writer conflict, on a leadership
+    change and when failed IO is queued (lvol.c: spdk_lvs_unfreeze_on_conflict,
+    spdk_lvs_change_leader_state, spdk_lvs_queued_failed_IO). That block is
+    correct and deliberate -- it is what prevents split-brain writes. But the
+    10s poller registered alongside it only releases lvs->hublvol_port; nothing
+    in-process ever releases the subsystem port. The release is the control
+    plane's job, and until now the control plane had detection without
+    remediation.
+
+    k8s 2026-09-05 08:57 (1fb83b67, LVS_13). worker-4 was never part of the
+    outage and was the surviving path for four volumes. It fenced port 4436 at
+    08:57:39 after a writer conflict. This monitor logged
+    "Check: node port 10.0.0.14, 4436 ... False" 78 times over 8m37s and did
+    nothing; tasks-runner-port-allow was idle for the whole hour. The fence
+    outlived the clients' ctrl_loss_tmo (60s), the kernel deleted every
+    controller, the namespace flipped from "no usable path - requeuing" to
+    "no available path - failing I/O", and four volumes took EIO. It was
+    finally cleared incidentally by an unrelated restart at 09:06:16.
+
+    Preconditions, all required:
+      * the node is ONLINE -- a fence on a node that is down is not a leak;
+      * no restart task owns that LVS -- the restart flow is the legitimate
+        author of port blocks during its phases and must not be raced;
+      * the block has persisted past STALE_PORT_BLOCK_SEC;
+      * and the node's hublvol for that LVS is healthy and connected.
+
+    That last one is not optional. Unblocking a peer that still has no
+    redirect just re-opens the path to a node that will promote itself on the
+    next write and fence itself again -- the same loop, with client IO let
+    back in each time round.
+    """
+    for port, ok in port_results.items():
+        key = (snode.get_id(), port)
+        if ok:
+            _blocked_port_since.pop(key, None)
+            continue
+        first_seen = _blocked_port_since.setdefault(key, time.monotonic())
+        held = time.monotonic() - first_seen
+        if held < STALE_PORT_BLOCK_SEC:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+
+        owner_id = port_lvs_owner.get(port)
+        if not owner_id:
+            continue
+        try:
+            owner = db.get_storage_node_by_id(owner_id)
+        except Exception:
+            continue
+
+        if health_controller._restart_owns_lvs(owner):
+            logger.info(
+                "Port %s on %s blocked %.0fs but a restart owns %s; leaving it",
+                port, snode.get_id(), held, owner.lvstore)
+            continue
+
+        # Hublvol gate: only lift the fence once this node can actually
+        # redirect. See the docstring -- unblocking without a redirect
+        # reopens the loop.
+        try:
+            if owner_id == snode.get_id():
+                hub_ok = health_controller._check_node_hublvol(snode)
+            else:
+                hub_ok = health_controller._check_sec_node_hublvol(
+                    snode, auto_fix=False, primary_node_id=owner_id,
+                    repair_paths=False)
+        except Exception as e:
+            logger.warning(
+                "Port %s on %s blocked %.0fs; hublvol health check raised "
+                "(%s), not unblocking", port, snode.get_id(), held, e)
+            continue
+        if not hub_ok:
+            logger.warning(
+                "Port %s on %s blocked %.0fs for %s, but its hublvol is not "
+                "healthy -- NOT unblocking; a peer with no redirect would "
+                "promote itself and fence again",
+                port, snode.get_id(), held, owner.lvstore)
+            continue
+
+        logger.error(
+            "Port %s on %s has been blocked %.0fs on an ONLINE node with a "
+            "healthy hublvol and no restart owning %s -- SPDK fenced it and "
+            "nothing released it. Unblocking.",
+            port, snode.get_id(), held, owner.lvstore)
+        try:
+            from simplyblock_core.utils import port_block
+            port_block.set_port(snode, port, block=False, timeout=5, retry=1)
+            _blocked_port_since.pop(key, None)
+        except Exception as e:
+            logger.error("Failed to unblock stale port %s on %s: %s",
+                         port, snode.get_id(), e)
 
 
 def _abort_hung_spdk(snode, hung_for):

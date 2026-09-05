@@ -361,8 +361,16 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
             passed = bool(ret)
             logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
-        elif passed and is_sec2 and (auto_fix or repair_paths) and primary_node.secondary_node_id \
-                and primary_node.lvstore_status == "ready":
+        elif passed and is_sec2 and (auto_fix or repair_paths) and primary_node.secondary_node_id:
+            # No primary_node.lvstore_status == "ready" gate here, deliberately.
+            #
+            # The path being added targets the SECONDARY, not the primary --
+            # it is the tertiary's redirect to whoever leads once the primary
+            # is gone. Requiring the primary to be "ready" closed this repair
+            # at exactly the moment it matters: the primary dying is what makes
+            # the path load-bearing. The controller already exists (`passed`),
+            # so nothing here needs the primary healthy; the sec1 status check
+            # below is the relevant one.
             # Controller exists but may only have the optimized path; ensure secondary path is present
             # ret is [{..., "ctrlrs": [path1, path2, ...]}, ...] — paths are inside ctrlrs
             #

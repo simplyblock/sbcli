@@ -73,3 +73,59 @@ class TestOrderingWithinTheCheck:
         src = _check_src()
         assert src.index("if not passed and auto_fix") < src.index(
             "elif passed and is_sec2 and (auto_fix or repair_paths)")
+
+
+class TestRepairIsNotGatedOnPrimaryHealth:
+    """The tertiary's second path targets the SECONDARY, not the primary.
+
+    Requiring primary_node.lvstore_status == "ready" closed this repair at
+    exactly the moment the path becomes load-bearing: the primary dying is
+    what makes the tertiary depend on its redirect to the secondary.
+    """
+
+    def test_the_lvstore_ready_gate_is_gone_from_this_branch(self):
+        src = _check_src()
+        i = src.index("elif passed and is_sec2 and (auto_fix or repair_paths)")
+        window = src[i:i + 900]
+        assert 'primary_node.lvstore_status == "ready":' not in window
+
+    def test_the_failover_target_status_is_still_checked(self):
+        """Relaxing the primary gate must not mean attaching to a dead sec1."""
+        src = _check_src()
+        i = src.index("elif passed and is_sec2 and (auto_fix or repair_paths)")
+        window = src[i:i + 5200]
+        assert "sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]" in window
+
+
+class TestStaleFenceRemediation:
+    def test_monitor_has_a_remediation_arm(self):
+        from simplyblock_core.services import storage_node_monitor
+        assert hasattr(storage_node_monitor, "_remediate_stale_port_blocks")
+
+    def test_it_is_gated_on_hublvol_health(self):
+        """Unblocking a peer with no redirect reopens the loop: it promotes on
+        the next write and fences itself again, with client IO let back in."""
+        import inspect as _i
+        from simplyblock_core.services import storage_node_monitor
+        src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)
+        assert "_check_sec_node_hublvol(" in src
+        assert "_check_node_hublvol(" in src
+        assert "NOT unblocking" in src
+
+    def test_it_stands_down_for_restart_owned_lvs(self):
+        import inspect as _i
+        from simplyblock_core.services import storage_node_monitor
+        src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)
+        assert "_restart_owns_lvs(owner)" in src
+
+    def test_it_requires_the_node_to_be_online(self):
+        import inspect as _i
+        from simplyblock_core.services import storage_node_monitor
+        src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)
+        assert "snode.status != StorageNode.STATUS_ONLINE" in src
+
+    def test_the_threshold_is_under_the_client_ctrl_loss_tmo(self):
+        """ctrl_loss_tmo is 30 x 2s = 60s; after that the kernel deletes the
+        controller and the namespace fails IO instead of requeuing."""
+        from simplyblock_core.services import storage_node_monitor
+        assert 0 < storage_node_monitor.STALE_PORT_BLOCK_SEC < 60
