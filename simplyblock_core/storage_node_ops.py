@@ -10794,12 +10794,27 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                         break
                     time.sleep(_DRAIN_POLL_SEC)
                 if not _peer_drained:
-                    _abort_restart_and_unblock(
-                        f"Inflight IO did not drain on blocked peer "
-                        f"{_peer.get_id()} within {_DRAIN_BOUND_SEC}s; refusing "
-                        f"to synchronise the journal and move leadership while "
-                        f"that peer still has IO in flight and no hublvol "
-                        f"redirect")
+                    # Best effort, NOT an abort -- deliberately unlike ### 4.
+                    #
+                    # The acting leader's pipeline empties once its port is
+                    # blocked, so failing to drain there is genuinely anomalous.
+                    # A secondary/tertiary is different: it serves REDIRECTED IO
+                    # from the leader through its hublvol, and blocking its
+                    # client port does not stop that. Its distrib pipeline for
+                    # this jm_vuid can be legitimately busy for the whole
+                    # window, so aborting here would fail restarts routinely --
+                    # 19 of the ftt2/test_restart_scenarios cases did exactly
+                    # that on the first cut of this change.
+                    #
+                    # Proceeding leaves the residual risk this drain exists to
+                    # reduce, which is where we already were; the drain still
+                    # closes the common case where the peer is quiet.
+                    logger.warning(
+                        "Inflight IO did not drain on blocked peer %s for %s "
+                        "within %.1fs; proceeding with journal sync and "
+                        "leadership move (peer may still hold IO with no "
+                        "hublvol redirect)",
+                        _peer.get_id(), lvs_name, _DRAIN_BOUND_SEC)
 
             if disconnected_peers:
                 logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")

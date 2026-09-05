@@ -361,10 +361,45 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
             passed = bool(ret)
             logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
-        elif passed and is_sec2 and auto_fix and primary_node.secondary_node_id \
+        elif passed and is_sec2 and (auto_fix or repair_paths) and primary_node.secondary_node_id \
                 and primary_node.lvstore_status == "ready":
             # Controller exists but may only have the optimized path; ensure secondary path is present
             # ret is [{..., "ctrlrs": [path1, path2, ...]}, ...] — paths are inside ctrlrs
+            #
+            # `auto_fix or repair_paths`, not `auto_fix` alone. This is the same
+            # correction already made for the NIC-path repair below, and for the
+            # same reason: the caller escalates to auto_fix only once the coarse
+            # existence check has FAILED, and a controller that exists with one
+            # of its two paths PASSES that check. Gated on auto_fix this branch
+            # was unreachable in exactly the state it exists to repair.
+            #
+            # That state is not cosmetic. The tertiary's second path is its
+            # redirect to the secondary, and it is the only thing that keeps a
+            # redirect alive when the PRIMARY dies: NVMe multipath fails the
+            # controller over to it. With one path, losing the primary destroys
+            # the controller outright -- the hub bdev is removed and reopening
+            # returns ENODEV -- and the peer, having nothing to redirect
+            # through, promotes itself on the next write
+            # (spdk_lvs_trigger_leadership_switch, "Leadership changed due to
+            # receive new IO"). Two leaders, writer conflict, and the conflict
+            # handler then blocks the peer's own client port.
+            #
+            # Both 2026-09 incidents come back to this one missing path:
+            #   * AWS 2026-09-04 17:11:23 (fc32e143, LVS_10): the tertiary's
+            #     only hublvol path died with the container-killed primary and
+            #     never reconnected; 35 s later the restart moved leadership and
+            #     four uninvolved nodes self-aborted, suspending the cluster.
+            #   * k8s 2026-09-05 08:57 (1fb83b67, LVS_13): "Receive remove event
+            #     from callback" then "hub bdev LVS_13/hublvoln1 cannot be
+            #     opened, error=-19" on BOTH survivors; both promoted, both
+            #     blocked their ports, and the client lost every path -> EIO.
+            #
+            # The path is established by a deferred, post-unblock, best-effort
+            # pass in the restart flow (deferred_tertiary_paths ->
+            # add_hublvol_failover_path). Nothing re-checked it afterwards, so a
+            # skipped or failed deferral -- or a later disconnect from a network
+            # hiccup -- left the peer single-pathed indefinitely. This is that
+            # re-check.
             ctrlrs = ret[0].get("ctrlrs", []) if ret else []
             if len(ctrlrs) < 2 and not _restart_owns_lvs(primary_node):
                 try:
