@@ -28,6 +28,16 @@ def generate_random_sequence(length):
     return first_char + remaining_chars
 
 class TestClusterBase:
+    # Temporarily disabled on the docker path. `sbctl sn dump-lvstore` walks the
+    # whole lvstore on the SPDK app thread. Fired at every node at once during an
+    # outage recovery it held the thread for 1.1-1.5s at a stretch; queued alceml
+    # IOs went undequeued for 4590ms, past the 4000ms `_check_stuck_ios` watchdog,
+    # which unregistered the bdev. The control plane read that unregister as a
+    # surprise hot-remove and retired a perfectly healthy device permanently.
+    # See docker_multi_failover_device_removed_rca_20260905.md.
+    # The k8s path is unaffected and still collects it.
+    COLLECT_DOCKER_DUMP_LVSTORE = False
+
     def __init__(self, **kwargs):
         self.cluster_secret = os.environ.get("CLUSTER_SECRET")
         self.cluster_id = os.environ.get("CLUSTER_ID")
@@ -1376,13 +1386,19 @@ class TestClusterBase:
                 except Exception as e:
                     self.logger.warning(f"[node_dump] fetch_distrib_logs_k8s failed for {node_id}: {e}")
             else:
-                try:
-                    self.ssh_obj.dump_lvstore(
-                        node_ip=self.mgmt_nodes[0],
-                        storage_node_id=node_id,
+                if self.COLLECT_DOCKER_DUMP_LVSTORE:
+                    try:
+                        self.ssh_obj.dump_lvstore(
+                            node_ip=self.mgmt_nodes[0],
+                            storage_node_id=node_id,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] dump_lvstore failed for {node_id}: {e}")
+                else:
+                    self.logger.info(
+                        f"[node_dump] dump_lvstore SKIPPED for {node_id} "
+                        f"(COLLECT_DOCKER_DUMP_LVSTORE=False)"
                     )
-                except Exception as e:
-                    self.logger.warning(f"[node_dump] dump_lvstore failed for {node_id}: {e}")
                 try:
                     self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=node_ip,
