@@ -99,8 +99,10 @@ class FailbackPath_DrainBeforeDrop(unittest.TestCase):
         # port blocked beyond client max_latency.
         self.assertRegex(
             self.takeover_block,
-            r"_DRAIN_BOUND_SEC\s*=\s*\d+",
-            "drain must declare a bounded deadline (e.g. _DRAIN_BOUND_SEC = 2.0)",
+            r"_DRAIN_BOUND_SEC\s*=\s*(\d+|_DRAIN_BOUND_SEC_DEFAULT)",
+            "drain must declare a bounded deadline (a literal, or the module "
+            "constant _DRAIN_BOUND_SEC_DEFAULT it is now hoisted to so the "
+            "peer drain in ### 5b can share the same value)",
         )
 
     def test_drain_timeout_aborts_and_unblocks(self):

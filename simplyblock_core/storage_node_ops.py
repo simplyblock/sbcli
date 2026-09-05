@@ -10702,8 +10702,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 # blocked beyond client max_latency.  On timeout we proceed
                 # with the drop and accept the same residual class of error
                 # this is trying to prevent — but bounded.
-                _DRAIN_BOUND_SEC = 2.0
-                _DRAIN_POLL_SEC = 0.05
+                _DRAIN_BOUND_SEC = _DRAIN_BOUND_SEC_DEFAULT
+                _DRAIN_POLL_SEC = _DRAIN_POLL_SEC_DEFAULT
                 deadline = time.time() + _DRAIN_BOUND_SEC
                 drained = False
                 while time.time() < deadline:
@@ -10743,6 +10743,63 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
                 except Exception as e:
                     _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
+
+            ### 5b- drain in-flight IO on the OTHER blocked peers too
+            #
+            # ### 4 above drains only the acting leader. Every other peer we
+            # port-blocked in ### 3 can be holding in-flight IO of its own:
+            # blocking its port stops NEW client IO, it does not empty what is
+            # already in its distrib pipeline.
+            #
+            # Both of the next two steps change who owns the journal while
+            # that IO is still landing -- jc_explicit_synchronization just
+            # below, and the leadership take in ### 7 -- and the peer's own
+            # hublvol redirect is not established until ### 8b, later in the
+            # fence. A peer with in-flight IO and no redirect promotes itself
+            # on the next write (spdk_lvs_trigger_leadership_switch, "Leadership
+            # changed due to receive new IO"), and a dual-leader writer
+            # conflict follows.
+            #
+            # Observed 2026-09-04 17:11:58 (cluster fc32e143, LVS_10): the
+            # tertiary's port 4440 was blocked at .721 while the CP itself
+            # logged "LVS_10/hublvoln1 not surfaced yet";
+            # jc_explicit_synchronization went to the primary at .729; all four
+            # JM replicas reported jfi_r_wr_lock conflicts at .732 with
+            # disagreeing holders; the tertiary only connected its hublvol at
+            # .913. Four healthy nodes self-aborted by 17:12:11 and the cluster
+            # suspended.
+            #
+            # Same bound and same policy as ### 4: proceeding with un-drained
+            # IO is precisely the condition this exists to prevent, so a peer
+            # that will not drain aborts the attempt and releases every port.
+            # _check_fence_deadline inside the poll keeps this inside the fence
+            # budget regardless of peer count.
+            for _peer in blocked_peers:
+                if current_leader is not None and _peer.get_id() == current_leader.get_id():
+                    continue                      # already drained by ### 4
+                _peer_rpc = _peer.rpc_client(timeout=constants.FENCE_RPC_TIMEOUT_SEC,
+                                             retry=constants.FENCE_RPC_RETRY)
+                _peer_deadline = time.time() + _DRAIN_BOUND_SEC
+                _peer_drained = False
+                while time.time() < _peer_deadline:
+                    _check_fence_deadline("peer inflight drain")
+                    try:
+                        if not _peer_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid):
+                            _peer_drained = True
+                            break
+                    except Exception as e:
+                        logger.warning(
+                            "bdev_distrib_check_inflight_io poll failed for %s on peer %s: %s",
+                            lvs_name, _peer.get_id(), e)
+                        break
+                    time.sleep(_DRAIN_POLL_SEC)
+                if not _peer_drained:
+                    _abort_restart_and_unblock(
+                        f"Inflight IO did not drain on blocked peer "
+                        f"{_peer.get_id()} within {_DRAIN_BOUND_SEC}s; refusing "
+                        f"to synchronise the journal and move leadership while "
+                        f"that peer still has IO in flight and no hublvol "
+                        f"redirect")
 
             if disconnected_peers:
                 logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
@@ -12105,6 +12162,13 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
 # giving the control plane time to reconcile a peer that went offline mid-restart
 # so the rebuilt cluster map no longer references its devices as online.
 _DISTR_RECREATE_RETRY_DELAY_SEC = 5
+
+#: Bound on waiting for a node's distrib pipeline to empty before its
+#: leadership is changed. Applied to the acting leader (### 4) and to every
+#: other port-blocked peer (### 5b). Held inside the port fence, so it is
+#: deliberately short and _check_fence_deadline still governs the total.
+_DRAIN_BOUND_SEC_DEFAULT = 2.0
+_DRAIN_POLL_SEC_DEFAULT = 0.05
 
 
 def apply_write_protection_mode(params, use_v2):
