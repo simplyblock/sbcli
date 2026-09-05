@@ -38,7 +38,9 @@ def get(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceDT
 
 @instance_api.post('/remove', name='clusters:storage_nodes:devices:remove', status_code=204, responses={204: {"content": None}})
 def remove(cluster: Cluster, storage_node: StorageNode, device: Device, force: bool = False) -> Response:
-    if not device_controller.device_remove(device.get_id(), force):
+    if not device_controller.device_remove(
+            device.get_id(), force,
+            cause=device_controller.CAUSE_ADMIN_REMOVE):
         raise ValueError('Failed to remove device')
 
     return Response(status_code=204)

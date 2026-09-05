@@ -165,3 +165,145 @@ class TestTrigger:
         i = src.index("if device_controller.device_repair_due(dev):")
         j = src.index("if cluster.status == Cluster.STATUS_ACTIVE:")
         assert i < j, "repair must be evaluated independently of the cluster-status branch"
+
+
+class TestRemovedIsRepairable:
+    """SPDK unregistering a bdev is not proof the hardware is gone.
+
+    2026-09-05, alceml_73753c0f on vm202_4424: the ALCEML stuck-IO watchdog
+    (bdev_alceml_impl.cpp, c_dt_ms_stuck_io = 4000) found 4 queue heads
+    undequeued for 4.59s and unregistered the bdev. The drive was healthy --
+    the JM alceml on partition p1 of the SAME physical SSD logged no stuck IO,
+    error or removal event for the entire run, and the watchdog fired exactly
+    once cluster-wide in 6.5 hours. The device then sat in STATUS_REMOVED with
+    device_monitor logging "Device status is not recognised" 505 times while
+    six device_migration subtasks spun to ~1900 retries on "only 7 devices
+    online, waiting for more devices to be online".
+    """
+
+    def _dev(self, status, **kw):
+        d = NVMeDevice()
+        d.status = status
+        for k, v in kw.items():
+            setattr(d, k, v)
+        return d
+
+    def test_removed_is_a_repairable_state(self):
+        assert NVMeDevice.STATUS_REMOVED in device_controller.DEVICE_REPAIRABLE_STATES
+
+    def test_unavailable_is_still_repairable(self):
+        assert NVMeDevice.STATUS_UNAVAILABLE in device_controller.DEVICE_REPAIRABLE_STATES
+
+    def test_a_removed_device_is_due_immediately(self):
+        assert device_controller.device_repair_due(
+            self._dev(NVMeDevice.STATUS_REMOVED, repair_attempts=0, last_repair_tsc=0.0))
+
+    def test_failed_is_not_repairable(self):
+        """STATUS_FAILED is a verdict with its own operator-driven exits."""
+        assert not device_controller.device_repair_due(
+            self._dev(NVMeDevice.STATUS_FAILED, repair_attempts=0, last_repair_tsc=0.0))
+
+    def test_removed_still_obeys_the_backoff(self):
+        import time
+        assert not device_controller.device_repair_due(
+            self._dev(NVMeDevice.STATUS_REMOVED, repair_attempts=1,
+                      last_repair_tsc=time.time()))
+
+
+class TestAdminRemovalIsNeverUndone:
+    """An operator who removes a device means it."""
+
+    def _dev(self, **kw):
+        d = NVMeDevice()
+        d.status = NVMeDevice.STATUS_REMOVED
+        for k, v in kw.items():
+            setattr(d, k, v)
+        return d
+
+    def test_admin_removed_is_not_due(self):
+        assert not device_controller.device_repair_due(
+            self._dev(admin_removed=True, repair_attempts=0, last_repair_tsc=0.0))
+
+    def test_the_same_device_would_be_due_without_the_flag(self):
+        """Isolates the flag as the only difference."""
+        assert device_controller.device_repair_due(
+            self._dev(admin_removed=False, repair_attempts=0, last_repair_tsc=0.0))
+
+    def test_repair_refuses_even_under_force(self):
+        """force forgives the retry budget; it does not overrule the operator."""
+        src = inspect.getsource(device_controller.device_repair)
+        i = src.index("if device.admin_removed:")
+        j = src.index("retries_exhausted and not force")
+        assert i < j, "the admin gate must precede (and not share) the force gate"
+        assert "not overridable by force" in src[i:j].lower()
+
+    def test_there_is_a_dedicated_cause(self):
+        assert device_controller.CAUSE_ADMIN_REMOVE == "admin_remove"
+        assert device_controller.CAUSE_ADMIN_REMOVE != device_controller.CAUSE_OTHER
+
+    def test_device_remove_records_intent_before_teardown(self):
+        """The teardown below can fail or be interrupted; if the device ends up
+        REMOVED anyway the monitor must still see that a human asked."""
+        src = inspect.getsource(device_controller.device_remove)
+        i = src.index("admin = (cause == CAUSE_ADMIN_REMOVE)")
+        assert "_atomic_device_set(" in src[i:i + 700]
+        assert src.index("device_set_state(device_id, NVMeDevice.STATUS_REMOVED") > i
+
+    def test_the_flag_is_persisted(self):
+        src = inspect.getsource(device_controller.device_set_state)
+        assert '"admin_removed": device.admin_removed' in src
+
+    def test_reaching_online_clears_the_flag_and_deleted(self):
+        """`sn add-device` / a node restart put the device back; the record must
+        not stay logically deleted while it serves IO."""
+        src = inspect.getsource(device_controller.device_set_state)
+        assert "device.admin_removed = False" in src
+        assert "device.deleted = False" in src
+
+
+class TestOperatorEntryPointsDeclareIntent:
+    """CAUSE_OTHER is the default everywhere, so it cannot be the marker --
+    the operator paths have to say so explicitly."""
+
+    def _src(self, mod):
+        import importlib
+        return inspect.getsource(importlib.import_module(mod))
+
+    def test_cli_remove_device(self):
+        src = self._src("simplyblock_cli.clibase")
+        i = src.index("def storage_node__remove_device")
+        assert "CAUSE_ADMIN_REMOVE" in src[i:i + 400]
+
+    def test_api_v1_remove(self):
+        assert "CAUSE_ADMIN_REMOVE" in self._src("simplyblock_web.api.v1.device")
+
+    def test_api_v2_remove(self):
+        assert "CAUSE_ADMIN_REMOVE" in self._src(
+            "simplyblock_web.api.v2.cluster.storage_node.device")
+
+    def test_the_event_collector_does_not_claim_operator_intent(self):
+        """An unsolicited SPDK REMOVE must stay repairable."""
+        src = self._src("simplyblock_core.services.main_distr_event_collector")
+        i = src.index("device_controller.device_remove(")
+        assert "CAUSE_LOCAL_FAILURE" in src[i:i + 200]
+        assert "CAUSE_ADMIN_REMOVE" not in src
+
+
+class TestMonitorReachesRemovedDevices:
+    def test_repair_is_evaluated_before_the_status_filter(self):
+        """device_monitor's filter drops anything not online/unavailable/
+        readonly/cannot-allocate. STATUS_REMOVED fell in that gap, which is why
+        nothing downstream of the `continue` could ever see the 2026-09-05
+        device."""
+        from simplyblock_core.services import device_monitor
+        src = inspect.getsource(device_monitor)
+        i = src.index("if device_controller.device_repair_due(dev):")
+        j = src.index("if dev.status not in [NVMeDevice.STATUS_ONLINE")
+        assert i < j
+
+    def test_the_filter_no_longer_calls_a_known_state_unrecognised(self):
+        from simplyblock_core.services import device_monitor
+        src = inspect.getsource(device_monitor)
+        # The comment above the new trigger quotes the old message verbatim,
+        # so assert on the logger CALL, not on the text appearing anywhere.
+        assert 'logger.warning(f"Device status is not recognised' not in src

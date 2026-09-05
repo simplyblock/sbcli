@@ -67,7 +67,11 @@ class TestDeviceActions:
         response = client.post(f'{BASE}/{DEVICE_ID}/remove', params={'force': True})
 
         assert response.status_code == 204
-        device_controller.device_remove.assert_called_once_with(DEVICE_ID, True)
+        # The cause is not decoration: it is what marks the removal as
+        # operator-initiated so device self-repair never undoes it.
+        device_controller.device_remove.assert_called_once_with(
+            DEVICE_ID, True,
+            cause=device_controller.CAUSE_ADMIN_REMOVE)
 
     def test_restart(self, client, device, device_controller):
         device_controller.restart_device.return_value = True

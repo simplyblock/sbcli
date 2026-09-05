@@ -366,7 +366,9 @@ class CLIWrapperBase:
         return device_controller.add_device(args.device_id)
 
     def storage_node__remove_device(self, sub_command, args):
-        return device_controller.device_remove(args.device_id, args.force)
+        return device_controller.device_remove(
+            args.device_id, args.force,
+            cause=device_controller.CAUSE_ADMIN_REMOVE)
 
     def storage_node__set_failed_device(self, sub_command, args):
         return device_controller.device_set_failed(args.device_id)
