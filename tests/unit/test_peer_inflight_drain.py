@@ -72,13 +72,21 @@ class TestOrdering:
 
 
 class TestPolicy:
-    def test_an_undrained_peer_aborts_and_releases(self):
-        """Proceeding with un-drained IO is exactly the incident. Same policy
-        as the leader drain: abort, which unblocks every port we took."""
+    def test_an_undrained_peer_warns_and_proceeds(self):
+        """Deliberately NOT an abort, unlike the leader drain.
+
+        A secondary/tertiary serves REDIRECTED IO from the leader through its
+        hublvol, and blocking its client port does not stop that -- its
+        pipeline for this jm_vuid can be legitimately busy for the whole
+        window. Aborting there fails restarts routinely: 19 of the
+        ftt2/test_restart_scenarios cases did exactly that on the first cut."""
         body = _fence_body()
         i = body.index("### 5b-")
-        window = body[i:i + 4500]
-        assert "_abort_restart_and_unblock(" in window
+        window = body[i:i + 5200]
+        assert "Inflight IO did not drain on blocked peer" in window
+        # the abort belongs to the leader drain, not this one
+        after = window[window.index("if not _peer_drained:"):]
+        assert "_abort_restart_and_unblock(" not in after
 
     def test_the_fence_deadline_is_checked_inside_the_poll(self):
         """Several peers x a 2s bound must not be able to overrun the fence."""
