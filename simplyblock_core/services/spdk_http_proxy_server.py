@@ -1,3 +1,4 @@
+import atexit
 import base64
 from typing import ClassVar
 import json
@@ -23,10 +24,25 @@ logger.setLevel(logging.INFO)
 
 read_line_time_diff: dict = {}
 recv_from_spdk_time_diff: dict = {}
+#: Set at interpreter exit so the stats thread stops before finalization.
+#:
+#: It is a daemon thread, so Python does not join it -- it keeps running while
+#: the interpreter tears down. Once logging's stream is closed every emit
+#: raises ValueError("I/O operation on closed file"), and the handler below
+#: used to log THAT to the same closed stream and loop again. Spinning through
+#: finalization is what produced "Fatal Python error: _enter_buffered_busy:
+#: could not acquire lock for <_io.BufferedWriter name='<stderr>'> at
+#: interpreter shutdown", aborting the process (exit -6 / 250) after every one
+#: of the 1213 integration tests had already passed.
+_stats_stop = threading.Event()
+atexit.register(_stats_stop.set)
+
+
 def print_stats():
-    while True:
+    # wait() doubles as the sleep and as the shutdown check, so exit is
+    # immediate instead of up to 3s late.
+    while not _stats_stop.wait(3):
         try:
-            time.sleep(3)
             t = time.time_ns()
             if len(read_line_time_diff) > 0:
                 read_line_time_diff_max = max(list(read_line_time_diff.values()))
@@ -57,6 +73,10 @@ def print_stats():
                 logger.info(f"Periodic stats: {t}: recv_from_spdk_time: max={recv_from_spdk_time_max} ns, avg={recv_from_spdk_time_avg} ns, last_3s_avg={recv_from_spdk_time_avg_last_3_sec} ns")
                 if len(recv_from_spdk_time_diff) > 10000:
                     recv_from_spdk_time_diff.clear()
+        except (ValueError, OSError):
+            # The log stream is gone (interpreter shutdown, or the handler was
+            # closed). Do not try to report it through that same stream.
+            return
         except Exception as e:
             logger.error(e)
 
