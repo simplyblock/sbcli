@@ -28,15 +28,26 @@ def generate_random_sequence(length):
     return first_char + remaining_chars
 
 class TestClusterBase:
-    # Temporarily disabled on the docker path. `sbctl sn dump-lvstore` walks the
-    # whole lvstore on the SPDK app thread. Fired at every node at once during an
-    # outage recovery it held the thread for 1.1-1.5s at a stretch; queued alceml
-    # IOs went undequeued for 4590ms, past the 4000ms `_check_stuck_ios` watchdog,
-    # which unregistered the bdev. The control plane read that unregister as a
-    # surprise hot-remove and retired a perfectly healthy device permanently.
-    # See docker_multi_failover_device_removed_rca_20260905.md.
-    # The k8s path is unaffected and still collects it.
-    COLLECT_DOCKER_DUMP_LVSTORE = False
+    # Temporarily disabled on BOTH the docker and k8s paths.
+    #
+    # `sbctl sn dump-lvstore` walks the whole lvstore on the SPDK app thread, and
+    # `_collect_all_node_dumps_parallel` fires it at every node at once.
+    #
+    # docker (docker_multi_failover_device_removed_rca_20260905.md): it held the
+    # app thread for 1.1-1.5s at a stretch, queued alceml IOs went undequeued for
+    # 4590ms, past the 4000ms `_check_stuck_ios` watchdog, which unregistered the
+    # bdev. The control plane read that unregister as a surprise hot-remove and
+    # retired a healthy device permanently.
+    #
+    # k8s (k8s_stalled_io_err110_rca_20260906.md): the dump was not the trigger
+    # there, but it is a reliable casualty and it removes the node from service
+    # for minutes. On worker-2 the RPC never returned at all, while the other five
+    # nodes finished in 18-24s, and the wrapper only gave up after 150s.
+    #
+    # Either way it is heavyweight enough to distort the runs it is meant to
+    # diagnose. `fetch_distrib_logs*` still runs on both paths, so placement maps
+    # and stack dumps are unaffected.
+    COLLECT_DUMP_LVSTORE = False
 
     def __init__(self, **kwargs):
         self.cluster_secret = os.environ.get("CLUSTER_SECRET")
@@ -1368,15 +1379,21 @@ class TestClusterBase:
                     getattr(self, 'sbcli_utils', None), 'sbcli_cmd',
                     os.environ.get("SBCLI_CMD", "sbcli-dev")
                 )
-                try:
-                    k8s_obj.dump_lvstore_k8s(
-                        storage_node_id=node_id,
-                        storage_node_ip=node_ip,
-                        logs_path=dump_dir,
-                        sbcli_cmd=sbcli_cmd,
+                if self.COLLECT_DUMP_LVSTORE:
+                    try:
+                        k8s_obj.dump_lvstore_k8s(
+                            storage_node_id=node_id,
+                            storage_node_ip=node_ip,
+                            logs_path=dump_dir,
+                            sbcli_cmd=sbcli_cmd,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] dump_lvstore_k8s failed for {node_id}: {e}")
+                else:
+                    self.logger.info(
+                        f"[node_dump] dump_lvstore_k8s SKIPPED for {node_id} "
+                        f"(COLLECT_DUMP_LVSTORE=False)"
                     )
-                except Exception as e:
-                    self.logger.warning(f"[node_dump] dump_lvstore_k8s failed for {node_id}: {e}")
                 try:
                     k8s_obj.fetch_distrib_logs_k8s(
                         storage_node_id=node_id,
@@ -1386,7 +1403,7 @@ class TestClusterBase:
                 except Exception as e:
                     self.logger.warning(f"[node_dump] fetch_distrib_logs_k8s failed for {node_id}: {e}")
             else:
-                if self.COLLECT_DOCKER_DUMP_LVSTORE:
+                if self.COLLECT_DUMP_LVSTORE:
                     try:
                         self.ssh_obj.dump_lvstore(
                             node_ip=self.mgmt_nodes[0],
@@ -1397,7 +1414,7 @@ class TestClusterBase:
                 else:
                     self.logger.info(
                         f"[node_dump] dump_lvstore SKIPPED for {node_id} "
-                        f"(COLLECT_DOCKER_DUMP_LVSTORE=False)"
+                        f"(COLLECT_DUMP_LVSTORE=False)"
                     )
                 try:
                     self.ssh_obj.fetch_distrib_logs(
