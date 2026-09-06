@@ -566,7 +566,7 @@ def process_snap_replicate_start(task, snapshot):
                      "for which check declined)")
 
     offset = 0
-    if "offset" in task.function_params and task.function_params["offset"]:
+    if task.function_params.get("offset"):
         offset = task.function_params["offset"]
 
     # Flip to IN_REPLICATION under the CHAIN lock, BEFORE the transfer starts.
