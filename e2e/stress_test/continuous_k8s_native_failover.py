@@ -1106,7 +1106,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info(f"[warmup] FIO warmup complete on {client}: {name}")
 
     def _start_client_fio(self, name: str, client: str, mount_point: str,
-                          log_file: str, bs: str = None, randseed: int = None):
+                          log_file: str, bs: str | None = None, randseed: int | None = None):
         """Launch FIO in a background thread on *client* via SSH/tmux."""
         if bs is None:
             bs = f"{2 ** random.randint(2, 7)}K"
@@ -1270,8 +1270,8 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── PVC + FIO creation ───────────────────────────────────────────────────
 
-    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None,
-                             storage_class: str = None):
+    def create_pvcs_with_fio(self, count: int, node_ids: list[str] | None = None,
+                             storage_class: str | None = None):
         """Create *count* PVCs via K8s and start FIO on each.
 
         When ``self.use_client_fio`` is True, the underlying lvol is
@@ -2861,7 +2861,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── Wait for FIO completion ─────────────────────────────────────────────
 
-    def wait_for_fio_complete(self, timeout: int = None) -> set[str]:
+    def wait_for_fio_complete(self, timeout: int | None = None) -> set[str]:
         """Wait for all active FIO workloads to finish naturally.
 
         Client mode: poll fio processes on client hosts until none remain.
@@ -3070,7 +3070,7 @@ class K8sNativeFailoverTest(TestClusterBase):
     # ── FIO Validation ───────────────────────────────────────────────────────
 
     def _save_fio_pod_logs(self, job_name: str, resource_name: str,
-                           pvc_name: str = None):
+                           pvc_name: str | None = None):
         """Save FIO pod logs and performance data to local log directory."""
         try:
             pod_name = self.k8s_utils.get_job_pod_name(job_name)
@@ -3092,7 +3092,7 @@ class K8sNativeFailoverTest(TestClusterBase):
     # ── FIO perf-log helpers ──────────────────────────────────────────────
 
     def _list_fio_perf_files(self, pod_name: str, ns: str,
-                              container: str = None) -> list[str]:
+                              container: str | None = None) -> list[str]:
         """List FIO-generated perf files in /spdkvol/ of a *running* pod.
 
         Returns a list of absolute paths inside the container, or ``[]`` if
@@ -3155,7 +3155,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
 
     def _copy_fio_perf_logs(self, pod_name: str, resource_name: str,
-                             pvc_name: str = None):
+                             pvc_name: str | None = None):
         """Copy FIO perf log files (lat, bw, iops, iolog) from /spdkvol/ in
         the pod to the local ClientLogs directory.
 
@@ -3648,7 +3648,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
         self.test_name = "k8s_native_basic_failover"
         self.num_clones = 3
 
-    def create_snapshots_and_clones_with_cleanup(self, count: int = None):
+    def create_snapshots_and_clones_with_cleanup(self, count: int | None = None):
         """Create snapshots + clones, cleaning old FIO files from clones.
 
         For K8s Job mode, uses an init container to rm old fio files.
@@ -5577,8 +5577,8 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
 
     # ── Parallel PVC creation ─────────────────────────────────────────────
 
-    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None,
-                             storage_class: str = None):
+    def create_pvcs_with_fio(self, count: int, node_ids: list[str] | None = None,
+                             storage_class: str | None = None):
         """Create PVCs and start FIO using parallel batches.
 
         Overrides the parent's sequential loop with a 3-phase approach:

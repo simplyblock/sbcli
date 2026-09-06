@@ -3121,7 +3121,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         # check for memory
-        if "memory_details" in node_info and node_info['memory_details']:
+        if node_info.get('memory_details'):
             memory_details = node_info['memory_details']
             logger.info("Node Memory info")
             logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -5770,7 +5770,7 @@ def _restart_storage_node_impl(
     minimum_hp_memory = max(minimum_hp_memory, max_prov)
 
     # check for memory
-    if "memory_details" in node_info and node_info['memory_details']:
+    if node_info.get('memory_details'):
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -11877,7 +11877,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
-        logger.debug(f"online_jms: {str(jm_ids)}")
+        logger.debug(f"online_jms: {jm_ids!s}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
@@ -12692,7 +12692,7 @@ def dump_lvstore(node_id):
 
     rpc_client = snode.rpc_client(timeout=120)
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
-    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
+    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{datetime.datetime.now().isoformat()!s}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
     ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
     if not ret:
@@ -12799,7 +12799,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")
@@ -12965,7 +12965,7 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")

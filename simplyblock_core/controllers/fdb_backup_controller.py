@@ -29,7 +29,7 @@ def create_backup(cluster_id):
         cluster = db_controller.get_cluster_by_id(cluster_id)
         backup_path = cluster.get_backup_path()
         if cluster.backup_s3_bucket and cluster.backup_s3_cred:
-            folder = f"backup-{str(datetime.datetime.now())}"
+            folder = f"backup-{datetime.datetime.now()!s}"
             folder = folder.replace(" ", "-")
             folder = folder.replace(":", "-")
             folder = folder.split(".")[0]

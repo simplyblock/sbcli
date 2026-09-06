@@ -156,7 +156,7 @@ def rpc_call(req, client_timeout=None):
     params = ""
     if "params" in req_data:
         params = str(req_data['params'])
-    logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
+    logger.info(f"Request:{req_time} function: {req_data['method']!s}, params: {params}")
     sock_timeout = _resolve_sock_timeout(client_timeout)
     spdk_semaphore.acquire()
     try:

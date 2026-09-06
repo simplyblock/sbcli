@@ -503,7 +503,7 @@ class SshUtils:
     #     )
 
     def connect(self, address: str, port: int = 22,
-            bastion_server_address: str = None,
+            bastion_server_address: str | None = None,
             username: str = "ec2-user",
             is_bastion_server: bool = False):
         """
@@ -548,7 +548,7 @@ class SshUtils:
                         return
                     except Exception as e:
                         last_err = e
-            raise Exception(f"All usernames failed for {address}. Last error: {repr(last_err)}")
+            raise Exception(f"All usernames failed for {address}. Last error: {last_err!r}")
 
         # --- VIA BASTION ---
         # ensure bastion client (reuse if alive)
@@ -576,7 +576,7 @@ class SshUtils:
                     continue
                 break
             if (not self._bastion_client) or (not self._bastion_client.get_transport()) or (not self._bastion_client.get_transport().is_active()):
-                raise Exception(f"All usernames failed for bastion {bastion_server_address}. Last error: {repr(last_err)}")
+                raise Exception(f"All usernames failed for bastion {bastion_server_address}. Last error: {last_err!r}")
 
         if is_bastion_server:
             # caller only wanted bastion connection open
@@ -614,7 +614,7 @@ class SshUtils:
             except Exception:
                 pass
 
-        raise Exception(f"Tunnel established, but all usernames failed for target {address}. Last error: {repr(last_err)}")
+        raise Exception(f"Tunnel established, but all usernames failed for target {address}. Last error: {last_err!r}")
 
 
 
@@ -2868,7 +2868,7 @@ class SshUtils:
                     self.logger.error(f"[PLACEMENT_DUMP] INVALID: {fp}")
                     all_ok = False
             except Exception as e:
-                self.logger.error(f"[PLACEMENT_DUMP] ERROR validating {fp}: {repr(e)}")
+                self.logger.error(f"[PLACEMENT_DUMP] ERROR validating {fp}: {e!r}")
                 all_ok = False
         return all_ok
 

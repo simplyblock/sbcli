@@ -1518,7 +1518,7 @@ class TestClusterBase:
         except Exception as e:
             # Teardown must NEVER fail the test
             self.logger.warning(
-                f"[SPDK-MEM] Exception during mem stats teardown: {str(e)}"
+                f"[SPDK-MEM] Exception during mem stats teardown: {e!s}"
             )
 
     def _fetch_spdk_mem_stats_for_node(self, storage_node_ip, storage_node_id):
@@ -1663,7 +1663,7 @@ class TestClusterBase:
 
         except Exception as e:
             self.logger.info(
-                f"[DEBUG][SPDK-MEM] FAILURE node={storage_node_ip} error={str(e)}"
+                f"[DEBUG][SPDK-MEM] FAILURE node={storage_node_ip} error={e!s}"
             )
 
     
@@ -1734,7 +1734,7 @@ class TestClusterBase:
 
             except Exception as e:
                 self.logger.info(
-                    f"[SPDK-MEM] Worker loop exception: {str(e)}"
+                    f"[SPDK-MEM] Worker loop exception: {e!s}"
                 )
 
             time.sleep(interval_sec)
@@ -2884,7 +2884,7 @@ class TestClusterBase:
                 ordered.append(n)
         return ordered
 
-    def cleanup_root_when_high_usage(self, threshold: int = None):
+    def cleanup_root_when_high_usage(self, threshold: int | None = None):
         """
         For each mgmt/storage node, if /root usage >= threshold,
         delete /root/distrib_* , /root/bdev_* , and /etc/simplyblock/LVS_* ONLY on that node.
@@ -2926,7 +2926,7 @@ class TestClusterBase:
             else:
                 self.logger.info(f"[{node}] /root usage {used}% < {thr}%. No cleanup needed.")
 
-    def start_root_monitor(self, interval_minutes: int = None, threshold: int = None):
+    def start_root_monitor(self, interval_minutes: int | None = None, threshold: int | None = None):
         """
         Start a background thread that checks /root usage periodically
         and cleans if usage >= threshold on a per-node basis.

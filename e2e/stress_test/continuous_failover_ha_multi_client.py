@@ -378,7 +378,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         crypto=is_crypto,
                     )
             except Exception as e:
-                self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Lvol creation fails with {e!s}. Retrying with different name.")
                 self.lvol_name = f"lvl{generate_random_sequence(15)}"
                 lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
                 try:
@@ -404,7 +404,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                             crypto=is_crypto,
                         )
                 except Exception as exp:
-                    self.logger.warning(f"Retry Lvol creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Lvol creation fails with {exp!s}.")
                     continue
 
             self.lvol_mount_details[lvol_name] = {
@@ -1035,7 +1035,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     if "(False," in error:
                         raise Exception(error)
             except Exception as e:
-                self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Snap creation fails with {e!s}. Retrying with different name.")
                 try:
                     snapshot_name = f"snap_{lvol}"
                     temp_name = generate_random_sequence(5)
@@ -1045,7 +1045,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     else:
                         self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
                 except Exception as exp:
-                    self.logger.warning(f"Retry Snap creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Snap creation fails with {exp!s}.")
                     continue
 
             self.snapshot_names.append(snapshot_name)
@@ -1067,7 +1067,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 else:
                     self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
             except Exception as e:
-                self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Clone creation fails with {e!s}. Retrying with different name.")
                 try:
                     clone_name = f"clone_{generate_random_sequence(15)}"
                     temp_name = generate_random_sequence(5)
@@ -1077,7 +1077,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     else:
                         self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
                 except Exception as exp:
-                    self.logger.warning(f"Retry Clone creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Clone creation fails with {exp!s}.")
                     continue
             fs_type = self.lvol_mount_details[lvol]["FS"]
             client = self.lvol_mount_details[lvol]["Client"]
@@ -1424,7 +1424,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
                 sleep_n_sec(300)  # Sleep for 60 seconds before the next validation
             except Exception as e:
-                self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
+                self.logger.error(f"Error in continuous I/O stats validation: {e!s}")
                 break  # Exit the thread on failure
 
     def restart_fio(self, iteration):

@@ -327,7 +327,7 @@ def _summarize(samples):
     def pct(p):
         if not samples_sorted:
             return 0.0
-        k = int(round((p / 100.0) * (len(samples_sorted) - 1)))
+        k = round((p / 100.0) * (len(samples_sorted) - 1))
         return samples_sorted[k]
 
     return {

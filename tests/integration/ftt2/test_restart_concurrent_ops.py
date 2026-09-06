@@ -236,7 +236,7 @@ class StressRunner:
             t.join(timeout=10)
         self._threads.clear()
 
-    def run_for(self, duration: float = None):
+    def run_for(self, duration: float | None = None):
         """Run stress ops for given duration then stop."""
         window = duration or self.duration
         self.start()

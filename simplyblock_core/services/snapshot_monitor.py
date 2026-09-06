@@ -227,7 +227,7 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
                 ret = None
             if ret:
                 lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                if lvs_info.get('lvs leadership'):
                     leader_node = snode
 
         if not leader_node:
@@ -248,7 +248,7 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
                 if not ret:
                     continue
                 lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                if lvs_info.get('lvs leadership'):
                     leader_node = sec_node
                     break
         if leader_node is not None and leader_cache is not None:

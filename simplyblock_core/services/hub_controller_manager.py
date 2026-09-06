@@ -64,7 +64,7 @@ logger = utils.get_logger(__name__)
 
 
 class _HubEntry:
-    __slots__ = ('ctrl_name', 'hub_bdev', 'src_rpc', 'tgt_node', 'last_used')
+    __slots__ = ('ctrl_name', 'hub_bdev', 'last_used', 'src_rpc', 'tgt_node')
 
     def __init__(self, ctrl_name: str, hub_bdev: str, src_rpc, tgt_node):
         self.ctrl_name = ctrl_name

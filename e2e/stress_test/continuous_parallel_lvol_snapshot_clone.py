@@ -193,7 +193,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         finally:
             self._record_op(op, time.time() - t0, ok)
 
-    def _set_failure(self, op: str, exc: Exception, details: str = "", ctx: dict = None, api_err: dict = None):
+    def _set_failure(self, op: str, exc: Exception, details: str = "", ctx: dict | None = None, api_err: dict | None = None):
         with self._lock:
             if self._metrics["failure_info"] is None:
                 self._metrics["failure_info"] = {
@@ -365,7 +365,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self._inc("success", "connect_mount_sanity", 1)
         return mount_path
 
-    def _unmount_and_disconnect(self, client: str, mount_path: str, lvol_name: str, lvol_id_hint: str = None):
+    def _unmount_and_disconnect(self, client: str, mount_path: str, lvol_name: str, lvol_id_hint: str | None = None):
         self._inc("attempts", "unmount_disconnect", 1)
 
         if mount_path:

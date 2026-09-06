@@ -219,7 +219,7 @@ class TestLvolDirFillStress(TestClusterBase):
             self._metrics[bucket][key] = self._metrics[bucket].get(key, 0) + n
 
     def _set_failure(self, op: str, exc: Exception, details: str = "",
-                     ctx: dict = None, api_err: dict = None):
+                     ctx: dict | None = None, api_err: dict | None = None):
         with self._lock:
             if self._metrics["failure_info"] is None:
                 self._metrics["failure_info"] = {

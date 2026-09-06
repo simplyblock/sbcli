@@ -418,13 +418,13 @@ class BackupTestBase(TestClusterBase):
 
     # ── CLI helpers ───────────────────────────────────────────────────────────
 
-    def _run(self, cmd: str, node: str = None) -> tuple[str, str]:
+    def _run(self, cmd: str, node: str | None = None) -> tuple[str, str]:
         node = node or self.mgmt_nodes[0]
         out, err = self.ssh_obj.exec_command(node=node, command=cmd)
         self.logger.debug(f"CMD: {cmd}\nOUT: {out}\nERR: {err}")
         return out, err
 
-    def _sbcli(self, subcmd: str, node: str = None) -> tuple[str, str]:
+    def _sbcli(self, subcmd: str, node: str | None = None) -> tuple[str, str]:
         if self.k8s_test and node is None:
             # In k8s-native mode, route sbcli commands through kubectl exec
             # into the admin pod via K8sUtils.exec_sbcli().
@@ -644,8 +644,8 @@ class BackupTestBase(TestClusterBase):
         raise TimeoutError(
             f"No completed backup for snapshot {snap_name} within {timeout}s")
 
-    def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str = None,
-                         restore_size: str = None) -> str:
+    def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str | None = None,
+                         restore_size: str | None = None) -> str:
         """Restore a backup to a new lvol; return the new lvol name.
 
         In k8s mode: creates a BackupRestore CRD that provisions a new PVC
@@ -878,8 +878,8 @@ class BackupTestBase(TestClusterBase):
             f"within {timeout}s — failing test."
         )
 
-    def _validate_backup_fields(self, backup: dict, lvol_name: str = None,
-                                 snap_name: str = None) -> None:
+    def _validate_backup_fields(self, backup: dict, lvol_name: str | None = None,
+                                 snap_name: str | None = None) -> None:
         """Assert that *backup* entry references the expected lvol name and/or snapshot name.
 
         Searches all field values in the backup dict so it is resilient to
@@ -905,7 +905,7 @@ class BackupTestBase(TestClusterBase):
         return bk_id
 
     def _get_backup_for_snapshot(self, snap_name: str,
-                                  backups: list = None) -> dict:
+                                  backups: list | None = None) -> dict:
         """Return the backup entry that references *snap_name*, or None.
 
         Matching is case-insensitive and normalizes underscores to hyphens
@@ -1084,8 +1084,8 @@ class BackupTestBase(TestClusterBase):
 
     # ── lvol / mount helpers ──────────────────────────────────────────────────
 
-    def _create_lvol(self, name: str = None, size: str = None,
-                     crypto: bool = False, ndcs: int = None, npcs: int = None) -> str:
+    def _create_lvol(self, name: str | None = None, size: str | None = None,
+                     crypto: bool = False, ndcs: int | None = None, npcs: int | None = None) -> str:
         """Create an lvol and return (name, lvol_id).
 
         In docker mode: creates via sbcli.
@@ -1137,7 +1137,7 @@ class BackupTestBase(TestClusterBase):
         return name, lvol_id
 
     def _connect_and_mount(self, lvol_name: str, lvol_id: str,
-                            mount: str = None,
+                            mount: str | None = None,
                             format_disk: bool = True) -> tuple[str, str]:
         """Connect lvol via NVMe and mount; return (device, mount_point).
 
@@ -1173,8 +1173,8 @@ class BackupTestBase(TestClusterBase):
         self.connected.append(lvol_id)
         return device, mount
 
-    def _run_fio(self, name_or_mount: str, mount: str = None,
-                  log_file: str = None, size: str = None,
+    def _run_fio(self, name_or_mount: str, mount: str | None = None,
+                  log_file: str | None = None, size: str | None = None,
                   runtime: int = 60, **kwargs):
         """Run FIO on mount point, wait for it to finish, and validate log.
 

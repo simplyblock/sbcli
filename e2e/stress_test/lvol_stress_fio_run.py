@@ -399,7 +399,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
                 sleep_n_sec(300)  # Sleep for 60 seconds before the next validation
             except Exception as e:
-                self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
+                self.logger.error(f"Error in continuous I/O stats validation: {e!s}")
                 break  # Exit the thread on failure
 
 

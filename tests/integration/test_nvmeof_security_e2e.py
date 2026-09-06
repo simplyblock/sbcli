@@ -22,7 +22,7 @@ from tests.integration.migration.mock_rpc_server import MockRpcServer
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _rpc_call(srv: MockRpcServer, method: str, params: dict = None):
+def _rpc_call(srv: MockRpcServer, method: str, params: dict | None = None):
     """Make a raw JSON-RPC 2.0 call to a MockRpcServer and return the result."""
     import http.client
     body = json.dumps({

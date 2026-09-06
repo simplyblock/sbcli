@@ -784,7 +784,7 @@ def get_logger(name=""):
     try:
         logg.setLevel(log_level.upper() if log_level else constants.LOG_LEVEL)
     except ValueError as e:
-        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {e!s}')
         logg.setLevel(constants.LOG_LEVEL)
 
     if not logg.hasHandlers():

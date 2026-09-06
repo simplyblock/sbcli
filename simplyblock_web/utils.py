@@ -110,7 +110,7 @@ def get_int_value_or_default(data, key, default):
 
 
 def get_cluster_id(request):
-    if "Authorization" in request.headers and request.headers["Authorization"]:
+    if request.headers.get("Authorization"):
         au = request.headers["Authorization"]
         if len(au.split()) == 2:
             cluster_id = au.split()[0]

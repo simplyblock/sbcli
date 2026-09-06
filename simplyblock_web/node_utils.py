@@ -202,7 +202,7 @@ def get_region():
         logger.info(f"Dynamically retrieved region: {region}")
         return region
     except Exception as e:
-        logger.error(f"Failed to retrieve region: {str(e)}")
+        logger.error(f"Failed to retrieve region: {e!s}")
         return ""
 
 
@@ -240,7 +240,7 @@ def detach_ebs_volumes(instance_id):
             logger.info(f"No volumes with matching tags found on instance {instance_id}.")
 
     except Exception as e:
-        logger.error(f"Failed to detach EBS volumes: {str(e)}")
+        logger.error(f"Failed to detach EBS volumes: {e!s}")
 
     return detached_volumes
 
@@ -266,7 +266,7 @@ def attach_ebs_volumes(instance_id, volume_ids):
         logger.info("All volumes attached successfully.")
         return True 
     except Exception as e:
-        logger.error(f"Failed to attach EBS volumes: {str(e)}")
+        logger.error(f"Failed to attach EBS volumes: {e!s}")
         return False
 
 def get_available_device_name(instance_id):
@@ -295,5 +295,5 @@ def get_available_device_name(instance_id):
             device_letter += 1
 
     except Exception as e:
-        logger.error(f"Failed to get available device name: {str(e)}")
+        logger.error(f"Failed to get available device name: {e!s}")
         return None

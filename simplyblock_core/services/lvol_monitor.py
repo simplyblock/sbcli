@@ -183,7 +183,7 @@ def process_lvol_delete_finish(cluster, lvol):
         if not ret:
             raise Exception("Failed to get LVol info")
         lvs_info = ret[0]
-        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+        if lvs_info.get('lvs leadership'):
             leader_node = snode
 
     if not leader_node:
@@ -192,7 +192,7 @@ def process_lvol_delete_finish(cluster, lvol):
                 ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
                 if ret:
                     lvs_info = ret[0]
-                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                    if lvs_info.get('lvs leadership'):
                         leader_node = sec_node
                         break
 
@@ -440,7 +440,7 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                         if not ret:
                             raise Exception("Failed to get LVol info")
                         lvs_info = ret[0]
-                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        if lvs_info.get('lvs leadership'):
                             leader_node = snode
 
                     if not leader_node:
@@ -453,7 +453,7 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                                 ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
                                 if ret:
                                     lvs_info = ret[0]
-                                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                    if lvs_info.get('lvs leadership'):
                                         leader_node = _sec
                                         break
 
