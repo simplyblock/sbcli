@@ -26,7 +26,7 @@ def disconnect_by_ip(node_ip):
     devices = []
     if data and 'Devices' in data and data['Devices']:
         for dev in data['Devices'][0]['Subsystems']:
-            if 'Controllers' in dev and dev['Controllers']:
+            if dev.get('Controllers'):
                 for controller in dev['Controllers']:
                     adr = controller['Address']
                     if node_ip in adr:
