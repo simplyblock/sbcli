@@ -189,13 +189,12 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 for connect_str in connect_ls:
                     _, error = self.ssh_obj.exec_command(
                         node=client_node, command=connect_str)
-                    if error:
-                        if "already connected" in error.lower():
-                            already_connected = True
-                        else:
-                            self.record_failed_nvme_connect(
-                                lvol_name, connect_str,
-                                client=client_node)
+                    if not self.nvme_connect_ok(error):
+                        self.record_failed_nvme_connect(
+                            lvol_name, connect_str,
+                            client=client_node, error=error)
+                    elif error:
+                        already_connected = True
 
                 sleep_n_sec(3)
                 final_devices = self.ssh_obj.get_devices(node=client_node)
@@ -402,14 +401,14 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client_node,
                                                      command=connect_str)
-                if error:
-                    if "already connected" in error.lower():
-                        already_connected = True
-                        self.logger.info(
-                            f"[lvol_connect] {lvol_name} already connected on"
-                            f" {client_node} — treating as success")
-                    else:
-                        self.record_failed_nvme_connect(lvol_name, connect_str, client=client_node)
+                if not self.nvme_connect_ok(error):
+                    self.record_failed_nvme_connect(
+                        lvol_name, connect_str, client=client_node, error=error)
+                elif error:
+                    already_connected = True
+                    self.logger.info(
+                        f"[lvol_connect] {lvol_name} already connected on"
+                        f" {client_node} - treating as success")
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client_node)

@@ -117,10 +117,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             log.write(f"{timestamp},{node},{outage_type},{event}\n")
 
     
-    def record_failed_nvme_connect(self, name, connect_cmd, client=None):
+    def record_failed_nvme_connect(self, name, connect_cmd, client=None, error=None):
+        # Always log the stderr. The old message asserted "expected during
+        # outage" with no evidence, which sent a real investigation at the
+        # product for a connect that had merely returned "already connected".
         self.logger.warning(
-            f"[DEFERRED] NVMe connect failed (expected during outage)"
-            f" client={client}: {connect_cmd}"
+            f"[DEFERRED] NVMe connect failed for {name} client={client}"
+            f" reason={(error or '').strip() or 'unknown (empty stderr)'}"
+            f" cmd={connect_cmd}"
         )
         self.failed_nvme_connects[name].append(connect_cmd)
 
@@ -154,8 +158,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 client = details["Client"]
                 for cmd in list(self.failed_nvme_connects[name]):
                     _, err = self.ssh_obj.exec_command(node=client, command=cmd)
-                    if not err:
-                        self.logger.info(f"NVMe reconnect successful: {name}")
+                    # "already connected" means the path is up: with
+                    # --ctrl-loss-tmo=-1 the kernel restores it on its own, so
+                    # this is the expected reply here and must count as success.
+                    if self.nvme_connect_ok(err):
+                        self.logger.info(
+                            f"NVMe reconnect successful: {name}"
+                            + (f" ({err.strip()})" if err else "")
+                        )
                         self.failed_nvme_connects[name].remove(cmd)
 
                 if not self.failed_nvme_connects[name]:
@@ -447,15 +457,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             #     self.lvols_without_sec_connect.append(lvol_name)
 
             initial_devices = self.ssh_obj.get_devices(node=client_node)
+            already_connected = False
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client_node, command=connect_str)
-                if error:
-                    # lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.lvol_mount_details[lvol_name]["ID"])
-                    # nqn = lvol_details[0]["nqn"]
-                    # self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
-                    # self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
-                    # self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=120, skip_error=True)
-                    self.record_failed_nvme_connect(lvol_name, connect_str, client=client_node)
+                if not self.nvme_connect_ok(error):
+                    self.record_failed_nvme_connect(
+                        lvol_name, connect_str, client=client_node, error=error)
+                elif error:
+                    already_connected = True
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client_node)
@@ -464,6 +473,17 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 if device not in initial_devices:
                     lvol_device = f"/dev/{device.strip()}"
                     break
+            if not lvol_device and already_connected:
+                # Path was already up, so no NEW device appears in the diff.
+                # Resolve it by NQN instead of declaring a connect failure.
+                lvol_nqn = self._nqn_from_connect_cmds(connect_ls)
+                if lvol_nqn:
+                    lvol_device = self.ssh_obj.get_nvme_device_for_nqn(
+                        client_node, lvol_nqn)
+                    if lvol_device:
+                        self.logger.info(
+                            f"[lvol_connect] {lvol_name} was already connected;"
+                            f" resolved by NQN to {lvol_device}")
             if not lvol_device:
                 raise LvolNotConnectException("LVOL did not connect")
             self.lvol_mount_details[lvol_name]["Device"] = lvol_device
@@ -1141,10 +1161,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         break
 
             initial_devices = self.ssh_obj.get_devices(node=client)
+            clone_already_connected = False
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
-                if error:
-                    self.record_failed_nvme_connect(clone_name, connect_str, client=client)
+                if not self.nvme_connect_ok(error):
+                    self.record_failed_nvme_connect(
+                        clone_name, connect_str, client=client, error=error)
+                elif error:
+                    clone_already_connected = True
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client)
@@ -1153,6 +1177,17 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 if device not in initial_devices:
                     lvol_device = f"/dev/{device.strip()}"
                     break
+            if not lvol_device and clone_already_connected:
+                # Clone joined a subsystem the host already holds a controller
+                # for, so no NEW device shows up in the diff. Resolve by NQN.
+                clone_nqn = self._nqn_from_connect_cmds(connect_ls)
+                if clone_nqn:
+                    lvol_device = self.ssh_obj.get_nvme_device_for_nqn(
+                        client, clone_nqn)
+                    if lvol_device:
+                        self.logger.info(
+                            f"[clone_connect] {clone_name} was already connected;"
+                            f" resolved by NQN to {lvol_device}")
             if not lvol_device:
                 raise LvolNotConnectException("LVOL did not connect")
             self.clone_mount_details[clone_name]["Device"] = lvol_device

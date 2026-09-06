@@ -673,12 +673,34 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                           command=f"{self.base_cmd} lvol list")
 
-            # Get clone's NS ID to decide connect vs rescan.
-            # NS ID == 1: clone got a NEW subsystem → need nvme connect
-            # NS ID > 1: clone joined an existing subsystem → just rescan
+            # Decide connect vs rescan.
+            #
+            # NS ID alone is NOT a reliable discriminator. A clone can report
+            # ns_id == 1 while its subsystem NQN names a DIFFERENT lvol, i.e.
+            # it is namespace 1 of a subsystem the host is already attached to.
+            # That is exactly what happened in
+            # n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656:
+            #   'lvol_name': 'clone_B289OXX3BQG5C2C'
+            #   'uuid':      '12381b49-c5f8-4508-9dd5-a847f5596911'
+            #   'nqn':       '...:lvol:4d0c3986-f19e-4615-ac3d-327793bf7422'
+            #   'ns_id': 1, 'max_namespace_per_subsys': 30
+            # With up to 30 namespaces per subsystem this is normal placement,
+            # so we compare the NQN against the clone's own id first and only
+            # fall back to ns_id when the NQN is unavailable.
             clone_id = self.clone_mount_details[clone_name]["ID"]
             clone_details = self.sbcli_utils.get_lvol_details(lvol_id=clone_id)
             clone_ns_id = clone_details[0].get("ns_id", 1) if clone_details else 1
+            reported_nqn = clone_details[0].get("nqn") if clone_details else None
+            shares_subsystem = bool(
+                reported_nqn and clone_id and clone_id not in reported_nqn
+            )
+            if shares_subsystem:
+                self.logger.info(
+                    f"[clone_connect] {clone_name} (id={clone_id}) reports "
+                    f"ns_id={clone_ns_id} but its subsystem NQN belongs to "
+                    f"another lvol ({reported_nqn}); treating as an EXISTING "
+                    f"subsystem and rescanning instead of connecting"
+                )
 
             # Fetch connect string — needed for NQN extraction and
             # stored in clone_mount_details for teardown/disconnect.
@@ -709,7 +731,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
             lvol_device = None
 
-            if clone_ns_id == 1:
+            if clone_ns_id == 1 and not shares_subsystem:
                 # ── NS ID 1: new subsystem — need nvme connect ──────
                 self.logger.info(
                     f"[clone_connect] {clone_name} has NS ID 1 (new "
@@ -719,9 +741,17 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     _, error = self.ssh_obj.exec_command(
                         node=client, command=connect_str
                     )
-                    if error:
+                    if not self.nvme_connect_ok(error):
                         self.record_failed_nvme_connect(
-                            clone_name, connect_str, client=client
+                            clone_name, connect_str, client=client, error=error
+                        )
+                    elif error:
+                        # "already connected": the path is up. No NEW device
+                        # will show in the diff below; the NQN lookup at
+                        # Step 2 resolves it.
+                        self.logger.info(
+                            f"[clone_connect] {clone_name}: {error.strip()}"
+                            f" — path already up, not a failure"
                         )
 
                 # Check ALL clients for the new device

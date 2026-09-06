@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 import boto3
@@ -48,6 +49,51 @@ class TestClusterBase:
     # diagnose. `fetch_distrib_logs*` still runs on both paths, so placement maps
     # and stack dumps are unaffected.
     COLLECT_DUMP_LVSTORE = False
+
+    # nvme-cli writes these to stderr for conditions that are NOT failures.
+    #
+    # "already connected": the kernel refused to create a DUPLICATE controller
+    # for the same (hostnqn, subnqn, traddr, trsvcid) tuple, which means the
+    # path is already up. Treating it as a failure is what wedged
+    # n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656: the clone's
+    # three paths were all reported "already connected", all three were deferred
+    # as failed, the device was present and healthy 4s later (/dev/nvme3n1,
+    # mounted, FIO running for the next 50 minutes), and retry_failed_nvme_connects
+    # then raised "0/3 succeeded" ten minutes later.
+    #
+    # It is not a rare race either: connects use --ctrl-loss-tmo=-1, so the
+    # kernel never stops reconnecting and has almost always restored the path
+    # before the retry loop runs. That makes "already connected" the EXPECTED
+    # reply on retry, and a retry loop that only accepts empty stderr can never
+    # converge. That run logged 63 "already connected" against 4 genuine
+    # "could not add new controller: connection refused".
+    BENIGN_NVME_CONNECT_ERRORS = ("already connected",)
+
+    @classmethod
+    def nvme_connect_ok(cls, err):
+        """True when an ``nvme connect`` attempt should count as success.
+
+        Covers both an empty stderr and the benign no-op replies above, so
+        callers can write ``if not self.nvme_connect_ok(err): <defer/fail>``
+        instead of branching on stderr being non-empty.
+        """
+        if not err:
+            return True
+        low = err.lower()
+        return any(benign in low for benign in cls.BENIGN_NVME_CONNECT_ERRORS)
+
+    @staticmethod
+    def _nqn_from_connect_cmds(connect_cmds):
+        """Pull the subsystem NQN out of a list of ``nvme connect`` commands.
+
+        Accepts both ``--nqn=<x>`` and ``--nqn <x>`` / ``-n <x>``. Returns None
+        if no NQN is present.
+        """
+        for cmd in connect_cmds or []:
+            m = re.search(r"(?:--nqn[=\s]|(?<!\S)-n\s)(\S+)", cmd)
+            if m:
+                return m.group(1)
+        return None
 
     def __init__(self, **kwargs):
         self.cluster_secret = os.environ.get("CLUSTER_SECRET")
