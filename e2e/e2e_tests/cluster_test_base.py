@@ -4044,6 +4044,7 @@ class TestClusterBase:
             if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on storage node {node} at {cur_date}")
+                self._analyze_core_dumps_docker(node)
 
         for node in self.mgmt_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
@@ -4051,6 +4052,56 @@ class TestClusterBase:
             if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on management node {node} at {cur_date}")
+
+    def _analyze_core_dumps_docker(self, node_ip):
+        """Produce gdb backtraces for SPDK cores on a docker storage node.
+
+        Streams ``e2e/scripts/analyze_core_dumps_docker.sh`` to the node, which
+        copies each core into that host's SPDK container (same host means the
+        same SPDK image, so symbols resolve), decompresses it there, and runs
+        ``bt`` and ``thread apply all bt full``. Results land in
+        ``<docker_logs_path>/core_backtraces/<host>/<core>/``.
+
+        The same script runs again from the workflow after the test finishes.
+        This call is what catches a crash the test survived, at the iteration
+        boundary where it was detected. Best-effort: never raises.
+        """
+        if not self.docker_logs_path:
+            self.logger.info(
+                "[core-bt] docker_logs_path not set, skipping backtrace"
+            )
+            return
+
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "scripts", "analyze_core_dumps_docker.sh",
+        )
+        if not os.path.isfile(script):
+            self.logger.warning(f"[core-bt] script not found: {script}")
+            return
+
+        try:
+            with open(script, "r", encoding="utf-8") as fh:
+                body = fh.read()
+            # Run it inline rather than piping a local file over the existing
+            # ssh channel: exec_command sends a command string, not stdin.
+            cmd = (
+                f"cat > /tmp/analyze_core_dumps.sh <<'SB_CORE_EOF'\n"
+                f"{body}\nSB_CORE_EOF\n"
+                f"bash /tmp/analyze_core_dumps.sh {shlex.quote(self.docker_logs_path)}; "
+                f"rm -f /tmp/analyze_core_dumps.sh"
+            )
+            out, err = self.ssh_obj.exec_command(
+                node=node_ip, command=cmd, timeout=1800, max_retries=1
+            )
+            if out:
+                self.logger.info(f"[core-bt] {node_ip}: {out.strip()}")
+            if err:
+                self.logger.warning(f"[core-bt] {node_ip} stderr: {err.strip()}")
+        except Exception as exc:
+            self.logger.warning(
+                f"[core-bt] backtrace generation failed for {node_ip}: {exc}"
+            )
 
     def _check_host_core_dumps_k8s(self, k8s_obj):
         """Collect host-level core dumps from all storage node K8s hosts.
@@ -4066,7 +4117,11 @@ class TestClusterBase:
 
         coredump_dir = os.path.join(self.docker_logs_path, "host_core_dumps")
         os.makedirs(coredump_dir, exist_ok=True)
-        max_size_mb = int(os.environ.get("CORE_DUMP_MAX_SIZE_MB", "500"))
+        # 5000 rather than 500: systemd is configured with ProcessSizeMax=10G
+        # (simplyblock_core/scripts/install_deps.sh), so real SPDK cores
+        # routinely exceed 500 MB and were being silently skipped. This caps
+        # only the copy of the compressed .zst; backtraces are always produced.
+        max_size_mb = int(os.environ.get("CORE_DUMP_MAX_SIZE_MB", "5000"))
 
         for node_ip in self.storage_nodes:
             try:

@@ -1764,6 +1764,35 @@ jobs:
           PYEOF
 
 
+
+      - name: Analyze SPDK core dumps (gdb backtraces)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -uo pipefail
+          # For every SPDK core on a storage node, stage it inside that node's
+          # snode-spdk pod (where the matching bdts binary and symbols live),
+          # run `bt` and `thread apply all bt full`, and save all three
+          # artifacts next to the run logs. Script and rationale:
+          # e2e/scripts/analyze_core_dumps_k8s.sh
+          CORE_SCRIPT="${GITHUB_WORKSPACE}/e2e/scripts/analyze_core_dumps_k8s.sh"
+          if [[ ! -f "${CORE_SCRIPT}" ]]; then
+            echo "WARN: ${CORE_SCRIPT} not found; skipping core-dump analysis"
+            exit 0
+          fi
+          OUT_DIR="${RUN_BASE_DIR:-}"
+          if [[ -z "${OUT_DIR}" && -n "${RUN_DIR_FILE:-}" && -f "${RUN_DIR_FILE}" ]]; then
+            OUT_DIR="$(tr -d '\r\n' < "${RUN_DIR_FILE}")"
+          fi
+          if [[ -z "${OUT_DIR}" ]]; then
+            OUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/core_backtraces-$(date -u '+%Y%m%d-%H%M%S')"
+            echo "WARN: no run dir found, falling back to ${OUT_DIR}"
+          fi
+          echo "Core backtraces -> ${OUT_DIR}/core_backtraces"
+          bash "${CORE_SCRIPT}" "${OUT_DIR}" "${NAMESPACE:-simplyblock}" || echo "WARN: core-dump analysis failed"
+
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
         timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}
