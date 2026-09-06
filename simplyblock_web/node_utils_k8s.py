@@ -2,9 +2,9 @@ import logging
 import os
 import time
 
-from simplyblock_core.utils import get_k8s_batch_client
 from kubernetes.client import ApiException
 
+from simplyblock_core.utils import get_k8s_batch_client
 
 node_name = os.environ.get("HOSTNAME")
 deployment_name = f"snode-spdk-deployment-{node_name}"

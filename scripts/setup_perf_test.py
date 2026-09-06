@@ -1,12 +1,12 @@
+import json
 import os
+import re
+import select
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 import paramiko
-import time
-import re
-import json
-import select
 
 # --- INPUT PARAMETERS ---
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1

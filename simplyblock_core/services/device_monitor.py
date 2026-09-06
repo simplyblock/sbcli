@@ -1,11 +1,10 @@
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import tasks_controller, device_controller
+from simplyblock_core.controllers import device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-
 
 logger = utils.get_logger(__name__)
 

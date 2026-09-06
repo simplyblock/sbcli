@@ -6,9 +6,12 @@ import threading
 import time
 import uuid
 
-from simplyblock_core import db_controller, constants, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import (
-    tasks_events, device_controller, events_controller)
+    device_controller,
+    events_controller,
+    tasks_events,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode

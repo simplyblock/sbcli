@@ -8,14 +8,14 @@ expansion logic be developed without the multi-hour real-FDB simulation.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.nvme_device import NVMeDevice
+import simplyblock_core.services.tasks_runner_cluster_expand as runner
 from simplyblock_core.controllers.cluster_expansion.planner import (
     EXPAND_PHASE_ABORTED,
     EXPAND_PHASE_COMPLETED,
     EXPAND_PHASE_IN_PROGRESS,
 )
-import simplyblock_core.services.tasks_runner_cluster_expand as runner
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.nvme_device import NVMeDevice
 
 
 def _task(status=JobSchedule.STATUS_NEW, retry=0, max_retry=3,

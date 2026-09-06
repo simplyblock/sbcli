@@ -15,12 +15,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
-
+from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.storage_node import StorageNode
 from tests._mocks import assert_hublvol_wired, unique_ip
-
 
 # ---------------------------------------------------------------------------
 # Helpers (shared with test_dual_ft_secondary_fixes.py)

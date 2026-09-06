@@ -2,7 +2,6 @@ import logging
 
 from simplyblock_core.controllers import events_controller as ec
 
-
 logger = logging.getLogger()
 
 

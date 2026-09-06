@@ -41,7 +41,7 @@ Usage:
 
 import os
 import sys
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 
 try:
     import requests
@@ -669,8 +669,8 @@ def main():
         except Exception as exc:
             print(f"  WARN: Failed to pre-populate probe cache: {exc}")
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     max_workers = min(8, len(pairs))
     total_lines = 0

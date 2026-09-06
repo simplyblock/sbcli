@@ -2,8 +2,8 @@ import base64
 import hmac
 import json
 import logging
-from typing import Annotated
 from json.decoder import JSONDecodeError
+from typing import Annotated
 from uuid import UUID
 
 import kubernetes.client

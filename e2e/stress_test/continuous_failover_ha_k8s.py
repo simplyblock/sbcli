@@ -31,8 +31,8 @@ Usage (K8s):
 
 from __future__ import annotations
 
-import re
 import random
+import re
 import threading
 
 from exceptions.custom_exception import LvolNotConnectException

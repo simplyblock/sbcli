@@ -29,13 +29,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import simplyblock_core.services.tasks_runner_restart as restart_runner
 from simplyblock_core import constants, storage_node_ops
 from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-
-import simplyblock_core.services.tasks_runner_restart as restart_runner
 
 
 def _now():

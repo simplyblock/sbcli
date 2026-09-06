@@ -20,7 +20,6 @@ from simplyblock_core import constants
 from simplyblock_core.services import main_distr_event_collector as collector
 from simplyblock_core.services import tasks_runner_sync_lvol_del as sync_del
 
-
 THRESHOLD = constants.JM_COMPRESSION_BACKLOG_ALERT_RECORDS
 REARM = THRESHOLD * constants.JM_COMPRESSION_BACKLOG_REARM_FRACTION
 

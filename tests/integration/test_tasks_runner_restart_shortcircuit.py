@@ -35,9 +35,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
-
+from simplyblock_core.models.storage_node import StorageNode
 
 _RUNNER_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..",

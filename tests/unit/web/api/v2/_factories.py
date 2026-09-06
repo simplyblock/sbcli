@@ -19,7 +19,6 @@ from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTa
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
-
 CLUSTER_ID = '11111111-1111-1111-1111-111111111111'
 POOL_ID = '22222222-2222-2222-2222-222222222222'
 VOLUME_ID = '33333333-3333-3333-3333-333333333333'

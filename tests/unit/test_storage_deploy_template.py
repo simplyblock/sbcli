@@ -3,7 +3,6 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "simplyblock_web" / "templates"
 
 

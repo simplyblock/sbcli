@@ -1,8 +1,9 @@
 """Unit tests for /api/v2/clusters/{id}/replication endpoints."""
 
-from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
+from simplyblock_core.controllers.replication_policy_controller import (
+    ReplicationConfigError,
+)
 from simplyblock_core.utils.nvme import NvmeConnectEntry
-
 from tests.unit.web.api.v2._factories import (
     CLUSTER_ID,
     REPLICATION_POLICY_ID,
@@ -11,7 +12,6 @@ from tests.unit.web.api.v2._factories import (
     TARGET_POOL_ID,
     VOLUME_ID,
 )
-
 
 TARGETS_URL = f'/api/v2/clusters/{CLUSTER_ID}/replication/targets/'
 POLICIES_URL = f'/api/v2/clusters/{CLUSTER_ID}/replication/policies/'

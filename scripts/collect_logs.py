@@ -48,7 +48,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 

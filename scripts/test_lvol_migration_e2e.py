@@ -11,14 +11,15 @@ Usage:
     python3 tests/perf/test_lvol_migration_e2e.py --teardown   # destroy only
 """
 
-import boto3
-import paramiko
-import time
-import re
+import argparse
 import json
 import os
-import argparse
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
+
+import boto3
+import paramiko
 
 # --- AWS config (same subnet/SG as perf tests) ---
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1

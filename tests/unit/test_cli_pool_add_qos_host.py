@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 from simplyblock_cli import cli as cli_module
 from simplyblock_cli import clibase
 
-
 NODE_ID = "1b0dcd4f-9e21-4b8b-9c04-2a6d7a1c9f00"
 CLUSTER_ID = "2c1e0a3b-77b2-4a5e-9d0e-6f3b8c2a1d55"
 

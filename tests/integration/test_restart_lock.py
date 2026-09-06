@@ -6,12 +6,11 @@ Covers:
   - restart_storage_node pre-restart check integration
 """
 
+import json
 import unittest
 from unittest.mock import MagicMock, patch
-import json
 
 from simplyblock_core.models.storage_node import StorageNode
-
 
 # ---------------------------------------------------------------------------
 # 1. Pre-restart FDB transaction guard

@@ -22,16 +22,15 @@ import random
 import threading
 import time
 import traceback
-from logger_config import setup_logger
-from utils.common_utils import sleep_n_sec
-from utils.ssh_utils import get_parent_device
 
+from logger_config import setup_logger
 from stress_test.continuous_k8s_native_failover import (
-    K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
+    K8sNativeFailoverTest,
     _rand_seq,
 )
-
+from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import get_parent_device
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Class 1: K8sNativeNamespacedFailoverTest

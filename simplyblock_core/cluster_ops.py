@@ -8,35 +8,56 @@ import socket
 import subprocess
 import threading
 import time
-import uuid
 import typing as t
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
-import docker
-from kubernetes import client as k8s_client
 import requests
-
 from docker.errors import DockerException
+from kubernetes import client as k8s_client
 from pydantic import SecretStr
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, release_upgrades, storage_node_ops
-from simplyblock_core.utils import port_block
-from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+import docker
+from simplyblock_core import (
+    constants,
+    mgmt_node_ops,
+    release_upgrades,
+    scripts,
+    storage_node_ops,
+    utils,
+)
+from simplyblock_core.controllers import (
+    backup_controller,
+    cluster_events,
+    device_controller,
+    qos_controller,
+    tasks_controller,
+    tcp_ports_events,
+)
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
+from simplyblock_core.models.cluster import (
+    Cluster,
+    DeployConfig,
+    HashicorpVaultSettings,
+)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, NodeStatObject, DeviceStatObject
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.stats import (
+    ClusterStatObject,
+    DeviceStatObject,
+    LVolStatObject,
+    NodeStatObject,
+)
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.release_upgrades import jc_compression_upgrade
-from simplyblock_core.utils import pull_docker_image_with_retry
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils import port_block, pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
@@ -1158,7 +1179,9 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         # layout) is deliberately NOT blocked: refusing to reactivate a
         # drifted cluster would turn a policy violation into an outage.
         if is_fresh_activation:
-            from simplyblock_core.controllers.cluster_expansion import planner as fd_planner
+            from simplyblock_core.controllers.cluster_expansion import (
+                planner as fd_planner,
+            )
 
             def _fd_fail(msg: str) -> None:
                 set_cluster_status(cl_id, ols_status)

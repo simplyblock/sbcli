@@ -18,7 +18,6 @@ import unittest
 from simplyblock_core import constants
 from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
 
-
 # ---------------------------------------------------------------------------
 # In-memory FDB transaction fake (mirrors test_node_add_concurrency.py)
 # ---------------------------------------------------------------------------

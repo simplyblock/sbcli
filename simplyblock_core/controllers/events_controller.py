@@ -1,10 +1,9 @@
 import time
 import uuid
 
-from simplyblock_core.models.events import EventObj
-from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils
-
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.events import EventObj
 
 logger = utils.get_logger(__name__)
 

@@ -35,9 +35,8 @@ from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import ClusterStatObject
-
+from simplyblock_core.models.storage_node import StorageNode
 from tests.integration.ftt2.mock_cluster import FTT2MockRpcServer
 
 NUM_NODES = 4

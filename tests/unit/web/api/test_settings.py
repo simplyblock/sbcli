@@ -5,7 +5,7 @@ test_web_settings.py – unit tests for simplyblock_web.settings.
 import pytest
 from pydantic import ValidationError
 
-from simplyblock_web.settings import Settings, _parse_str_list, _parse_int_list
+from simplyblock_web.settings import Settings, _parse_int_list, _parse_str_list
 
 
 class TestParseStrList:

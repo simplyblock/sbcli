@@ -1,9 +1,10 @@
-import os
-import boto3
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import boto3
 
 # MinIO Configuration
 MINIO_ENDPOINT = "http://192.168.10.164:9000"

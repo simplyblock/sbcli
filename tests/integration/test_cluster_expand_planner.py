@@ -23,10 +23,10 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     expand_state_abort,
     expand_state_advance,
     expand_state_complete,
+    expand_state_rearm,
     is_expand_in_progress,
     is_expand_state_compatible,
     make_expand_state,
-    expand_state_rearm,
     move_from_dict,
     move_to_dict,
     pending_moves,
@@ -216,7 +216,9 @@ class TestPostExpandLayoutInvariants(unittest.TestCase):
     LVS still has distinct primary/secondary/tertiary on different nodes."""
 
     def _reconstruct(self, existing, new_node_id, ftt):
-        from simplyblock_core.controllers.cluster_expansion.planner import _rotation_layout
+        from simplyblock_core.controllers.cluster_expansion.planner import (
+            _rotation_layout,
+        )
         layout = {
             primary: {ROLE_PRIMARY: primary,
                       ROLE_SECONDARY: sec,

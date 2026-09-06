@@ -25,7 +25,6 @@ from prometheus_client.registry import Collector
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.stats import CpuStats, ReactorStats, ThreadStats
 
-
 api = APIRouter()
 db = DBController()
 

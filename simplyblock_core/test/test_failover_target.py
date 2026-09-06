@@ -8,11 +8,11 @@ returned to the caller.
 import pytest
 
 from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.utils.nvme import NvmeConnectEntry
 
 

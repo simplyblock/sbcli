@@ -15,7 +15,7 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError, HTTPError, ReadTimeout
 from urllib3 import Retry
 
-from simplyblock_core import utils, constants
+from simplyblock_core import constants, utils
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils.helpers import single_or_none
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send

@@ -16,8 +16,8 @@ should call ``invalidate`` so their own process re-reads immediately.
 import threading
 import time
 import weakref
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 _NOT_SET = object()
 

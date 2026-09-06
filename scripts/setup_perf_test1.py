@@ -3,9 +3,9 @@ import logging
 import os
 import re
 import select
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-import sys
 
 # Streamed remote stderr is arbitrary UTF-8 -- systemctl alone prints
 # "Created symlink ... -> ..." with U+2192. On Windows a redirected stdout

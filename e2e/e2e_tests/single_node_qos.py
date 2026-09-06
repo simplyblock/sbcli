@@ -1,8 +1,10 @@
-import os
-from e2e_tests.cluster_test_base import TestClusterBase
-import threading
 import json
+import os
+import threading
+
+from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
+
 
 class TestLvolQOSBase(TestClusterBase):
     """

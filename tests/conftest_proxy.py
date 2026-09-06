@@ -10,7 +10,7 @@ import os
 import socket
 import sys
 import threading
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 # Windows compat
 if not hasattr(socket, 'AF_UNIX'):

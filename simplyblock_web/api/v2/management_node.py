@@ -7,7 +7,6 @@ from simplyblock_core.db_controller import DBController
 from ._dependencies import Cluster, ManagementNode
 from ._dtos import ManagementNodeDTO
 
-
 api = APIRouter()
 db = DBController()
 

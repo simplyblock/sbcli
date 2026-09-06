@@ -1,5 +1,6 @@
-from pathlib import Path
 import threading
+from pathlib import Path
+
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 

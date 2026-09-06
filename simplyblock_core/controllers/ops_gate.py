@@ -19,8 +19,8 @@ clibase and the v2 API calls them directly, so gating here covers both without
 either having to remember to ask.
 """
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils
+from simplyblock_core.db_controller import DBController
 
 logger = utils.get_logger(__name__)
 

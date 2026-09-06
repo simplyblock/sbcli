@@ -14,15 +14,17 @@ started; the test process only imports the task runner module directly.
 """
 
 import time
+
 import pytest
 
 from simplyblock_core import constants
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
-
 from tests.integration.migration.conftest import (
-    run_migration_task, set_node_status, start_migration,
+    run_migration_task,
+    set_node_status,
+    start_migration,
 )
 from tests.integration.migration.topology_loader import TestContext
 

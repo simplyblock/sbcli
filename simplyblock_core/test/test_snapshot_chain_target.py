@@ -7,8 +7,8 @@ old lookup matched target-cluster nodes against source-cluster instances, so
 run). Every replicated snapshot ended up a standalone blob: fail-over clones
 read only the last delta and zeros elsewhere.
 """
-from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_replication as sr
 
 

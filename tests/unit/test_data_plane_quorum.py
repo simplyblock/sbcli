@@ -21,7 +21,6 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.storage_node import StorageNode
 
-
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------

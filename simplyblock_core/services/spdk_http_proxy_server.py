@@ -1,5 +1,4 @@
 import base64
-from typing import ClassVar
 import json
 import logging
 import os
@@ -7,13 +6,10 @@ import socket
 import sys
 import threading
 import time
-
-from http.server import HTTPServer
-from http.server import ThreadingHTTPServer
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from typing import ClassVar
 
 from simplyblock_core.settings import Settings
-
 
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))

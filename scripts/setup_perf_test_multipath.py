@@ -24,10 +24,10 @@ Prerequisites:
 """
 
 import json
-import shlex
 import logging
 import os
 import re
+import shlex
 import time
 from concurrent.futures import ThreadPoolExecutor
 

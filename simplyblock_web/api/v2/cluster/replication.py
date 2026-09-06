@@ -4,9 +4,11 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import replication_policy_controller
-from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
+from simplyblock_core.controllers.replication_policy_controller import (
+    ReplicationConfigError,
+)
+from simplyblock_core.db_controller import DBController
 
 from .. import util
 from .._dependencies import Cluster, ReplicationPolicy, ReplicationTarget

@@ -1,13 +1,12 @@
 import builtins
 
-from fastapi import APIRouter, Response, Request
+from fastapi import APIRouter, Request, Response
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import snapshot_controller
+from simplyblock_core.db_controller import DBController
 
-from ..._dependencies import Cluster, StoragePool, Snapshot
+from ..._dependencies import Cluster, Snapshot, StoragePool
 from ..._dtos import SnapshotDTO
-
 
 api = APIRouter()
 db = DBController()

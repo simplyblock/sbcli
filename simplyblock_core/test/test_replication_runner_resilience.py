@@ -8,8 +8,8 @@ the process, so replication stopped for EVERY volume, and no snapshot was ever
 chained or pruned. The visible symptom was a fail-over target full of zeros —
 five layers away from the actual cause.
 """
-from typing import cast
 import inspect
+from typing import cast
 
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.services import snapshot_replication as sr

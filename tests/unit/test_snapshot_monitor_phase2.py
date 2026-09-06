@@ -20,8 +20,8 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.services import snapshot_monitor
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services import snapshot_monitor
 
 
 def _mk_node(node_id, leadership=False, delete_status=None,

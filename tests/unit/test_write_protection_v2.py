@@ -31,7 +31,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
-
 # ---------------------------------------------------------------------------
 # The create parameter
 # ---------------------------------------------------------------------------

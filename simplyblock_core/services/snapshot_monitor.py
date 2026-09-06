@@ -3,11 +3,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-
 from simplyblock_core import constants, db_controller, utils
+from simplyblock_core.controllers import snapshot_controller, snapshot_events
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.controllers import (
-    snapshot_events, snapshot_controller)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot

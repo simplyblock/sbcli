@@ -1,7 +1,6 @@
 import time
 
-
-from simplyblock_core import db_controller, utils, constants
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.controllers.cluster_expansion.executor import (
     integrate_new_node_into_cluster,
@@ -13,7 +12,6 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
-
 
 logger = utils.get_logger(__name__)
 

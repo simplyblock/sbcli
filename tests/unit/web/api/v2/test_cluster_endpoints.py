@@ -4,7 +4,6 @@ import pytest
 
 from tests.unit.web.api.v2._factories import CLUSTER_ID
 
-
 # max_subsys and spdk_vcpu_count are capacity decisions with real
 # consequences if silently defaulted, so every create body has to state
 # them. hugepages_mem defaults to 0 -- "compute it" (calculate_minimum_hp_

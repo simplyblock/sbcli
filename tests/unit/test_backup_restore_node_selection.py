@@ -14,7 +14,6 @@ from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.storage_node import StorageNode
 
-
 TARGET_CLUSTER = "00000000-0000-0000-0000-00000000000c"
 SOURCE_CLUSTER = "00000000-0000-0000-0000-00000000000f"
 

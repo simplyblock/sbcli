@@ -2,12 +2,12 @@ import random
 import threading
 from datetime import datetime
 
-from utils.common_utils import sleep_n_sec
 from exceptions.custom_exception import LvolNotConnectException
 from stress_test.continuous_failover_ha_multi_outage import (
     RandomMultiClientMultiFailoverTest,
     generate_random_sequence,
 )
+from utils.common_utils import sleep_n_sec
 
 
 class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):

@@ -16,11 +16,10 @@ All external dependencies (FDB, RPC, SPDK) are mocked.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from tests._mocks import unique_ip
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -482,8 +481,8 @@ class TestBdevNvmeSetOptionsRetries(unittest.TestCase):
     """
 
     def test_retries_are_unconditional_and_nonzero(self):
-        from simplyblock_core.rpc_client import RPCClient
         from simplyblock_core import constants
+        from simplyblock_core.rpc_client import RPCClient
 
         self.assertEqual(constants.BDEV_RETRY, 2)
         self.assertEqual(constants.TRANSPORT_RETRY, 1)

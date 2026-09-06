@@ -1,12 +1,12 @@
+import json
 import os
+import re
+import select
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 import paramiko
-import time
-import re
-import json
-import select
 
 # --- INPUT PARAMETERS ---
 # 3 x i3en.12xlarge storage nodes (48 vCPU / 2 NUMA sockets each), single mgmt,

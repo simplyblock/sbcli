@@ -1,11 +1,10 @@
 import json
-from typing import ClassVar
 import logging
 import random
 import threading
 import uuid as _uuid_mod
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
+from typing import ClassVar
 
 logger = logging.getLogger(__name__)
 

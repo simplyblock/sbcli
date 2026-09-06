@@ -2,7 +2,6 @@
 
 from simplyblock_core import utils as core_utils
 from simplyblock_core.models.lvol_model import LVol
-
 from tests.unit.web.api.v2._factories import (
     CLUSTER_ID,
     POOL_ID,

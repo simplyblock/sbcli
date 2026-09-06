@@ -1,7 +1,8 @@
+import random
 import threading
+
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
-import random
 
 
 class TestMultiFioSnapshotDowntime(TestClusterBase):

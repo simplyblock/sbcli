@@ -1,11 +1,11 @@
-from pathlib import Path
-import threading
-from e2e_tests.cluster_test_base import TestClusterBase
-from utils.common_utils import sleep_n_sec, convert_bytes_to_gb_tb
-from logger_config import setup_logger
-from datetime import datetime
 import random
+import threading
+from datetime import datetime
+from pathlib import Path
 
+from e2e_tests.cluster_test_base import TestClusterBase
+from logger_config import setup_logger
+from utils.common_utils import convert_bytes_to_gb_tb, sleep_n_sec
 
 
 class FioWorkloadTest(TestClusterBase):

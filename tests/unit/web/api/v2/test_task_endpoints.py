@@ -1,7 +1,6 @@
 """Unit tests for /api/v2/clusters/{id}/tasks endpoints."""
 
 from simplyblock_core.models.job_schedule import JobSchedule
-
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import CLUSTER_ID, TASK_ID
 

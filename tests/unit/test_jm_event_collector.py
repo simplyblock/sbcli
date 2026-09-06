@@ -19,7 +19,6 @@ from simplyblock_core.controllers import events_controller
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.services import main_distr_event_collector as collector
 
-
 STARTED = {"timestamp": "2026-08-19T18:59:59.010000Z", "event_type": "jm_compression",
            "jm_vuid": "1", "status": "compression_started", "error_code": 0}
 FINISHED = {"timestamp": "2026-08-19T19:01:04.220000Z", "event_type": "jm_compression",

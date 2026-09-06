@@ -264,6 +264,7 @@ class TestMonitorClearCallsReadmit(unittest.TestCase):
 
     def test_source_wires_clear_to_readmit(self):
         import inspect
+
         from simplyblock_core.services import storage_node_monitor as mon
         src = inspect.getsource(mon.check_node)
         idx_clear = src.find("clearing to ONLINE")

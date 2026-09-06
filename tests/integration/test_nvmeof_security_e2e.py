@@ -17,7 +17,6 @@ import uuid as _uuid_mod
 
 from tests.integration.migration.mock_rpc_server import MockRpcServer
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -563,8 +562,9 @@ class TestGetHostSecret(unittest.TestCase):
 
     def test_get_secret_success(self):
         from unittest.mock import patch
-        from simplyblock_core.models.lvol_model import LVol
+
         from simplyblock_core.controllers import lvol_controller
+        from simplyblock_core.models.lvol_model import LVol
 
         lvol = LVol()
         lvol.uuid = "vol-secret-1"
@@ -584,8 +584,9 @@ class TestGetHostSecret(unittest.TestCase):
 
     def test_get_secret_host_not_found(self):
         from unittest.mock import patch
-        from simplyblock_core.models.lvol_model import LVol
+
         from simplyblock_core.controllers import lvol_controller
+        from simplyblock_core.models.lvol_model import LVol
 
         lvol = LVol()
         lvol.uuid = "vol-secret-2"
@@ -600,6 +601,7 @@ class TestGetHostSecret(unittest.TestCase):
 
     def test_get_secret_volume_not_found(self):
         from unittest.mock import patch
+
         from simplyblock_core.controllers import lvol_controller
 
         with patch.object(lvol_controller, "DBController") as MockDB:
@@ -611,8 +613,9 @@ class TestGetHostSecret(unittest.TestCase):
 
     def test_get_secret_empty_hosts(self):
         from unittest.mock import patch
-        from simplyblock_core.models.lvol_model import LVol
+
         from simplyblock_core.controllers import lvol_controller
+        from simplyblock_core.models.lvol_model import LVol
 
         lvol = LVol()
         lvol.uuid = "vol-empty"
@@ -627,8 +630,9 @@ class TestGetHostSecret(unittest.TestCase):
 
     def test_get_secret_returns_all_fields(self):
         from unittest.mock import patch
-        from simplyblock_core.models.lvol_model import LVol
+
         from simplyblock_core.controllers import lvol_controller
+        from simplyblock_core.models.lvol_model import LVol
 
         lvol = LVol()
         lvol.uuid = "vol-all-fields"

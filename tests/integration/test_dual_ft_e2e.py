@@ -27,10 +27,8 @@ import pytest
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import ClusterStatObject
-
-
+from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger(__name__)
 

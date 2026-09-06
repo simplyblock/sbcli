@@ -70,8 +70,8 @@ Test class map
 """
 
 import os
-import re
 import random
+import re
 import string
 import threading
 import time
@@ -80,7 +80,6 @@ from pathlib import Path
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
-
 
 # ─────────────────────────────────────── helpers ──────────────────────────────
 

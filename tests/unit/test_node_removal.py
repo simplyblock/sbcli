@@ -19,12 +19,11 @@ import unittest
 from unittest.mock import DEFAULT, MagicMock, call, patch
 
 from simplyblock_core import storage_node_ops
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteJMDevice
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice, RemoteJMDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCConnectionError, RPCException, RPCRemoteError
 from tests._mocks import unique_ip
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -2148,8 +2147,8 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
 
     def _run_gate(self, cluster_status):
         """Drive the runner's cluster-status gate; True == it proceeded."""
-        from simplyblock_core.services import tasks_runner_failed_migration as runner
         from simplyblock_core.models.job_schedule import JobSchedule
+        from simplyblock_core.services import tasks_runner_failed_migration as runner
 
         task = MagicMock(spec=JobSchedule)
         task.node_id, task.cluster_id, task.retry = "n1", "cl-1", 0

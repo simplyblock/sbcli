@@ -26,10 +26,10 @@ import random
 import string
 import threading
 import time
+from datetime import UTC
 
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
-from datetime import UTC
 
 logger = setup_logger(__name__)
 
@@ -918,7 +918,9 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
 # K8s variant
 # ─────────────────────────────────────────────────────────────────────────────
 
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest  # noqa: E402
+from stress_test.continuous_k8s_native_failover import (
+    K8sNativeFailoverTest,  # noqa: E402
+)
 
 
 class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):

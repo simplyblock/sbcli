@@ -17,12 +17,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import simplyblock_core.services.tasks_runner_node_add as node_add_runner
+import simplyblock_core.services.tasks_runner_restart as restart_runner
 from simplyblock_core import constants
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-
-import simplyblock_core.services.tasks_runner_node_add as node_add_runner
-import simplyblock_core.services.tasks_runner_restart as restart_runner
 
 
 @pytest.fixture(autouse=True)

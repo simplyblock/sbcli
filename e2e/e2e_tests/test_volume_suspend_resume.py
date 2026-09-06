@@ -7,8 +7,8 @@ Status: UNCERTAIN — commented out in get_all_tests()
 """
 
 from e2e_tests.cluster_test_base import TestClusterBase
-from utils.common_utils import sleep_n_sec
 from logger_config import setup_logger
+from utils.common_utils import sleep_n_sec
 
 
 class TestVolumeSuspendResume(TestClusterBase):

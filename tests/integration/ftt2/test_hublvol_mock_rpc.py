@@ -25,10 +25,8 @@ from pydantic import SecretStr
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.storage_node import StorageNode
-
-from tests.integration.ftt2.conftest import _worker_port_offset, _BASE_PORT
+from tests.integration.ftt2.conftest import _BASE_PORT, _worker_port_offset
 from tests.integration.ftt2.mock_cluster import FTT2MockRpcServer
-
 
 # ---------------------------------------------------------------------------
 # Helpers — in-memory node construction

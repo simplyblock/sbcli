@@ -2,10 +2,10 @@ import builtins
 
 from fastapi import APIRouter, Response
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import device_controller
+from simplyblock_core.db_controller import DBController
 
-from ..._dependencies import Cluster, StorageNode, Device
+from ..._dependencies import Cluster, Device, StorageNode
 from ..._dtos import DeviceDTO, DeviceHealthInfoDTO
 
 api = APIRouter()

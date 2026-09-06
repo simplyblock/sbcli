@@ -19,14 +19,12 @@ import time
 from dataclasses import dataclass
 from unittest.mock import patch
 
-
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import storage_node_ops
-
+from simplyblock_core.models.storage_node import StorageNode
 from tests.integration.ftt2.conftest import (
-    prepare_node_for_restart,
     create_test_lvol,
     patch_externals,
+    prepare_node_for_restart,
 )
 
 logger = logging.getLogger(__name__)

@@ -6,7 +6,7 @@ import json
 import threading
 import time
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests.conftest_proxy import import_proxy_module
 

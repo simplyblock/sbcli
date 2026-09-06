@@ -1,13 +1,10 @@
 import time
 from datetime import datetime
 
-from simplyblock_core import db_controller, utils, constants
-from simplyblock_core.controllers import tasks_controller, device_controller
+from simplyblock_core import constants, db_controller, utils
+from simplyblock_core.controllers import device_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-
-
-
 from simplyblock_core.models.storage_node import StorageNode
 
 

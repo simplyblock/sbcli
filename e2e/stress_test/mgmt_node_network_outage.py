@@ -13,12 +13,11 @@ Self-restoring iptables approach:
 """
 
 import itertools
-import threading
 import random
+import threading
 
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
 from utils.common_utils import sleep_n_sec
-
 
 # Security type configurations
 _SEC_CONFIGS = [

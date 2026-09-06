@@ -5,8 +5,8 @@ from simplyblock_core.settings import Settings
 
 from ._base import KMS
 from ._exceptions import KMSException
-from ._hcp import HCPClient
 from ._fdb import LocalKMS
+from ._hcp import HCPClient
 
 logger = logging.getLogger()
 

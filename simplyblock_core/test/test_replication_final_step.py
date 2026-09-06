@@ -1,6 +1,6 @@
 """D6 unit tests for the shared cross-cluster replication cutover."""
-from simplyblock_core.services import replication_final_step as rfs
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services import replication_final_step as rfs
 
 
 class _Nic:

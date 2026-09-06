@@ -98,6 +98,7 @@ class TestEmptyControllerNameIsNotPruned:
 
     def test_primitive_refuses_an_empty_name(self):
         from unittest.mock import MagicMock
+
         from simplyblock_core import storage_node_ops
         rpc = MagicMock()
         dup = [{"ctrlrs": [
@@ -108,6 +109,7 @@ class TestEmptyControllerNameIsNotPruned:
 
     def test_primitive_still_prunes_a_named_controller(self):
         from unittest.mock import MagicMock
+
         from simplyblock_core import storage_node_ops
         rpc = MagicMock()
         dup = [{"ctrlrs": [

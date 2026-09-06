@@ -40,9 +40,8 @@ Two entry points:
   caller needs to express the host topology explicitly.
 """
 
-from typing import NamedTuple
 from collections.abc import Sequence
-
+from typing import NamedTuple
 
 # Role names match the wire protocol used by bdev_lvol_set_lvs_opts.
 ROLE_PRIMARY = "primary"

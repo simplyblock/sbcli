@@ -4,8 +4,8 @@ from uuid import UUID
 from fastapi import Depends, HTTPException
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_web import utils
-from simplyblock_core.models.backup import Backup as BackupModel, BackupPolicy
+from simplyblock_core.models.backup import Backup as BackupModel
+from simplyblock_core.models.backup import BackupPolicy
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -16,10 +16,13 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool as PoolModel
 from simplyblock_core.models.replication import (
     ReplicationPolicy as ReplicationPolicyModel,
+)
+from simplyblock_core.models.replication import (
     ReplicationTarget as ReplicationTargetModel,
 )
 from simplyblock_core.models.snapshot import SnapShot as SnapshotModel
 from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
+from simplyblock_web import utils
 
 _db = DBController()
 

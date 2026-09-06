@@ -17,10 +17,10 @@ IMPORTANT (deploying the async-replication code under test):
     ($SIMPLYBLOCK_DOCKER_IMAGE) was built from that branch — otherwise the new
     TasksRunnerReplicationFinal service / final-step RPC will be missing.
 """
-import os
 import json
-import sys
+import os
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 

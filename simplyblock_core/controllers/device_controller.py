@@ -1,13 +1,13 @@
 import json
+import logging
 import threading
 import time
-import logging
 import uuid
 
-from simplyblock_core import distr_controller, utils, storage_node_ops
+from simplyblock_core import distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 

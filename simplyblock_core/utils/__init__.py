@@ -10,29 +10,38 @@ import socket
 import string
 import subprocess
 import sys
-import uuid
+import tempfile
 import time
-from datetime import datetime, UTC
-from typing import Any
+import uuid
 from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Any
 
-from pydantic import SecretStr
-from docker import DockerClient
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from kubernetes import client, config
-from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
-    V1PodTemplateSpec, V1PodSpec, V1Container, V1EnvVar, V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, \
-    V1LabelSelector, V1ResourceRequirements
-
-import docker
+from kubernetes.client import (
+    ApiException,
+    V1ConfigMapVolumeSource,
+    V1Container,
+    V1Deployment,
+    V1DeploymentSpec,
+    V1EnvVar,
+    V1LabelSelector,
+    V1ObjectMeta,
+    V1PodSpec,
+    V1PodTemplateSpec,
+    V1ResourceRequirements,
+    V1Volume,
+    V1VolumeMount,
+)
 from kubernetes.stream import stream
 from prettytable import PrettyTable
-from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from pydantic import SecretStr
 
-import tempfile
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
-
-from simplyblock_core import constants
-from simplyblock_core import shell_utils
+import docker
+from docker import DockerClient
+from simplyblock_core import constants, shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
@@ -745,8 +754,8 @@ def make_async_handler(target_handler):
     interpreter exit.
     """
     import atexit
-    import queue as _queue
     import logging.handlers as _lh
+    import queue as _queue
     log_queue: _queue.Queue = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
     listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
     listener.start()
@@ -1072,6 +1081,7 @@ def _get_active_port_reservations(cluster_id):
     record itself, so if the reservation read fails we fall back to node-only
     ports rather than break allocation."""
     import time as _time
+
     from simplyblock_core.db_controller import DBController
     from simplyblock_core.models.cluster import PortReservation
     db_controller = DBController()
@@ -1348,8 +1358,8 @@ def generate_dhchap_key(length=32, hash_id=1):
     hash_id: 00=none, 01=SHA-256, 02=SHA-384, 03=SHA-512
     The key bytes are followed by a 4-byte CRC32 checksum (little-endian).
     """
-    import secrets
     import base64
+    import secrets
     import struct
     import zlib
     key_bytes = secrets.token_bytes(length)

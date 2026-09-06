@@ -23,7 +23,6 @@ from pydantic import SecretStr
 
 from tests._mocks import make_mock_cluster
 
-
 # ---------------------------------------------------------------------------
 # Pool model
 # ---------------------------------------------------------------------------
@@ -142,8 +141,9 @@ class TestAddPoolDhchap(unittest.TestCase):
 
     def test_dhchap_false_by_default(self):
         """add_pool with no dhchap arg must set pool.dhchap = False."""
-        from simplyblock_core.controllers import pool_controller
         import inspect
+
+        from simplyblock_core.controllers import pool_controller
         sig = inspect.signature(pool_controller.add_pool)
         self.assertIn("dhchap", sig.parameters)
         self.assertFalse(sig.parameters["dhchap"].default)
@@ -603,10 +603,10 @@ class TestAddHostToLvolDhchapPool(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_no_per_host_key_generation_for_dhchap_pool(self, MockDB, MockRPC, mock_pool_reg):
         """For DHCHAP pools, generate_dhchap_key must never be called."""
+        from simplyblock_core import utils
         from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
         from simplyblock_core.models.lvol_model import LVol
         from simplyblock_core.models.storage_node import StorageNode
-        from simplyblock_core import utils
 
         pool = _make_dhchap_pool()
         mock_pool_reg.return_value = {

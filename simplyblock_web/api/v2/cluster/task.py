@@ -8,7 +8,6 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from .._dependencies import Cluster, Task
 from .._dtos import TaskDTO
 
-
 api = APIRouter()
 db = DBController()
 

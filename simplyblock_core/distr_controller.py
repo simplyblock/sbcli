@@ -4,9 +4,9 @@ import re
 import threading
 
 from simplyblock_core import utils
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
 

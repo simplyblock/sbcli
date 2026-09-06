@@ -27,7 +27,6 @@ from typing import ClassVar
 
 from simplyblock_core.services import __main__ as dispatcher
 
-
 SERVICES_DIR = pathlib.Path(dispatcher.__file__).parent
 
 

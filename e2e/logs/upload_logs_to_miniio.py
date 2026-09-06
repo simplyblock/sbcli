@@ -1,9 +1,10 @@
-import os
-import paramiko
-import boto3
 import argparse
-import time
+import os
 import subprocess
+import time
+
+import boto3
+import paramiko
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Fetch and upload logs from Docker and/or Kubernetes.")

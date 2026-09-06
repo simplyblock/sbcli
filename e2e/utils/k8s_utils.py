@@ -22,7 +22,8 @@ import re
 import shlex
 import subprocess
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
+
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 

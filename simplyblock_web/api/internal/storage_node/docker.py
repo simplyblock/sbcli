@@ -1,22 +1,23 @@
 import json
 import math
 import os
+import socket
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-import docker
 import psutil
-import socket
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
 
-from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
-import simplyblock_core.utils.pci as pci_utils
+import docker
 import simplyblock_core.utils as init_utils
-from simplyblock_web import utils, node_utils
+import simplyblock_core.utils.pci as pci_utils
+from simplyblock_core import constants, scripts, shell_utils
+from simplyblock_core import utils as core_utils
+from simplyblock_web import node_utils, utils
 
 from .._node_info import get_static_node_info
 
@@ -242,6 +243,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
     teardown.
     """
     import threading
+
     from docker.errors import NotFound
 
     client = get_docker_client()

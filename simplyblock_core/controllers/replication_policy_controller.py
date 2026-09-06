@@ -11,11 +11,11 @@ reverts itself silently.
 """
 import uuid as uuid_module
 
-from simplyblock_core import db_controller as db_module, utils
+from simplyblock_core import db_controller as db_module
+from simplyblock_core import snapshot_retention, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVolReplication
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import snapshot_retention
 from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.snapshot import SnapShot
 

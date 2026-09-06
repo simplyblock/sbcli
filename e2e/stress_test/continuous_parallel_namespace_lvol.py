@@ -26,8 +26,8 @@ import string
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 
-from datetime import datetime, UTC
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from utils.ssh_utils import RunnerK8sLog

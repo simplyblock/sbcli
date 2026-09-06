@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import json as _json
 import math
-from typing import ClassVar
 import os
 import random
 import string
@@ -48,8 +47,9 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec

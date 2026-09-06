@@ -37,7 +37,6 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 
-
 # --------------------------------------------------------------------------
 # Backup runner: terminates instead of looping forever.
 #

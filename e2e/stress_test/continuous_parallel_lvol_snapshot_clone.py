@@ -1,10 +1,10 @@
 import json as _json
 import os
-import time
 import threading
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence

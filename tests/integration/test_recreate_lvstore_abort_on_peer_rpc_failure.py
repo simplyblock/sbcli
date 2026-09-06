@@ -29,11 +29,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
+from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.storage_node import StorageNode
 from tests._mocks import unique_ip
-
 
 # --------------------------------------------------------------------------
 # Helpers (kept aligned with tests/test_dual_ft_secondary_fixes.py)

@@ -9,8 +9,8 @@ import logging
 
 import jc
 
-from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError
 from simplyblock_core.fw_api_client import FirewallClient
+from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError
 
 logger = logging.getLogger(__name__)
 

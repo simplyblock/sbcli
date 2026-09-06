@@ -5,10 +5,10 @@ Usage: python3 merge_logs.py <node_name>
 
 Expects files at /tmp/<node>_p*.json, outputs to /tmp/graylog_export/<node>_all.csv
 """
-import json
 import glob
-import sys
+import json
 import os
+import sys
 
 node = sys.argv[1]
 files = sorted(glob.glob(f"/tmp/{node}_p*.json"), key=lambda f: int(f.split("_p")[1].split(".")[0]))

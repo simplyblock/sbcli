@@ -5,8 +5,7 @@ import time
 import uuid
 
 import docker
-
-from simplyblock_core import utils, constants
+from simplyblock_core import constants, utils
 from simplyblock_core.controllers import fdb_backup_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule

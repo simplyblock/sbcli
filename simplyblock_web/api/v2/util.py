@@ -1,5 +1,5 @@
-from typing import Annotated, Any, Literal
 from collections.abc import Callable
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, BeforeValidator, Field
 
 from simplyblock_core import utils as core_utils
-
 
 Unsigned = Annotated[int, Field(ge=0)]
 Size = Annotated[Unsigned, BeforeValidator(core_utils.parse_size)]

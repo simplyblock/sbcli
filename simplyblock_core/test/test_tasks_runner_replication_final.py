@@ -1,10 +1,10 @@
 """D6 unit tests for the replication-final task runner lifecycle."""
 import pytest
 
-from simplyblock_core.services import tasks_runner_replication_final as runner
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services import tasks_runner_replication_final as runner
 
 
 def _task(**params):

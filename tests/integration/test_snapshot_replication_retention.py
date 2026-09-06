@@ -28,6 +28,7 @@ Mocked here — everything *above* the database, per the tier's rule:
 """
 
 import itertools
+
 import pytest
 
 from simplyblock_core.db_controller import DBController

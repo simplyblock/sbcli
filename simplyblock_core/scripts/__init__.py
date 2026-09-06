@@ -3,7 +3,6 @@ import logging
 import os
 import subprocess
 
-
 DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 
 logger = logging.getLogger()

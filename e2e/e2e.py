@@ -6,25 +6,32 @@ import shutil
 import subprocess
 import time
 import traceback
-from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, ALL_TESTS
-from logger_config import setup_logger
-from exceptions.custom_exception import (
-    TestNotFoundException,
-    MultipleExceptions,
-    SkippedTestsException
+
+from __init__ import (
+    ALL_TESTS,
+    get_all_tests,
+    get_backup_stress_tests,
+    get_backup_tests,
+    get_backup_topology_tests,
+    get_parity_tests,
+    get_security_tests,
 )
 from e2e_tests.cluster_test_base import TestClusterBase
-from utils.sbcli_utils import SbcliUtils
-from utils.ssh_utils import SshUtils
+from exceptions.custom_exception import (
+    MultipleExceptions,
+    SkippedTestsException,
+    TestNotFoundException,
+)
+from logger_config import setup_logger
 from utils.common_utils import CommonUtils
-
 from utils.manage_portal_util import (
+    FAILURE_REASON_OTHER,
     TestRunsAPI,
     detect_fe_be_tags,
-    FAILURE_REASON_OTHER,
-    resolve_environment_id_from_ip
+    resolve_environment_id_from_ip,
 )
-
+from utils.sbcli_utils import SbcliUtils
+from utils.ssh_utils import SshUtils
 
 PROFILE_KEY = "e2e"         # fixed
 JIRA_TICKET = ""            # always empty, per your note

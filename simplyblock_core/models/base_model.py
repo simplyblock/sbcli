@@ -1,13 +1,12 @@
-import pprint
 import json
+import pprint
 from collections import ChainMap
 from collections.abc import Callable, Mapping
-from inspect import get_annotations, ismethod, isfunction
+from inspect import get_annotations, isfunction, ismethod
 from types import UnionType
 from typing import ClassVar, TypeVar, Union, cast, get_args, get_origin
 
 from pydantic import SecretBytes, SecretStr
-
 
 _T = TypeVar('_T')
 
@@ -384,6 +383,7 @@ class BaseModel:
                 # atomic_update for ANY new node-record mutation.
                 import os.path
                 import traceback
+
                 from simplyblock_core import utils
                 frames = [
                     f"{os.path.basename(fs.filename)}:{fs.lineno}:{fs.name}"

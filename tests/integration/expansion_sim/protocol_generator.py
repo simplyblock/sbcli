@@ -46,7 +46,6 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     compute_role_diff_topology,
 )
 
-
 # ---------------------------------------------------------------------------
 # Timing table
 # ---------------------------------------------------------------------------
@@ -315,7 +314,9 @@ def generate_protocol(spec: ScenarioSpec,
     primary_to_secs: dict[str, dict[str, str]] = {}
     # For the *post-expand* layout we know sec_1 / sec_2 from desired
     # rotation; reuse the planner formula here for sibling lookup.
-    from simplyblock_core.controllers.cluster_expansion.planner import _host_rotation_layout
+    from simplyblock_core.controllers.cluster_expansion.planner import (
+        _host_rotation_layout,
+    )
     for pid, sec, tert in _host_rotation_layout(spec.current_topology, spec.ftt):
         primary_to_secs[pid] = {ROLE_SECONDARY: sec, ROLE_TERTIARY: tert}
 

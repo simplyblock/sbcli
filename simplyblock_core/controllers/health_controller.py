@@ -1,14 +1,13 @@
 
-from typing import Any
 from logging import DEBUG, ERROR, INFO
+from typing import Any
 
-
-from simplyblock_core import utils, distr_controller, storage_node_ops
+from simplyblock_core import distr_controller, storage_node_ops, utils
+from simplyblock_core.controllers import device_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)
 

@@ -5,11 +5,11 @@ import re
 
 import boto3
 import requests
+from pydantic import BaseModel
 
+import simplyblock_core.utils.pci as pci_utils
 from simplyblock_core import shell_utils
 from simplyblock_core.utils.pci import PCIAddress
-import simplyblock_core.utils.pci as pci_utils
-from pydantic import BaseModel
 
 
 # Type definitions

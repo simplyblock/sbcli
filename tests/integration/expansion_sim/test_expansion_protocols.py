@@ -41,7 +41,6 @@ from tests.integration.expansion_sim.protocol_generator import (
     load_timing,
 )
 
-
 _HERE = Path(__file__).parent
 _TIMING_PATH = _HERE / "rpc_timing.json"
 _OUT_DIR = _HERE / "protocols"

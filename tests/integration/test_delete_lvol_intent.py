@@ -36,9 +36,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.lvol_model import LVol
-
 from tests._mocks import make_mock_cluster
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

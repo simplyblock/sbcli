@@ -1,6 +1,5 @@
 from simplyblock_core.db_controller import DBController
 
-
 NODE_ID = "1bec25a8-d815-45d2-ae76-b1bd6c21584b"
 LVS_NAME = "LVS_6002"
 
