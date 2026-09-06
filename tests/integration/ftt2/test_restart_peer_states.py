@@ -201,7 +201,7 @@ class TestPrimaryLVSPeerStates:
         def _on_rpc(method, params):
             if method == disconnect_at_rpc:
                 set_node_no_fabric(env, 1)
-                return None  # Let the RPC fail
+                return  # Let the RPC fail
         env['servers'][1].set_rpc_hook(_on_rpc)
 
         try:
@@ -235,7 +235,7 @@ class TestPrimaryLVSPeerStates:
         def _on_rpc(method, params):
             if method == disconnect_at_rpc:
                 set_node_no_fabric(env, 2)
-                return None
+                return
         env['servers'][2].set_rpc_hook(_on_rpc)
 
         try:
@@ -313,7 +313,7 @@ class TestSecondaryLVSPeerStates:
         def _on_rpc(method, params):
             if method == disconnect_at_rpc:
                 set_node_no_fabric(env, 3)
-                return None
+                return
         env['servers'][3].set_rpc_hook(_on_rpc)
         try:
             # A peer vanishing mid-restart legitimately aborts the restart
@@ -341,7 +341,7 @@ class TestSecondaryLVSPeerStates:
         def _on_rpc(method, params):
             if method == disconnect_at_rpc:
                 set_node_no_fabric(env, 2)
-                return None
+                return
         env['servers'][2].set_rpc_hook(_on_rpc)
         try:
             # A peer vanishing mid-restart legitimately aborts the restart
@@ -416,7 +416,7 @@ class TestTertiaryLVSPeerStates:
         def _on_rpc(method, params):
             if method == disconnect_at_rpc:
                 set_node_no_fabric(env, 2)
-                return None
+                return
         env['servers'][2].set_rpc_hook(_on_rpc)
         try:
             # A peer vanishing mid-restart legitimately aborts the restart
@@ -444,7 +444,7 @@ class TestTertiaryLVSPeerStates:
         def _on_rpc(method, params):
             if method == disconnect_at_rpc:
                 set_node_no_fabric(env, 3)
-                return None
+                return
         env['servers'][3].set_rpc_hook(_on_rpc)
         try:
             # A peer vanishing mid-restart legitimately aborts the restart
