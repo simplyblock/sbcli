@@ -524,7 +524,7 @@ def task_runner(task: JobSchedule, tasks=None):
                   params["tgt_lvol_composite"], params["tgt_map_id"],
                   params["tgt_snap_composite"], operation=params.get("operation", "replicate"))
         except Exception as e:
-            logger.error(f"Cutover raised: {e}", exc_info=True)
+            logger.exception(f"Cutover raised: {e}")
             return _finalize(task, False, str(e))
         return _finalize(task, ok, err)
     return True
@@ -851,7 +851,7 @@ def main():
                 try:
                     task_runner(task, cluster_tasks)
                 except Exception as e:
-                    logger.error(f"replication-final task {task.uuid} failed: {e}", exc_info=True)
+                    logger.exception(f"replication-final task {task.uuid} failed: {e}")
                 # No blanket backoff here, and the return value is deliberately
                 # ignored: False is the NORMAL result for a task that is queued
                 # or mid-round, and sleeping 3s per such task cost ~70s per
