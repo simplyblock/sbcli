@@ -256,9 +256,30 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         # start node-level outages first so their API/SSH calls complete before
         # the host-level outage makes mgmt_ip unreachable.
         outage_results = {}  # node → (effective_type, outage_dur)
+        outage_errors = {}   # node → exception raised while triggering
 
         def _trigger(node, outage_type, node_ip, node_rpc_port):
+            try:
+                _trigger_inner(node, outage_type, node_ip, node_rpc_port)
+            except Exception as exc:
+                # A thread that raises dies silently, leaving outage_results
+                # without an entry for this node. The caller then blew up with
+                # an opaque `KeyError: <node-uuid>` that hid the real cause —
+                # in the 2026-09-06 run, an ssh hang during storage_node_reboot.
+                # Record it so the failure names the node, the outage and why.
+                outage_errors[node] = exc
+                self.logger.error(
+                    f"[outage] {outage_type} on {node} ({node_ip}) FAILED: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        def _trigger_inner(node, outage_type, node_ip, node_rpc_port):
             self.logger.info(f"Performing {outage_type} on node {node}.")
+            # We are about to make this node unreachable on purpose, so reset
+            # its SSH unreachable clock. Resetting (rather than exempting the
+            # node) means a planned outage never trips the 2h threshold, while
+            # a node that never comes back still does.
+            self.ssh_obj.notify_outage_started([node_ip])
             node_outage_dur = 0
             effective_type = outage_type
             if outage_type == "container_stop":
@@ -312,8 +333,25 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         for t in threads_early + threads_rest:
             t.join()
 
+        # Fail with the real reason, not a KeyError on the missing entry.
+        if outage_errors:
+            detail = "; ".join(
+                f"{n}: {type(e).__name__}: {e}" for n, e in outage_errors.items()
+            )
+            raise RuntimeError(
+                f"Failed to trigger outage on {len(outage_errors)} of "
+                f"{len(node_plans)} node(s): {detail}"
+            )
+
         outage_combinations = []
         for node, _, _, _ in node_plans:
+            if node not in outage_results:
+                # Belt and braces: a thread that neither recorded a result nor
+                # an error (killed, or an exception during logging).
+                raise RuntimeError(
+                    f"Outage trigger for node {node} produced no result and no "
+                    f"error; treating as a failed outage"
+                )
             effective_type, node_outage_dur = outage_results[node]
             outage_combinations.append((node, effective_type, node_outage_dur))
             self.current_outage_nodes.append(node)

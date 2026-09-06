@@ -22,6 +22,7 @@ from typing import Optional, List
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
+from exceptions.custom_exception import NodeUnreachableTimeout
 # import importlib
 # from glob import glob
 
@@ -92,9 +93,124 @@ class SshUtils:
         self.log_monitor_stop_flags = {}
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
         self._bastion_client = None
-        self._reconnect_locks = defaultdict(threading.Lock)   
+        self._reconnect_locks = defaultdict(threading.Lock)
         self.ssh_pass = None
         self.distrib_dump_paths = {}
+
+        # Per-node SSH health, so a node that never comes back fails the run
+        # instead of letting it grind on for hours. Keyed by node IP, like
+        # ssh_connections / _reconnect_locks above.
+        #   first_fail : when the current unhealthy stretch began (None = healthy)
+        #   consec_ok  : successes since the last retry-exhausted failure
+        #   fails      : retry-exhausted failures in the current stretch
+        #   last_err   : last error text, used in the failure message
+        self._node_ssh_health = {}
+        self._node_health_lock = threading.Lock()
+        # 2h. The longest *intentional* outage across the last 12 runs was
+        # 56 min, so this has ~2x headroom and cannot fire on a planned outage.
+        self._ssh_down_sec = int(os.getenv("SSH_NODE_DOWN_SEC", "7200"))
+        # A single success must NOT clear the clock. A dying node keeps
+        # answering trivial commands (echo, a log redirect) while anything
+        # touching the wedged IO path hangs, so one lucky success would reset
+        # the timer forever and the rule would never fire. Require a run of
+        # consecutive successes before calling a node healed.
+        self._ssh_heal_ok = int(os.getenv("SSH_HEAL_OK_COUNT", "3"))
+
+    # ------------------------------------------------------------------
+    # Per-node SSH health tracking
+    # ------------------------------------------------------------------
+    def _health_entry(self, node):
+        return self._node_ssh_health.setdefault(
+            node, {"first_fail": None, "consec_ok": 0, "fails": 0, "last_err": ""}
+        )
+
+    def _record_ssh_ok(self, node):
+        """One successful command. Only heals after _ssh_heal_ok in a row."""
+        with self._node_health_lock:
+            h = self._health_entry(node)
+            h["consec_ok"] += 1
+            if h["first_fail"] is not None and h["consec_ok"] >= self._ssh_heal_ok:
+                down_for = time.time() - h["first_fail"]
+                self.logger.info(
+                    f"[ssh-health] {node} recovered after {down_for/60:.1f} min "
+                    f"and {h['consec_ok']} consecutive successes"
+                )
+                h["first_fail"] = None
+                h["fails"] = 0
+                h["last_err"] = ""
+
+    def _record_ssh_failure(self, node, err_text=""):
+        """One retry-exhausted failure. Returns seconds unhealthy so far."""
+        with self._node_health_lock:
+            h = self._health_entry(node)
+            h["consec_ok"] = 0
+            h["fails"] += 1
+            h["last_err"] = (err_text or "")[:500]
+            if h["first_fail"] is None:
+                h["first_fail"] = time.time()
+            return time.time() - h["first_fail"], h["fails"]
+
+    def notify_outage_started(self, node_ips):
+        """Reset the unreachable clock for nodes we are deliberately downing.
+
+        The tests reboot nodes, stop containers and cut NICs on purpose, so SSH
+        failure is expected. Resetting here (rather than exempting the node
+        outright) means a planned outage never trips the threshold, while a node
+        that never comes back still does — an outright exemption would suppress
+        the alert forever, because ``current_outage_nodes`` is not cleared until
+        the *next* outage cycle begins.
+        """
+        if isinstance(node_ips, str):
+            node_ips = [node_ips]
+        with self._node_health_lock:
+            for ip in node_ips or []:
+                if not ip:
+                    continue
+                self._node_ssh_health[ip] = {
+                    "first_fail": None, "consec_ok": 0, "fails": 0, "last_err": ""
+                }
+        self.logger.info(
+            f"[ssh-health] cleared unreachable clock for planned outage on {node_ips}"
+        )
+
+    def get_unreachable_nodes(self, threshold_sec=None):
+        """Nodes unhealthy for longer than the threshold.
+
+        Returns ``[(node, seconds_down, fail_count, last_err), ...]``. Intended
+        to be polled from the stress ``run()`` loop, which catches the case
+        where nothing happens to issue another command against the dead node.
+        """
+        limit = self._ssh_down_sec if threshold_sec is None else threshold_sec
+        now = time.time()
+        out = []
+        with self._node_health_lock:
+            for node, h in self._node_ssh_health.items():
+                if h["first_fail"] is None:
+                    continue
+                down = now - h["first_fail"]
+                if down >= limit:
+                    out.append((node, down, h["fails"], h["last_err"]))
+        return out
+
+    def _probe_node_alive(self, node):
+        """Cheap liveness check used as the final gate before failing a node.
+
+        Stops a node being failed on thin evidence — e.g. one failure two hours
+        ago and very little traffic since. Deliberately bypasses the health
+        bookkeeping so it cannot recurse.
+        """
+        try:
+            ssh = self.ssh_connections.get(node)
+            if not ssh or not ssh.get_transport() or not ssh.get_transport().is_active():
+                self.connect(node, is_bastion_server=(node == self.bastion_server))
+                ssh = self.ssh_connections.get(node)
+            if not ssh:
+                return False
+            _, stdout, _ = ssh.exec_command("echo __sb_alive__", timeout=20)
+            return "__sb_alive__" in stdout.read().decode(errors="replace")
+        except Exception as exc:
+            self.logger.warning(f"[ssh-health] liveness probe failed for {node}: {exc}")
+            return False
 
     def _candidate_usernames(self, explicit_user) -> List[str]:
         if explicit_user:
@@ -728,6 +844,31 @@ class SshUtils:
     #     self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
     #     return "", "Command failed after max retries"
 
+    @staticmethod
+    def _recv_exit_status_bounded(channel, timeout):
+        """``recv_exit_status()`` with a bound.
+
+        paramiko's ``recv_exit_status()`` waits on an event with no timeout of
+        its own — the ``timeout`` passed to ``exec_command`` only bounds the
+        reads. When the remote host disappears *during* a command (``sudo
+        reboot``, a forced shutdown, a NIC going down) the exit-status message
+        never arrives, the event never fires, and the call blocks forever.
+
+        That is what wedged a docker stress run for six hours: a
+        ``storage_node_reboot`` outage ran ``sudo reboot`` through
+        ``exec_command`` and the thread parked in ``recv_exit_status()`` while
+        four nodes sat unreachable.
+
+        Raising ``socket.timeout`` here lands in the existing retry handler, so
+        the call fails cleanly after ``max_retries`` instead of hanging.
+        """
+        if channel.status_event.wait(timeout=timeout):
+            return channel.recv_exit_status()
+        raise socket.timeout(
+            f"timed out after {timeout}s waiting for command exit status "
+            f"(remote host likely went away mid-command)"
+        )
+
     def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False, raise_on_error=False):
         '''
         Execute a command with auto-reconnect (serialized per node), optional streaming,
@@ -776,13 +917,13 @@ class SshUtils:
                             error_chunks.append(chunk)
                             stream_callback(chunk, is_error=True)
 
-                        exit_status = stdout.channel.recv_exit_status()
+                        exit_status = self._recv_exit_status_bounded(stdout.channel, timeout)
                         out = "".join(output_chunks)
                         err = "".join(error_chunks)
                     else:
                         out = stdout.read().decode(errors="replace")
                         err = stderr.read().decode(errors="replace")
-                        exit_status = stdout.channel.recv_exit_status()
+                        exit_status = self._recv_exit_status_bounded(stdout.channel, timeout)
 
                     if (not supress_logs) and out:
                         self.logger.info(f"Command output [{node}]: {out.strip()}")
@@ -802,6 +943,7 @@ class SshUtils:
                             f"Command failed on {node} (exit {exit_status}): {command}\n{err.strip()}"
                         )
 
+                    self._record_ssh_ok(node)
                     return out, err
 
                 except (EOFError, paramiko.SSHException, paramiko.buffered_pipe.PipeTimeout, socket.error) as e:
@@ -814,7 +956,35 @@ class SshUtils:
                     self.logger.error(f"SSH command failed (General): {e}. Retrying ({retry}/{max_retries})...")
                     time.sleep(min(2 * retry, 5))
 
+        # Retries exhausted. Note this is OUTSIDE the while loop on purpose: the
+        # `except Exception` inside it catches everything and retries, so a raise
+        # in there would be swallowed by the very handler we need to escape.
         self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
+        down_for, fail_count = self._record_ssh_failure(
+            node, f"last command: {command}"
+        )
+        if down_for >= self._ssh_down_sec:
+            # Final gate: confirm the node really is gone before failing the run.
+            if self._probe_node_alive(node):
+                self.logger.warning(
+                    f"[ssh-health] {node} unhealthy for {down_for/60:.1f} min but "
+                    f"liveness probe succeeded; clearing and continuing"
+                )
+                self._record_ssh_ok(node)
+                with self._node_health_lock:
+                    self._node_ssh_health[node] = {
+                        "first_fail": None, "consec_ok": self._ssh_heal_ok,
+                        "fails": 0, "last_err": ""
+                    }
+            else:
+                raise NodeUnreachableTimeout(
+                    f"Node {node} has been SSH-unreachable for "
+                    f"{down_for/3600:.2f}h ({fail_count} failed commands, "
+                    f"threshold {self._ssh_down_sec/3600:.2f}h) and a liveness "
+                    f"probe also failed. Last command: {command}"
+                )
+        # Historic behaviour for everything below the threshold: no caller
+        # checks this sentinel, which is why the threshold check above exists.
         return "", "Command failed after max retries"
 
 
@@ -2505,9 +2675,13 @@ class SshUtils:
         """
         try:
             self.logger.info(f"Initiating reboot for node: {node_ip}")
-            # Execute the reboot command
+            # `sudo reboot` never returns an exit status: the host is gone
+            # before it can be sent. Use a short timeout and a single attempt
+            # so we do not burn max_retries * timeout discovering that.
             reboot_command = "sudo reboot"
-            self.exec_command(node=node_ip, command=reboot_command)
+            self.exec_command(
+                node=node_ip, command=reboot_command, timeout=15, max_retries=1
+            )
             self.logger.info(f"Reboot command executed for node: {node_ip}")
             
             # Disconnect the current SSH connection

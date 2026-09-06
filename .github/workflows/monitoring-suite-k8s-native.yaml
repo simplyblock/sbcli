@@ -227,11 +227,12 @@ jobs:
       # PRE-CLEAN CLIENTS
       # ============================================================
       - name: Pre-clean clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }

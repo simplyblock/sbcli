@@ -266,11 +266,12 @@ jobs:
       # PRE-BOOTSTRAP CLEANUP
       # ============================================================
       - name: Pre-clean — kill fio/tmux, unmount NFS on all nodes
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -298,12 +299,13 @@ jobs:
           done
 
       - name: Pre-clean — uninstall k3s / k3s-agent, remove containers and sbcli
+        timeout-minutes: 15
         if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -338,11 +340,12 @@ jobs:
           done
 
       - name: Pre-clean — disconnect lvols and unmount /mnt on clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -358,12 +361,13 @@ jobs:
           done
 
       - name: Pre-clean — remove /etc/simplyblock on all nodes
+        timeout-minutes: 15
         if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -374,12 +378,13 @@ jobs:
           done
 
       - name: Reboot storage nodes + wait online + disk reset
+        timeout-minutes: 15
         if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -779,12 +784,13 @@ jobs:
       # POST-TEST CLEANUP & ARTIFACTS
       # ============================================================
       - name: Post-test cleanup (kill tmux/fio on clients)
+        timeout-minutes: 15
         if: always()
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null "${SSH_USER}@$1" \
               "bash -s" <<< "$2" || true
           }

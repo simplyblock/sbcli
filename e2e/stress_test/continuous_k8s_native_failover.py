@@ -2419,6 +2419,9 @@ class K8sNativeFailoverTest(TestClusterBase):
             node_outage_dur = 0
             try:
                 self.logger.info(f"Performing {outage_type} on node {node}")
+                # About to make this node unreachable on purpose: reset its SSH
+                # unreachable clock so a planned outage cannot trip the 2h rule.
+                self.ssh_obj.notify_outage_started([node_ip])
                 if outage_type == "container_stop":
                     self._k8s_stop_spdk_pod(node_ip, node)
                 elif outage_type == "graceful_shutdown":

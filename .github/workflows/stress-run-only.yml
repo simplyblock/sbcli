@@ -209,6 +209,7 @@ jobs:
       # Targets = MNODES + STORAGE_PRIVATE_IPS + CLIENTNODES
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -216,7 +217,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -251,6 +253,7 @@ jobs:
 
 
       - name: Client cleanup disconnect lvols; ensure NFS not mounted anywhere; unmount all /mnt; remove /mnt dirs
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -258,7 +261,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -387,6 +391,7 @@ jobs:
             2>&1 | tee output.log
 
       - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        timeout-minutes: 15
         id: post-cleanup
         if: always()
         continue-on-error: true
@@ -397,7 +402,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script" || true

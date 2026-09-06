@@ -282,11 +282,12 @@ jobs:
       # PRE-BOOTSTRAP CLEANUP
       # ============================================================
       - name: "Pre-clean: kill fio/tmux + unmount NFS"
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -311,11 +312,12 @@ jobs:
           done
 
       - name: "Pre-clean: destroy/clean storage nodes"
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -340,11 +342,12 @@ jobs:
           done
 
       - name: "Pre-clean: client disconnect + unmount"
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -372,6 +375,7 @@ jobs:
           done
 
       - name: Reboot storage nodes, wait online, disk reset + PCI rebind + mklabel
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -379,7 +383,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -486,11 +491,12 @@ jobs:
           fi
 
       - name: Remove /etc/simplyblock on all nodes
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -708,12 +714,13 @@ jobs:
       # POST-TEST CLEANUP + LOG COLLECTION
       # ============================================================
       - name: Post-test cleanup (kill fio/tmux)
+        timeout-minutes: 15
         if: always()
         shell: bash
         run: |
           set -euxo pipefail
           run_remote() {
-            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2" || true
           }
           for ip in $MNODES $STORAGE_PRIVATE_IPS; do

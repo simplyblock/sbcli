@@ -2,7 +2,7 @@ from utils.common_utils import sleep_n_sec
 from datetime import datetime
 from collections import defaultdict
 from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
-from exceptions.custom_exception import LvolNotConnectException
+from exceptions.custom_exception import LvolNotConnectException, NodeUnreachableTimeout
 import threading
 import string
 import random
@@ -305,6 +305,10 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             node_rpc_port = node_details[0]["rpc_port"]
 
             self.logger.info(f"Performing {outage_type} on primary node {node}.")
+
+            # About to make this node unreachable on purpose: reset its SSH
+            # unreachable clock so a planned outage cannot trip the 2h rule.
+            self.ssh_obj.notify_outage_started([node_ip])
 
             node_outage_dur = 0
             effective_type = outage_type
@@ -1045,6 +1049,21 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if self.dump_validation_errors:
                 raise RuntimeError(
                     f"Placement dump validation failed: {self.dump_validation_errors}"
+                )
+
+            # A node that never came back. exec_command raises this itself when
+            # it is the one talking to the dead node, but nothing guarantees we
+            # keep issuing commands against it — so poll here too, where the
+            # loop is guaranteed to run. Same idiom as dump_validation_errors.
+            unreachable = self.ssh_obj.get_unreachable_nodes()
+            if unreachable:
+                detail = "; ".join(
+                    f"{ip} down {secs/3600:.2f}h ({fails} failed cmds, last: {err})"
+                    for ip, secs, fails, err in unreachable
+                )
+                raise NodeUnreachableTimeout(
+                    f"{len(unreachable)} node(s) SSH-unreachable past the "
+                    f"threshold: {detail}"
                 )
 
             if iteration > 1:

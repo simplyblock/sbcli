@@ -203,6 +203,7 @@ jobs:
       # Targets = CLIENTNODES
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -210,7 +211,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
