@@ -708,6 +708,29 @@ jobs:
           test -f sbcli/e2e/stress.py
           test -f sbcli/e2e/logs/cleanup.py
 
+
+      - name: Disable swap on mgmt + storage + client nodes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # SPDK pins hugepages and is latency critical. When these hosts swap,
+          # poller threads stall and qpairs go delayed, which in the logs looks
+          # exactly like a storage fault. Run
+          # n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656 started
+          # with 30 of 31Gi used, 339Mi available and swap already in use, and
+          # no OOM kill to make that obvious.
+          # Script and full rationale: e2e/scripts/disable_swap.sh
+          SWAP_SCRIPT="sbcli/e2e/scripts/disable_swap.sh"
+          if [[ ! -f "${SWAP_SCRIPT}" ]]; then
+            echo "WARN: ${SWAP_SCRIPT} not found; skipping swap disable"
+            exit 0
+          fi
+          ALL_IPS=$(echo "${MNODES} ${STORAGE_PRIVATE_IPS} ${CLIENT_IP}" | tr ' ' '\n' | sed '/^$/d' | sort -u)
+          for ip in ${ALL_IPS}; do
+            echo "---- disable swap: ${ip} ----"
+            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "${SSH_USER}@${ip}" 'bash -s' < "${SWAP_SCRIPT}" || echo "WARN: swap disable failed on ${ip}"
+          done
+
       - name: Install Python deps (best-effort)
         shell: bash
         run: |

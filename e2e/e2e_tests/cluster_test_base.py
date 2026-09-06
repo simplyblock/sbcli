@@ -50,6 +50,22 @@ class TestClusterBase:
     # and stack dumps are unaffected.
     COLLECT_DUMP_LVSTORE = False
 
+    # Distrib placement-map + stack dumps, also disabled. These pull a
+    # placement map and a stack dump per distrib per node, so on an 8-node
+    # cluster they are dozens of RPCs plus kubectl/docker exec and file copies
+    # per collection round, on top of the lvstore walk above.
+    #
+    # Disabled together with the lvstore dump because the docker hosts were
+    # already out of memory headroom before the workload started:
+    #   n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656,
+    #   192.168.10.201/system_memory_usage_*_232824.txt at run start:
+    #     Mem:  31Gi total, 30Gi used, 374Mi free, 339Mi available
+    #     Swap: 3.0Gi total, 171Mi used
+    # There was no kernel OOM kill on any of the four hosts, but with ~339Mi
+    # available and swap already in use, every extra collector competes with
+    # SPDK for memory on a box that has none left to give.
+    COLLECT_DISTRIB_PLACEMENT_DUMPS = False
+
     # nvme-cli writes these to stderr for conditions that are NOT failures.
     #
     # "already connected": the kernel refused to create a DUPLICATE controller
@@ -1347,11 +1363,19 @@ class TestClusterBase:
         except Exception as e:
             self.logger.warning(f"[diagnostics] collect_management_details failed: {e}")
 
-        # 2. Collect dump_lvstore + distrib placement for ALL nodes in parallel
-        try:
-            self._collect_all_node_dumps_parallel(tag)
-        except Exception as e:
-            self.logger.warning(f"[diagnostics] _collect_all_node_dumps_parallel failed: {e}")
+        # 2. Collect dump_lvstore + distrib placement for ALL nodes in parallel.
+        #    Skipped entirely when both collectors are off, so we do not fan out
+        #    threads and create empty node_dumps dirs for nothing.
+        if self.COLLECT_DUMP_LVSTORE or self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
+            try:
+                self._collect_all_node_dumps_parallel(tag)
+            except Exception as e:
+                self.logger.warning(f"[diagnostics] _collect_all_node_dumps_parallel failed: {e}")
+        else:
+            self.logger.info(
+                "[diagnostics] node dumps SKIPPED "
+                "(COLLECT_DUMP_LVSTORE=False, COLLECT_DISTRIB_PLACEMENT_DUMPS=False)"
+            )
 
         # 3. Compress old dump files & delete aged-out compressed dumps in background
         dump_dir = os.path.join(self.docker_logs_path, f"node_dumps{tag}")
@@ -1440,14 +1464,20 @@ class TestClusterBase:
                         f"[node_dump] dump_lvstore_k8s SKIPPED for {node_id} "
                         f"(COLLECT_DUMP_LVSTORE=False)"
                     )
-                try:
-                    k8s_obj.fetch_distrib_logs_k8s(
-                        storage_node_id=node_id,
-                        storage_node_ip=node_ip,
-                        logs_path=dump_dir,
+                if self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
+                    try:
+                        k8s_obj.fetch_distrib_logs_k8s(
+                            storage_node_id=node_id,
+                            storage_node_ip=node_ip,
+                            logs_path=dump_dir,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] fetch_distrib_logs_k8s failed for {node_id}: {e}")
+                else:
+                    self.logger.info(
+                        f"[node_dump] fetch_distrib_logs_k8s SKIPPED for {node_id} "
+                        f"(COLLECT_DISTRIB_PLACEMENT_DUMPS=False)"
                     )
-                except Exception as e:
-                    self.logger.warning(f"[node_dump] fetch_distrib_logs_k8s failed for {node_id}: {e}")
             else:
                 if self.COLLECT_DUMP_LVSTORE:
                     try:
@@ -1462,14 +1492,20 @@ class TestClusterBase:
                         f"[node_dump] dump_lvstore SKIPPED for {node_id} "
                         f"(COLLECT_DUMP_LVSTORE=False)"
                     )
-                try:
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=node_ip,
-                        storage_node_id=node_id,
-                        logs_path=dump_dir,
+                if self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
+                    try:
+                        self.ssh_obj.fetch_distrib_logs(
+                            storage_node_ip=node_ip,
+                            storage_node_id=node_id,
+                            logs_path=dump_dir,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] fetch_distrib_logs failed for {node_id}: {e}")
+                else:
+                    self.logger.info(
+                        f"[node_dump] fetch_distrib_logs SKIPPED for {node_id} "
+                        f"(COLLECT_DISTRIB_PLACEMENT_DUMPS=False)"
                     )
-                except Exception as e:
-                    self.logger.warning(f"[node_dump] fetch_distrib_logs failed for {node_id}: {e}")
         except Exception as e:
             self.logger.warning(f"[node_dump] Failed for node {node_id} ({node_ip}): {e}")
         self.logger.info(f"[node_dump] Completed dump for node {node_id} ({node_ip})")
