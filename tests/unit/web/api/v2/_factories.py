@@ -1,4 +1,3 @@
-# coding=utf-8
 """Model factories for API v2 endpoint unit tests.
 
 Each factory builds a *real* core model (not a MagicMock) carrying exactly the

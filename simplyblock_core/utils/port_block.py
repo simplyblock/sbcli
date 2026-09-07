@@ -1,4 +1,3 @@
-# coding=utf-8
 """Port block helpers with RPC-then-iptables fallback.
 
 Tries the SPDK ``nvmf_port_block`` / ``nvmf_port_unblock`` /

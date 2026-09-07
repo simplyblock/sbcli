@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the volume replication endpoints and the policy assignment
 folded into the volume PUT."""
 

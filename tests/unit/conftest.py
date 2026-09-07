@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit-tier fixtures.
 
 Stub the native ``fdb`` module so unit tests can run without ``libfdb_c`` or

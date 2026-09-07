@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for ``storage_node_ops.teardown_non_leader_lvstore``.
 
 Mocks the SPDK RPC client and the DB layer; exercises the helper's contract:

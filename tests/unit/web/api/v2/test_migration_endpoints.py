@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/.../subsystems/{nqn}/migrations endpoints (migration_controller mocked).
 
 Covers the merged single-lvol / batch (shared-namespace) migration endpoint:

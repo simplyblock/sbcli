@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_async_delete_poll.py – unit tests for the inline async->sync delete gate.
 

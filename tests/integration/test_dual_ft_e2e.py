@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_dual_ft_e2e.py – end-to-end tests for dual fault tolerance (triple-path).
 
@@ -21,7 +20,6 @@ import threading
 import time
 import uuid as _uuid_mod
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Dict, List
 from unittest.mock import patch
 
 import pytest
@@ -46,10 +44,10 @@ class ClusterNodeState:
 
     def __init__(self, lvstore: str = ""):
         self.lvstore = lvstore
-        self.bdevs: Dict[str, dict] = {}
-        self.subsystems: Dict[str, dict] = {}
-        self.nvme_controllers: Dict[str, dict] = {}
-        self.lvstores: Dict[str, dict] = {}
+        self.bdevs: dict[str, dict] = {}
+        self.subsystems: dict[str, dict] = {}
+        self.nvme_controllers: dict[str, dict] = {}
+        self.lvstores: dict[str, dict] = {}
         self.leader: bool = False
         self.lvs_opts: dict = {}
         self.hublvol_created: bool = False
@@ -57,7 +55,7 @@ class ClusterNodeState:
         self.compression_suspended: bool = True
         self.examined: bool = False
         self.lock = threading.Lock()
-        self._nsid_counter: Dict[str, int] = {}
+        self._nsid_counter: dict[str, int] = {}
 
     def next_nsid(self, nqn: str) -> int:
         self._nsid_counter.setdefault(nqn, 1)
@@ -581,7 +579,7 @@ def _worker_port_offset() -> int:
 _NUM_PRIMARIES = 2
 _NUM_SECONDARIES = 4
 _NUM_NODES = _NUM_PRIMARIES + _NUM_SECONDARIES
-_mock_servers: List[ClusterMockRpcServer] = []
+_mock_servers: list[ClusterMockRpcServer] = []
 
 
 @pytest.fixture(scope="session")

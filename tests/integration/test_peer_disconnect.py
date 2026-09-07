@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_peer_disconnect.py — regression tests for the FDB-status short-circuit
 added to ``simplyblock_core.storage_node_ops._check_peer_disconnected``.

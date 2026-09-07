@@ -1,4 +1,3 @@
-# encoding: utf-8
 """Static, process-lifetime-constant identity info for a storage node.
 
 Gathering this is not free: ``cpuinfo.get_cpu_info()`` parses ``/proc/cpuinfo``,
@@ -22,7 +21,8 @@ multi-megabyte core dump, so it should not happen once per import.
 """
 import functools
 import os
-from typing import Any, Callable, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict
+from collections.abc import Callable
 
 import cpuinfo
 import requests
@@ -31,10 +31,10 @@ from simplyblock_core import shell_utils
 
 
 class StaticNodeInfo(TypedDict):
-    cpu_info: Dict[str, Any]
+    cpu_info: dict[str, Any]
     hostname: str
     system_id: str
-    cloud_info: Dict[str, Any]
+    cloud_info: dict[str, Any]
 
 
 @functools.lru_cache(maxsize=1)
@@ -49,7 +49,7 @@ def get_static_node_info() -> StaticNodeInfo:
     hostname, _, _ = shell_utils.run_command("hostname -s")
     system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
-    cloud_info: Dict[str, Any] = {}
+    cloud_info: dict[str, Any] = {}
     if not os.environ.get("WITHOUT_CLOUD_INFO"):
         cloud_info = get_cloud_info() or {}
         if cloud_info:
@@ -63,8 +63,8 @@ def get_static_node_info() -> StaticNodeInfo:
     )
 
 
-def get_cloud_info() -> Optional[dict]:
-    getters: List[Callable[[], Optional[dict]]] = [_google_info, _amazon_info, _equinix_info]
+def get_cloud_info() -> dict | None:
+    getters: list[Callable[[], dict | None]] = [_google_info, _amazon_info, _equinix_info]
     return next((
         info
         for getter in getters
@@ -72,7 +72,7 @@ def get_cloud_info() -> Optional[dict]:
     ), None)
 
 
-def _google_info() -> Optional[dict]:
+def _google_info() -> dict | None:
     try:
         headers = {'Metadata-Flavor': 'Google'}
         response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true", headers=headers, timeout=2)
@@ -88,7 +88,7 @@ def _google_info() -> Optional[dict]:
         return None
 
 
-def _amazon_info() -> Optional[dict]:
+def _amazon_info() -> dict | None:
     try:
         import ec2_metadata
         session = requests.session()
@@ -104,7 +104,7 @@ def _amazon_info() -> Optional[dict]:
         return None
 
 
-def _equinix_info(timeout: int = 2) -> Optional[dict]:
+def _equinix_info(timeout: int = 2) -> dict | None:
     try:
         response = requests.get("https://metadata.platformequinix.com/metadata", timeout=2)
         data = response.json()

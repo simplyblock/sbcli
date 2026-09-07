@@ -1,4 +1,3 @@
-# coding=utf-8
 """Regression test for the clone() cntlid-window bug.
 
 Bug (observed at scale, 2026-05-27): when ``snapshot_controller.clone()``

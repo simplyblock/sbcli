@@ -1,4 +1,3 @@
-# coding=utf-8
 """Raw vs. effective capacity.
 
 Every byte figure in the control plane is one of two things:
@@ -31,12 +30,11 @@ their own. The raw numbers are kept alongside in the ``*_raw`` stat fields so
 nothing that was measured is thrown away.
 """
 
-from typing import Tuple
 
 from simplyblock_core.models.cluster import Cluster
 
 
-def stripe_geometry(cluster: Cluster) -> Tuple[int, int]:
+def stripe_geometry(cluster: Cluster) -> tuple[int, int]:
     """Return ``(ndcs, npcs)`` for ``cluster``, or ``(1, 0)`` if unset.
 
     ``distr_ndcs``/``distr_npcs`` default to 0 on the model, so a record

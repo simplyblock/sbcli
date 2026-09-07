@@ -1,4 +1,3 @@
-# coding=utf-8
 """Phase 1 happy-path test: integrate a 5th node into a 4-node FTT1 cluster
 using the real expansion code path (planner + orchestrator + executor +
 recreate_lvstore_on_sec etc.) against a real FoundationDB and a simulated

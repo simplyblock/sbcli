@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_repair_gating.py — when repairs may run, and that hublvol path repair runs at all.
 
 Two defects found during the multipath soak on 2026-08-20, both about repairs

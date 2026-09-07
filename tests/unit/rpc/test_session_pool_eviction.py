@@ -1,4 +1,3 @@
-# coding=utf-8
 """Regression test for the mgmt_ip-change eviction in
 storage_node_ops.restart_storage_node's "restart on a new address" branch.
 

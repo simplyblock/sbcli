@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_cluster_suspend_recovery.py — regression tests for the
 auto-recovery deadlock that left clusters DEGRADED instead of SUSPENDED

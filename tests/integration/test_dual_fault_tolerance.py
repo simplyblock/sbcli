@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_dual_fault_tolerance.py – unit tests for the dual fault tolerance
 (triple-path NVMe-oF) feature.

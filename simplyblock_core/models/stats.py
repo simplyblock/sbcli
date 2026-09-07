@@ -1,7 +1,6 @@
-# coding=utf-8
 import json
 import uuid
-from typing import List, TypedDict
+from typing import TypedDict
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
@@ -115,11 +114,11 @@ class ReactorStats(TypedDict, total=False):
     idle: int
     irq: int
     sys: int
-    threads: List[ThreadStats]
+    threads: list[ThreadStats]
 
 
 class CpuStats(TypedDict, total=False):
-    reactors: List[ReactorStats]
+    reactors: list[ReactorStats]
 
 
 class NodeStatObject(StatsObject):

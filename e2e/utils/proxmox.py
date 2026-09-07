@@ -4,7 +4,6 @@ import re
 import requests
 import urllib3
 from logger_config import setup_logger
-from typing import Tuple
 from ping3 import ping
 
 logging = setup_logger(__name__)
@@ -79,7 +78,7 @@ def is_valid_ip(ip):
         matched = False
     return matched
 
-def get_proxmox(ip) -> Tuple[int, int]:
+def get_proxmox(ip) -> tuple[int, int]:
     """
     Check if the last octet of the IP is in the valid range.
     """

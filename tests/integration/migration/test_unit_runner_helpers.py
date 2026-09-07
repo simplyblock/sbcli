@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_unit_runner_helpers.py – unit tests for pure helper functions in
 tasks_runner_lvol_migration.py.

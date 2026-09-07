@@ -1,4 +1,3 @@
-# coding=utf-8
 """Regression test for the API v1 ``/cluster/metrics`` leak fix (48c0e2f6ee).
 
 That commit rebuilt the metric Gauges on every scrape instead of caching

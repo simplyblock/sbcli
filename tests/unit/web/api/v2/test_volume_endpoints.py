@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/.../volumes endpoints (lvol/snapshot controllers mocked)."""
 
 from simplyblock_core import utils as core_utils

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_device_flap_counter.py — unit tests for the per-device flap counter
 and failed-state guard added to ``device_controller.device_set_state``.

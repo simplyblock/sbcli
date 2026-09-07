@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_ftt_protection.py – unit tests for _check_ftt_allows_node_removal.
 

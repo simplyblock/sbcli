@@ -1,4 +1,3 @@
-# coding=utf-8
 """Transactional namespace-slot allocation (claim_lvol_ns_slot /
 release_lvol_ns_slot).
 

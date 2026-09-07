@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_lvs_role_assignment.py – unit tests verifying that bdev_lvol_set_lvs_opts
 receives the correct role ("primary", "secondary", "tertiary") for each node.

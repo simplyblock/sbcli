@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_cluster_spdk_sizing.py — SPDK sizing is a cluster setting, in vCPUs.
 
 max-subsys, the huge-page floor and the SPDK core budget used to be set per

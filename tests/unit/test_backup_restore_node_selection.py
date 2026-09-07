@@ -1,4 +1,3 @@
-# coding=utf-8
 """Node selection in ``backup_controller.restore_backup``.
 
 A backup's ``node_id`` records the node the backup was taken from, which for an

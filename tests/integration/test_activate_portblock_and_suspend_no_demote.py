@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Regression tests for two related fixes:
 

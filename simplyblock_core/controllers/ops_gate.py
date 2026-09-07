@@ -1,4 +1,3 @@
-# coding=utf-8
 """Cluster-wide switch for object lifecycle operations.
 
 ``cluster op-stop <uuid>`` stops a cluster accepting new object lifecycle

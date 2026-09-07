@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 ``tasks_controller.cancel_pending_node_restart_tasks`` exclusion semantics.
 

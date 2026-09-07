@@ -1,4 +1,3 @@
-# coding=utf-8
 """Every path of a shared subsystem gets a disjoint controller-id window.
 
 The host rejects a controller that presents a cntlid it has already seen for

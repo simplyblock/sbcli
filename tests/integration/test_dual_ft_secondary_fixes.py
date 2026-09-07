@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_dual_ft_secondary_fixes.py – unit tests for the three bugs fixed in
 the dual fault-tolerance (tertiary_node_id) support:

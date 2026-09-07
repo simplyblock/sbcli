@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_multipath_repair.py -- unit tests for multipath path repair logic.
 

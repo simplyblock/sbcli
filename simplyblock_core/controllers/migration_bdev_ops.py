@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 migration_bdev_ops.py -- shared bdev-delete primitive for migration code.
 

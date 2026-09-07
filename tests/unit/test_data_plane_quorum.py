@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_data_plane_quorum.py — unit tests for
 ``simplyblock_core.services.storage_node_monitor._count_data_plane_votes``

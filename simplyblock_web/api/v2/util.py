@@ -1,4 +1,5 @@
-from typing import Annotated, Any, Callable, Literal, Optional, Union
+from typing import Annotated, Any, Literal
+from collections.abc import Callable
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -15,7 +16,7 @@ Size = Annotated[Unsigned, BeforeValidator(core_utils.parse_size)]
 Percent = Annotated[int, Field(ge=0, le=100)]
 Port = Annotated[int, Field(ge=0, lt=65536)]
 # Records spell an unset reference as an empty string rather than omitting it.
-OptionalUUID = Annotated[Optional[UUID], BeforeValidator(lambda value: value or None)]
+OptionalUUID = Annotated[UUID | None, BeforeValidator(lambda value: value or None)]
 
 
 def _validate_url_path(value: Any) -> str:
@@ -40,9 +41,9 @@ def creation_response(
     response_format: CreationResponseFormat,
     entity_id: UUID,
     route_name: str,
-    route_kwargs: dict[str, Union[UUID, str]],
+    route_kwargs: dict[str, UUID | str],
     get_full: Callable[[UUID], BaseModel],
-    extra_headers: Optional[dict[str, str]] = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> Response:
     headers = {"Location": str(request.app.url_path_for(route_name, **route_kwargs))}
     if extra_headers:

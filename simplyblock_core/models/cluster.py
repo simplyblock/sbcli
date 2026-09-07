@@ -1,6 +1,5 @@
-# coding=utf-8
 import os.path
-from typing import ClassVar, List, Optional
+from typing import ClassVar
 
 from pydantic import SecretStr
 
@@ -89,7 +88,7 @@ class Cluster(BaseModel):
     #: Empty means the cluster has never been activated. Once set, activation
     #: refuses to run with nodes present that are not in this list: growth goes
     #: through the expansion flow, never through re-activation.
-    activated_node_ids: List[str] = default_factory(list)
+    activated_node_ids: list[str] = default_factory(list)
     #: Set by "cluster op-stop": the cluster refuses creation, deletion and
     #: modification of lvols, snapshots, clones and pools while this is true.
     #: Read paths and the cluster's own maintenance are unaffected.
@@ -143,7 +142,7 @@ class Cluster(BaseModel):
     inflight_io_threshold: int = 4
     iscsi: str = ""
     max_queue_size: int = 128
-    model_ids: List[str] = default_factory(list)
+    model_ids: list[str] = default_factory(list)
     cluster_name: str = None # type: ignore[assignment]
     nqn: str = ""
     page_size_in_blocks: int = 2097152
@@ -245,7 +244,7 @@ class Cluster(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     container_image_prefix: str = ""
-    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
+    hashicorp_vault_settings: HashicorpVaultSettings | None = None
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
     # is in flight. Populated/advanced/cleared via the helpers in

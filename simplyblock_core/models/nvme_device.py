@@ -1,5 +1,4 @@
-# coding=utf-8
-from typing import ClassVar, List, Optional
+from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
@@ -31,13 +30,13 @@ class NVMeDevice(BaseModel):
 
     alceml_bdev: str = ""
     alceml_name: str = ""
-    bdev_stack: List = default_factory(list)
+    bdev_stack: list = default_factory(list)
     capacity: int = -1
     cluster_device_order: int = -1
     cluster_id: str = ""
     device_name: str = ""
     # None => not applicable (owning node not in ONLINE/DOWN)
-    health_check: Optional[bool] = True
+    health_check: bool | None = True
     io_error: bool = False
     is_partition: bool = False
     model_id: str = ""
@@ -121,13 +120,13 @@ class JMDevice(NVMeDevice):
 
     device_data_dict: dict = default_factory(dict)
     jm_bdev: str = ""
-    jm_nvme_bdev_list: List[str] = default_factory(list)
+    jm_nvme_bdev_list: list[str] = default_factory(list)
     raid_bdev: str = ""
     # RAID 0+1 layout: the two leg bdev names fed to the top raid1 (each is a
     # raid0 over a drive group, or a bare device for a single-drive leg), and
     # the per-leg member partitions. Empty for single-device (no-raid) JMs.
-    jm_leg_bdevs: List[str] = default_factory(list)
-    jm_leg_members: List = default_factory(list)
+    jm_leg_bdevs: list[str] = default_factory(list)
+    jm_leg_members: list = default_factory(list)
 
 
 class RemoteDevice(BaseModel):

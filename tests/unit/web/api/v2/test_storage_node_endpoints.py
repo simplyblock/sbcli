@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/clusters/{id}/storage-nodes endpoints (storage_node_ops mocked)."""
 
 import pytest

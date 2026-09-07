@@ -1,9 +1,7 @@
-# coding=utf-8
 import logging
 import re
 import time
 import uuid
-from typing import Optional
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -390,7 +388,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
 
 
 def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
-                   target_node_id: Optional[str] = None):
+                   target_node_id: str | None = None):
     """Restore a backup chain into a new fully-accessible lvol.
 
     Creates the volume (with subsystem, listeners, namespace) via

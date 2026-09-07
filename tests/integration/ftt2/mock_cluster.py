@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 mock_cluster.py – extended mock RPC server for FTT=2 restart testing.
 
@@ -16,7 +15,6 @@ import threading
 import time
 import uuid as _uuid_mod
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -33,38 +31,38 @@ class FTT2NodeState:
         self.lvstore = lvstore
 
         # Basic bdev/subsystem state (same as ClusterNodeState)
-        self.bdevs: Dict[str, dict] = {}
-        self.subsystems: Dict[str, dict] = {}
-        self.nvme_controllers: Dict[str, dict] = {}
-        self.lvstores: Dict[str, dict] = {}
+        self.bdevs: dict[str, dict] = {}
+        self.subsystems: dict[str, dict] = {}
+        self.nvme_controllers: dict[str, dict] = {}
+        self.lvstores: dict[str, dict] = {}
         self.lvs_opts: dict = {}
         self.compression_suspended: bool = True
         self.examined: bool = False
-        self._nsid_counter: Dict[str, int] = {}
+        self._nsid_counter: dict[str, int] = {}
 
         # --- Dynamic state for restart testing ---
 
         # Leadership per LVS: lvstore_name -> bool
-        self.leadership: Dict[str, bool] = {}
+        self.leadership: dict[str, bool] = {}
 
         # Hublvol state per LVS
-        self.hublvols_created: Set[str] = set()    # lvstore names
-        self.hublvols_connected: Set[str] = set()   # lvstore names
+        self.hublvols_created: set[str] = set()    # lvstore names
+        self.hublvols_connected: set[str] = set()   # lvstore names
 
         # NVMe controller path tracking: controller_name -> list of path dicts
         # Each entry: {nqn, traddr, trsvcid, trtype, multipath}
         # Used to verify: how many paths a controller has, whether multipath was requested
-        self.nvme_controller_paths: Dict[str, list] = {}
+        self.nvme_controller_paths: dict[str, list] = {}
 
         # Port blocking: (port, port_type) -> {"blocker": "restart"|"fabric_error", "ts": float}
-        self.blocked_ports: Dict[tuple, dict] = {}
+        self.blocked_ports: dict[tuple, dict] = {}
 
         # JM connectivity: remote_node_id -> bool (True = connected)
         # Configurable per test to control quorum check responses
-        self.jm_connectivity: Dict[str, bool] = {}
+        self.jm_connectivity: dict[str, bool] = {}
 
         # Inflight IO: jm_vuid -> bool (True = has inflight IO)
-        self.inflight_io: Dict[int, bool] = {}
+        self.inflight_io: dict[int, bool] = {}
 
         # Whether this node is reachable (False = all RPCs fail)
         self.reachable: bool = True
@@ -72,11 +70,11 @@ class FTT2NodeState:
         self.fabric_up: bool = True
 
         # RPC call log: list of (timestamp, method, params)
-        self.rpc_log: List[tuple] = []
+        self.rpc_log: list[tuple] = []
 
         # Error injection: method_name -> error_message
         # Any method listed here will return an RPC error instead of its normal result.
-        self.failing_methods: Dict[str, str] = {}
+        self.failing_methods: dict[str, str] = {}
 
         # Phase gate for concurrent operation tests (set by test code)
         self._phase_gate = None  # type: ignore
@@ -648,8 +646,8 @@ class FTT2MockRpcServer:
         self.port = port
         self.node_id = node_id
         self.state = FTT2NodeState(node_id, lvstore)
-        self._server: Optional[_FTT2HTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self._server: _FTT2HTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     def start(self):
         self._server = _FTT2HTTPServer(
@@ -698,7 +696,7 @@ class FTT2MockRpcServer:
         """Remove the RPC hook."""
         self.state._rpc_hook = None
 
-    def get_rpc_calls(self, method: Optional[str] = None) -> list:
+    def get_rpc_calls(self, method: str | None = None) -> list:
         """Get logged RPC calls, optionally filtered by method."""
         with self.state.lock:
             if method:
@@ -709,7 +707,7 @@ class FTT2MockRpcServer:
         """Check if a specific RPC method was called."""
         return any(m == method for _, m, _ in self.state.rpc_log)
 
-    def get_leadership(self, lvs_name: str) -> Optional[bool]:
+    def get_leadership(self, lvs_name: str) -> bool | None:
         """Get current leadership state for an LVS."""
         return self.state.leadership.get(lvs_name)
 

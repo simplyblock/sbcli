@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_service_entrypoints.py — guards the background services' invocation contract.
 

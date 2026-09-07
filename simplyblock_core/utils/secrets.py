@@ -1,4 +1,4 @@
-from typing import Any, Optional, Union
+from typing import Any
 
 from pydantic import SecretBytes, SecretStr
 
@@ -23,7 +23,7 @@ def unwrap_secrets_for_send(obj: Any) -> Any:
     return obj
 
 
-def unwrap_secret(value: Union[SecretStr, str, None]) -> Optional[str]:
+def unwrap_secret(value: SecretStr | str | None) -> str | None:
     """Tolerant scalar unwrap for transitional call sites that still expect ``str``.
 
     Removed once the surrounding code is type-correct on ``SecretStr``.

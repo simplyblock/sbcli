@@ -10,7 +10,7 @@ import subprocess
 
 import psutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List, Optional
+from typing import Any
 
 import threading
 
@@ -699,7 +699,7 @@ def _collect_attached_ips(ctrlr_list):
     return attached
 
 
-def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: Optional[float] = None):
+def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: float | None = None):
     """Connect snode to device
 
     This only performs the actual operation between both involved SPDK instances,
@@ -780,7 +780,7 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
         # Wait transients out; on a controller that stays transient past
         # the budget, raise so the calling task suspends and retries.
         _TRANSIENT_STATES = ("failed", "resetting", "deleting", "reconnect_is_delayed")
-        states: List[str] = []
+        states: list[str] = []
         for _attempt in range(5):
             if not ret:
                 # The module destructed the controller on its own; the
@@ -942,7 +942,7 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
             "from the target node", name)
         return False
 
-    expected_ips = set(ip.strip() for ip in nvmf_ip.split(",") if ip.strip())
+    expected_ips = {ip.strip() for ip in nvmf_ip.split(",") if ip.strip()}
     if len(expected_ips) < 2:
         return True  # not actually multipath
 
@@ -1756,7 +1756,7 @@ def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
     except Exception:
         # Unknown owner / DB hiccup: keep the full best-effort retry.
         pass
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     for attempt in attempts:
         try:
             connect_device(name, device, node)
@@ -1776,7 +1776,7 @@ def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
 def _connect_to_remote_devs(
         this_node: StorageNode, /,
         reattach: bool = True, force_connect_restarting_nodes: bool = False,
-        only_node_id: Optional[str] = None
+        only_node_id: str | None = None
 ):
     """Connect ``this_node`` to remote data devices and return the refreshed
     remote-device records.
@@ -2347,7 +2347,19 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
     for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
         sec_primary_id = getattr(this_node, sec_attr, None)
         if sec_primary_id:
-            org_node = db_controller.get_storage_node_by_id(sec_primary_id)
+            # A dangling peer linkage (primary removed, or a legacy record
+            # value StorageNode.from_dict could not repair) must degrade to
+            # "skip this peer's JMs", never abort the whole restart: the JM
+            # mesh verifier re-establishes missing links once both sides are
+            # up (verify_jm_mesh_coverage).
+            try:
+                org_node = db_controller.get_storage_node_by_id(sec_primary_id)
+            except KeyError:
+                logger.warning(
+                    "Node %s %s references unknown primary %r; skipping its "
+                    "JM devices", this_node.get_id()[:8], sec_attr,
+                    sec_primary_id)
+                continue
             if org_node.jm_device and org_node.jm_device not in remote_devices:
                 remote_devices.append(org_node.jm_device)
             for jm_id in org_node.jm_ids:
@@ -5058,7 +5070,7 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                     # ~15+ minutes until some unrelated SPDK-side dead-peer
                     # timeout eventually noticed (found live 2026-08-25).
                     # Clean up both sides here instead of waiting for that.
-                    old_controller_name = name_old[:-2] if name_old.endswith("n1") else name_old
+                    old_controller_name = name_old.removesuffix("n1")
                     try:
                         node.rpc_client().bdev_nvme_detach_controller(old_controller_name)
                     except Exception as de:
@@ -6528,7 +6540,7 @@ def list_storage_devices(node_id):
             "Status": remote_jm_device.status,
         })
 
-    data: dict[str, List[Any]] = {
+    data: dict[str, list[Any]] = {
         "Storage Devices": storage_devices,
         "JM Devices": jm_devices,
         "Remote Devices": remote_devices,
@@ -10690,8 +10702,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 # blocked beyond client max_latency.  On timeout we proceed
                 # with the drop and accept the same residual class of error
                 # this is trying to prevent — but bounded.
-                _DRAIN_BOUND_SEC = 2.0
-                _DRAIN_POLL_SEC = 0.05
+                _DRAIN_BOUND_SEC = _DRAIN_BOUND_SEC_DEFAULT
+                _DRAIN_POLL_SEC = _DRAIN_POLL_SEC_DEFAULT
                 deadline = time.time() + _DRAIN_BOUND_SEC
                 drained = False
                 while time.time() < deadline:
@@ -11848,7 +11860,7 @@ def splice_stranded_tertiary(stranded_node) -> bool:
 def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    lvstore_stack: List[dict] = []
+    lvstore_stack: list[dict] = []
     distrib_list = []
     distrib_vuids = []
     # Fixed size per distrib, reported up to the raid0/lvstore layer,
@@ -12093,6 +12105,13 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
 # giving the control plane time to reconcile a peer that went offline mid-restart
 # so the rebuilt cluster map no longer references its devices as online.
 _DISTR_RECREATE_RETRY_DELAY_SEC = 5
+
+#: Bound on waiting for a node's distrib pipeline to empty before its
+#: leadership is changed. Applied to the acting leader (### 4) and to every
+#: other port-blocked peer (### 5b). Held inside the port fence, so it is
+#: deliberately short and _check_fence_deadline still governs the total.
+_DRAIN_BOUND_SEC_DEFAULT = 2.0
+_DRAIN_POLL_SEC_DEFAULT = 0.05
 
 
 def apply_write_protection_mode(params, use_v2):

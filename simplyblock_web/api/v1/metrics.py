@@ -1,4 +1,3 @@
-# encoding: utf-8
 import logging
 
 from flask import Blueprint
@@ -251,4 +250,4 @@ def get_data():
                             lvol.health_check)
 
 
-    return Response(generate_latest(registry), mimetype=str('text/plain; version=0.0.4; charset=utf-8'))
+    return Response(generate_latest(registry), mimetype='text/plain; version=0.0.4; charset=utf-8')

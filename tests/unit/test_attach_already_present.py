@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_attach_already_present.py — an attach that already succeeded is success.
 

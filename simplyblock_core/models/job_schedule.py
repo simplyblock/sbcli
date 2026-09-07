@@ -1,4 +1,3 @@
-# coding=utf-8
 import datetime
 
 from simplyblock_core.models.base_model import BaseModel, default_factory

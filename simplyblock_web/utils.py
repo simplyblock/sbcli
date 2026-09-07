@@ -3,7 +3,7 @@ import logging
 import random
 import re
 import string
-from typing import Literal, Optional
+from typing import Literal
 import traceback
 
 from flask import jsonify
@@ -160,7 +160,7 @@ def error_handler(exception: Exception):
 
 class RPCPortParams(BaseModel):
     rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=0, le=65536)
-    cluster_id: Optional[str]
+    cluster_id: str | None
 
 
 class DeviceParams(BaseModel):
@@ -174,9 +174,9 @@ class NVMEConnectParams(BaseModel):
 
 
 class DisconnectParams(BaseModel):
-    nqn: Optional[str]
-    device_path: Optional[str]
-    all: Optional[Literal[True]]
+    nqn: str | None
+    device_path: str | None
+    all: Literal[True] | None
 
     @model_validator(mode='after')
     def verify_mutually_exclusive(self):

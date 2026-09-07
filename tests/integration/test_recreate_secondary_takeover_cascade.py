@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Regression tests for the LVS_9060 incident (2026-04-25, 10:32 run).
 

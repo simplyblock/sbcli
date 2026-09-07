@@ -1,9 +1,7 @@
-# encoding: utf-8
 
 import json
 import logging
 import re
-from typing import List, Tuple
 
 import boto3
 import requests
@@ -27,13 +25,13 @@ class NVMeController(BaseModel):
     Transport: str
     ModelNumber: str
     SerialNumber: str
-    Namespaces: List[NVMENamespace]
+    Namespaces: list[NVMENamespace]
 
 
 class NVMeSubsystem(BaseModel):
     SubsystemNQN: str
-    Controllers: List[NVMeController]
-    Namespaces: List[NVMENamespace]
+    Controllers: list[NVMeController]
+    Namespaces: list[NVMENamespace]
 
 
 class NVMeDevice(BaseModel):
@@ -52,7 +50,7 @@ class NVMeDevice(BaseModel):
 logger = logging.getLogger(__name__)
 
 
-def get_spdk_pcie_list() -> List[PCIAddress]:
+def get_spdk_pcie_list() -> list[PCIAddress]:
     """
     Get a list of PCIe devices bound to SPDK-compatible drivers.
 
@@ -62,7 +60,7 @@ def get_spdk_pcie_list() -> List[PCIAddress]:
     return pci_utils.list_devices(driver_name='uio_pci_generic') or pci_utils.list_devices(driver_name='vfio-pci')
 
 
-def get_nvme_pcie_list() -> List[PCIAddress]:
+def get_nvme_pcie_list() -> list[PCIAddress]:
     """
     Get a list of NVMe PCIe devices.
 
@@ -72,7 +70,7 @@ def get_nvme_pcie_list() -> List[PCIAddress]:
     return pci_utils.list_devices(driver_name='nvme')
 
 
-def get_nvme_pcie() -> List[Tuple[str, Tuple[int, int]]]:
+def get_nvme_pcie() -> list[tuple[str, tuple[int, int]]]:
     """
     Get a list of NVMe PCIe devices with their vendor and device IDs.
 
@@ -86,7 +84,7 @@ def get_nvme_pcie() -> List[Tuple[str, Tuple[int, int]]]:
     ]
 
 
-def get_nvme_devices() -> List[NVMeDevice]:
+def get_nvme_devices() -> list[NVMeDevice]:
     """
     Get detailed information about NVMe devices in the system.
 
@@ -106,7 +104,7 @@ def get_nvme_devices() -> List[NVMeDevice]:
         return []
 
     logger.debug("NVMe device list: %s", data)
-    devices: List[NVMeDevice] = []
+    devices: list[NVMeDevice] = []
 
     if not data or 'Devices' not in data or not data['Devices']:
         return devices

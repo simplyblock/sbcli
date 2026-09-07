@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Any
 
 import yaml
 
@@ -8,7 +8,7 @@ import yaml
 # simplyblock-operator Helm chart values, so that one file describes the
 # receivers for both the docker and the kubernetes deployment. Keep in sync
 # with alert_resources.yaml.j2, which relies on every key being present.
-ALERTING_DEFAULTS: Dict[str, Dict[str, Any]] = {
+ALERTING_DEFAULTS: dict[str, dict[str, Any]] = {
     'slack': {
         'enabled': False,
         'url': '',
@@ -48,7 +48,7 @@ ALERTING_DEFAULTS: Dict[str, Dict[str, Any]] = {
 # Keys without which an enabled receiver cannot deliver anything. Grafana
 # accepts such a contact point and then silently drops every notification, so
 # reject it while the operator is still watching.
-ALERTING_REQUIRED_KEYS: Dict[str, List[str]] = {
+ALERTING_REQUIRED_KEYS: dict[str, list[str]] = {
     'slack': ['url'],
     'teams': ['url'],
     'pagerduty': ['integrationKey'],
@@ -57,7 +57,7 @@ ALERTING_REQUIRED_KEYS: Dict[str, List[str]] = {
 }
 
 
-def parse_alerting_config(alert_config_path: Optional[Path]) -> Optional[Dict[str, Any]]:
+def parse_alerting_config(alert_config_path: Path | None) -> dict[str, Any] | None:
     """Read the alerting configuration file and layer it onto ALERTING_DEFAULTS.
 
     Returns the values dictionary consumed by alert_resources.yaml.j2: one
@@ -92,7 +92,7 @@ def parse_alerting_config(alert_config_path: Optional[Path]) -> Optional[Dict[st
             f"{', '.join(unknown_receivers)}. Known receivers: {', '.join(ALERTING_DEFAULTS)}"
         )
 
-    values: Dict[str, Any] = {}
+    values: dict[str, Any] = {}
     for receiver, defaults in ALERTING_DEFAULTS.items():
         overrides = config.get(receiver) or {}
         if not isinstance(overrides, dict):

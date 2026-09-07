@@ -1056,7 +1056,7 @@ class CLIWrapperBase:
             args.max_r_mbytes,
             args.max_w_mbytes,
             args.cluster_id,
-            args.qos_host,
+            qos_host=args.qos_host,
             dhchap=args.dhchap,
         )
 

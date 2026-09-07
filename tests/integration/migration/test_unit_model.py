@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_unit_model.py – unit tests for LVolMigration model methods.
 

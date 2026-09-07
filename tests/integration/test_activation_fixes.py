@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_activation_fixes.py – unit tests covering the cluster_activate fixes:
 

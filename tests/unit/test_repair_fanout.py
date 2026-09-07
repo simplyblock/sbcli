@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_repair_fanout.py — repairs of independent objects run together.
 
 One health cycle used to dial every degraded controller in series, so a node

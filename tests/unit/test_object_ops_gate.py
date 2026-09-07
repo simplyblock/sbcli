@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_object_ops_gate.py — 'cluster op-stop' refuses object lifecycle work.
 
 op-stop must cover creation, deletion AND modification of volumes, snapshots,

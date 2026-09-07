@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 db_setup.py – helpers to pre-populate FDB with control-plane objects
 (StorageNode, LVol, SnapShot) that migration tests need.
@@ -25,7 +24,6 @@ Usage::
 import time
 import uuid as _uuid_mod
 from dataclasses import dataclass, field
-from typing import Dict, List
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.hublvol import HubLVol
@@ -59,7 +57,7 @@ class NodeSpec:
 class ClusterSpec:
     """References a pre-existing cluster and lists nodes to attach to it."""
     cluster_id: str
-    nodes: List[NodeSpec] = field(default_factory=list)
+    nodes: list[NodeSpec] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -71,9 +69,9 @@ class TestContext:
 
     def __init__(self, spec: ClusterSpec):
         self.cluster_id: str = spec.cluster_id
-        self._nodes: Dict[str, StorageNode] = {}
-        self._lvols: Dict[str, LVol] = {}        # symbolic_name → LVol
-        self._snaps: Dict[str, SnapShot] = {}     # symbolic_name → SnapShot
+        self._nodes: dict[str, StorageNode] = {}
+        self._lvols: dict[str, LVol] = {}        # symbolic_name → LVol
+        self._snaps: dict[str, SnapShot] = {}     # symbolic_name → SnapShot
 
     def register_node(self, node_id: str, node: StorageNode):
         self._nodes[node_id] = node
@@ -93,7 +91,7 @@ class TestContext:
     def snap(self, name: str) -> SnapShot:
         return self._snaps[name]
 
-    def all_node_ids(self) -> List[str]:
+    def all_node_ids(self) -> list[str]:
         return list(self._nodes.keys())
 
 

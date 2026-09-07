@@ -1,4 +1,3 @@
-# coding=utf-8
 """Per-node restart claim: cross-ACTOR mutual exclusion for one node's restart.
 
 Regression suite for the 2026-08-06 soak iter-50 incident: a manual CLI

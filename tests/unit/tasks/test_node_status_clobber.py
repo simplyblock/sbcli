@@ -1,4 +1,3 @@
-# coding=utf-8
 """Regression test: setting one node field must not clobber node status.
 
 2026-08-31, iteration 4 of the migration-enabled soak. Node 61a887af was

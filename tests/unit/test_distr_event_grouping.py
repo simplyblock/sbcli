@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_distr_event_grouping.py — a batch must reach the cluster log intact.
 
 The collector aggregates repeats of the same (storage_id, event_type, status)

@@ -1,4 +1,3 @@
-# coding=utf-8
 """One-shot reconcile for snapshots stuck IN_DELETION with an incomplete
 delete protocol (phase-1 async issued, phase-2 sync deletes never sent).
 

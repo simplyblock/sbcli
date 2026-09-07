@@ -67,7 +67,7 @@ class PlacementDump:
                     continue
 
                 # Unknown line. Placement dump broken?
-                print("Unknown line in placement dump: {}".format(line))
+                print(f"Unknown line in placement dump: {line}")
                 exit(1)
                     
 
@@ -151,7 +151,7 @@ class PlacementDump:
 
             for layer in entry['layers']:
                 if layer['storage_ID'] == storage_ID_failed:
-                    print("Found failed storage_ID {} in lpgi {} in placement map".format(storage_ID_failed, lpgi))
+                    print(f"Found failed storage_ID {storage_ID_failed} in lpgi {lpgi} in placement map")
                     return False
 
             # Compare columns and ranges on each column.
@@ -161,7 +161,7 @@ class PlacementDump:
             for column, ranges in entry['columns'].items():
                 for range_data in ranges:
                     if range_data['storage_ID'] == storage_ID_failed:
-                        print("Found failed storage_ID {} in column {} in lpgi {} in placement map".format(storage_ID_failed, column, lpgi))
+                        print(f"Found failed storage_ID {storage_ID_failed} in column {column} in lpgi {lpgi} in placement map")
                         return False
 
         return True
@@ -230,7 +230,7 @@ class PlacementDump:
             # Check if any node has multiple columns
             for node_idx, columns in node_to_columns.items():
                 if len(columns) > 1:
-                    print("lpgi {}, columns {} share the same node (node_index {})".format(lpgi, sorted(columns), node_idx))
+                    print(f"lpgi {lpgi}, columns {sorted(columns)} share the same node (node_index {node_idx})")
                     return False
 
         return True
@@ -253,7 +253,7 @@ class PlacementDump:
             columns = entry['columns']
 
             if len(columns) != 4:
-                print("lpgi {} has {} columns, expected 4 for 2+2 configuration".format(lpgi, len(columns)))
+                print(f"lpgi {lpgi} has {len(columns)} columns, expected 4 for 2+2 configuration")
                 return False
 
             # Get allocated chunks for each column
@@ -279,12 +279,12 @@ class PlacementDump:
                     missing_list = sorted(list(missing_in_3))[:20]
                     print("lpgi {}, chunks {} in column 2 but not in column 3{}".format(
                         lpgi, missing_list,
-                        " ... ({} total)".format(len(missing_in_3)) if len(missing_in_3) > 20 else ""))
+                        f" ... ({len(missing_in_3)} total)" if len(missing_in_3) > 20 else ""))
                 if missing_in_2:
                     missing_list = sorted(list(missing_in_2))[:20]
                     print("lpgi {}, chunks {} in column 3 but not in column 2{}".format(
                         lpgi, missing_list,
-                        " ... ({} total)".format(len(missing_in_2)) if len(missing_in_2) > 20 else ""))
+                        f" ... ({len(missing_in_2)} total)" if len(missing_in_2) > 20 else ""))
                 return False
 
             # Rule 2: If column 0 or 1 contains a block, columns 2 and 3 must also contain it
@@ -294,7 +294,7 @@ class PlacementDump:
                 missing_list = sorted(list(missing_in_parity))[:20]
                 print("lpgi {}, chunks {} in data columns (0 or 1) but not in parity columns (2 and 3){}".format(
                     lpgi, missing_list,
-                    " ... ({} total)".format(len(missing_in_parity)) if len(missing_in_parity) > 20 else ""))
+                    f" ... ({len(missing_in_parity)} total)" if len(missing_in_parity) > 20 else ""))
                 return False
 
             # Rule 3: Parity columns should not have extra chunks not in any data column
@@ -303,7 +303,7 @@ class PlacementDump:
                 missing_list = sorted(list(extra_in_parity))[:20]
                 print("lpgi {}, chunks {} in parity columns (2 and 3) but not in any data column (0 or 1){}".format(
                     lpgi, missing_list,
-                    " ... ({} total)".format(len(extra_in_parity)) if len(extra_in_parity) > 20 else ""))
+                    f" ... ({len(extra_in_parity)} total)" if len(extra_in_parity) > 20 else ""))
                 return False
 
         return True

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_activation_ana_inaccessible.py — covers Fix 1 of the 2026-06-08 incident:
 

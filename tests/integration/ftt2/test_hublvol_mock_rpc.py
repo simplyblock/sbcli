@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_hublvol_mock_rpc.py – Mock-RPC-server tests for hublvol NVMe multipath.
 

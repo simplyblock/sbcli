@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the failure-domain topology policy.
 
 Policy under test (2026-08-04 design decision):

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 tasks_runner_backup_merge.py - periodic service that evaluates backup policies
 and triggers merges when retention limits are exceeded.

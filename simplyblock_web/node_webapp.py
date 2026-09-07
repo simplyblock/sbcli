@@ -1,4 +1,3 @@
-# encoding: utf-8
 from simplyblock_core import utils as core_utils
 import argparse
 

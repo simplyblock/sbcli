@@ -1,4 +1,3 @@
-# coding=utf-8
 """Fixtures for API v2 endpoint unit tests.
 
 The tests drive the real v2 FastAPI routers through ``TestClient`` while all

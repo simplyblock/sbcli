@@ -1,4 +1,3 @@
-# coding=utf-8
 """Pytest fixtures for the expansion simulator framework.
 
 Connects to a real FoundationDB (no in-memory shortcut) and patches every

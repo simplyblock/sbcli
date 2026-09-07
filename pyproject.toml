@@ -105,19 +105,11 @@ extend-exclude = ['simplyblock_cli/cli.py']
 extend-select = ["TID251"]
 ignore = [
     "BLE001",
-    "C401",
-    "C408",
-    "C414",
     "DTZ005",
     "DTZ006",
     "DTZ007",
     "FA100",
     "FLY002",
-    "FURB122",
-    "FURB129",
-    "FURB167",
-    "FURB188",
-    "FURB192",
     "G010",
     "G201",
     "I001",
@@ -126,10 +118,6 @@ ignore = [
     "PERF101",
     "PERF102",
     "PERF402",
-    "PIE790",
-    "PIE807",
-    "PIE808",
-    "PIE810",
     "PLC0206",
     "PLR0402",
     "PLR1704",
@@ -164,31 +152,22 @@ ignore = [
     "TRY201",
     "TRY203",
     "TRY401",
-    "UP004",
-    "UP006",
     "UP007",
-    "UP008",
-    "UP009",
-    "UP018",
     "UP022",
-    "UP024",
     "UP031",
-    "UP032",
-    "UP034",
-    "UP035",
-    "UP036",
-    "UP037",
-    "UP041",
-    "UP045",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # TID251 is flake8-tidy-imports.banned-api, configured below. Test code only —
 # production code may seed the global RNG.
 "!tests/**" = ["TID251"]
+"e2e/**" = ["C401", "C408", "C414"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "random.seed".msg = "Seeding the global RNG breaks seed replay for every later test — pytest-randomly seeds it per test. See tests/AGENTS.md § Randomness and seeds."
+
+[tool.ruff.lint.flake8-comprehensions]
+allow-dict-calls-with-keyword-arguments = true
 
 [tool.mypy]
 check_untyped_defs = true

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Replication targets and policies.
 
 Three levels: a source cluster has any number of **targets** (named

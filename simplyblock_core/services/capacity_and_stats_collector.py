@@ -1,7 +1,5 @@
-# coding=utf-8
 import statistics
 import time
-from typing import List, Optional
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import device_events
@@ -250,9 +248,9 @@ def get_cpu_stats(rpc_client) -> CpuStats:
     thread_data = rpc_client.thread_get_stats() or {}
     thread_stats = {t['id']: t for t in thread_data.get('threads', [])}
 
-    reactors: List[ReactorStats] = []
+    reactors: list[ReactorStats] = []
     for reactor in reactor_data['reactors']:
-        threads: List[ThreadStats] = []
+        threads: list[ThreadStats] = []
         for thread in reactor['lw_threads']:
             entry: ThreadStats = {'id': thread['id'], 'name': thread['name']}
             # Per-thread counters come from the second RPC and are matched by
@@ -275,7 +273,7 @@ def get_cpu_stats(rpc_client) -> CpuStats:
     return {'reactors': reactors}
 
 
-def add_node_stats(cluster, node, records, all_lvols, cpu_dict: Optional[CpuStats] = None):
+def add_node_stats(cluster, node, records, all_lvols, cpu_dict: CpuStats | None = None):
     size_used = 0
     size_total = 0
     data = {}

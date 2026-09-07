@@ -14,7 +14,7 @@ an object that no longer exists stops being exported, and every instance
 returns an identical response because the only input is shared FDB state.
 """
 
-from typing import Callable, Iterable, Iterator, Optional, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 
 from fastapi import APIRouter
 from fastapi.responses import Response
@@ -113,14 +113,14 @@ _THREAD_LABELS = _CORE_LABELS + ['thread_name']
 # mypy does not check the key of a TypedDict `.get()` (only of a subscript), so
 # a typo here would read as permanently absent rather than failing to compile.
 # test_every_reactor_and_thread_counter_reports pins all six names instead.
-_REACTOR_COUNTERS: Sequence[tuple[str, str, Callable[[ReactorStats], Optional[int]]]] = (
+_REACTOR_COUNTERS: Sequence[tuple[str, str, Callable[[ReactorStats], int | None]]] = (
     ('reactor_busy_ticks', 'Cumulative reactor busy ticks', lambda r: r.get('busy')),
     ('reactor_idle_ticks', 'Cumulative reactor idle ticks', lambda r: r.get('idle')),
     ('reactor_irq_ticks', 'Cumulative reactor IRQ ticks', lambda r: r.get('irq')),
     ('reactor_sys_ticks', 'Cumulative reactor system ticks', lambda r: r.get('sys')),
 )
 
-_THREAD_COUNTERS: Sequence[tuple[str, str, Callable[[ThreadStats], Optional[int]]]] = (
+_THREAD_COUNTERS: Sequence[tuple[str, str, Callable[[ThreadStats], int | None]]] = (
     ('thread_busy_ticks', 'Cumulative lightweight-thread busy ticks', lambda t: t.get('busy')),
     ('thread_idle_ticks', 'Cumulative lightweight-thread idle ticks', lambda t: t.get('idle')),
 )

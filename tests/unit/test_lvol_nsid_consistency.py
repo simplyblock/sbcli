@@ -1,4 +1,3 @@
-# coding=utf-8
 """Namespace IDs must be identical on every path of a shared subsystem.
 
 Mass-create incident 2026-07-06: ``nvmf_subsystem_add_ns`` was issued

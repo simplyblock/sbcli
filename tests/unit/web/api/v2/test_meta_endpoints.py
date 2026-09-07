@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the unauthenticated v2 ``/_meta`` probe endpoints."""
 
 import pytest

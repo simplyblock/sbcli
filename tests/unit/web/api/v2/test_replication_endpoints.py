@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/clusters/{id}/replication endpoints."""
 
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Per-address backoff for cluster-internal dial-outs.
 
 A dial-out is any attempt to (re)connect an NVMe controller path to a peer:

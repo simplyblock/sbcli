@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_dial_backoff.py — repeated refusals earn a peer address a hold.
 
 Run mass_create_delete_docker-20260821: a node's SPDK was dead for hours while

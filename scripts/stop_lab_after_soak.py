@@ -31,7 +31,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple
 
 
 def log(msg: str) -> None:
@@ -110,7 +109,7 @@ def wait_for_soak_exit(pid: int, poll_interval: float) -> int:
     return rc
 
 
-def _collect_instance_ids(metadata: dict, stop_mgmt: bool) -> Tuple[List[str], List[str], List[str]]:
+def _collect_instance_ids(metadata: dict, stop_mgmt: bool) -> tuple[list[str], list[str], list[str]]:
     """Return (storage_node_ids, client_ids, mgmt_ids).
 
     mgmt_ids is non-empty only when --stop-mgmt was passed.
@@ -131,7 +130,7 @@ def _collect_instance_ids(metadata: dict, stop_mgmt: bool) -> Tuple[List[str], L
     return sn_ids, client_ids, mgmt_ids
 
 
-def _stop_one(ec2_client, instance_id: str, dry_run: bool) -> Tuple[str, bool, str]:
+def _stop_one(ec2_client, instance_id: str, dry_run: bool) -> tuple[str, bool, str]:
     """Stop a single instance. Returns (instance_id, ok, message). The
     monitor catches every exception per-instance so one ENI tied up by
     a stuck VPC endpoint or a misconfigured IAM doesn't prevent the
@@ -147,7 +146,7 @@ def _stop_one(ec2_client, instance_id: str, dry_run: bool) -> Tuple[str, bool, s
         return instance_id, False, f"{type(e).__name__}: {e}"
 
 
-def stop_instances(region: str, ids: List[str], label: str, dry_run: bool) -> Tuple[int, int]:
+def stop_instances(region: str, ids: list[str], label: str, dry_run: bool) -> tuple[int, int]:
     """Stop every id in ``ids``. Returns (ok_count, fail_count). Each
     instance is attempted independently — a failure on one does not
     short-circuit the rest."""

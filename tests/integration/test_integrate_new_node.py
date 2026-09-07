@@ -1,4 +1,3 @@
-# coding=utf-8
 """End-to-end-shape unit tests for the single-node expansion entry point.
 
 Covers ``cluster_expansion.executor.integrate_new_node_into_cluster`` plus

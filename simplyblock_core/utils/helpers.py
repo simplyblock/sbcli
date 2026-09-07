@@ -46,7 +46,7 @@ def parse_thread_siblings_list(siblings: str) -> list[int]:
         return []
 
     cpus = set()
-    token_re = re.compile(r"^\s*(?P<start>\d+)(?:\s*-\s*(?P<end>\d+)(?:\s*(?:[:\/])\s*(?P<step>\d+))?)?\s*$", re.X)
+    token_re = re.compile(r"^\s*(?P<start>\d+)(?:\s*-\s*(?P<end>\d+)(?:\s*(?:[:\/])\s*(?P<step>\d+))?)?\s*$", re.VERBOSE)
 
     for raw in siblings.split(","):
         part = raw.strip()

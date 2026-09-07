@@ -1,4 +1,3 @@
-# coding=utf-8
 """Cross-process coordinator for hublvol NVMe-oF (re)attach.
 
 All ``bdev_nvme_attach_controller`` / ``bdev_nvme_detach_controller`` calls

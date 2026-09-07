@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 hub_controller_manager.py — lifecycle manager for migration hub NVMe-oF controllers.
 
@@ -113,7 +112,7 @@ class HubControllerManager:
         # lazily and never removed (bounded by the number of distinct
         # (src, tgt) pairs a process ever touches, i.e. node-pair count).
         self._attach_locks: dict = {}
-        self._gc_thread: Optional[threading.Thread] = None
+        self._gc_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # Public API

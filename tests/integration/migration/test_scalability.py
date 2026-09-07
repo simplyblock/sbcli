@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_scalability.py – scalability e2e test for volume migration.
 

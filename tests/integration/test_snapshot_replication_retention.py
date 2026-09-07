@@ -1,4 +1,3 @@
-# coding=utf-8
 """Retention for replication-driven internal snapshots (D2), against real FDB.
 
 ``snapshot_replication._prune_internal_snapshots`` decides which internal

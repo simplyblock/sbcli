@@ -1,11 +1,10 @@
 #!/usr/bin/env python
-# encoding: utf-8
 
 import argparse
 import logging
 import os
 import sys
-from typing import List, Optional, cast
+from typing import cast
 
 from kubernetes.client import ApiException, CoreV1Api
 
@@ -34,7 +33,7 @@ def _is_pod_present_for_node() -> bool:
     """
     k8s_core_v1: CoreV1Api = cast(CoreV1Api, utils.get_k8s_core_client())
     namespace: str = node_utils_k8s.get_namespace()
-    node_name: Optional[str] = os.environ.get("HOSTNAME")
+    node_name: str | None = os.environ.get("HOSTNAME")
 
     if not node_name:
         raise RuntimeError("HOSTNAME environment variable not set")
@@ -215,7 +214,7 @@ def main() -> None:
             sys.exit(0)
 
         # Process socket configuration
-        sockets_to_use: List[int] = [0]
+        sockets_to_use: list[int] = [0]
         if args.sockets_to_use:
             try:
                 sockets_to_use = [int(x) for x in args.sockets_to_use.split(',')]
@@ -238,9 +237,9 @@ def main() -> None:
                 )
 
         # Process PCI device filters
-        pci_allowed: List[str] = []
-        pci_blocked: List[str] = []
-        nvme_names: List[str] = []
+        pci_allowed: list[str] = []
+        pci_blocked: list[str] = []
+        nvme_names: list[str] = []
 
         if args.pci_allowed:
             pci_allowed = [pci.strip() for pci in args.pci_allowed.split(',') if pci.strip()]

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_hublvol_role_assignment.py — regression tests for the duplicate-LVS-role
 bug (mass_create_delete_k8s 2026-07-14).

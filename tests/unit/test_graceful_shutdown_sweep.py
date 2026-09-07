@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 ``cluster_ops.cluster_grace_shutdown`` must not act on departed nodes.
 
