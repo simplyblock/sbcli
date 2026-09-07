@@ -1626,42 +1626,10 @@ class SshUtils:
             supress_logs=True)
         candidates.extend(self._parse_nvme_list_json(raw, nqn))
 
-        # sysfs is the version-independent source, and is also the only one
-        # that sees a subsystem whose namespace nvme-cli has not picked up.
-        #
-        # BOTH loops are needed; do not "simplify" this to one.
-        #   loop 1: on kernels that expose head namespaces directly under the
-        #     subsystem dir, they are at depth 1. The nvmeXcYnZ entries one
-        #     level further down (inside the controller dir) are the ones the
-        #     old two-level glob picked up, and they are not block devices.
-        #   loop 2: other kernels expose nothing under the subsystem dir at
-        #     all -- verified on RHCOS 2026-09-08, where
-        #     /sys/class/nvme-subsystem/nvme-subsys0 has no nvme*n* children
-        #     and only /sys/block/nvme0n1 resolves. /sys/block also cannot
-        #     contain a controller-scoped name, since those are not block
-        #     devices, so this loop is the safe one.
-        sysfs_cmd = (
-            'for d in /sys/class/nvme-subsystem/*; do '
-            '  [ -r "$d/subsysnqn" ] || continue; '
-            f'  [ "$(cat "$d/subsysnqn" 2>/dev/null)" = "{nqn}" ] || continue; '
-            '  for n in "$d"/nvme*n*; do [ -e "$n" ] && basename "$n"; done; '
-            'done; '
-            'for b in /sys/block/nvme*n*; do '
-            '  [ -e "$b" ] || continue; '
-            '  nm=$(basename "$b"); q=""; '
-            '  [ -r "$b/device/subsysnqn" ] && q=$(cat "$b/device/subsysnqn" 2>/dev/null); '
-            # /sys/block/<dev> is a symlink, so "$b/.." resolves lexically to
-            # /sys/block and never to the subsystem. Resolve it first.
-            '  if [ -z "$q" ]; then '
-            '    p=$(readlink -f "$b" 2>/dev/null); '
-            '    [ -n "$p" ] && [ -r "${p%/*}/subsysnqn" ] && q=$(cat "${p%/*}/subsysnqn" 2>/dev/null); '
-            '  fi; '
-            f'  [ "$q" = "{nqn}" ] && echo "$nm"; '
-            'done'
-        )
-        out2, _ = self.exec_command(node=node, command=sysfs_cmd,
-                                    supress_logs=True)
-        candidates.extend((out2 or "").split())
+        # sysfs is the version-independent source, and the only one that sees a
+        # subsystem whose namespace nvme-cli has not picked up.
+        heads, _scan_ok = self.get_ns_heads_for_nqn(node, nqn)
+        candidates.extend(name for _nsid, name in heads)
 
         # Prefer the requested nsid; only fall back to "any head" when the
         # caller did not tell us which namespace it wants.
@@ -1700,37 +1668,120 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
 
-    def get_namespace_count_for_nqn(self, node, nqn):
-        """Count namespaces in the given NVMe subsystem on the client.
+    # Marker the sysfs probe prints last, so an empty result can be told apart
+    # from a probe that never ran (ssh hiccup, sudo denied, shell error). That
+    # distinction is what lets safe_disconnect_nvme fail CLOSED.
+    _NS_SCAN_OK = "__NS_SCAN_OK__"
 
-        Returns the number of namespaces visible on the client for the
-        subsystem identified by *nqn*.  Returns -1 if the count cannot
-        be determined (caller should fall back to normal disconnect).
+    def get_ns_heads_for_nqn(self, node, nqn):
+        """Head namespaces of *nqn* on *node*, read from sysfs.
+
+        Returns ``(heads, ok)`` where *heads* is a list of ``(nsid, device)``
+        tuples for subsystem-level head devices only, and *ok* is False when the
+        probe itself did not complete (so the caller must not read an empty list
+        as "no namespaces").
+
+        sysfs rather than ``nvme list`` on purpose. The JSON schema moved between
+        nvme-cli versions (flat ``Devices[*].SubsystemNQN`` vs nested
+        ``Devices[*].Subsystems[*].Namespaces[*]``), and a parser written for one
+        silently finds nothing in the other -- which is how a namespace-count
+        guard can report 0 for a subsystem holding three namespaces. sysfs has no
+        such versioning.
+
+        BOTH loops are needed; do not "simplify" this to one:
+          loop 1: kernels that expose head namespaces directly under the
+            subsystem dir have them at depth 1. The nvmeXcYnZ entries one level
+            further down (inside the controller dir) are the per-controller view
+            and are NOT block devices under native multipath.
+          loop 2: other kernels expose nothing under the subsystem dir at all --
+            verified on RHCOS 2026-09-08, where
+            /sys/class/nvme-subsystem/nvme-subsys0 has no nvme*n* children and
+            only /sys/block/nvme0n1 resolves. /sys/block also cannot contain a
+            controller-scoped name, so this loop is the safe one.
         """
-        command = "sudo nvme list --output-format=json"
-        output, _ = self.exec_command(node=node, command=command, supress_logs=True)
-        try:
-            data = json.loads(output)
-            for device in data.get('Devices', []):
-                for subsystem in device.get('Subsystems', []):
-                    if subsystem.get('SubsystemNQN', '') == nqn:
-                        return len(subsystem.get('Namespaces', []))
-            return 0
-        except Exception as e:
-            self.logger.warning(f"Failed to count namespaces for NQN {nqn}: {e}")
-            return -1
+        cmd = (
+            'for d in /sys/class/nvme-subsystem/*; do '
+            '  [ -r "$d/subsysnqn" ] || continue; '
+            f'  [ "$(cat "$d/subsysnqn" 2>/dev/null)" = "{nqn}" ] || continue; '
+            '  for n in "$d"/nvme*n*; do '
+            '    [ -e "$n" ] || continue; '
+            '    nm=$(basename "$n"); '
+            '    echo "$(cat "$n/nsid" 2>/dev/null):$nm"; '
+            '  done; '
+            'done; '
+            'for b in /sys/block/nvme*n*; do '
+            '  [ -e "$b" ] || continue; '
+            '  nm=$(basename "$b"); q=""; '
+            '  [ -r "$b/device/subsysnqn" ] && q=$(cat "$b/device/subsysnqn" 2>/dev/null); '
+            # /sys/block/<dev> is a symlink, so "$b/.." resolves lexically to
+            # /sys/block and never to the subsystem. Resolve it first.
+            '  if [ -z "$q" ]; then '
+            '    p=$(readlink -f "$b" 2>/dev/null); '
+            '    [ -n "$p" ] && [ -r "${p%/*}/subsysnqn" ] && q=$(cat "${p%/*}/subsysnqn" 2>/dev/null); '
+            '  fi; '
+            f'  [ "$q" = "{nqn}" ] && echo "$(cat "$b/nsid" 2>/dev/null):$nm"; '
+            'done; '
+            f'echo {self._NS_SCAN_OK}'
+        )
+        out, _ = self.exec_command(node=node, command=cmd, supress_logs=True)
+        text = out or ""
+        ok = self._NS_SCAN_OK in text
+        heads = {}
+        for tok in text.split():
+            if tok == self._NS_SCAN_OK or ":" not in tok:
+                continue
+            nsid, _, name = tok.partition(":")
+            if not name or self._CONTROLLER_SCOPED_NS.match(name):
+                continue
+            if not self._HEAD_NS.match(name):
+                continue
+            heads[name] = nsid  # dedupe: both loops can report the same head
+        return sorted(((v, k) for k, v in heads.items()),
+                      key=lambda t: (t[0] == "", t[0])), ok
+
+    def get_namespace_count_for_nqn(self, node, nqn):
+        """Namespaces visible on *node* for subsystem *nqn*.
+
+        Returns an int, or **None** when it could not be determined. Callers
+        must treat None as "unknown" and take the conservative branch; the old
+        contract returned -1 here and every caller read that as "go ahead".
+        """
+        heads, ok = self.get_ns_heads_for_nqn(node, nqn)
+        if not ok:
+            self.logger.warning(
+                f"Namespace count for NQN {nqn} on {node} is UNKNOWN "
+                f"(sysfs probe did not complete)")
+            return None
+        return len(heads)
 
     def safe_disconnect_nvme(self, node, nqn):
-        """Disconnect NVMe subsystem only if no other namespaces share it.
+        """Disconnect an NVMe subsystem only when it is safe to do so.
 
-        When clone volumes are placed in unrelated lvols' subsystems
-        (due to server-side random assignment), disconnecting the
-        subsystem would destroy the clone's IO.  This method checks
-        first and skips if ns_count > 1.
+        A namespaced clone lives in some other lvol's subsystem, so
+        disconnecting the subsystem to clean up ONE volume tears down every
+        sibling on that NQN and kills their IO. So this only disconnects when
+        the subsystem is known to hold at most one namespace.
+
+        FAILS CLOSED. The previous version disconnected whenever the count was
+        <= 1 *or* unknown (-1), and the count came from an nvme-cli JSON parser
+        written against one of the two possible schemas -- so on a client whose
+        nvme-cli emits the other shape it returned 0, 0 <= 1 passed, and
+        deleting a master lvol would disconnect all of its clones. Silently.
+        The asymmetry is stark: skipping leaves a namespace-less subsystem
+        attached, which is harmless and cleared at teardown, while disconnecting
+        wrongly destroys live IO. So anything other than a confident count of
+        <= 1 now skips.
 
         Returns True if disconnect was performed, False if skipped.
         """
         ns_count = self.get_namespace_count_for_nqn(node=node, nqn=nqn)
+        if ns_count is None:
+            self.logger.warning(
+                f"Skipping NVMe disconnect of {nqn} on {node}: namespace count "
+                f"unknown, and disconnecting a shared subsystem would disrupt "
+                f"sibling volumes. Server-side DELETE still removes the namespace."
+            )
+            return False
         if ns_count > 1:
             self.logger.warning(
                 f"Subsystem {nqn} has {ns_count} namespaces on {node}; "
@@ -1738,10 +1789,67 @@ class SshUtils:
                 f"Server-side DELETE will remove the namespace."
             )
             return False
-        # ns_count <= 1 or -1 (error -> proceed with disconnect to preserve existing behavior)
-        self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
+        self.logger.info(
+            f"Disconnecting NVMe subsystem: {nqn} (namespaces on {node}: {ns_count})")
         self.disconnect_nvme(node=node, nqn_grep=nqn)
         return True
+
+    def rescan_and_verify_ns_gone(self, node, nqn, ns_id=None, retries=3,
+                                  interval=3):
+        """After a server-side volume delete, make the client forget the namespace.
+
+        Nothing else does this today. ``safe_disconnect_nvme`` correctly SKIPS a
+        shared subsystem, and the server-side DELETE only removes the namespace
+        from the target, so on the clone path there is no client-side step at
+        all: the kernel keeps its ``nvme_ns_head`` for that NSID until something
+        happens to trigger a scan.
+
+        That residue is not cosmetic. NSIDs are recycled -- in
+        n_plus_k_failover_multi_client_ha_all_nodes-20260907-090440, NSID 2 of one
+        subsystem was freed at 17:42:41 and reissued to a different volume at
+        17:55:24 with a different uuid/nguid. The client still held the retired
+        identity (/dev/nvme18n2 was listed 13 minutes after the removal) and the
+        kernel refused the new namespace outright:
+            nvme nvme18: IDs don't match for shared namespace 2
+        leaving a volume that the control plane called `online` with no block
+        device anywhere.
+
+        ``nvme ns-rescan`` makes the kernel re-read the controller's active NSID
+        list and drop namespaces no longer advertised, releasing the head once
+        nothing references it (the delete path unmounts first, so nothing does).
+
+        Returns True if the namespace is gone, False if it lingers. A lingering
+        namespace is reported rather than swallowed: it is the visible symptom of
+        the NSID-reuse defect, so quietly cleaning up would hide the bug this
+        exists to surface. It cannot be fixed client-side when a peer still
+        advertises a conflicting identity for that NSID -- there the rescan keeps
+        the stale head and logs the mismatch instead of removing it.
+        """
+        for attempt in range(1, retries + 1):
+            self.rescan_live_nvme_controllers(node)
+            heads, ok = self.get_ns_heads_for_nqn(node, nqn)
+            if not ok:
+                self.logger.warning(
+                    f"[ns_cleanup] {node}: could not verify namespace removal "
+                    f"for {nqn} (sysfs probe did not complete)")
+                return False
+            if ns_id is None:
+                if not heads:
+                    return True
+                stale = heads
+            else:
+                stale = [(n, d) for n, d in heads if n == str(ns_id)]
+                if not stale:
+                    return True
+            if attempt < retries:
+                time.sleep(interval)
+        self.logger.warning(
+            f"[ns_cleanup] {node}: namespace ns_id={ns_id} of {nqn} is STILL "
+            f"present after {retries} rescans: {stale}. The kernel is holding a "
+            f"stale ns_head. If this NSID is reused by another volume the client "
+            f"will reject it with \"IDs don't match for shared namespace\"."
+        )
+        return False
     
     def get_nvme_device_subsystems(self, node):
         """Get json for nvme device wise

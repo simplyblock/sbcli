@@ -457,13 +457,26 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                             sleep_n_sec(10)
 
                         sleep_n_sec(10)
-                        self.disconnect_lvol(clone_details['ID'])
+                        # Capture the subsystem identity BEFORE the delete: once
+                        # the record is gone the NQN and ns_id cannot be read.
+                        _cd = self.sbcli_utils.get_lvol_details(lvol_id=clone_details['ID'])
+                        _nqn = _cd[0].get("nqn") if _cd else None
+                        _nsid = _cd[0].get("ns_id") if _cd else None
+                        # Unmount BEFORE disconnect. The old order disconnected
+                        # first, which yanks the block device out from under a
+                        # mounted filesystem whenever the subsystem holds only
+                        # this one namespace (the case where the disconnect is
+                        # not skipped). Unmounting first also drops the fs
+                        # reference so the kernel can free the ns_head later.
                         self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
+                        self.disconnect_lvol(clone_details['ID'])
                         self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
                         deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=120, skip_error=True)
                         if not deleted:
                             self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         sleep_n_sec(30)
+                        self._cleanup_client_namespace(
+                            clone_details["Client"], _nqn, _nsid, clone_name)
                         if clone_name in self.lvols_without_sec_connect:
                             self.lvols_without_sec_connect.remove(clone_name)
                         to_delete.append(clone_name)
@@ -510,12 +523,20 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 sleep_n_sec(10)
 
             sleep_n_sec(10)
+            # Read the subsystem identity before the record disappears.
+            _ld = self.sbcli_utils.get_lvol_details(
+                lvol_id=self.lvol_mount_details[lvol]['ID'])
+            _nqn = _ld[0].get("nqn") if _ld else None
+            _nsid = _ld[0].get("ns_id") if _ld else None
+            _client = self.lvol_mount_details[lvol]["Client"]
+            # Unmount before disconnect; see _cleanup_client_namespace.
+            self.ssh_obj.unmount_path(_client, f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
-            self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
-            self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
+            self.ssh_obj.remove_dir(_client, dir_path=f"/mnt/{lvol}")
             deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=120, skip_error=True)
             if not deleted:
                 self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
+            self._cleanup_client_namespace(_client, _nqn, _nsid, lvol)
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])
@@ -528,6 +549,41 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     lvols.remove(lvol)
                     break
         sleep_n_sec(60)
+
+    def _cleanup_client_namespace(self, client, nqn, ns_id, obj_name):
+        """Make the client forget a namespace after its volume was deleted.
+
+        Nothing else does this. ``safe_disconnect_nvme`` deliberately SKIPS a
+        shared subsystem (disconnecting it would tear down every sibling lvol on
+        that NQN), and the server-side DELETE only removes the namespace from the
+        target, so on the namespaced-clone path there is no client-side step at
+        all and the kernel keeps its ns_head for that NSID.
+
+        That residue is what made
+        n_plus_k_failover_multi_client_ha_all_nodes-20260907-090440 fail: NSID 2
+        of one subsystem was freed at 17:42:41, reissued to a different volume at
+        17:55:24 with a different uuid/nguid, and the client refused it with
+        "IDs don't match for shared namespace 2", leaving a volume the control
+        plane called `online` with no block device anywhere.
+
+        A lingering namespace is WARNED about, not swallowed: it is the visible
+        symptom of the NSID-reuse defect, so silently cleaning up would hide the
+        bug. It also cannot be fixed client-side when a peer still advertises a
+        conflicting identity for that NSID.
+        """
+        if not client or not nqn:
+            return
+        try:
+            if not self.ssh_obj.rescan_and_verify_ns_gone(client, nqn, ns_id=ns_id):
+                self.logger.warning(
+                    f"[ns_cleanup] {obj_name}: namespace ns_id={ns_id} of {nqn} "
+                    f"still present on {client} after delete + rescan. If this "
+                    f"NSID is reused the client will reject the new volume."
+                )
+        except Exception as exc:
+            self.logger.warning(
+                f"[ns_cleanup] {obj_name}: namespace cleanup on {client} "
+                f"failed: {exc}")
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage, avoiding lvols on outage nodes."""
