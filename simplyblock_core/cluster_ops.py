@@ -2780,6 +2780,11 @@ def get_cluster(cl_id) -> dict:
     return data
 
 
+#: Releases whose `cluster update` must restart Grafana to load a changed
+#: alert_rules.yaml. Add a version here when a release changes that file.
+GRAFANA_RESTART_RELEASE = "26.3.0.4"
+
+
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
                    max_subsys=None, hugepages_mem=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
@@ -2871,6 +2876,22 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_name="app_BackupService",
                 service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
+
+        # Grafana reads provisioning at startup, and its upstream image is not
+        # matched by the loop above, so the alert rules `pip` refreshed in the
+        # directory it mounts are only picked up here. Gated on the release
+        # that adds API_request_latency_high, so an update that changes no rule
+        # does not interrupt Grafana; a later release that does has to add its
+        # version here. Logged, not raised: a Grafana that will not restart
+        # must not fail the whole update.
+        if not cluster.disable_monitoring and release_upgrades.release_matches(
+                constants.SIMPLY_BLOCK_VERSION, GRAFANA_RESTART_RELEASE):
+            try:
+                cluster_docker.services.get(
+                    constants.MONITORING_GRAFANA_SERVICE).update(force_update=True)
+                logger.info("Restarted Grafana to reload the alert rules")
+            except Exception as e:
+                logger.error(f"Failed to restart Grafana: {e}")
 
         logger.info("Done updating mgmt cluster")
 
