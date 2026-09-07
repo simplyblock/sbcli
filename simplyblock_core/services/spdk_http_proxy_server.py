@@ -32,6 +32,7 @@ from pydantic import BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import ClientDisconnect
+from tenacity import AsyncRetrying, RetryCallState, retry_if_exception_type, stop_never, wait_fixed
 
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils.secrets import redact_rpc_params
@@ -70,6 +71,10 @@ OTHER_METHOD_LABEL = 'other'
 #: Per-attempt bound on the readiness probe, and the pause between attempts.
 SPDK_READY_PROBE_TIMEOUT_SEC = 5
 SPDK_READY_POLL_INTERVAL_SEC = 1
+#: How many probes one 'still waiting' line stands for, and how long the wait
+#: may last before those lines are raised from INFO to WARNING.
+SPDK_READY_LOG_EVERY = 30
+SPDK_READY_WARN_AFTER_SEC = 60
 #: SPDK responses are read in one shot.
 SPDK_RECV_SIZE = 1024 * 1024 * 1024
 
@@ -354,6 +359,28 @@ def _parse_request(req: bytes) -> dict[str, Any]:
     return req_data
 
 
+def _log_spdk_not_ready(retry_state: RetryCallState) -> None:
+    """Report a failed readiness probe, sparingly.
+
+    ``wait_for_spdk_ready`` polls until SPDK answers, however long that takes,
+    so logging every probe would emit a line a second for the whole of an
+    outage. Only the first failure and then one probe in
+    ``SPDK_READY_LOG_EVERY`` are logged, and a wait long enough to have
+    outlasted an ordinary start is raised to WARNING.
+    """
+    if retry_state.attempt_number > 1 and retry_state.attempt_number % SPDK_READY_LOG_EVERY:
+        return
+
+    waited = retry_state.seconds_since_start or 0.0
+    logger.log(
+        logging.INFO if waited < SPDK_READY_WARN_AFTER_SEC else logging.WARNING,
+        "Waiting for SPDK to be ready (%.0fs, %d probes): %s",
+        waited,
+        retry_state.attempt_number,
+        retry_state.outcome.exception() if retry_state.outcome is not None else None,
+    )
+
+
 class SpdkProxy:
     """Forwards JSON-RPC requests to SPDK's unix socket."""
 
@@ -391,23 +418,29 @@ class SpdkProxy:
                     logger.info("Periodic stats: %s", summary)
 
     async def wait_for_spdk_ready(self) -> None:
-        """Block until SPDK responds to spdk_get_version on the unix socket."""
+        """Block until SPDK responds to spdk_get_version on the unix socket.
+
+        The retry is deliberately unbounded (``stop_never``): there is no
+        caller to hand a failure back to, and the proxy has nothing to serve
+        without its SPDK, so giving up would only tear the container down
+        while SPDK is still coming up. What a stuck wait gets instead is
+        ``_log_spdk_not_ready``, which makes it visible without a line a
+        second.
+        """
         payload = json.dumps({'id': 1, 'method': 'spdk_get_version'}).encode('ascii')
-        while True:
-            try:
-                ready = await asyncio.wait_for(
+        async for attempt in AsyncRetrying(
+            stop=stop_never,
+            wait=wait_fixed(SPDK_READY_POLL_INTERVAL_SEC),
+            retry=retry_if_exception_type((TimeoutError, OSError)),
+            before_sleep=_log_spdk_not_ready,
+        ):
+            with attempt:
+                await asyncio.wait_for(
                     self._probe(payload), SPDK_READY_PROBE_TIMEOUT_SEC)
-            except (TimeoutError, OSError) as e:
-                logger.info(f"Waiting for SPDK to be ready: {e}")
-                ready = False
 
-            if ready:
-                logger.info("SPDK is ready (spdk_get_version responded)")
-                return
+        logger.info("SPDK is ready (spdk_get_version responded)")
 
-            await asyncio.sleep(SPDK_READY_POLL_INTERVAL_SEC)
-
-    async def _probe(self, payload: bytes) -> bool:
+    async def _probe(self, payload: bytes) -> None:
         reader, writer = await asyncio.open_unix_connection(self.settings.rpc_sock)
         try:
             writer.write(payload)
@@ -420,8 +453,8 @@ class SpdkProxy:
                     json.loads(buf.decode('ascii'))
                 except ValueError:
                     continue
-                return True
-            return False
+                return
+            raise ConnectionError('SPDK closed the socket without answering')
         finally:
             _close(writer)
 

@@ -13,6 +13,7 @@ import os
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import tenacity
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY, CollectorRegistry, Histogram
 from pydantic import ValidationError
@@ -309,6 +310,52 @@ class TestWaitForSpdkReady(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(all(writer.closed for writer in fake.writers))
         self.assertEqual(fake.attempt_count, 2)
+
+    async def test_probe_failures_are_not_logged_every_attempt(self):
+        # The wait is unbounded, so a per-attempt line would fill the log for
+        # as long as SPDK stays down.
+        attempts = 2 * proxy_mod.SPDK_READY_LOG_EVERY
+        fake = FakeSpdkSocket(
+            *(ConnectionRefusedError("not ready") for _ in range(attempts)),
+            [rpc_response(result={})],
+        )
+        proxy = make_proxy()
+
+        with (
+            patch_connect(fake),
+            patch.object(proxy_mod.asyncio, 'sleep', new=AsyncMock()),
+            captured_records(proxy_mod.logger) as records,
+        ):
+            await proxy.wait_for_spdk_ready()
+
+        waiting = [r for r in records if r.msg.startswith("Waiting for SPDK")]
+        self.assertEqual(
+            [r.args[1] for r in waiting],
+            [1, proxy_mod.SPDK_READY_LOG_EVERY, attempts],
+        )
+
+
+class TestLogSpdkNotReady(unittest.TestCase):
+
+    def _log(self, attempt_number, waited):
+        state = tenacity.RetryCallState(None, None, (), {})
+        state.attempt_number = attempt_number
+        state.set_exception((ConnectionRefusedError, ConnectionRefusedError("nope"), None))
+        with (
+            patch.object(type(state), 'seconds_since_start', waited),
+            captured_records(proxy_mod.logger) as records,
+        ):
+            proxy_mod._log_spdk_not_ready(state)
+        return records
+
+    def test_ordinary_startup_stays_at_info(self):
+        record, = self._log(1, proxy_mod.SPDK_READY_WARN_AFTER_SEC - 1)
+        self.assertEqual(record.levelno, logging.INFO)
+        self.assertIn("nope", record.getMessage())
+
+    def test_wait_outlasting_a_start_escalates(self):
+        record, = self._log(1, proxy_mod.SPDK_READY_WARN_AFTER_SEC)
+        self.assertEqual(record.levelno, logging.WARNING)
 
 
 class TestRpcCall(MetricsReader, unittest.IsolatedAsyncioTestCase):
