@@ -6413,7 +6413,6 @@ def _restart_storage_node_impl(
             return False
 
     logger.info(f"Devices found: {len(nvme_devs)}")
-    logger.debug(nvme_devs)
 
     logger.info(f"Devices in db: {len(snode.nvme_devices)}")
     logger.debug(snode.nvme_devices)
@@ -6819,8 +6818,6 @@ def list_storage_nodes(cluster_id=None):
     # Only surface the failure-domain column when the feature is actually in use.
     show_failure_domain = any(node.failure_domain >= 0 for node in nodes)
     for node in nodes:
-        logger.debug(node)
-        logger.debug("*" * 20)
         total_devices = len(node.nvme_devices)
         online_devices = 0
 
@@ -6872,8 +6869,6 @@ def list_storage_devices(node_id):
     jm_devices = []
     remote_devices = []
     for device in snode.nvme_devices:
-        logger.debug(device)
-        logger.debug("*" * 20)
         storage_devices.append({
             "UUID": device.uuid,
             "StorgeID": device.cluster_device_order,
@@ -6893,7 +6888,6 @@ def list_storage_devices(node_id):
     for bdev in snode.lvstore_stack:
         if bdev['type'] != "bdev_distr":
             continue
-        logger.debug("*" * 20)
         distrib_params = bdev['params']
         bdev_devices.append({
             "VUID": distrib_params['vuid'],
@@ -6920,8 +6914,6 @@ def list_storage_devices(node_id):
         })
 
     for remote_device in snode.remote_devices:
-        logger.debug(remote_device)
-        logger.debug("*" * 20)
         name = remote_device.alceml_name
 
         remote_devices.append({
@@ -6933,8 +6925,6 @@ def list_storage_devices(node_id):
         })
 
     for remote_jm_device in snode.remote_jm_devices:
-        logger.debug(remote_jm_device)
-        logger.debug("*" * 20)
         remote_devices.append({
             "UUID": remote_jm_device.uuid,
             "Name": remote_jm_device.remote_bdev,
