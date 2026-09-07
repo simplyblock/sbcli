@@ -685,11 +685,20 @@ class K8sUtils:
                                 max_size_mb: int = 500) -> list[str]:
         """Collect host-level core dumps from a K8s node.
 
-        **Primary path**: uses the already-running SPDK pod (privileged)
-        to access the host filesystem via ``/proc/1/root/``.
+        Cores land on the NODE at ``/var/lib/systemd/coredump/``, because the
+        host's ``core_pattern`` pipes to ``systemd-coredump``. They are never
+        written inside the SPDK container.
 
-        **Fallback**: if the SPDK pod is not running, deploys a
-        platform-aware temporary pod/debug session.
+        This used to try the running SPDK pod first, reading
+        ``/proc/1/root/var/lib/systemd/coredump``. That cannot work: the SPDK
+        pod does not set ``hostPID``, so PID 1 in its namespace is its own
+        entrypoint and ``/proc/1/root`` resolves to the *container* root. The
+        probe always found an empty directory, wrote a "Host core dumps"
+        listing reading ``total 0``, and returned before the working paths
+        below could run, so real cores sat uncollected on the hosts (run
+        ``k8s_native_resilient_failover-20260906-112437``: four cores on the
+        nodes, none collected). That path is removed; host access now always
+        goes through a debug pod.
 
         Parameters
         ----------
@@ -708,28 +717,10 @@ class K8sUtils:
         """
         saved: list[str] = []
         os.makedirs(local_dir, exist_ok=True)
-        host_coredump_dir = "/proc/1/root/var/lib/systemd/coredump"
 
-        # ── Try via running SPDK pod ──────────────────────────────────────
-        try:
-            pod_name = self.get_spdk_pod_name(node_ip)
-        except Exception:
-            pod_name = None
-
-        if pod_name:
-            try:
-                saved = self._collect_host_core_dumps_via_spdk(
-                    pod_name, node_ip, local_dir, host_coredump_dir,
-                    max_size_mb,
-                )
-                return saved
-            except Exception as exc:
-                self.logger.warning(
-                    f"[coredump] SPDK pod collection failed for "
-                    f"{node_ip}: {exc}, trying fallback"
-                )
-
-        # ── Fallback ──────────────────────────────────────────────────────
+        # ── Host access via a debug pod. OpenShift uses `oc debug node/`;
+        #    everything else gets a privileged pod that hostPath-mounts the
+        #    coredump directory. ────────────────────────────────────────────
         try:
             node_name = self._get_k8s_node_name(node_ip)
         except Exception as exc:
@@ -748,174 +739,6 @@ class K8sUtils:
                 f"[coredump] Fallback collection failed for "
                 f"{node_ip} ({node_name}): {exc}"
             )
-        return saved
-
-    def _collect_host_core_dumps_via_spdk(
-        self, pod_name: str, node_ip: str, local_dir: str,
-        host_coredump_dir: str, max_size_mb: int,
-    ) -> list[str]:
-        """Collect host core dumps using the running SPDK pod.
-
-        The SPDK pod is privileged and can read the host filesystem
-        via ``/proc/1/root/``.
-        """
-        saved: list[str] = []
-        kexec = (
-            f"kubectl exec {pod_name} -c spdk-container "
-            f"-n {self.namespace} --"
-        )
-        label = node_ip.replace(".", "_")
-
-        # 1. List host core dumps
-        out, _ = self._exec_kubectl(
-            f"{kexec} bash -c "
-            f"'ls -la {host_coredump_dir}/ 2>/dev/null || echo EMPTY'",
-            supress_logs=True,
-        )
-        listing_path = os.path.join(local_dir, f"coredump_listing_{label}.txt")
-        with open(listing_path, "w") as f:
-            f.write(f"# Host core dumps on {node_ip} (via SPDK pod {pod_name})\n")
-            f.write("# Path: /var/lib/systemd/coredump/\n\n")
-            f.write(out)
-        saved.append(listing_path)
-
-        if "EMPTY" in out or not out.strip():
-            self.logger.info(
-                f"[coredump] No host-level core dumps on {node_ip}"
-            )
-            return saved
-
-        # Parse core file names from ls output
-        core_files = []
-        for line in out.strip().splitlines():
-            parts = line.split()
-            if parts and "core" in line.lower() and not line.startswith("total"):
-                fname = parts[-1]
-                core_files.append(fname)
-
-        if core_files:
-            self.logger.warning(
-                f"[coredump] HOST CORE DUMPS on {node_ip}: {core_files}"
-            )
-
-        # 2. Try coredumpctl list (best-effort)
-        try:
-            out, _ = self._exec_kubectl(
-                f"{kexec} bash -c "
-                f"'chroot /proc/1/root coredumpctl list --no-pager "
-                f"2>/dev/null || echo COREDUMPCTL_UNAVAILABLE'",
-                supress_logs=True,
-                timeout=60,
-            )
-            if "COREDUMPCTL_UNAVAILABLE" not in out and out.strip():
-                fpath = os.path.join(
-                    local_dir, f"coredumpctl_list_{label}.txt"
-                )
-                with open(fpath, "w") as f:
-                    f.write(out)
-                saved.append(fpath)
-                self.logger.info(
-                    f"[coredump] Saved coredumpctl list for {node_ip}"
-                )
-        except Exception as exc:
-            self.logger.info(
-                f"[coredump] coredumpctl list unavailable on {node_ip}: {exc}"
-            )
-
-        # 3. Try coredumpctl info (best-effort, contains stack traces)
-        if core_files:
-            try:
-                out, _ = self._exec_kubectl(
-                    f"{kexec} bash -c "
-                    f"'chroot /proc/1/root coredumpctl info --no-pager "
-                    f"2>/dev/null || true'",
-                    supress_logs=True,
-                    timeout=120,
-                )
-                if out and out.strip():
-                    fpath = os.path.join(
-                        local_dir, f"coredumpctl_info_{label}.txt"
-                    )
-                    with open(fpath, "w") as f:
-                        f.write(out)
-                    saved.append(fpath)
-                    self.logger.info(
-                        f"[coredump] Saved coredumpctl info for {node_ip}"
-                    )
-            except Exception as exc:
-                self.logger.info(
-                    f"[coredump] coredumpctl info unavailable on "
-                    f"{node_ip}: {exc}"
-                )
-
-        # 4. Copy actual core dump files under size threshold
-        for fname in core_files:
-            host_path = f"{host_coredump_dir}/{fname}"
-            try:
-                size_out, _ = self._exec_kubectl(
-                    f"{kexec} bash -c "
-                    f"'stat -c %s {shlex.quote(host_path)} 2>/dev/null "
-                    f"|| echo 0'",
-                    supress_logs=True,
-                )
-                size_bytes = int(size_out.strip() or "0")
-                size_mb = size_bytes / (1024 * 1024)
-                self.logger.info(
-                    f"[coredump] {node_ip}: {fname} = {size_mb:.1f} MB"
-                )
-                if max_size_mb > 0 and size_mb > max_size_mb:
-                    self.logger.warning(
-                        f"[coredump] Skipping copy of {fname} on {node_ip} "
-                        f"({size_mb:.1f} MB > {max_size_mb} MB limit)"
-                    )
-                    continue
-            except Exception:
-                self.logger.warning(
-                    f"[coredump] Cannot stat {fname} on {node_ip}"
-                )
-                continue
-
-            safe_name = fname.replace(":", "_")
-            local_path = os.path.join(local_dir, f"{label}_{safe_name}")
-            tmp_path = f"/tmp/coredump_{safe_name}"
-            try:
-                # Copy from host path (via /proc/1/root) to temp in container
-                self._exec_kubectl(
-                    f"{kexec} bash -c "
-                    f"'cp {shlex.quote(host_path)} {tmp_path}'",
-                    supress_logs=True,
-                    timeout=600,
-                )
-                # kubectl cp from container temp to local
-                self._exec_kubectl(
-                    f"kubectl cp -n {self.namespace} "
-                    f"{pod_name}:{tmp_path} -c spdk-container "
-                    f"{shlex.quote(local_path)}",
-                    supress_logs=True,
-                    timeout=600,
-                )
-                self._exec_kubectl(
-                    f"{kexec} rm -f {tmp_path}", supress_logs=True
-                )
-                if os.path.exists(local_path):
-                    self.logger.info(
-                        f"[coredump] Copied host core dump {fname} from "
-                        f"{node_ip} ({size_mb:.1f} MB) -> {local_path}"
-                    )
-                    saved.append(local_path)
-            except Exception as exc:
-                self.logger.warning(
-                    f"[coredump] Failed to copy {fname} from "
-                    f"{node_ip}: {exc}"
-                )
-                # Clean up temp file on failure
-                try:
-                    self._exec_kubectl(
-                        f"{kexec} rm -f {tmp_path}", supress_logs=True
-                    )
-                except Exception:
-                    pass
-
         return saved
 
     def _collect_host_core_dumps_fallback(
