@@ -14,6 +14,7 @@ import uuid as uuid_module
 
 from simplyblock_core import db_controller as db_module, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core import snapshot_retention
@@ -350,25 +351,159 @@ def _has_dependent_clone(snapshot_uuid):
 # --------------------------------------------------------------------------- #
 
 def failover_policy(policy_id):
-    """Fail over every volume following *policy_id*. Idempotent per volume."""
+    """Fail over every volume following *policy_id*. Idempotent per volume.
+
+    A consistency-group policy fails over as ONE unit: every member is pinned
+    to the same group generation (see _resolve_group_failover_generation)
+    instead of each volume's own newest replicated snapshot.
+    """
     policy = db.get_replication_policy_by_id(policy_id)
-    return _failover_volumes(db.get_lvols_by_replication_policy(policy.get_id()),
-                             f"policy {policy.policy_name}")
+    volumes = db.get_lvols_by_replication_policy(policy.get_id())
+    pinned = None
+    if getattr(policy, "consistency_group", False):
+        try:
+            _, pinned = _resolve_group_failover_generation(policy, volumes)
+        except ReplicationConfigError as e:
+            logger.error("Group fail-over of policy %s refused: %s",
+                         policy.policy_name, e)
+            return [{"lvol_id": v.get_id(), "status": "failed", "detail": str(e)}
+                    for v in volumes]
+    return _failover_volumes(volumes, f"policy {policy.policy_name}", pinned=pinned)
 
 
 def failover_target(target_id):
     """Fail over every volume whose policy points at *target_id*."""
     target = db.get_replication_target_by_id(target_id)
-    volumes = []
+    results = []
     for policy in db.get_replication_policies(target.cluster_id):
         if policy.target_id.split('/')[-1] != target.uuid:
             continue
-        volumes.extend(db.get_lvols_by_replication_policy(policy.get_id()))
-    return _failover_volumes(volumes, f"target {target.target_name}")
+        # Through failover_policy, so a consistency-group policy keeps its
+        # group-wide generation pinning on the target-scoped path too.
+        results.extend(failover_policy(policy.get_id()))
+    return results
 
 
-def _failover_volumes(volumes, what):
-    """Per-volume results, so a partial failure is visible instead of silent."""
+def _settled_relationship(lvol_id):
+    """The volume's relationship if it is already failed over, else None."""
+    rep = _active_relationship(lvol_id)
+    if rep is not None and rep.state in (LVolReplication.STATE_FAILED_OVER,
+                                         LVolReplication.STATE_CUTOVER_DONE):
+        return rep
+    return None
+
+
+def _resolve_group_failover_generation(policy, volumes):
+    """The one generation every pending member fails over to.
+
+    A consistency group restores as ONE crash-consistent cut, so every member
+    must clone from a snapshot of the SAME group generation. Selecting per
+    volume instead (each volume's own newest replicated snapshot) tears the
+    group apart the moment a new generation has finished replicating for some
+    members only — observed live on 2026-09-07 as a (3, 3, 4) restore.
+
+    A generation qualifies when every member still to be failed over has a
+    snapshot of it that is FULLY replicated, by the same rules
+    lvol_controller._last_replicated_target_snapshot applies per volume: the
+    replication task is DONE (a target record alone proves allocation, not
+    data), and the target copy still exists and is not being deleted by
+    retention.
+
+    Members that already failed over pin the choice: their clones' group
+    generation (target snapshot copies keep group_id/group_seq) is the
+    incumbent, and a resumed run must join it rather than resolve afresh —
+    a newer generation completing between the two passes would otherwise
+    split the group across two cuts.
+
+    Returns (seq, {lvol_id: source_snapshot_id}) for the pending members.
+    Raises ReplicationConfigError when no generation qualifies.
+    """
+    group = db.get_consistency_group_for_policy(policy.get_id())
+    if group is None:
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} declares a consistency group but "
+            f"has no group record")
+
+    pending_ids = []
+    incumbent_seqs = set()
+    for lvol in volumes:
+        rep = _settled_relationship(lvol.get_id())
+        if rep is None:
+            pending_ids.append(lvol.get_id())
+            continue
+        clone = getattr(rep, "target_lvol", None)
+        if clone is None or not getattr(clone, "cloned_from_snap", ""):
+            continue
+        try:
+            clone_base = db.get_snapshot_by_id(clone.cloned_from_snap)
+        except KeyError:
+            continue
+        if getattr(clone_base, "group_seq", 0):
+            incumbent_seqs.add(clone_base.group_seq)
+
+    if not pending_ids:
+        return 0, {}
+    if len(incumbent_seqs) > 1:
+        raise ReplicationConfigError(
+            f"Consistency group of policy {policy.policy_name} is already split "
+            f"across generations {sorted(incumbent_seqs)}; refusing to fail over "
+            f"more members")
+
+    replicated = {
+        task.function_params.get("snapshot_id")
+        for task in db.get_job_tasks(policy.cluster_id)
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+        and task.status == JobSchedule.STATUS_DONE
+    }
+
+    by_seq: dict = {}
+    for snap in db.get_snapshots():
+        if getattr(snap, "group_id", "") != group.get_id():
+            continue
+        seq = getattr(snap, "group_seq", 0)
+        lvol_id = snap.lvol.get_id() if snap.lvol else ""
+        if not seq or lvol_id not in pending_ids:
+            continue
+        if snap.get_id() not in replicated or not snap.target_replicated_snap_uuid:
+            continue
+        try:
+            target_copy = db.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+        except KeyError:
+            continue
+        if (target_copy.status == SnapShot.STATUS_IN_DELETION
+                or getattr(target_copy, "deleted", False)):
+            continue
+        by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
+
+    candidates = (sorted(incumbent_seqs) if incumbent_seqs
+                  else sorted(by_seq, reverse=True))
+    for seq in candidates:
+        covered = by_seq.get(seq, {})
+        if set(pending_ids) <= set(covered):
+            logger.info("Group fail-over of policy %s pinned to generation %d "
+                        "(%d pending member(s)%s)", policy.policy_name, seq,
+                        len(pending_ids),
+                        ", resuming the incumbent" if incumbent_seqs else "")
+            return seq, covered
+
+    missing = ""
+    if candidates:
+        best = candidates[0]
+        absent = sorted(set(pending_ids) - set(by_seq.get(best, {})))
+        missing = f"; generation {best} lacks {', '.join(absent)}"
+    raise ReplicationConfigError(
+        f"No group generation of policy {policy.policy_name} is fully "
+        f"replicated for all {len(pending_ids)} pending member(s); refusing a "
+        f"mixed-generation fail-over{missing}")
+
+
+def _failover_volumes(volumes, what, pinned=None):
+    """Per-volume results, so a partial failure is visible instead of silent.
+
+    ``pinned`` maps lvol id to the snapshot the volume MUST clone from
+    (consistency groups); a plain policy passes None and every volume picks
+    its own newest replicated snapshot.
+    """
     results = []
     logger.info("Failing over %d volume(s) of %s", len(volumes), what)
     for lvol in volumes:
@@ -381,7 +516,15 @@ def _failover_volumes(volumes, what):
                             "target_lvol_id": rep.target_lvol.get_id() if rep.target_lvol else ""})
             continue
         try:
-            ret = lvol_controller.replicate_lvol_on_target_cluster(lvol_id)
+            if pinned is None:
+                ret = lvol_controller.replicate_lvol_on_target_cluster(lvol_id)
+            elif not pinned.get(lvol_id):
+                results.append({"lvol_id": lvol_id, "status": "failed",
+                                "detail": "no snapshot of the group's fail-over generation"})
+                continue
+            else:
+                ret = lvol_controller.replicate_lvol_on_target_cluster(
+                    lvol_id, pin_snapshot_id=pinned[lvol_id])
         except Exception as e:                       # one volume must not stop the group
             logger.error("Fail-over of %s failed: %s", lvol_id, e)
             results.append({"lvol_id": lvol_id, "status": "failed", "detail": str(e)})

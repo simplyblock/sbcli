@@ -4148,7 +4148,8 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
-def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0):
+def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
+                                     pin_snapshot_id=None):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
 
@@ -4181,6 +4182,12 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generat
         snaps.append(snap)
 
     snaps.sort(key=lambda x: x.created_at, reverse=True)
+    # A pinned snapshot (consistency-group fail-over) is not a preference but
+    # a requirement: the group resolved ONE generation for every member, and
+    # falling back to a different snapshot here would silently split the
+    # group across two cuts. Filter, never widen.
+    if pin_snapshot_id:
+        snaps = [s for s in snaps if s.get_id() == pin_snapshot_id]
     # generation 0 = newest replicated point-in-time (the default and the only
     # behaviour before tiered retention existed). A higher generation walks
     # BACK through the retained history, which is what a retention schedule is
@@ -4336,7 +4343,7 @@ def _evict_stale_namespace(new_lvol, target_node, superseded=None):
 
 def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_uuid,
                                 cluster_id, attempts=3, generation=0,
-                                for_migration=False):
+                                for_migration=False, pin_snapshot_id=None):
     """Pick the last fully replicated target snapshot and clone from it ATOMICALLY.
 
     Selecting and then cloning as two unsynchronised steps loses the data: the
@@ -4358,8 +4365,13 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
     """
     for _ in range(attempts):
         snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
-                                                    generation=generation)
+                                                    generation=generation,
+                                                    pin_snapshot_id=pin_snapshot_id)
         if not snapshot:
+            if pin_snapshot_id:
+                return None, None, (
+                    f"Pinned snapshot {pin_snapshot_id} is no longer a valid "
+                    f"fail-over point (pruned or unreplicated)")
             return None, None, (
                 f"No replicated snapshot on target for generation {generation}"
                 if generation else "No replicated snapshot on target yet")
@@ -4472,7 +4484,7 @@ def _retire_source_data_path(db_controller, lvol):
                            "on %s failed: %s", lvol.get_id(), node_id, e)
 
 
-def replicate_lvol_on_target_cluster(lvol_id, generation=0):
+def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -4529,7 +4541,8 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0):
 
     new_lvol, _snapshot, error = _clone_from_last_replicated(
         db_controller, lvol_id, lvol, target_node,
-        target_pool_uuid, source_node.cluster_id, generation=generation)
+        target_pool_uuid, source_node.cluster_id, generation=generation,
+        pin_snapshot_id=pin_snapshot_id)
     if error:
         logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
         return False, error

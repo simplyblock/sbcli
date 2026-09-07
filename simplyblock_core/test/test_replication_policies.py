@@ -9,7 +9,9 @@ from simplyblock_core.controllers import replication_policy_controller as rpc
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.replication import (ConsistencyGroup, ReplicationPolicy,
+                                                 ReplicationTarget)
 from simplyblock_core.models.snapshot import SnapShot
 
 
@@ -17,12 +19,14 @@ class _FakeDB:
     kv_store = object()
 
     def __init__(self, clusters=("CL_SRC", "CL_TGT"), pools=(), lvols=(),
-                 snapshots=(), replications=()):
+                 snapshots=(), replications=(), groups=(), tasks=()):
         self._clusters = list(clusters)
         self._pools = list(pools)
         self._lvols = list(lvols)
         self._snapshots = list(snapshots)
         self._replications = list(replications)
+        self._groups = list(groups)
+        self._tasks = list(tasks)
         self.written = []
         self.removed = []
 
@@ -113,6 +117,16 @@ class _FakeDB:
 
     def get_lvol_replication_objects(self):
         return self._replications
+
+    def get_consistency_group_for_policy(self, policy_id):
+        wanted = policy_id.split('/')[-1] if policy_id else ""
+        for g in self._groups:
+            if g.policy_id.split('/')[-1] == wanted:
+                return g
+        return None
+
+    def get_job_tasks(self, cluster_id):
+        return self._tasks
 
 
 def _install(monkeypatch, db):
@@ -461,6 +475,157 @@ def test_group_failover_reports_per_volume_failures(monkeypatch):
     results = rpc.failover_policy(policy_id)
     assert results[0]["status"] == "failed" and "node offline" in results[0]["detail"]
     assert results[1]["status"] == "failed_over", "one bad volume must not stop the group"
+
+
+# --------------------------------------------------------------------------- #
+# Consistency-group fail-over: one generation for the whole group
+# --------------------------------------------------------------------------- #
+
+def _cg_group(policy_id, members, last_seq):
+    g = ConsistencyGroup()
+    g.uuid = "CG1"
+    g.cluster_id = "CL_SRC"
+    g.policy_id = policy_id
+    g.last_group_seq = last_seq
+    g.members = {m: {"joined_seq": 1, "removed_seq": 0} for m in members}
+    return g
+
+
+def _done_replication_task(snapshot_id):
+    return type("T", (), {
+        "function_name": JobSchedule.FN_SNAPSHOT_REPLICATION,
+        "status": JobSchedule.STATUS_DONE,
+        "function_params": {"snapshot_id": snapshot_id},
+    })()
+
+
+def _group_snap(uuid, lvol, group, seq, target=""):
+    s = _snap(uuid, lvol, target=target)
+    s.group_id = group.get_id()
+    s.group_seq = seq
+    return s
+
+
+def _cg_policy(monkeypatch, db):
+    """A CG policy without add_policy's group-creation side effect (the group
+    record is installed directly into the fake)."""
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+    db.get_replication_policy_by_id(policy_id).consistency_group = True
+    return policy_id
+
+
+def test_cg_failover_pins_every_member_to_one_common_generation(monkeypatch):
+    """Fail-over of a consistency group must cut EVERY member at the newest
+    generation fully replicated for ALL members — not at each volume's own
+    newest replicated snapshot. Regression: run 2026-09-07 restored
+    generations (3, 3, 4) because generation 4 had replicated for one member
+    only."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _cg_policy(monkeypatch, db)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    db._lvols.extend([lv1, lv2])
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=2)
+    db._groups.append(group)
+
+    # Generation 1 fully replicated for both members; generation 2 only for
+    # LV2 (LV1's copy has no target yet).
+    remote = _lvol("REP")
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"), _snap("T1_LV1", remote),
+        _group_snap("S1_LV2", lv2, group, 1, target="T1_LV2"), _snap("T1_LV2", remote),
+        _group_snap("S2_LV1", lv1, group, 2),
+        _group_snap("S2_LV2", lv2, group, 2, target="T2_LV2"), _snap("T2_LV2", remote),
+    ])
+    db._tasks.extend([_done_replication_task("S1_LV1"),
+                      _done_replication_task("S1_LV2"),
+                      _done_replication_task("S2_LV2")])
+
+    pins: dict[str, str] = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"T_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_policy(policy_id)
+    assert all(r["status"] == "failed_over" for r in results), results
+    assert pins == {"LV1": "S1_LV1", "LV2": "S1_LV2"}, \
+        "every member must be pinned to generation 1, the newest COMMON one"
+
+
+def test_cg_failover_refuses_without_a_common_generation(monkeypatch):
+    """No generation replicated for every member: failing over anything would
+    tear the group, so every volume is refused and none is cloned."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _cg_policy(monkeypatch, db)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    db._lvols.extend([lv1, lv2])
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=2)
+    db._groups.append(group)
+
+    remote = _lvol("REP")
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"), _snap("T1_LV1", remote),
+        _group_snap("S2_LV2", lv2, group, 2, target="T2_LV2"), _snap("T2_LV2", remote),
+    ])
+    db._tasks.extend([_done_replication_task("S1_LV1"),
+                      _done_replication_task("S2_LV2")])
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        lambda *a, **k: pytest.fail("no member may be failed over"))
+    results = rpc.failover_policy(policy_id)
+    assert {r["status"] for r in results} == {"failed"}
+    assert "generation" in results[0]["detail"]
+
+
+def test_cg_failover_resume_pins_to_the_incumbent_generation(monkeypatch):
+    """A partial re-run must finish on the generation the first pass cut, even
+    when a newer generation has since fully replicated — otherwise the resumed
+    members land on a different cut than the settled ones."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _cg_policy(monkeypatch, db)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    db._lvols.extend([lv1, lv2])
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=2)
+    db._groups.append(group)
+
+    remote = _lvol("REP")
+    t1_lv1 = _group_snap("T1_LV1", remote, group, 1)   # target copies keep provenance
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"), t1_lv1,
+        _group_snap("S1_LV2", lv2, group, 1, target="T1_LV2"), _snap("T1_LV2", remote),
+        _group_snap("S2_LV1", lv1, group, 2, target="T2_LV1"), _snap("T2_LV1", remote),
+        _group_snap("S2_LV2", lv2, group, 2, target="T2_LV2"), _snap("T2_LV2", remote),
+    ])
+    db._tasks.extend([_done_replication_task(s) for s in
+                      ("S1_LV1", "S1_LV2", "S2_LV1", "S2_LV2")])
+
+    # LV1 already failed over on generation 1: its clone derives from T1_LV1.
+    clone = _lvol("FO_LV1")
+    clone.cloned_from_snap = "T1_LV1"
+    rep = LVolReplication()
+    rep.source_lvol = lv1
+    rep.target_lvol = clone
+    rep.state = LVolReplication.STATE_FAILED_OVER
+    db._replications.append(rep)
+
+    pins: dict[str, str] = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"T_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_policy(policy_id)
+    assert results[0]["status"] == "skipped"
+    assert results[1]["status"] == "failed_over"
+    assert pins == {"LV2": "S1_LV2"}, \
+        "the resumed member must join the incumbent generation 1, not the newer 2"
 
 
 def test_relationship_resolves_source_to_target_and_back(monkeypatch):
