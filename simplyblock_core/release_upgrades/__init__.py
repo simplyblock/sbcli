@@ -60,6 +60,15 @@ class UpgradePlugin:
         raise NotImplementedError
 
 
+def release_matches(running: str, wanted: str) -> bool:
+    """True when ``running`` is ``wanted`` or a more specific build of it.
+
+    Prefix semantics on ``.``/``-``-separated parts, so "RC26.3" covers
+    "RC26.3-RC1". Also used by cluster_ops to gate release-specific steps.
+    """
+    return _release_matches(running, wanted)
+
+
 def _release_matches(running: str, wanted: str) -> bool:
     def parts(version):
         return str(version).replace("-", ".").split(".")
