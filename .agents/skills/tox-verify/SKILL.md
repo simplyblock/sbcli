@@ -94,7 +94,7 @@ tox run
 
 This covers `lint`, `types`, `unit`, `integration` (still excluding `slow`), and their
 `py314t-*` twins on the free-threaded interpreter — the most expensive step, so it runs once,
-last. A change that touches runtime behaviour must be green on both the py3.9 and py314t
+last. A change that touches runtime behaviour must be green on both the py3.11 and py314t
 twins; the GIL-off build is where a previously-masked data race surfaces.
 
 Only report success after this passes clean.

@@ -73,7 +73,7 @@ tox run -e integration-slow # Slow tier only (the migration suite, ~20min).
 ```
 
 Each tier also has a `py314t-` twin (`tox run -e py314t-unit`, `py314t-integration`) running the
-free-threaded 3.14 interpreter the container image ships; the un-prefixed envs use python3.9, the
+free-threaded 3.14 interpreter the container image ships; the un-prefixed envs use python3.11, the
 floor `requires-python` promises. tox-uv fetches both, so neither has to be installed on the host.
 
 `passenv` is deliberately minimal — it lists only `PYTEST_ADDOPTS`, so a machine-specific value

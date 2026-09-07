@@ -7,7 +7,7 @@ This file provides guidance to AI coding agents when working with code in this r
 Simplyblock Control Plane and CLI (`sbctl`) — a Kubernetes-native distributed block storage solution. FoundationDB backend.
 
 Packaging is PEP 621 (`pyproject.toml`, setuptools backend) and dependencies are locked in
-`uv.lock`. `requires-python` is `>=3.9` because the published `sbctl` wheel is installed on
+`uv.lock`. `requires-python` is `>=3.11` because the published `sbctl` wheel is installed on
 management nodes with whatever system python they have; **the container image runs free-threaded
 3.14 (`3.14t`)**, so the supported range spans both and CI tests both ends.
 
@@ -34,7 +34,7 @@ unaffected.
 Two tiers via tox: `tox run -e unit` (fast, no infra) and `tox run -e integration` (Docker + `libfdb_c` required). See `tests/AGENTS.md` for tier criteria, the testcontainers FDB fixture, and how to reuse an existing dev-compose FDB instance.
 
 Both tiers have a `py314t-` twin (`tox run -e py314t-unit`) running the image's free-threaded
-interpreter. The un-prefixed envs use python3.9, the floor the published wheel must keep working
+interpreter. The un-prefixed envs use python3.11, the floor the published wheel must keep working
 on. tox-uv fetches both interpreters, so neither needs to be installed on the host. **A change
 that touches runtime behaviour must be green on both** — the GIL-off build is where a
 previously-masked data race surfaces.
