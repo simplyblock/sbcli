@@ -1,4 +1,3 @@
-import pprint
 import json
 from collections import ChainMap
 from collections.abc import Callable, Mapping
@@ -284,7 +283,7 @@ class BaseModel:
         return data
 
     def to_str(self):
-        return pprint.pformat(self.to_dict())
+        return str(self.to_dict())
 
     # Per-chunk row count for one range-read transaction. An unbounded
     # get_range_startswith over a large prefix (e.g. the job-task table during
