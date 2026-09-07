@@ -2872,6 +2872,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
 
+        # Grafana reads provisioning at startup, and its upstream image is not
+        # matched by the loop above, so the alert rules `pip` refreshed in the
+        # directory it mounts are only picked up here. Logged, not raised: a
+        # Grafana that will not restart must not fail the whole update.
+        if not cluster.disable_monitoring:
+            try:
+                cluster_docker.services.get(
+                    constants.MONITORING_GRAFANA_SERVICE).update(force_update=True)
+                logger.info("Restarted Grafana to reload the alert rules")
+            except Exception as e:
+                logger.error(f"Failed to restart Grafana: {e}")
+
         logger.info("Done updating mgmt cluster")
 
     elif cluster.mode == "kubernetes":
