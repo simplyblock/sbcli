@@ -1,4 +1,3 @@
-# coding=utf-8
 """End-to-end tests for the SPDK HTTP proxy.
 
 A real unix-socket server stands in for SPDK and the real proxy application is
