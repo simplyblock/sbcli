@@ -17,7 +17,6 @@ import hmac
 import json
 import logging
 import math
-import ssl
 import sys
 import time
 from collections.abc import AsyncGenerator
@@ -728,10 +727,7 @@ def main() -> None:
         access_log=False,
         limit_concurrency=settings.max_concurrent_connections,
         timeout_keep_alive=settings.keepalive_timeout,
-        ssl_certfile=tls.tls_certificate if tls.tls_serve else None,
-        ssl_keyfile=tls.tls_key if tls.tls_serve else None,
-        ssl_ca_certs=tls.tls_certificate_authority if tls.tls_client_auth != ssl.CERT_NONE else None,
-        ssl_cert_reqs=tls.tls_client_auth,
+        ssl_context_factory=tls.uvicorn_ssl_context_factory(),
     )).run()
 
 
