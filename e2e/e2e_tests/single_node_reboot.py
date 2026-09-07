@@ -208,7 +208,7 @@ class TestSingleNodeReboot(TestClusterBase):
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                           "online",
                                                           timeout=300)
-            raise exp
+            raise
 
         # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
         reboot_thread.join()
@@ -454,7 +454,7 @@ class TestHASingleNodeReboot(TestClusterBase):
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                               "online",
                                                               timeout=300)
-                raise exp
+                raise
 
             # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
             reboot_thread.join()

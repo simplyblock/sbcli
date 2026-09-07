@@ -171,7 +171,7 @@ class TestClusterBase:
                 retry -= 1
                 if retry == 0:
                     self.logger.info(f"Retry attemp exhausted. API failed with: {e}. Exiting")
-                    raise e
+                    raise
                 self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
         self._validate_storage_node_health()
         # Populate sn_nodes with storage node UUIDs for tests that need them

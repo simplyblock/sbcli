@@ -149,7 +149,7 @@ class TestSingleNodeFailure(TestClusterBase):
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                           "online",
                                                           timeout=300)
-            raise exp
+            raise
 
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
         self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
@@ -345,7 +345,7 @@ class TestHASingleNodeFailure(TestClusterBase):
                 self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid,
                                                               "online",
                                                               timeout=300)
-                raise exp
+                raise
 
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)

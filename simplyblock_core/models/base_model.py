@@ -352,11 +352,11 @@ class BaseModel:
                 else:
                     begin = bytes(kvs[-1].key) + b'\x00'
             return objects
-        except Exception as e:
+        except Exception:
             from simplyblock_core import utils
             logger = utils.get_logger(__name__)
             logger.exception('Error reading from FDB')
-            raise e
+            raise
 
     def get_last(self, kv_store):
         id = self.get_db_id(" ")

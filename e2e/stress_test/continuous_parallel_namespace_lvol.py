@@ -2663,7 +2663,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 retry -= 1
                 if retry == 0:
                     self.logger.info(f"Retry attempt exhausted. API failed with: {e}. Exiting")
-                    raise e
+                    raise
                 self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
                 sleep_n_sec(10)
 

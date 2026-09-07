@@ -159,8 +159,6 @@ class TestRebootNodeHost(TestClusterBase):
             for node in self.sbcli_utils.get_storage_nodes()["results"]:
                 assert node["status"] == "online", f"{node['id']} is not online"
                 assert node["health_check"], f"{node['id']} health check failed"
-        except Exception as e:
-            raise e
         finally:
             proxmox.start_vm(proxmox_id, vm_id, 600)
 

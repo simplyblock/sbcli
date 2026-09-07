@@ -115,10 +115,7 @@ class TestMgmtNodeReboot(TestClusterBase):
         # Step: Reboot mgmt node
         proxmox_id, vm_id = proxmox.get_proxmox(self.mgmt_nodes[0])
         self.logger.info(f"Rebooting VM {vm_id} on proxmox {proxmox_id}")
-        try:
-            proxmox.stop_vm(proxmox_id, vm_id)
-        except Exception as e:
-            raise e
+        proxmox.stop_vm(proxmox_id, vm_id)
 
         if mode == "after_fio":
             self.logger.info("Waiting for all FIO threads to complete before reboot...")

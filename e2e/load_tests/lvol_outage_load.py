@@ -239,8 +239,6 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
                     self.logger.info(f"Lvol create during count {count} failed!")
                     raise exception
                 self.write_to_log(count, shutdown_time, restart_time)
-        except Exception as e:
-            raise e
         finally:
             results = self.parse_existing_log()
             self.generate_graph(results)

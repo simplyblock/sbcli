@@ -219,7 +219,7 @@ def get_docker_client(cluster_id=None):
             return docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
         except Exception as e:
             print(e)
-            raise e
+            raise
 
     raise RuntimeError("No docker client found for this IP")
 

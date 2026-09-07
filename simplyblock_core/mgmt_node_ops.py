@@ -67,34 +67,30 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: Se
                                                      cluster_data['uuid'], cluster_data['secret'])
 
         logger.info("Joining docker swarm...")
-        try:
-            cluster_docker = utils.get_docker_client(cluster_id)
-            docker_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-            join_token = cluster_docker.swarm.attrs['JoinTokens']['Manager']
-            node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
-            if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-                logger.info("Node is part of another swarm, leaving swarm")
-                try:
-                    cluster_docker.nodes.get(node_docker.info()["Swarm"]["NodeID"]).remove(force=True)
-                except Exception:
-                    pass
-                node_docker.swarm.leave(force=True)
-                time.sleep(5)
-
-            node_docker.swarm.join([f"{docker_ip}:2377"], join_token)
-
-            retries = 10
-            while retries > 0:
-                if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-                    break
-                logger.info("Waiting for node to be active...")
-                retries -= 1
-                time.sleep(2)
-            logger.info("Joining docker swarm > Done")
+        cluster_docker = utils.get_docker_client(cluster_id)
+        docker_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+        join_token = cluster_docker.swarm.attrs['JoinTokens']['Manager']
+        node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
+        if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+            logger.info("Node is part of another swarm, leaving swarm")
+            try:
+                cluster_docker.nodes.get(node_docker.info()["Swarm"]["NodeID"]).remove(force=True)
+            except Exception:
+                pass
+            node_docker.swarm.leave(force=True)
             time.sleep(5)
 
-        except Exception as e:
-            raise e
+        node_docker.swarm.join([f"{docker_ip}:2377"], join_token)
+
+        retries = 10
+        while retries > 0:
+            if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
+                break
+            logger.info("Waiting for node to be active...")
+            retries -= 1
+            time.sleep(2)
+        logger.info("Joining docker swarm > Done")
+        time.sleep(5)
 
     elif mode == "kubernetes":
         dev_ip = mgmt_ip

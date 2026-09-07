@@ -277,7 +277,7 @@ class ManagementStressUtils:
             print(f"Error executing command '{cmd}': {e.stderr.strip()}")
             if error_ok:
                 return ""
-            raise e
+            raise
 
     @staticmethod
     def measure_cmd_time(cmd):

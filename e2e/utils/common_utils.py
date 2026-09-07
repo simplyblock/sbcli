@@ -273,7 +273,7 @@ class CommonUtils:
 
         except Exception as e:
             print(f"Error rebooting instance {instance_id}: {e}")
-            raise e
+            raise
 
     def reboot_proxmox_node(self, ip):
         """Reboots a Proxmox node.
