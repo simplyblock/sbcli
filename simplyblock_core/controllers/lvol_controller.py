@@ -2290,7 +2290,6 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
             pool_policy_map[att.target_id] = pol
 
     for lvol in lvols:
-        logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
         size_used = 0

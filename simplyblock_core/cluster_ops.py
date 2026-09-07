@@ -2578,7 +2578,6 @@ def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
         if record.event in ["device_status", "node_status"]:
             msg = msg+f" ({record.count})"
 
-        logger.debug(record)
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,

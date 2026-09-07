@@ -985,7 +985,6 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
 
     data = []
     for snap in snaps:
-        logger.debug(snap)
         clones = clones_by_snap.get(snap.get_id(), [])
         d = {
             "UUID": snap.uuid,
