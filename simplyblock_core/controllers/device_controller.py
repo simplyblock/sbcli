@@ -1075,7 +1075,11 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     device_set_unavailable(device_id, cause=cause)
 
     logger.info("Disconnecting device from all nodes")
-    distr_controller.disconnect_device(device)
+    # Detach the peers' controllers ONLY when a human asked for this removal.
+    # See distr_controller.disconnect_device() for why an unsolicited removal
+    # must leave them attached.
+    distr_controller.disconnect_device(
+        device, detach_controllers=(cause == CAUSE_ADMIN_REMOVE))
 
     logger.info("Removing device fabric")
     rpc_client = snode.rpc_client()

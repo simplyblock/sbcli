@@ -8381,6 +8381,19 @@ def get_restart_phase(node_id, lvs_name):
                 fresh.restart_phases.pop(lvs_name, None)
 
         db_controller.atomic_update(node, _clear)
+
+        # Clearing the phase is only half the repair. drain_restart_queue is
+        # otherwise called from exactly two places, both inside
+        # _set_restart_phase (BLOCKED->POST_UNBLOCK and POST_UNBLOCK->""), so
+        # a phase retired HERE leaves everything queued against it stranded
+        # for good -- the same permanent black hole the self-heal exists to
+        # prevent, just reached one step later.
+        try:
+            drain_restart_queue(node_id, lvs_name)
+        except Exception as e:
+            logger.warning(
+                "Drain of the restart queue for %s on %s after clearing a "
+                "stale phase failed: %s", lvs_name, node_id[:8], e)
         return ""
     except (KeyError, Exception):
         return ""
@@ -9240,6 +9253,123 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             snode, leader_node, primary_node, activation_mode=False, force=force)
 
 
+#: Cap on concurrent lvol subsystem registrations against a single SPDK.
+#: The previous 50, at rpc timeout=10/retry=2 against a node that is still
+#: finishing its rebuild, is how partial registrations happened in the first
+#: place -- enough of them time out that some lvols never land.
+LVOL_REGISTER_MAX_WORKERS = 10
+
+
+def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
+    """Register every lvol's subsystem on ``snode`` and report what failed.
+
+    Returns a list of ``(lvol_id, reason)`` for lvols that are not serving on
+    ``snode`` afterwards; an empty list means every one is registered AND
+    verified.
+
+    Both call sites used to do::
+
+        for lvol in lvol_list:
+            executor.submit(add_lvol_thread, lvol, snode, ...)
+        executor.shutdown(wait=True)
+
+    which discards every Future. ``shutdown(wait=True)`` waits for the work to
+    finish but never calls ``result()``, so an exception inside
+    add_lvol_thread stays captured in the thrown-away Future -- and it does
+    not even need to raise: it reports failure as ``(False, msg)``, dropped
+    just the same. The caller then cleared the restart phase and set
+    lvstore_status="ready", declaring success over a partially registered
+    node.
+
+    2026-09-05: LVS_13's tertiary came back with subsystems missing for some
+    of its lvols. The phase cycle was clean (pre_block 22:22:02 through
+    cleared 22:22:11) and not one line was logged, because every failure
+    signal from this loop was discarded. The volume then served fewer paths
+    than it believed it had -- invisible above the client, which connects
+    successfully and simply has one path fewer.
+
+    So: collect the results; retry the failures once (the likely cause is an
+    RPC timeout against a node still busy rebuilding, which a second attempt
+    usually wins); then VERIFY against the node rather than trusting a return
+    value, because a swallowed failure is precisely what this exists to stop.
+    """
+    if not lvol_list:
+        return []
+
+    def _submit_all(items):
+        out = {}
+        workers = max(1, min(LVOL_REGISTER_MAX_WORKERS, len(items)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {
+                ex.submit(add_lvol_thread, lv, snode,
+                          lvol_ana_state=lvol_ana_state): lv
+                for lv in items
+            }
+            for fut, lv in futures.items():
+                try:
+                    res = fut.result()
+                except Exception as e:
+                    out[lv.get_id()] = "raised: %s" % e
+                    continue
+                # add_lvol_thread returns (ok, msg). Tolerate a bare truthy
+                # return so a signature change cannot silently re-open the
+                # hole this function closes.
+                if isinstance(res, tuple):
+                    ok = res[0] if res else False
+                    msg = res[1] if len(res) > 1 else None
+                else:
+                    ok, msg = bool(res), None
+                if not ok:
+                    out[lv.get_id()] = msg or "registration returned False"
+        return out
+
+    failures = _submit_all(lvol_list)
+
+    if failures:
+        logger.warning(
+            "lvol registration on %s%s: %d of %d failed, retrying once: %s",
+            snode.get_id()[:8], (" for %s" % lvs_label) if lvs_label else "",
+            len(failures), len(lvol_list), sorted(failures))
+        failures = _submit_all(
+            [lv for lv in lvol_list if lv.get_id() in failures])
+
+    try:
+        probe = snode.rpc_client(timeout=10, retry=1)
+        for lvol in lvol_list:
+            if lvol.get_id() in failures:
+                continue
+            try:
+                if not probe.subsystem_get(lvol.nqn):
+                    failures[lvol.get_id()] = \
+                        "no subsystem present after registration"
+            except Exception as e:
+                logger.warning("verify of lvol %s on %s raised: %s",
+                               lvol.get_id(), snode.get_id()[:8], e)
+    except Exception as e:
+        logger.warning("lvol registration verify pass on %s unavailable: %s",
+                       snode.get_id()[:8], e)
+
+    if failures:
+        # ERROR and greppable: the lvol monitor repairs non-leaders on its
+        # next cycle (try_repair_lvol_on_non_leader), so this is usually
+        # transient -- but it must never again be silent, because when the
+        # repair does NOT stick there is otherwise nothing to correlate.
+        logger.error(
+            "INCOMPLETE LVOL REGISTRATION on %s%s: %d of %d lvols are not "
+            "serving after restart -- running below configured redundancy "
+            "until repaired: %s",
+            snode.get_id()[:8], (" (%s)" % lvs_label) if lvs_label else "",
+            len(failures), len(lvol_list),
+            ", ".join("%s: %s" % (k, v) for k, v in sorted(failures.items())))
+    else:
+        logger.info(
+            "Registered and verified %d lvol subsystem(s) on %s%s",
+            len(lvol_list), snode.get_id()[:8],
+            (" for %s" % lvs_label) if lvs_label else "")
+
+    return sorted(failures.items())
+
+
 def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primary_node, activation_mode=False, force=False):
     """Recreate a non-leader LVS on snode.
 
@@ -10027,10 +10157,8 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         # connected and leadership settles — cluster_activate sets the correct ANA
         # in a dedicated pass before flipping the cluster to ACTIVE).
         non_leader_ana_state = "inaccessible" if activation_mode else "non_optimized"
-        executor = ThreadPoolExecutor(max_workers=50)
-        for lvol in lvol_list:
-            executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state=non_leader_ana_state)
-        executor.shutdown(wait=True)
+        _register_lvols_on_node(lvol_list, snode, non_leader_ana_state,
+                                lvs_label=primary_node.lvstore)
 
         if not activation_mode:
             ### 10- add non-optimized path on tertiary to newly-restarted secondary's hublvol
@@ -11365,10 +11493,8 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         _deferred_lvol_verify()
 
         ### 9- add lvols to subsystems
-        executor = ThreadPoolExecutor(max_workers=50)
-        for lvol in lvol_list:
-            executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
-        executor.shutdown(wait=True)
+        _register_lvols_on_node(lvol_list, snode, lvol_ana_state,
+                                lvs_label=lvs_name)
 
         # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
         _release_block_gate()
