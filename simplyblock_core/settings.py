@@ -1,5 +1,6 @@
 import ssl
 from pathlib import Path
+from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
 from pydantic import BeforeValidator, Field, PlainSerializer, model_validator
@@ -98,12 +99,23 @@ class Settings(BaseSettings):
             )
         return self
 
+    def uvicorn_ssl_context_factory(self) -> Callable[..., ssl.SSLContext] | None:
+        """Return an ``ssl_context_factory`` for ``uvicorn.Config``, or None if TLS is not configured.
+
+        Given a factory, uvicorn skips building its own context out of the file
+        paths, which would be a second implementation of the same setup. None is
+        that argument's own default, so it reads as "no TLS" to uvicorn.
+        """
+        context = self.make_server_ssl_context()
+        return (lambda config, default_factory: context) if context is not None else None
+
     def make_server_ssl_context(self):
         """Return an SSLContext requiring client certificates, or None if TLS is not configured."""
         if not self.tls_serve:
             return None
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.load_cert_chain(self.tls_certificate, self.tls_key)
         ctx.verify_mode = self.tls_client_auth
         if self.tls_client_auth != ssl.CERT_NONE:
