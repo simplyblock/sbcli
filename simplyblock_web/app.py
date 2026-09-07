@@ -130,7 +130,7 @@ def main() -> None:
         app=app,
         host='0.0.0.0',
         port=int(os.environ.get('FLASK_PORT', 5000)),
-        log_level='debug',
+        log_level=constants.LOG_WEB_LEVEL,
         access_log=False,
         proxy_headers=True,
         forwarded_allow_ips='192.168.1.0/24',
