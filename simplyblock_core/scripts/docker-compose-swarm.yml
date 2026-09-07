@@ -269,6 +269,12 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   HAProxy:
+    # The only service that used to omit *service-base, so its logs never
+    # reached Graylog/OpenSearch and collect_logs.py -- which does ask for
+    # "HAProxy" -- always produced an empty file. That left no proxy-side view
+    # of the 2026-09-07 API stalls (no 5xx, no queue or timeout evidence) while
+    # investigating whether the load balancer was cutting requests off.
+    <<: *service-base
     image: haproxytech/haproxy-debian:latest
     deploy:
       mode: global

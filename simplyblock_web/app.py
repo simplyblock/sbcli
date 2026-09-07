@@ -20,12 +20,16 @@ from simplyblock_core import constants, utils as core_utils
 from simplyblock_core.settings import Settings
 from simplyblock_core.exceptions import PreconditionError
 
+# The root level is owned by get_logger(), which honours SIMPLYBLOCK_LOG_LEVEL.
+# Overriding it here (it used to be forced to the then-hardcoded-DEBUG
+# LOG_WEB_LEVEL) made the env var a no-op for the web process, so DEBUG could
+# not be turned off without a rebuild. Only this module's own logger is set,
+# and only to raise verbosity above the root when asked.
 logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
-logging.getLogger().setLevel(constants.LOG_WEB_LEVEL)
 
 # Prevent external libraries from logging secrets (tokens, response bodies)
-# at DEBUG level while keeping our own loggers at DEBUG.
+# at DEBUG level, whatever level our own loggers are set to.
 for _ext_logger_name in (
     "kubernetes.client.rest",
     "urllib3",
@@ -130,7 +134,9 @@ def main() -> None:
         app=app,
         host='0.0.0.0',
         port=int(os.environ.get('FLASK_PORT', 5000)),
-        log_level='debug',
+        # uvicorn takes an int level directly; follow the operator's setting
+        # rather than pinning the server's own loggers to debug.
+        log_level=constants.LOG_WEB_LEVEL,
         access_log=False,
         proxy_headers=True,
         forwarded_allow_ips='192.168.1.0/24',

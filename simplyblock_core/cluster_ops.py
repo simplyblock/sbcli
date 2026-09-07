@@ -2556,6 +2556,19 @@ def change_cluster_name(cluster_id, new_name) -> None:
 
 
 def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
+    """Return the newest `limit` cluster event records, shaped for display.
+
+    Do NOT log the records themselves here. `limit` is caller-supplied (the
+    Grafana event-alert rules pass 1000, `--log-limit`), and `EventObj.__repr__`
+    is `pprint.pformat(to_dict())` over a nested `object_dict` holding a whole
+    LVol -- so a `logger.debug(record)` in this loop expands one request into
+    ~780 records x ~150 lines. With the web API pinned to DEBUG that produced
+    1.7GB/hour of logs from an 8-rule alert group, overran the gelf driver's
+    non-blocking buffer (dropping ~80% of ALL control-plane logs), and the
+    pformat -- which `QueueHandler.prepare` runs on the *calling* thread --
+    starved the event loop: lvol creates on the affected worker stalled 11-38s
+    and CSI retried them into 409s (2026-09-07 incident).
+    """
     db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
@@ -2577,7 +2590,6 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
         if record.event in ["device_status", "node_status"]:
             msg = msg+f" ({record.count})"
 
-        logger.debug(record)
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,

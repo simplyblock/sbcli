@@ -29,8 +29,43 @@ KVD_DB_TIMEOUT_MS = 10000
 KVD_DB_BACKUP_PATH = "file:///etc/foundationdb/backup"
 SPK_DIR = '/home/ec2-user/spdk'
 LOG_LEVEL = logging.INFO
-LOG_WEB_LEVEL = logging.DEBUG
-LOG_WEB_DEBUG = True if LOG_WEB_LEVEL == logging.DEBUG else False
+
+
+#: Spelled out rather than derived from `logging`: `getLevelName` is deprecated
+#: for the str -> int direction and `getLevelNamesMapping` needs 3.11, while tox
+#: still builds on 3.9.
+_LOG_LEVEL_NAMES = {
+    "CRITICAL": logging.CRITICAL,
+    "FATAL": logging.CRITICAL,
+    "ERROR": logging.ERROR,
+    "WARNING": logging.WARNING,
+    "WARN": logging.WARNING,
+    "INFO": logging.INFO,
+    "DEBUG": logging.DEBUG,
+}
+
+
+def _parse_log_level(value, default=logging.INFO):
+    """Resolve a level name ('DEBUG', 'info', …) to a `logging` constant.
+
+    Unknown names fall back to `default` rather than raising: a typo in a
+    deploy-time environment variable must not stop the control plane from
+    starting.
+    """
+    if not value:
+        return default
+    return _LOG_LEVEL_NAMES.get(str(value).strip().upper(), default)
+
+
+#: Log level for the web API, and -- via `LOG_WEB_DEBUG` below -- the level
+#: every service in the swarm stack is deployed with (cluster_ops.deploy_stack
+#: passes it as $LOG_LEVEL, which becomes each service's
+#: SIMPLYBLOCK_LOG_LEVEL). This was hardcoded to DEBUG, so no operator could
+#: turn DEBUG off without a rebuild, and the whole control plane ran verbose in
+#: production -- see the get_logs() docstring for what that cost on 2026-09-07.
+#: Now operator-settable, default INFO.
+LOG_WEB_LEVEL = _parse_log_level(get_config_var("SIMPLYBLOCK_LOG_LEVEL"), logging.INFO)
+LOG_WEB_DEBUG = LOG_WEB_LEVEL == logging.DEBUG
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
