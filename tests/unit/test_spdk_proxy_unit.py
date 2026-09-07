@@ -897,29 +897,31 @@ class TestMethodLabelCardinality(unittest.TestCase):
     """The method label is caller-supplied, so its value set must be bounded."""
 
     def setUp(self):
-        self.metrics = proxy_mod.ProxyMetrics()
+        # The budget is module state shared with every other test in the process.
+        self.addCleanup(setattr, proxy_mod, "_known_methods", proxy_mod._known_methods)
+        proxy_mod._known_methods = set()
 
     def test_known_methods_are_passed_through(self):
-        self.assertEqual(self.metrics.method_label("bdev_get_bdevs"), "bdev_get_bdevs")
+        self.assertEqual(proxy_mod.method_label("bdev_get_bdevs"), "bdev_get_bdevs")
 
     def test_methods_past_the_cap_collapse(self):
         for i in range(proxy_mod.MAX_METHOD_LABELS):
-            self.metrics.method_label(f"method_{i}")
+            proxy_mod.method_label(f"method_{i}")
 
         self.assertEqual(
-            self.metrics.method_label("one_too_many"), proxy_mod.OTHER_METHOD_LABEL)
+            proxy_mod.method_label("one_too_many"), proxy_mod.OTHER_METHOD_LABEL)
 
     def test_a_method_already_seen_survives_the_cap(self):
-        self.metrics.method_label("early")
+        proxy_mod.method_label("early")
         for i in range(proxy_mod.MAX_METHOD_LABELS):
-            self.metrics.method_label(f"method_{i}")
+            proxy_mod.method_label(f"method_{i}")
 
-        self.assertEqual(self.metrics.method_label("early"), "early")
+        self.assertEqual(proxy_mod.method_label("early"), "early")
 
     def test_absurdly_long_methods_collapse(self):
         overlong = "x" * (proxy_mod.MAX_METHOD_LABEL_LEN + 1)
 
-        self.assertEqual(self.metrics.method_label(overlong), proxy_mod.OTHER_METHOD_LABEL)
+        self.assertEqual(proxy_mod.method_label(overlong), proxy_mod.OTHER_METHOD_LABEL)
 
 
 class TestMetricsEndpoint(MetricsReader, unittest.TestCase):
@@ -946,7 +948,7 @@ class TestMetricsEndpoint(MetricsReader, unittest.TestCase):
         self.assertIn("process_open_fds", response.text)
 
     def test_observations_reach_the_exposition(self):
-        self.proxy.metrics.observe_response("bdev_get_bdevs", 0.25)
+        self.proxy.spdk_response.observe(0.25, method="bdev_get_bdevs")
 
         response = self.client.get(proxy_mod.METRICS_ENDPOINT, auth=("test", "secret"))
 

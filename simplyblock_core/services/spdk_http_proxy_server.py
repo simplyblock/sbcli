@@ -230,6 +230,9 @@ class IntervalReport:
         return summary if slowest is None else f"{summary} slowest={slowest}"
 
 
+#: The metrics below live in the default registry, which is also what
+#: ``Instrumentator`` and the standard process collectors write into, and what
+#: ``METRICS_ENDPOINT`` exposes.
 SPDK_RESPONSE_DURATION = Histogram(
     'spdk_proxy_response_duration_seconds',
     'Time awaiting and reading one JSON-RPC response from SPDK',
@@ -255,46 +258,24 @@ RPC_FAILURES = Counter(
     ['method', 'reason'],
 )
 
+#: Method names already admitted as label values. Process-global to match the
+#: series it bounds: the cap is on one label set in one registry, so it has to
+#: be counted once per process rather than once per proxy.
+_known_methods: set[str] = set()
 
-class ProxyMetrics:
-    """What one proxy accumulates on top of the module-level metrics.
 
-    Holds the interval reports and the seen-method set behind
-    ``method_label``; the metrics themselves live in the default registry,
-    which is also what ``Instrumentator`` and the standard process
-    collectors write into.
-    """
-
-    def __init__(self) -> None:
-        self._known_methods: set[str] = set()
-
-        self.spdk_response = IntervalReport('recv_from_spdk', SPDK_RESPONSE_DURATION)
-        self.body_read = IntervalReport('read_body', BODY_READ_DURATION)
-        self.slots_in_use = RPC_SLOTS_IN_USE
-        self.unix_connections = UNIX_CONNECTIONS_OPEN
-        self.failures = RPC_FAILURES
-
-    def method_label(self, method: str) -> str:
-        """Fold a caller-supplied method name into the bounded label set."""
-        if method in self._known_methods:
-            return method
-        if len(method) > MAX_METHOD_LABEL_LEN or len(self._known_methods) >= MAX_METHOD_LABELS:
-            return OTHER_METHOD_LABEL
-        self._known_methods.add(method)
+def method_label(method: str) -> str:
+    """Fold a caller-supplied method name into the bounded label set."""
+    if method in _known_methods:
         return method
+    if len(method) > MAX_METHOD_LABEL_LEN or len(_known_methods) >= MAX_METHOD_LABELS:
+        return OTHER_METHOD_LABEL
+    _known_methods.add(method)
+    return method
 
-    def observe_response(self, method: str, seconds: float) -> None:
-        self.spdk_response.observe(seconds, method=self.method_label(method))
 
-    def observe_body_read(self, seconds: float) -> None:
-        self.body_read.observe(seconds)
-
-    def record_failure(self, method: str, reason: str) -> None:
-        self.failures.labels(method=self.method_label(method), reason=reason).inc()
-
-    @property
-    def reports(self) -> tuple[IntervalReport, ...]:
-        return (self.body_read, self.spdk_response)
+def _record_failure(method: str, reason: str) -> None:
+    RPC_FAILURES.labels(method=method_label(method), reason=reason).inc()
 
 
 @dataclasses.dataclass
@@ -378,7 +359,8 @@ class SpdkProxy:
 
     def __init__(self, settings: ProxySettings) -> None:
         self.settings = settings
-        self.metrics = ProxyMetrics()
+        self.body_read = IntervalReport('read_body', BODY_READ_DURATION)
+        self.spdk_response = IntervalReport('recv_from_spdk', SPDK_RESPONSE_DURATION)
         self.concurrency_limit = (
             settings.max_concurrent_spdk if settings.multi_threading_enabled else 1)
         self._slots: asyncio.Semaphore | None = None
@@ -404,7 +386,7 @@ class SpdkProxy:
         """
         while True:
             await asyncio.sleep(STATS_INTERVAL_SEC)
-            for report in self.metrics.reports:
+            for report in (self.body_read, self.spdk_response):
                 if (summary := report.report()) is not None:
                     logger.info("Periodic stats: %s", summary)
 
@@ -494,11 +476,11 @@ class SpdkProxy:
             f"Request:{log.request_id} function: {log.rpc_method}, params: {params}")
         sock_timeout = self._resolve_sock_timeout(client_timeout)
         async with self.slots:
-            self.metrics.slots_in_use.inc()
+            RPC_SLOTS_IN_USE.inc()
             try:
                 return await self._rpc_call_inner(req, req_data, log, sock_timeout)
             finally:
-                self.metrics.slots_in_use.dec()
+                RPC_SLOTS_IN_USE.dec()
 
     async def _rpc_call_inner(
         self,
@@ -513,17 +495,17 @@ class SpdkProxy:
             logger.error(
                 f"Socket timeout waiting for SPDK response (request {log.request_id}, "
                 f"function: {log.rpc_method})")
-            self.metrics.record_failure(log.rpc_method, 'timeout')
+            _record_failure(log.rpc_method, 'timeout')
             raise ValueError('SPDK response timeout') from e
         except OSError:
-            self.metrics.record_failure(log.rpc_method, 'unreachable')
+            _record_failure(log.rpc_method, 'unreachable')
             raise
         except ValueError:
-            self.metrics.record_failure(log.rpc_method, 'invalid_response')
+            _record_failure(log.rpc_method, 'invalid_response')
             raise
 
     async def _exchange(self, req: bytes, req_data: dict, log: RequestLog) -> str | None:
-        self.metrics.unix_connections.inc()
+        UNIX_CONNECTIONS_OPEN.inc()
         try:
             reader, writer = await asyncio.open_unix_connection(self.settings.rpc_sock)
             try:
@@ -548,7 +530,8 @@ class SpdkProxy:
                             break
                         continue
                     break
-                self.metrics.observe_response(log.rpc_method, time.monotonic() - recv_start)
+                self.spdk_response.observe(
+                    time.monotonic() - recv_start, method=method_label(log.rpc_method))
 
                 if not response:
                     raise ValueError(
@@ -559,7 +542,7 @@ class SpdkProxy:
             finally:
                 _close(writer)
         finally:
-            self.metrics.unix_connections.dec()
+            UNIX_CONNECTIONS_OPEN.dec()
 
 
 def _log_task_death(task: "asyncio.Task[None]") -> None:
@@ -659,7 +642,7 @@ def create_app(settings: ProxySettings) -> FastAPI:
                 "client disconnected before the request body arrived "
                 f"(request {log.request_id})")
             return Response(status_code=400)
-        proxy.metrics.observe_body_read(time.monotonic() - read_start)
+        proxy.body_read.observe(time.monotonic() - read_start)
 
         try:
             response = await proxy.rpc_call(
