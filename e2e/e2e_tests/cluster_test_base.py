@@ -29,42 +29,70 @@ def generate_random_sequence(length):
     return first_char + remaining_chars
 
 class TestClusterBase:
-    # Temporarily disabled on BOTH the docker and k8s paths.
+    # Heavyweight diagnostic collectors, scoped per platform: ON for k8s,
+    # OFF for docker. Read them through the `COLLECT_DUMP_LVSTORE` /
+    # `COLLECT_DISTRIB_PLACEMENT_DUMPS` properties below, never directly.
     #
-    # `sbctl sn dump-lvstore` walks the whole lvstore on the SPDK app thread, and
-    # `_collect_all_node_dumps_parallel` fires it at every node at once.
+    # `sbctl --dev sn dump-lvstore` walks the whole lvstore on the SPDK app
+    # thread, and `_collect_all_node_dumps_parallel` fires it at every node at
+    # once. The placement collector adds a map plus a stack dump per distrib per
+    # node on top, which is dozens of RPCs and file copies per round.
     #
-    # docker (docker_multi_failover_device_removed_rca_20260905.md): it held the
-    # app thread for 1.1-1.5s at a stretch, queued alceml IOs went undequeued for
-    # 4590ms, past the 4000ms `_check_stuck_ios` watchdog, which unregistered the
-    # bdev. The control plane read that unregister as a surprise hot-remove and
-    # retired a healthy device permanently.
+    # docker: OFF. In docker_multi_failover_device_removed_rca_20260905 the
+    # lvstore walk held the app thread for 1.1-1.5s at a stretch, queued alceml
+    # IOs went undequeued for 4590ms, past the 4000ms `_check_stuck_ios`
+    # watchdog, which unregistered the bdev. The control plane read that
+    # unregister as a surprise hot-remove and retired a healthy device
+    # permanently. The docker hosts also have no memory headroom to spend on
+    # collectors: n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656,
+    # 192.168.10.201/system_memory_usage_*_232824.txt at run start showed
+    #   Mem:  31Gi total, 30Gi used, 374Mi free, 339Mi available
+    #   Swap: 3.0Gi total, 171Mi used
+    # No kernel OOM kill on any of the four hosts, but with ~339Mi available and
+    # swap already in use every extra collector competes with SPDK for memory on
+    # a box that has none left to give.
     #
-    # k8s (k8s_stalled_io_err110_rca_20260906.md): the dump was not the trigger
-    # there, but it is a reliable casualty and it removes the node from service
-    # for minutes. On worker-2 the RPC never returned at all, while the other five
-    # nodes finished in 18-24s, and the wrapper only gave up after 150s.
+    # k8s: ON. Turned back on because the absence of these dumps is now the
+    # thing blocking diagnosis. In
+    # k8s_native_resilient_failover_20260906_112437 a within-tolerance 2-node
+    # outage produced an unrecoverable stripe read
+    #   DISTRIBD Unable to read stripe vuid=24 ... ndm=2, npm=1
+    # i.e. 3 of 4 columns missing at ndcs=2/npcs=2. Deciding whether that was
+    # transient device loss or a placement violation needs the placement map for
+    # that vuid, and it had not been collected. The three relevant SPDK cores
+    # were also truncated at 1GiB by the hosts' coredump cap, so there was no
+    # second source. A run that cannot be diagnosed is worth less than a run
+    # that is slightly perturbed by collecting.
     #
-    # Either way it is heavyweight enough to distort the runs it is meant to
-    # diagnose. `fetch_distrib_logs*` still runs on both paths, so placement maps
-    # and stack dumps are unaffected.
-    COLLECT_DUMP_LVSTORE = False
+    # The k8s risk is real but smaller and different in kind: in that same run
+    # the dump was not the trigger for anything, though on worker-2 the RPC
+    # never returned while the other five finished in 18-24s and the wrapper
+    # only gave up after 150s. Collected by hand on an idle cluster on
+    # 2026-09-07 all six nodes dumped in about 20s each and `sbctl sn list`
+    # reported 6 online, 0 offline after every one.
+    #
+    # NOTE: the residual k8s risk is concentrated in the parallel fan-out, not
+    # in the dump itself. If these turn out to perturb k8s runs, serialise
+    # `_collect_all_node_dumps_parallel` before switching them back off.
+    COLLECT_DUMP_LVSTORE_K8S = True
+    COLLECT_DUMP_LVSTORE_DOCKER = False
 
-    # Distrib placement-map + stack dumps, also disabled. These pull a
-    # placement map and a stack dump per distrib per node, so on an 8-node
-    # cluster they are dozens of RPCs plus kubectl/docker exec and file copies
-    # per collection round, on top of the lvstore walk above.
-    #
-    # Disabled together with the lvstore dump because the docker hosts were
-    # already out of memory headroom before the workload started:
-    #   n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656,
-    #   192.168.10.201/system_memory_usage_*_232824.txt at run start:
-    #     Mem:  31Gi total, 30Gi used, 374Mi free, 339Mi available
-    #     Swap: 3.0Gi total, 171Mi used
-    # There was no kernel OOM kill on any of the four hosts, but with ~339Mi
-    # available and swap already in use, every extra collector competes with
-    # SPDK for memory on a box that has none left to give.
-    COLLECT_DISTRIB_PLACEMENT_DUMPS = False
+    COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S = True
+    COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER = False
+
+    @property
+    def COLLECT_DUMP_LVSTORE(self):
+        """Whether to run the lvstore walk on this platform."""
+        return (self.COLLECT_DUMP_LVSTORE_K8S
+                if getattr(self, "k8s_test", False)
+                else self.COLLECT_DUMP_LVSTORE_DOCKER)
+
+    @property
+    def COLLECT_DISTRIB_PLACEMENT_DUMPS(self):
+        """Whether to run the distrib placement/stack dumps on this platform."""
+        return (self.COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S
+                if getattr(self, "k8s_test", False)
+                else self.COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER)
 
     # nvme-cli writes these to stderr for conditions that are NOT failures.
     #
@@ -1374,7 +1402,8 @@ class TestClusterBase:
         else:
             self.logger.info(
                 "[diagnostics] node dumps SKIPPED "
-                "(COLLECT_DUMP_LVSTORE=False, COLLECT_DISTRIB_PLACEMENT_DUMPS=False)"
+                "(both collectors off for this platform: "
+                f"k8s_test={getattr(self, 'k8s_test', False)})"
             )
 
         # 3. Compress old dump files & delete aged-out compressed dumps in background
@@ -1462,7 +1491,8 @@ class TestClusterBase:
                 else:
                     self.logger.info(
                         f"[node_dump] dump_lvstore_k8s SKIPPED for {node_id} "
-                        f"(COLLECT_DUMP_LVSTORE=False)"
+                        f"(COLLECT_DUMP_LVSTORE_K8S="
+                        f"{self.COLLECT_DUMP_LVSTORE_K8S})"
                     )
                 if self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
                     try:
@@ -1476,7 +1506,8 @@ class TestClusterBase:
                 else:
                     self.logger.info(
                         f"[node_dump] fetch_distrib_logs_k8s SKIPPED for {node_id} "
-                        f"(COLLECT_DISTRIB_PLACEMENT_DUMPS=False)"
+                        f"(COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S="
+                        f"{self.COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S})"
                     )
             else:
                 if self.COLLECT_DUMP_LVSTORE:
@@ -1490,7 +1521,8 @@ class TestClusterBase:
                 else:
                     self.logger.info(
                         f"[node_dump] dump_lvstore SKIPPED for {node_id} "
-                        f"(COLLECT_DUMP_LVSTORE=False)"
+                        f"(COLLECT_DUMP_LVSTORE_DOCKER="
+                        f"{self.COLLECT_DUMP_LVSTORE_DOCKER})"
                     )
                 if self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
                     try:
@@ -1504,7 +1536,8 @@ class TestClusterBase:
                 else:
                     self.logger.info(
                         f"[node_dump] fetch_distrib_logs SKIPPED for {node_id} "
-                        f"(COLLECT_DISTRIB_PLACEMENT_DUMPS=False)"
+                        f"(COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER="
+                        f"{self.COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER})"
                     )
         except Exception as e:
             self.logger.warning(f"[node_dump] Failed for node {node_id} ({node_ip}): {e}")
