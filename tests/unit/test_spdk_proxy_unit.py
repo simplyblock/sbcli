@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the SPDK HTTP proxy.
 
 The module under test is imported plainly: building the app is an explicit

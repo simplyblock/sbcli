@@ -2151,7 +2151,7 @@ class RPCClient:
 
     def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
                        snapshot_backups=True, local_testing=False, local_endpoint="",
-                       access_key_id="", secret_access_key: Optional[SecretStr] = None,
+                       access_key_id="", secret_access_key: SecretStr | None = None,
                        bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
         """Create the S3 bdev device.
         Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.

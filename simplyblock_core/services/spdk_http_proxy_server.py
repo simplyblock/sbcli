@@ -1,4 +1,3 @@
-# coding=utf-8
 """HTTP front-end for SPDK's JSON-RPC unix socket.
 
 Storage nodes run one instance of this next to every SPDK process. It accepts
@@ -21,8 +20,9 @@ import math
 import ssl
 import sys
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, AsyncGenerator, ClassVar, Dict, Optional, Set, Tuple
+from typing import Annotated, Any, ClassVar
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -153,7 +153,7 @@ class ProxySettings(BaseSettings):
     ] = False
 
     rpc_sock_path: Annotated[
-        Optional[str],
+        str | None,
         Field(description=(
             "Path of SPDK's JSON-RPC unix socket. Defaults to the location SPDK "
             "binds for this RPC_PORT, which is what every deployment uses."
@@ -193,9 +193,9 @@ class IntervalReport:
         self._count = 0
         self._total = 0.0
         self._peak = 0.0
-        self._methods: Dict[str, Tuple[int, float]] = {}
+        self._methods: dict[str, tuple[int, float]] = {}
 
-    def observe(self, seconds: float, method: Optional[str] = None) -> None:
+    def observe(self, seconds: float, method: str | None = None) -> None:
         target = self.histogram if method is None else self.histogram.labels(method=method)
         target.observe(seconds)
 
@@ -206,7 +206,7 @@ class IntervalReport:
             count, total = self._methods.get(method, (0, 0.0))
             self._methods[method] = (count + 1, total + seconds)
 
-    def report(self) -> Optional[str]:
+    def report(self) -> str | None:
         """Summarize the interval, or ``None`` if nothing was observed in it."""
         count, total, peak = self._count, self._total, self._peak
         methods = self._methods
@@ -266,7 +266,7 @@ class ProxyMetrics:
     """
 
     def __init__(self) -> None:
-        self._known_methods: Set[str] = set()
+        self._known_methods: set[str] = set()
 
         self.spdk_response = IntervalReport('recv_from_spdk', SPDK_RESPONSE_DURATION)
         self.body_read = IntervalReport('read_body', BODY_READ_DURATION)
@@ -293,7 +293,7 @@ class ProxyMetrics:
         self.failures.labels(method=self.method_label(method), reason=reason).inc()
 
     @property
-    def reports(self) -> Tuple[IntervalReport, ...]:
+    def reports(self) -> tuple[IntervalReport, ...]:
         return (self.body_read, self.spdk_response)
 
 
@@ -360,7 +360,7 @@ class InvalidRequest(Exception):
     """
 
 
-def _parse_request(req: bytes) -> Dict[str, Any]:
+def _parse_request(req: bytes) -> dict[str, Any]:
     """Decode a request body, or reject it as the caller's fault."""
     try:
         req_data = json.loads(req.decode('ascii'))
@@ -381,7 +381,7 @@ class SpdkProxy:
         self.metrics = ProxyMetrics()
         self.concurrency_limit = (
             settings.max_concurrent_spdk if settings.multi_threading_enabled else 1)
-        self._slots: Optional[asyncio.Semaphore] = None
+        self._slots: asyncio.Semaphore | None = None
         logger.info("SPDK concurrency limit: %s", self.concurrency_limit)
 
     @property
@@ -415,7 +415,7 @@ class SpdkProxy:
             try:
                 ready = await asyncio.wait_for(
                     self._probe(payload), SPDK_READY_PROBE_TIMEOUT_SEC)
-            except (OSError, asyncio.TimeoutError) as e:
+            except (TimeoutError, OSError) as e:
                 logger.info(f"Waiting for SPDK to be ready: {e}")
                 ready = False
 
@@ -443,7 +443,7 @@ class SpdkProxy:
         finally:
             _close(writer)
 
-    def _resolve_sock_timeout(self, client_timeout: Optional[str]) -> float:
+    def _resolve_sock_timeout(self, client_timeout: str | None) -> float:
         """Bound the SPDK unix-socket wait (and hence the concurrency-slot hold)
         to a value tied to the CALLER's HTTP timeout, rather than the global
         ``timeout``.
@@ -474,9 +474,9 @@ class SpdkProxy:
     async def rpc_call(
         self,
         req: bytes,
-        client_timeout: Optional[str] = None,
-        log: Optional[RequestLog] = None,
-    ) -> Optional[str]:
+        client_timeout: str | None = None,
+        log: RequestLog | None = None,
+    ) -> str | None:
         """Forward one JSON-RPC request, returning SPDK's raw response.
 
         Returns ``None`` for a request without an ``id`` (a notification, which
@@ -506,10 +506,10 @@ class SpdkProxy:
         req_data: dict,
         log: RequestLog,
         sock_timeout: float,
-    ) -> Optional[str]:
+    ) -> str | None:
         try:
             return await asyncio.wait_for(self._exchange(req, req_data, log), sock_timeout)
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             logger.error(
                 f"Socket timeout waiting for SPDK response (request {log.request_id}, "
                 f"function: {log.rpc_method})")
@@ -522,7 +522,7 @@ class SpdkProxy:
             self.metrics.record_failure(log.rpc_method, 'invalid_response')
             raise
 
-    async def _exchange(self, req: bytes, req_data: dict, log: RequestLog) -> Optional[str]:
+    async def _exchange(self, req: bytes, req_data: dict, log: RequestLog) -> str | None:
         self.metrics.unix_connections.inc()
         try:
             reader, writer = await asyncio.open_unix_connection(self.settings.rpc_sock)
