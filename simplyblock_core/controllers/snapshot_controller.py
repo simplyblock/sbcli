@@ -9,6 +9,14 @@ import time
 import uuid
 from datetime import datetime
 
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_result,
+    stop_after_attempt,
+    wait_fixed,
+)
+
 from simplyblock_core.controllers import ops_gate
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
@@ -789,19 +797,20 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 rpc_client = primary_node.rpc_client()
 
                 logger.info("Creating Snapshot bdev")
-                ret = False
+
+                @retry(
+                    retry=retry_if_result(lambda result: not result[0] and result[1] and result[1].get("code") == -32602),
+                    stop=stop_after_attempt(5),
+                    wait=wait_fixed(2),
+                    before_sleep=before_sleep_log(logger, lg.WARNING),
+                    retry_error_callback=lambda state: state.outcome.result() if state.outcome else (False, None),
+                )
+                def _create_snapshot_bdev():
+                    return rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+
                 with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
                                      node_id=primary_node.get_id(), enabled=lock):
-                    for i in range(5):
-                        ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
-                        if not ret:
-                            if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
-                                logger.error(f"Failed to create snapshot, retrying: {err}")
-                                time.sleep(0.1)
-                            else:
-                                break
-                        else:
-                            break
+                    ret, err = _create_snapshot_bdev()
                 if not ret:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
