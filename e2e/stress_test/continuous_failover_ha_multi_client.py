@@ -1179,11 +1179,23 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     break
             if not lvol_device and clone_already_connected:
                 # Clone joined a subsystem the host already holds a controller
-                # for, so no NEW device shows up in the diff. Resolve by NQN.
+                # for, so no NEW device shows up in the diff. Resolve by NQN
+                # AND ns_id: the subsystem holds one namespace per lvol, so the
+                # NQN alone can resolve to a sibling volume's device.
                 clone_nqn = self._nqn_from_connect_cmds(connect_ls)
+                clone_ns_id = None
+                try:
+                    _cd = self.sbcli_utils.get_lvol_details(
+                        lvol_id=self.clone_mount_details[clone_name]["ID"])
+                    if _cd:
+                        clone_ns_id = _cd[0].get("ns_id")
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[clone_connect] could not read ns_id for "
+                        f"{clone_name}: {exc}")
                 if clone_nqn:
                     lvol_device = self.ssh_obj.get_nvme_device_for_nqn(
-                        client, clone_nqn)
+                        client, clone_nqn, ns_id=clone_ns_id)
                     if lvol_device:
                         self.logger.info(
                             f"[clone_connect] {clone_name} was already connected;"

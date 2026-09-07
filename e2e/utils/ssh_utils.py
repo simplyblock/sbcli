@@ -1527,42 +1527,154 @@ class SshUtils:
             return output, error
         return None, None
 
-    def get_nvme_device_for_nqn(self, node, nqn):
-        """Return the block-device path (e.g. /dev/nvme2n2) already connected for *nqn*.
+    # nvmeXcYnZ is the per-controller view of a namespace. Under native NVMe
+    # multipath it is NOT a block device -- only the subsystem-level head
+    # nvmeXnZ is. Returning one of these looks like a located device and then
+    # fails `test -b`, which is how a healthy NSID-2 clone was reported missing
+    # in n_plus_k_failover_multi_client_ha_all_nodes-20260907-090440:
+    #   sysfs lookup -> nvme18c18n1
+    #   test -b /dev/nvme18c18n1 -> MISSING
+    _CONTROLLER_SCOPED_NS = re.compile(r"^nvme\d+c\d+n\d+$")
+    _HEAD_NS = re.compile(r"^nvme(\d+)n(\d+)$")
 
-        Tries two methods:
-        1. ``nvme list -o json`` (works when the namespace block device is visible)
-        2. sysfs scan via /sys/class/nvme-subsystem (fallback when nvme list misses it)
-        Returns the path string, or None if not found.
+    @classmethod
+    def _pick_ns_device(cls, names, ns_id=None):
+        """Choose the head namespace device for *ns_id* out of *names*.
+
+        Drops controller-scoped nvmeXcYnZ entries. When *ns_id* is given, only
+        a device whose trailing nZ matches it is acceptable -- a subsystem can
+        hold many namespaces and returning the wrong one is worse than
+        returning nothing, because the caller then mounts another volume's
+        device. Without *ns_id* the first head device wins (legacy behaviour).
         """
-        cmd = (
-            "sudo nvme list -o json 2>/dev/null | "
-            "python3 -c \""
-            "import sys,json; "
-            "d=json.load(sys.stdin); "
-            "[print(x['DevicePath']) for x in d.get('Devices',[]) "
-            f"if x.get('SubsystemNQN','').strip()=='{nqn}']\""
-        )
-        out, _ = self.exec_command(node=node, command=cmd)
-        lines = [ln.strip() for ln in out.strip().split('\n') if ln.strip()]
-        if lines:
-            return lines[0]
+        heads = []
+        for raw in names:
+            name = (raw or "").strip().rstrip(':').lstrip('/')
+            if name.startswith('dev/'):
+                name = name[4:]
+            if not name or cls._CONTROLLER_SCOPED_NS.match(name):
+                continue
+            m = cls._HEAD_NS.match(name)
+            if m:
+                heads.append((name, int(m.group(2))))
+        if ns_id is not None:
+            for name, nsid in heads:
+                if nsid == int(ns_id):
+                    return name
+            return None
+        return heads[0][0] if heads else None
 
-        # Fallback: scan sysfs — subsystem may be connected but not in nvme list
-        # Extract just the block device name (e.g. nvme0n1) and return as /dev/ path
+    @staticmethod
+    def _parse_nvme_list_json(raw, nqn):
+        """Namespace device names for *nqn* from ``nvme list -o json`` output.
+
+        Handles both nvme-cli schemas. The old flat one carries the NQN on each
+        device; the 2.x one nests Subsystems -> Namespaces (or
+        Subsystems -> Controllers -> Namespaces). Assuming only the flat schema
+        made this lookup return nothing on a host that plainly had the
+        subsystem connected (same run as above), which pushed every caller onto
+        the broken sysfs fallback.
+        """
+        try:
+            data = json.loads(raw or "")
+        except (ValueError, TypeError):
+            return []
+
+        want = (nqn or "").strip()
+        found = []
+
+        def _ns_names(container):
+            out = []
+            for ns in container.get("Namespaces") or []:
+                if isinstance(ns, dict):
+                    out.append(ns.get("NameSpace") or ns.get("DevicePath") or "")
+            return out
+
+        for dev in (data.get("Devices") or []):
+            if not isinstance(dev, dict):
+                continue
+            # Flat schema: NQN and device path on the same object.
+            if (dev.get("SubsystemNQN") or "").strip() == want:
+                if dev.get("DevicePath"):
+                    found.append(dev["DevicePath"])
+                found.extend(_ns_names(dev))
+            for subsys in (dev.get("Subsystems") or []):
+                if not isinstance(subsys, dict):
+                    continue
+                if (subsys.get("SubsystemNQN") or "").strip() != want:
+                    continue
+                found.extend(_ns_names(subsys))
+                for ctrl in (subsys.get("Controllers") or []):
+                    if isinstance(ctrl, dict):
+                        found.extend(_ns_names(ctrl))
+        return [f for f in found if f]
+
+    def get_nvme_device_for_nqn(self, node, nqn, ns_id=None):
+        """Return the block-device path (e.g. /dev/nvme2n2) connected for *nqn*.
+
+        *ns_id* is the namespace this volume occupies in the subsystem. Pass it
+        whenever it is known: a shared subsystem holds one namespace per lvol,
+        so without it this can hand back a sibling volume's device.
+
+        Only subsystem-level head devices (nvmeXnZ) that pass ``test -b`` are
+        returned. Returns the path string, or None.
+        """
+        candidates = []
+
+        raw, _ = self.exec_command(
+            node=node, command="sudo nvme list -o json 2>/dev/null",
+            supress_logs=True)
+        candidates.extend(self._parse_nvme_list_json(raw, nqn))
+
+        # sysfs is the version-independent source, and is also the only one
+        # that sees a subsystem whose namespace nvme-cli has not picked up.
+        #
+        # BOTH loops are needed; do not "simplify" this to one.
+        #   loop 1: on kernels that expose head namespaces directly under the
+        #     subsystem dir, they are at depth 1. The nvmeXcYnZ entries one
+        #     level further down (inside the controller dir) are the ones the
+        #     old two-level glob picked up, and they are not block devices.
+        #   loop 2: other kernels expose nothing under the subsystem dir at
+        #     all -- verified on RHCOS 2026-09-08, where
+        #     /sys/class/nvme-subsystem/nvme-subsys0 has no nvme*n* children
+        #     and only /sys/block/nvme0n1 resolves. /sys/block also cannot
+        #     contain a controller-scoped name, since those are not block
+        #     devices, so this loop is the safe one.
         sysfs_cmd = (
-            f"for f in /sys/class/nvme-subsystem/*/subsysnqn; do "
-            f"  if [ \"$(cat $f 2>/dev/null)\" = \"{nqn}\" ]; then "
-            f"    ls -d $(dirname $f)/nvme*/nvme*n* 2>/dev/null | head -1 | xargs -I{{}} basename {{}}; "
-            f"    break; "
-            f"  fi; "
-            f"done"
+            'for d in /sys/class/nvme-subsystem/*; do '
+            '  [ -r "$d/subsysnqn" ] || continue; '
+            f'  [ "$(cat "$d/subsysnqn" 2>/dev/null)" = "{nqn}" ] || continue; '
+            '  for n in "$d"/nvme*n*; do [ -e "$n" ] && basename "$n"; done; '
+            'done; '
+            'for b in /sys/block/nvme*n*; do '
+            '  [ -e "$b" ] || continue; '
+            '  nm=$(basename "$b"); q=""; '
+            '  [ -r "$b/device/subsysnqn" ] && q=$(cat "$b/device/subsysnqn" 2>/dev/null); '
+            # /sys/block/<dev> is a symlink, so "$b/.." resolves lexically to
+            # /sys/block and never to the subsystem. Resolve it first.
+            '  if [ -z "$q" ]; then '
+            '    p=$(readlink -f "$b" 2>/dev/null); '
+            '    [ -n "$p" ] && [ -r "${p%/*}/subsysnqn" ] && q=$(cat "${p%/*}/subsysnqn" 2>/dev/null); '
+            '  fi; '
+            f'  [ "$q" = "{nqn}" ] && echo "$nm"; '
+            'done'
         )
-        out2, _ = self.exec_command(node=node, command=sysfs_cmd)
-        lines2 = [ln.strip() for ln in out2.strip().split('\n') if ln.strip()]
-        if lines2:
-            dev_name = lines2[0].rstrip(':')
-            return f"/dev/{dev_name}"
+        out2, _ = self.exec_command(node=node, command=sysfs_cmd,
+                                    supress_logs=True)
+        candidates.extend((out2 or "").split())
+
+        # Prefer the requested nsid; only fall back to "any head" when the
+        # caller did not tell us which namespace it wants.
+        for want_ns in ([ns_id] if ns_id is not None else [None]):
+            name = self._pick_ns_device(candidates, want_ns)
+            if name and self.is_block_device(node, f"/dev/{name}"):
+                return f"/dev/{name}"
+
+        if candidates:
+            self.logger.info(
+                "[nqn_lookup] %s: subsystem %s present but no usable block "
+                "device for ns_id=%s; candidates=%s",
+                node, nqn, ns_id, sorted(set(candidates)))
         return None
 
     def disconnect_nvme(self, node, nqn_grep):

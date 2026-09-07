@@ -735,88 +735,88 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
             lvol_device = None
 
-            if clone_ns_id == 1 and not shares_subsystem:
-                # ── NS ID 1: new subsystem — need nvme connect ──────
-                self.logger.info(
-                    f"[clone_connect] {clone_name} has NS ID 1 (new "
-                    f"subsystem); running nvme connect on {client}"
+            # ── Always connect, then rescan. Do not branch on ns_id. ──
+            #
+            # The old code ran nvme connect only when
+            # `ns_id == 1 and not shares_subsystem`, and otherwise only
+            # rescanned. Both halves of that guess are unreliable:
+            #
+            #   * ns_id == 1 does NOT prove a fresh subsystem. NSIDs are
+            #     recycled: when the lvol holding nsid 1 is deleted, the next
+            #     volume placed in that subsystem can be handed nsid 1 while
+            #     the subsystem still belongs to another lvol. Seen as
+            #     clone_B289OXX3BQG5C2C in
+            #     n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656:
+            #       'uuid': '12381b49-...', 'nqn': '...:lvol:4d0c3986-...',
+            #       'ns_id': 1
+            #   * a foreign NQN does NOT prove the host is already connected.
+            #     The clone can be namespaced into a subsystem this client has
+            #     never attached.
+            #
+            # Guessing "already connected" when it is not means the connect is
+            # never issued, there is no controller to rescan, and the volume
+            # can never attach — a test failure indistinguishable from the
+            # product bug this is meant to detect.
+            #
+            # Doing both is safe and cheap: `nvme connect` on a subsystem+path
+            # already up returns "already connected", which nvme_connect_ok()
+            # classifies as success, and `nvme ns-rescan` on a live controller
+            # is a no-op when nothing changed.
+            self.logger.info(
+                f"[clone_connect] {clone_name} ns_id={clone_ns_id} "
+                f"shares_subsystem={shares_subsystem}; connecting then "
+                f"rescanning on {client}"
+            )
+            for connect_str in connect_ls:
+                _, error = self.ssh_obj.exec_command(
+                    node=client, command=connect_str
                 )
-                for connect_str in connect_ls:
-                    _, error = self.ssh_obj.exec_command(
-                        node=client, command=connect_str
+                if not self.nvme_connect_ok(error):
+                    self.record_failed_nvme_connect(
+                        clone_name, connect_str, client=client, error=error
                     )
-                    if not self.nvme_connect_ok(error):
-                        self.record_failed_nvme_connect(
-                            clone_name, connect_str, client=client, error=error
-                        )
-                    elif error:
-                        # "already connected": the path is up. No NEW device
-                        # will show in the diff below; the NQN lookup at
-                        # Step 2 resolves it.
-                        self.logger.info(
-                            f"[clone_connect] {clone_name}: {error.strip()}"
-                            f" — path already up, not a failure"
-                        )
+                elif error:
+                    # "already connected": the path is up. No NEW device will
+                    # show in the diff below; the NQN + ns_id lookup at Step 2
+                    # resolves it.
+                    self.logger.info(
+                        f"[clone_connect] {clone_name}: {error.strip()}"
+                        f" — path already up, not a failure"
+                    )
 
-                # Check ALL clients for the new device
-                sleep_n_sec(3)
-                for chk_client in all_clients:
-                    chk_devs = set(self.ssh_obj.get_devices(node=chk_client))
-                    new_devs = list(
-                        chk_devs - initial_devices_per_client[chk_client]
-                    )
-                    if new_devs:
-                        lvol_device = f"/dev/{new_devs[0].strip()}"
-                        if chk_client != client:
-                            self.logger.info(
-                                f"[clone_connect] {clone_name} appeared on "
-                                f"{chk_client} after connect (not {client})"
-                            )
-                            client = chk_client
-                            self.clone_mount_details[clone_name]["Client"] = client
-                        self.logger.info(
-                            f"[clone_connect] Located {clone_name} device "
-                            f"after nvme connect: {lvol_device}"
-                        )
-                        break
-            else:
-                # ── NS ID > 1: existing subsystem — just rescan ─────
-                self.logger.info(
-                    f"[clone_connect] {clone_name} has NS ID {clone_ns_id} "
-                    f"(existing subsystem); rescanning live controllers"
+            # Rescan live controllers on ALL clients — a namespaced clone can
+            # land on any lvol's subsystem, so it may surface on a different
+            # client than the one we connected from.
+            sleep_n_sec(3)
+            for chk_client in all_clients:
+                self.ssh_obj.rescan_live_nvme_controllers(chk_client)
+            sleep_n_sec(3)
+
+            for chk_client in all_clients:
+                chk_devs = set(self.ssh_obj.get_devices(node=chk_client))
+                new_devs = list(
+                    chk_devs - initial_devices_per_client[chk_client]
                 )
-                # Rescan live controllers on ALL clients — the clone
-                # can land on any lvol's subsystem, so it may appear
-                # on a different client than the parent's.
-                sleep_n_sec(3)
-                for chk_client in all_clients:
-                    self.ssh_obj.rescan_live_nvme_controllers(chk_client)
-                sleep_n_sec(3)
-                for chk_client in all_clients:
-                    chk_devs = set(self.ssh_obj.get_devices(node=chk_client))
-                    new_devs = list(
-                        chk_devs - initial_devices_per_client[chk_client]
-                    )
-                    if new_devs:
-                        lvol_device = f"/dev/{new_devs[0].strip()}"
-                        if chk_client != client:
-                            self.logger.info(
-                                f"[clone_connect] {clone_name} appeared on "
-                                f"{chk_client} after rescan (not {client})"
-                            )
-                            client = chk_client
-                            self.clone_mount_details[clone_name]["Client"] = client
+                if new_devs:
+                    lvol_device = f"/dev/{new_devs[0].strip()}"
+                    if chk_client != client:
                         self.logger.info(
-                            f"[clone_connect] Located {clone_name} device "
-                            f"after live-controller rescan: {lvol_device}"
+                            f"[clone_connect] {clone_name} appeared on "
+                            f"{chk_client} (not {client})"
                         )
-                        break
+                        client = chk_client
+                        self.clone_mount_details[clone_name]["Client"] = client
+                    self.logger.info(
+                        f"[clone_connect] Located {clone_name} device after "
+                        f"connect + rescan: {lvol_device}"
+                    )
+                    break
 
             # Step 2: Still nothing — NQN-based lookup on all clients
             if not lvol_device and clone_nqn:
                 for chk_client in all_clients:
                     found_dev = self.ssh_obj.get_nvme_device_for_nqn(
-                        chk_client, clone_nqn
+                        chk_client, clone_nqn, ns_id=clone_ns_id
                     )
                     if found_dev and self.ssh_obj.is_block_device(
                         chk_client, found_dev
@@ -861,7 +861,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     alt_device = None
                     if clone_nqn:
                         alt_device = self.ssh_obj.get_nvme_device_for_nqn(
-                            client, clone_nqn
+                            client, clone_nqn, ns_id=clone_ns_id
                         )
                     if alt_device and self.ssh_obj.is_block_device(
                         client, alt_device
