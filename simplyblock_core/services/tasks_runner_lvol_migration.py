@@ -82,8 +82,17 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
+import logging
 import random
 import time
+
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_result,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
@@ -1709,17 +1718,32 @@ def _get_lvol_delta_bytes(src_rpc, composite_name):
         return None
 
 
+@retry(
+    retry=retry_if_result(lambda result: result[1] is not None),
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(2),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    retry_error_callback=lambda state: state.outcome.result() if state.outcome else (False, "snapshot creation retries exhausted"),
+)
+def _add_intermediate_snapshot_with_backoff(lvol_id, snap_name):
+    return snapshot_controller.add(lvol_id, snap_name, bypass_migration_check=True)
+
+
 def _take_intermediate_snapshot(migration):
     """
     Take an additional "shrink" snapshot from the live lvol on the source node
     to reduce the delta that must be frozen during PHASE_LVOL_MIGRATE.
+
+    ``snapshot_controller.add()`` can transiently fail with "lvol ... is being
+    already created" when SPDK hasn't finished registering the previous
+    attempt yet; retry a few times with a real gap so we don't exhaust the
+    attempt budget faster than SPDK can settle.
     """
     snap_name = f"_mig_{migration.uuid[:8]}_r{migration.intermediate_snap_rounds}"
     logger.info(
         f"[IO-FREEZE] {_now_ms()} intermediate snapshot starting: "
         f"lvol={migration.lvol_id} round={migration.intermediate_snap_rounds} name={snap_name}")
-    snap_uuid, err = snapshot_controller.add(
-        migration.lvol_id, snap_name, bypass_migration_check=True)
+    snap_uuid, err = _add_intermediate_snapshot_with_backoff(migration.lvol_id, snap_name)
     if err:
         logger.warning(f"Intermediate snapshot failed (proceeding without): {err}")
         migration.intermediate_snap_rounds = migration.max_intermediate_snap_rounds
