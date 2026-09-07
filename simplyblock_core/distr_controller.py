@@ -179,7 +179,38 @@ def send_dev_status_event(device, status, target_node=None):
     return all(results) if results else False
 
 
-def disconnect_device(device):
+def disconnect_device(device, detach_controllers=True):
+    """Drop the peers' remote controllers for ``device``.
+
+    ``detach_controllers=False`` leaves them attached deliberately. Only an
+    operator-initiated removal (``CAUSE_ADMIN_REMOVE``) should detach, for two
+    reasons:
+
+    * bdev_nvme_detach_controller cancels SPDK's auto-reconnect poller, so a
+      device that is only transiently unreachable can no longer come back on
+      its own. And since device self-repair now re-attaches after a non-admin
+      removal, detach-then-attach is exactly the sequence that has produced
+      duplicate IO qpair IDs on the target.
+    * it frequently does not even achieve the removal. 2026-09-05: the detach
+      of remote_alceml_794a1db1 left "NVMe path ... still exists after delete"
+      because distrib never released all 15 of its io_channels, and the
+      controller then sat in the deleting state logging "Submitting Keep Alive
+      failed" every few seconds from 21:56:02 to 22:08:47 -- 13 minutes of a
+      wedged controller and error spam, having removed nothing.
+
+    Graceful shutdown keeps its own detach loop
+    (storage_node_ops._detach_remote_controllers_from_peers): there the node
+    really is going away, and cancelling the peers' reconnect pollers so they
+    cannot reattach to a dying node is the whole point.
+    """
+    if not detach_controllers:
+        logger.info(
+            "Device %s removal is not operator-initiated: leaving peers' "
+            "remote controllers attached so SPDK can reconnect and the "
+            "device can be repaired without a fresh attach",
+            device.get_id())
+        return
+
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
