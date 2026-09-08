@@ -567,13 +567,6 @@ class BackupDTO(BaseModel):
     prev_backup_id: Optional[UUID] = None
 
     size: int
-
-    #: The NQNs allowed to attach. The record's host entries also carry that
-    #: host's DHCHAP keys and PSK, which listing backups has no business handing
-    #: out; ``LVolDTO`` already exposes the same field this way, and a volume's
-    #: per-host keys are read through the endpoint authorised for exactly that.
-    allowed_hosts: List[util.NQN]
-
     created_at: int
     completed_at: int
     encrypted: bool
@@ -591,7 +584,6 @@ class BackupDTO(BaseModel):
             status=model.status,
             prev_backup_id=UUID(model.prev_backup_id) if model.prev_backup_id else None,
             size=model.size,
-            allowed_hosts=[host["nqn"] for host in (model.allowed_hosts or [])],
             created_at=model.created_at,
             completed_at=model.completed_at,
             encrypted=model.encrypted,

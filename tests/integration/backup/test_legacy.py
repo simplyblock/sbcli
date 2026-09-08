@@ -507,12 +507,13 @@ class TestBackupSnapshot(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.controller.backup_events")
-    def test_records_host_nqns_without_copying_their_keys(self, mock_events, mock_tasks):
-        """The record takes the allow-list, not the volume's authentication.
+    def test_copies_nothing_about_who_may_attach(self, mock_events, mock_tasks):
+        """The record takes no allow-list: a restore inherits the target pool's.
 
-        Copying the keys here would duplicate live key material into a second
-        record and from there into every manifest, while restore only ever uses
-        the NQNs and mints fresh keys from the target pool.
+        Copying one here would freeze a setting that belongs to whichever pool
+        the volume comes back in, and would carry the source volume's DHCHAP
+        keys and PSK -- stored beside each NQN -- into a second record, and from
+        there into every manifest.
         """
         snap = _snapshot()
         snap.lvol.allowed_hosts = [{
@@ -528,7 +529,7 @@ class TestBackupSnapshot(unittest.TestCase):
 
         self.assertIsNone(error)
         stored = self.db.get_backup_by_id(backup_id)
-        self.assertEqual(stored.allowed_hosts, [{"nqn": "nqn.2024-01.io.test:host"}])
+        self.assertNotIn("nqn.2024-01.io.test:host", str(stored.to_dict()))
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.controller.backup_events")

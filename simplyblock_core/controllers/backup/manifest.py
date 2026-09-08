@@ -36,18 +36,17 @@ for where the two genuinely differ and where they should be collapsed.
 """
 import json
 import logging
-from typing import Annotated, Any, List, Literal, Optional, Tuple, Union
+from typing import Annotated, List, Literal, Optional, Tuple, Union
 from uuid import UUID
 
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import (
-    BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, model_validator)
+    BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter)
 
 from simplyblock_core.kms import KMS
 from simplyblock_core.models.backup_config import BackupConfig
-from simplyblock_core.utils import NQN
 from simplyblock_core.utils.secrets import unwrap_secret
 
 
@@ -94,6 +93,13 @@ class Volume(BaseModel):
     hardcoded defaults. They are recorded anyway because a manifest is read
     years after it is written, and a backup taken today cannot be given a shape
     retroactively once its volume is gone.
+
+    The volume's allow-list is deliberately not among them. Who may attach is a
+    property of the pool a volume lives in, not of the bytes a backup holds, and
+    a restore lands in whichever pool it is given -- possibly in another cluster,
+    where the source volume's NQNs mean nothing. So a restored volume takes the
+    target pool's host configuration, and a stale allow-list from the source
+    never overrides it.
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -102,14 +108,6 @@ class Volume(BaseModel):
     snapshot_id: UUID
     snapshot_name: str
     size: int
-
-    #: The NQNs allowed to attach, so a restore recreates the volume's
-    #: allow-list rather than an open subsystem. NQNs alone: the control plane's
-    #: own host entries also carry that host's DHCHAP keys and PSK, which no
-    #: reader of a manifest needs -- restore passes the NQNs to add_lvol_ha,
-    #: which mints fresh keys from the target pool -- and which a manifest must
-    #: not carry any more than it carries bucket credentials.
-    allowed_hosts: List[NQN] = []
 
     pool_name: Optional[str] = None
 
@@ -125,26 +123,6 @@ class Volume(BaseModel):
     rw_mbytes_per_sec: Optional[int] = None
     r_mbytes_per_sec: Optional[int] = None
     w_mbytes_per_sec: Optional[int] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _hosts_to_nqns(cls, data: Any) -> Any:
-        """Take the NQN out of a host entry that carries more than one.
-
-        Two inputs arrive this way: the control plane's own ``allowed_hosts``
-        dicts, which is where the key material would otherwise come from, and a
-        manifest written before this field was narrowed. Both are read for the
-        NQNs they hold rather than refused, and the rest is dropped here -- so
-        the next write of that manifest no longer republishes it.
-        """
-        if isinstance(data, dict) and isinstance(data.get("allowed_hosts"), list):
-            data = dict(data)
-            data["allowed_hosts"] = [
-                host["nqn"] if isinstance(host, dict) else host
-                for host in data["allowed_hosts"]
-            ]
-
-        return data
 
 
 class _KeyDescriptor(BaseModel):

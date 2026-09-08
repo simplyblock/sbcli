@@ -115,7 +115,6 @@ def _backup(db, index, prev=None, **overrides):
     b.size = 4096
     b.created_at = 1000 + index
     b.completed_at = 2000 + index
-    b.allowed_hosts = [{"nqn": "nqn.2024-01.io.test:host"}]
     b.status = Backup.STATUS_COMPLETED
     b.location = _config().location().model_dump(mode="json")
     for key, value in overrides.items():
@@ -172,26 +171,26 @@ class TestBuildManifest:
         assert manifest.volume.ha_type == "ha"
         assert manifest.volume.rw_ios_per_sec == 5000
         assert manifest.volume.max_size == 8192
-        assert manifest.volume.allowed_hosts == ["nqn.2024-01.io.test:host"]
 
-    def test_host_keys_never_reach_the_bucket(self, db, cluster, lvol):
-        """A manifest carries no authentication material, host keys included.
+    def test_says_nothing_about_who_may_attach(self, db, cluster, lvol):
+        """The allow-list belongs to the pool a restore lands in, not to a backup.
 
-        Restore takes the NQNs and mints fresh keys from the target pool, so
-        publishing these would be a plaintext copy of the volume's DHCHAP keys
-        and PSK in a bucket, for no reader.
+        So neither the source volume's NQNs nor -- the reason this is asserted
+        rather than assumed -- the DHCHAP keys and PSK stored beside them may
+        travel into a bucket.
         """
-        backup = _backup(db, 1, allowed_hosts=[{
+        lvol.allowed_hosts = [{
             "nqn": "nqn.2024-01.io.test:host",
             "dhchap_key": "DHHC-1:00:secret-dhchap:",
             "psk": "NVMeTLSkey-1:01:secret-psk:",
-        }])
+        }]
+        lvol.write_to_db(db.kv_store)
 
-        manifest = backup_controller.build_manifest(backup)
+        rendered = backup_controller.build_manifest(_backup(db, 1)).model_dump_json()
 
-        assert manifest.volume.allowed_hosts == ["nqn.2024-01.io.test:host"]
-        assert "secret-dhchap" not in manifest.model_dump_json()
-        assert "secret-psk" not in manifest.model_dump_json()
+        assert "nqn.2024-01.io.test:host" not in rendered
+        assert "secret-dhchap" not in rendered
+        assert "secret-psk" not in rendered
 
     def test_survives_a_deleted_volume(self, db, cluster, lvol):
         """A backup outlives its volume; that must not stop the manifest."""
