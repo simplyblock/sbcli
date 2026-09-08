@@ -1281,6 +1281,97 @@ class K8sUtils:
             "capacity": parts[1] if len(parts) > 1 else "",
         }
 
+    def get_pv_capacity(self, pv_name: str) -> str:
+        """Return a PV's ``spec.capacity.storage`` (e.g. ``'10Gi'``), or ''."""
+        out, _ = self._exec_kubectl(
+            f"kubectl get pv {pv_name} "
+            f"-o jsonpath='{{.spec.capacity.storage}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out.strip()
+
+    def get_pvc_conditions(self, name: str, namespace: str = None) -> list:
+        """Return the PVC's condition *types* as a list of strings.
+
+        The one that matters for expansion is ``FileSystemResizePending``:
+        the external resizer sets it once ``ControllerExpandVolume`` has
+        succeeded but the driver asked for node-side expansion too.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pvc {name} -n {ns} "
+            f"-o jsonpath='{{.status.conditions[*].type}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out.split()
+
+    def wait_pv_capacity(self, pv_name: str, expected: str,
+                         timeout: int = 300) -> bool:
+        """Poll until a PV's ``spec.capacity.storage`` equals *expected*.
+
+        This is the CONTROLLER side of a CSI expansion, and the only side that
+        can complete while the volume is detached.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cap = self.get_pv_capacity(pv_name)
+            if cap == expected:
+                self.logger.info(
+                    f"[K8sUtils] PV {pv_name!r} capacity is {cap}")
+                return True
+            time.sleep(5)
+        self.logger.warning(
+            f"[K8sUtils] PV {pv_name!r} capacity never reached {expected} "
+            f"within {timeout}s (last: {self.get_pv_capacity(pv_name)!r})")
+        return False
+
+    def wait_pvc_capacity(self, name: str, expected: str, timeout: int = 300,
+                          namespace: str = None) -> bool:
+        """Poll until a PVC's ``status.capacity.storage`` equals *expected*.
+
+        This is the NODE side of a CSI expansion. For a Filesystem-mode volume
+        the driver returns ``node_expansion_required: true`` and kubelet only
+        runs ``NodeExpandVolume`` while some pod has the volume mounted -- so
+        on a DETACHED claim this never converges, by design. Use
+        :meth:`wait_pv_capacity` there instead.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get pvc {name} -n {ns} "
+                f"-o jsonpath='{{.status.capacity.storage}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            last = out.strip()
+            if last == expected:
+                self.logger.info(
+                    f"[K8sUtils] PVC {name!r} status.capacity is {last}")
+                return True
+            time.sleep(5)
+        self.logger.warning(
+            f"[K8sUtils] PVC {name!r} status.capacity never reached "
+            f"{expected} within {timeout}s (last: {last!r})")
+        return False
+
+    def get_mount_size_bytes(self, pod_name: str, mount_path: str = "/spdkvol",
+                             namespace: str = None) -> int:
+        """Return the size in bytes of *mount_path*'s filesystem inside a pod.
+
+        Reads the filesystem as the workload sees it, which is what a
+        node-side expansion actually has to change -- a grown block device
+        with an ungrown filesystem is not a usable resize.
+        """
+        out, _ = self.exec_in_pod(
+            pod_name, f"df -B1 {mount_path} | tail -1 | awk '{{print $2}}'",
+            namespace=namespace,
+        )
+        try:
+            return int((out or "").strip())
+        except ValueError:
+            return 0
+
     def get_pvc_volume_handle(self, name: str, namespace: str = None) -> str:
         """Return the CSI volumeHandle (lvol ID) backing a bound PVC, or ''."""
         ns = namespace or self.namespace

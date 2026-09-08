@@ -51,6 +51,57 @@ def _rand_suffix(n=6):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
 
 
+_SIZE_UNITS = {
+    "": 1,
+    "K": 10 ** 3, "KB": 10 ** 3, "KI": 2 ** 10, "KIB": 2 ** 10,
+    "M": 10 ** 6, "MB": 10 ** 6, "MI": 2 ** 20, "MIB": 2 ** 20,
+    "G": 10 ** 9, "GB": 10 ** 9, "GI": 2 ** 30, "GIB": 2 ** 30,
+    "T": 10 ** 12, "TB": 10 ** 12, "TI": 2 ** 40, "TIB": 2 ** 40,
+}
+
+
+# A resize target is checked with a floor, not for equality. "10G" reaches
+# the control plane as a decimal 10^10 while the PV that backs it is a binary
+# 10Gi, and a filesystem loses a further slice to metadata -- so the useful
+# question is "did it grow to about the target", never "is it exactly N bytes".
+_SIZE_FLOOR = 0.95          # block/backing-device sizes
+_FS_SIZE_FLOOR = 0.90       # filesystem sizes, which also pay metadata overhead
+
+
+def _size_to_bytes(size):
+    """Parse a size string (``'10G'``, ``'10Gi'``, ``'512M'``) into bytes.
+
+    sbcli sizes are decimal (10G = 10 * 10^9) while K8s quantities are binary
+    (10Gi = 10 * 2^30). Both spellings appear in this suite, so each is
+    parsed by its own unit rather than assumed interchangeable.
+    """
+    if isinstance(size, (int, float)):
+        return int(size)
+    text = str(size).strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([A-Za-z]*)", text)
+    if not match:
+        raise ValueError(f"unparseable size: {size!r}")
+    value, unit = match.group(1), match.group(2).upper()
+    if unit not in _SIZE_UNITS:
+        raise ValueError(f"unknown size unit in {size!r}")
+    return int(float(value) * _SIZE_UNITS[unit])
+
+
+def _to_k8s_quantity(size):
+    """Render an sbcli size as the K8s quantity a PVC will report back.
+
+    ``_resize_lvol_dual`` patches the claim with G->Gi / M->Mi substituted,
+    and the API server echoes that spelling back in ``status.capacity``, so
+    an assertion has to compare against the same string.
+    """
+    text = str(size).strip()
+    if "G" in text and "Gi" not in text:
+        return text.replace("G", "Gi")
+    if "M" in text and "Mi" not in text:
+        return text.replace("M", "Mi")
+    return text
+
+
 class DhchapHost:
     """An identity a DHCHAP authorization question can be asked about.
 
@@ -6583,9 +6634,18 @@ class TestLvolSecurityResize(SecurityTestBase):
     Creates a DHCHAP+crypto lvol, resizes it, and verifies that DHCHAP
     configuration is unchanged after the resize operation.
 
+    Resize is covered twice, because detached and attached expansion are
+    different contracts and only one of them can be observed on the claim:
+
     TC-SEC-140  Create DHCHAP+crypto lvol (5G), connect, FIO
-    TC-SEC-141  Disconnect, resize to 10G
+    TC-SEC-141  Detached: disconnect, resize 5G -> 10G. Only the CONTROLLER
+                side can finish here, so this asserts the PV, not the PVC.
+    TC-SEC-143  Attach, and assert the deferred NODE-side expansion lands
+                (PVC status.capacity reaches 10Gi, filesystem grows).
+    TC-SEC-144  Attached: resize 10G -> 15G online, under a live mount.
     TC-SEC-142  Verify DHCHAP keys in connect string post-resize; reconnect, FIO
+
+    The cases run in that order; the numbering is historical.
     """
 
     def __init__(self, **kwargs):
@@ -6639,35 +6699,35 @@ class TestLvolSecurityResize(SecurityTestBase):
                 "TC-SEC-140: PV has no nodeAffinity before the resize — an "
                 "'unchanged after resize' assertion would be vacuous")
 
-        self.logger.info("TC-SEC-141: Resizing to 10G …")
+        self.logger.info("TC-SEC-141: Resizing to 10G while detached …")
         self._resize_lvol_dual(lvol_name, "10G")
+        fs_resize_pending = self._assert_resize_detached(
+            lvol_name, lvol_id, "10G", tc="TC-SEC-141")
+        self.logger.info("TC-SEC-141: Detached resize PASSED")
 
-        # Assert the resize ACTUALLY happened before claiming anything about
-        # what survived it.
-        if self.k8s_test:
-            k8s = self._ensure_k8s_utils()
-            pvc_name = self._k8s_normalize_name(lvol_name)
-            grew = False
-            deadline = time.time() + 300
-            while time.time() < deadline:
-                cap, _ = k8s._exec_kubectl(
-                    f"kubectl get pvc {pvc_name} -n {k8s.namespace} "
-                    f"-o jsonpath='{{.status.capacity.storage}}' "
-                    f"2>/dev/null || true")
-                cap = (cap or "").strip()
-                if cap and cap not in ("5Gi", "5G"):
-                    grew = True
-                    self.logger.info(
-                        f"TC-SEC-141: PVC {pvc_name} capacity is now {cap}")
-                    break
-                sleep_n_sec(10)
-            assert grew, (
-                f"TC-SEC-141: PVC {pvc_name} status.capacity never grew past "
-                f"5Gi — the resize did not take effect, so TC-SEC-142 would "
-                f"be asserting about a volume that was never resized")
-        else:
-            sleep_n_sec(5)
-        self.logger.info("TC-SEC-141: Resize PASSED")
+        # TC-SEC-143: the leg TC-SEC-141 cannot finish.
+        #
+        # A detached Filesystem-mode CSI volume stops at the controller side
+        # on purpose: the driver answers ControllerExpandVolume with
+        # node_expansion_required=true, and kubelet only runs
+        # NodeExpandVolume while a pod has the volume mounted. The deferred
+        # half is a real part of the resize contract, and it takes an attach
+        # to observe at all.
+        self._assert_resize_completes_on_attach(
+            lvol_name, lvol_id, "10G", host_nqn=host_nqn,
+            fs_resize_pending=fs_resize_pending, tc="TC-SEC-143")
+        self.logger.info("TC-SEC-143: Deferred node expansion PASSED")
+
+        # TC-SEC-144: resize again, this time WITH the volume attached.
+        #
+        # The online path is a different path, not a repeat: controller and
+        # node expansion run back to back against a live mount, and the
+        # filesystem has to grow underneath a workload rather than at the
+        # next mount.
+        self._assert_resize_attached(
+            lvol_name, lvol_id, "10G", "15G", host_nqn=host_nqn,
+            tc="TC-SEC-144")
+        self.logger.info("TC-SEC-144: Attached (online) resize PASSED")
 
         # TC-SEC-142: security config must be untouched by the resize
         self.logger.info("TC-SEC-142: Verifying DHCHAP after resize …")
@@ -6707,6 +6767,266 @@ class TestLvolSecurityResize(SecurityTestBase):
         self.logger.info("TC-SEC-142: Post-resize FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityResize PASSED ===")
+
+    # ── resize verification ──────────────────────────────────────────────
+    #
+    # Detached and attached expansion are two different contracts, and the
+    # detached one is the easy thing to assert wrongly. For a Filesystem-mode
+    # CSI volume the driver answers ControllerExpandVolume with
+    # node_expansion_required=true; kubelet then runs NodeExpandVolume only
+    # while a pod has the volume mounted. With nothing attached the claim
+    # parks in FileSystemResizePending and pvc.status.capacity NEVER moves --
+    # that is correct behaviour, not a product failure, so a detached test
+    # has to assert on the PV (controller side) and leave status.capacity to
+    # the attach that follows.
+
+    def _lvol_size_bytes(self, lvol_id):
+        """Backend lvol size in bytes, straight from the control plane."""
+        details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        return int(details[0]["size"])
+
+    def _wait_pod_running_or_explain(self, pod_name, node, why):
+        """Wait for a pod to run, and say what the events showed if it did not.
+
+        ``wait_pod_running`` raises rather than returning False, so the
+        failure arrives without any of the scheduling detail that explains
+        it -- which for these pods is usually the pool's nodeAffinity.
+        """
+        k8s = self._ensure_k8s_utils()
+        try:
+            k8s.wait_pod_running(pod_name, timeout=300)
+        except (TimeoutError, RuntimeError) as exc:
+            events = k8s.get_pod_events(pod_name)
+            raise AssertionError(
+                f"{why}: pod {pod_name} pinned to {node!r} never reached "
+                f"Running ({exc}); events: {events!r}") from exc
+
+    def _assert_resize_detached(self, lvol_name, lvol_id, new_size,
+                                tc="TC-SEC-141"):
+        """Verify a resize issued while the volume is detached.
+
+        Returns True when K8s deferred the filesystem growth to the next
+        attach (the usual Filesystem-mode outcome), so the caller knows
+        whether TC-SEC-143 still has work to observe.
+        """
+        expected = int(_size_to_bytes(new_size) * _SIZE_FLOOR)
+        if not self.k8s_test:
+            deadline = time.time() + 120
+            actual = None
+            while time.time() < deadline:
+                actual = self._lvol_size_bytes(lvol_id)
+                if actual >= expected:
+                    break
+                sleep_n_sec(5)
+            assert actual is not None and actual >= expected, (
+                f"{tc}: lvol {lvol_name} is still {actual} bytes after a "
+                f"resize to {new_size} (floor {expected} bytes) — the control "
+                f"plane did not apply the resize")
+            self.logger.info(
+                f"{tc}: lvol {lvol_name} grew to {actual} bytes while detached")
+            return False
+
+        k8s = self._ensure_k8s_utils()
+        pvc_name = self._k8s_normalize_name(lvol_name)
+        pv_name = k8s.get_pvc_pv_name(pvc_name)
+        assert pv_name, f"{tc}: PVC {pvc_name} has no bound PV"
+
+        k8s_size = _to_k8s_quantity(new_size)
+        assert k8s.wait_pv_capacity(pv_name, k8s_size, timeout=300), (
+            f"{tc}: PV {pv_name} spec.capacity never reached {k8s_size} — "
+            f"ControllerExpandVolume did not succeed. This half of the "
+            f"resize needs no attachment, so a detached volume is no excuse "
+            f"for it")
+        self.logger.info(
+            f"{tc}: PV {pv_name} capacity is {k8s_size} (controller "
+            f"expansion complete while detached)")
+
+        # The backend must agree with what CSI reported.
+        actual = self._lvol_size_bytes(lvol_id)
+        assert actual >= expected, (
+            f"{tc}: PV reports {k8s_size} but the backing lvol is still "
+            f"{actual} bytes — CSI reported a resize the control plane "
+            f"never made")
+
+        conditions = k8s.get_pvc_conditions(pvc_name)
+        cap = k8s.get_pvc_status(pvc_name).get("capacity", "")
+        if "FileSystemResizePending" in conditions:
+            # Expected path. Assert the deferral is real rather than just
+            # logging it: if status.capacity had somehow advanced, the
+            # condition would be stale and TC-SEC-143 would prove nothing.
+            assert cap != k8s_size, (
+                f"{tc}: PVC {pvc_name} is FileSystemResizePending yet "
+                f"status.capacity already reads {cap} — the two disagree")
+            self.logger.info(
+                f"{tc}: PVC {pvc_name} is FileSystemResizePending with "
+                f"status.capacity still {cap!r}; the filesystem grows at the "
+                f"next attach, which TC-SEC-143 asserts")
+            return True
+
+        # No node expansion was asked for (block mode, or a driver that grew
+        # the filesystem itself). Then status.capacity is the completion
+        # signal and it has to land without any attach.
+        assert k8s.wait_pvc_capacity(pvc_name, k8s_size, timeout=300), (
+            f"{tc}: PVC {pvc_name} is not FileSystemResizePending, so no "
+            f"node-side expansion is pending, yet status.capacity never "
+            f"reached {k8s_size} (last: {cap!r})")
+        self.logger.info(
+            f"{tc}: PVC {pvc_name} completed to {k8s_size} without needing "
+            f"a node-side expansion")
+        return False
+
+    def _assert_resize_completes_on_attach(self, lvol_name, lvol_id, new_size,
+                                           host_nqn=None,
+                                           fs_resize_pending=True,
+                                           tc="TC-SEC-143"):
+        """Attach the volume and verify the deferred filesystem growth lands."""
+        k8s_size = _to_k8s_quantity(new_size)
+        if not self.k8s_test:
+            # Docker has no deferred leg -- the lvol is already grown. What
+            # an attach adds is that the client actually sees the new size.
+            device, _ = self._connect_and_get_device_dual(
+                lvol_name, lvol_id, host_nqn=host_nqn)
+            self._assert_device_size(device, new_size, tc=tc)
+            self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+            return
+
+        if not fs_resize_pending:
+            self.logger.info(
+                f"{tc}: nothing deferred — the resize already completed "
+                f"without a node-side expansion")
+            return
+
+        k8s = self._ensure_k8s_utils()
+        pvc_name = self._k8s_normalize_name(lvol_name)
+        node = (self._dhchap_allowed_nodes[0]
+                if self._dhchap_allowed_nodes else None)
+        pod_name = f"grow-{_rand_suffix().lower()}"
+        # Track before creating: a surviving pod holds pvc-protection on the
+        # claim and leaves it Terminating for hours.
+        self.created_pods.append(pod_name)
+        try:
+            # nodeSelector, not nodeName: the StorageClass binds
+            # WaitForFirstConsumer, and only the scheduler triggers that.
+            k8s.create_utility_pod(pod_name, pvc_name, node_selector=node)
+            self._wait_pod_running_or_explain(
+                pod_name, node,
+                f"{tc}: the deferred filesystem expansion cannot be observed "
+                f"without a pod holding the volume")
+            assert k8s.wait_pvc_capacity(pvc_name, k8s_size, timeout=300), (
+                f"{tc}: PVC {pvc_name} status.capacity never reached "
+                f"{k8s_size} even with the volume mounted on {node!r} — "
+                f"NodeExpandVolume did not complete")
+            fs_bytes = k8s.get_mount_size_bytes(pod_name)
+            assert fs_bytes >= _size_to_bytes(new_size) * _FS_SIZE_FLOOR, (
+                f"{tc}: the claim reports {k8s_size} but the filesystem in "
+                f"{pod_name} is only {fs_bytes} bytes — the block device grew "
+                f"and the filesystem did not")
+            self.logger.info(
+                f"{tc}: PVC {pvc_name} reached {k8s_size} on attach; "
+                f"filesystem is {fs_bytes} bytes")
+        finally:
+            self._k8s_release_pod(pod_name, pvc_name=pvc_name)
+
+    def _assert_resize_attached(self, lvol_name, lvol_id, old_size, new_size,
+                                host_nqn=None, tc="TC-SEC-144"):
+        """Verify an ONLINE resize: grow the volume while a pod holds it."""
+        k8s_size = _to_k8s_quantity(new_size)
+        expected = int(_size_to_bytes(new_size) * _SIZE_FLOOR)
+        if not self.k8s_test:
+            device, _ = self._connect_and_get_device_dual(
+                lvol_name, lvol_id, host_nqn=host_nqn)
+            try:
+                self._resize_lvol_dual(lvol_name, new_size)
+                deadline = time.time() + 120
+                actual = None
+                while time.time() < deadline:
+                    actual = self._lvol_size_bytes(lvol_id)
+                    if actual >= expected:
+                        break
+                    sleep_n_sec(5)
+                assert actual is not None and actual >= expected, (
+                    f"{tc}: lvol {lvol_name} is still {actual} bytes after an "
+                    f"online resize to {new_size}")
+                self._assert_device_size(device, new_size, tc=tc)
+                self.logger.info(
+                    f"{tc}: lvol {lvol_name} grew to {actual} bytes while "
+                    f"connected")
+            finally:
+                self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+            return
+
+        k8s = self._ensure_k8s_utils()
+        pvc_name = self._k8s_normalize_name(lvol_name)
+        node = (self._dhchap_allowed_nodes[0]
+                if self._dhchap_allowed_nodes else None)
+        pod_name = f"online-{_rand_suffix().lower()}"
+        self.created_pods.append(pod_name)
+        try:
+            k8s.create_utility_pod(pod_name, pvc_name, node_selector=node)
+            self._wait_pod_running_or_explain(
+                pod_name, node,
+                f"{tc}: an online resize needs a live mount, and there is "
+                f"none")
+            before = k8s.get_mount_size_bytes(pod_name)
+            assert before > 0, (
+                f"{tc}: could not read the filesystem size in {pod_name} "
+                f"before the resize — a 'it grew' assertion would be vacuous")
+
+            self.logger.info(
+                f"{tc}: resizing {pvc_name} {old_size} → {new_size} with the "
+                f"volume mounted on {node!r} …")
+            self._resize_lvol_dual(lvol_name, new_size)
+
+            # Online there is no detached half: status.capacity is the
+            # completion signal and it must land without any remount.
+            assert k8s.wait_pvc_capacity(pvc_name, k8s_size, timeout=300), (
+                f"{tc}: PVC {pvc_name} status.capacity never reached "
+                f"{k8s_size} while mounted on {node!r} — an online expansion "
+                f"has both an attached node and a live kubelet, so nothing "
+                f"is deferred here")
+            pending = k8s.get_pvc_conditions(pvc_name)
+            assert "FileSystemResizePending" not in pending, (
+                f"{tc}: PVC {pvc_name} is still FileSystemResizePending after "
+                f"reporting {k8s_size} while attached")
+
+            after = k8s.get_mount_size_bytes(pod_name)
+            assert after > before, (
+                f"{tc}: the filesystem in {pod_name} did not grow during the "
+                f"online resize ({before} → {after} bytes) — the pod is still "
+                f"seeing the old size, so the expansion is not usable without "
+                f"a remount")
+            self.logger.info(
+                f"{tc}: filesystem grew live under the mount, "
+                f"{before} → {after} bytes")
+
+            actual = self._lvol_size_bytes(lvol_id)
+            assert actual >= expected, (
+                f"{tc}: PVC reports {k8s_size} but the backing lvol is still "
+                f"{actual} bytes")
+        finally:
+            self._k8s_release_pod(pod_name, pvc_name=pvc_name)
+
+    def _assert_device_size(self, device, expected_size, tc=""):
+        """Docker: the connected block device reflects the new size."""
+        expected = int(_size_to_bytes(expected_size) * _SIZE_FLOOR)
+        deadline = time.time() + 120
+        actual = 0
+        while time.time() < deadline:
+            out, _ = self.ssh_obj.exec_command(
+                self.fio_node, f"lsblk -bndo SIZE {device}")
+            try:
+                actual = int((out or "").strip().splitlines()[0])
+            except (ValueError, IndexError):
+                actual = 0
+            if actual >= expected:
+                self.logger.info(
+                    f"{tc}: device {device} reports {actual} bytes")
+                return
+            sleep_n_sec(5)
+        raise AssertionError(
+            f"{tc}: device {device} still reports {actual} bytes, expected at "
+            f"least {expected} ({expected_size}) — the client never saw the "
+            f"resize")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
