@@ -8,7 +8,7 @@ Core business logic, data models, and background services for the Simplyblock co
 - `models/` — Data models inheriting from `BaseModel` (see below).
 - `services/` — Background services for monitoring and async task execution (health checks, snapshot/lvol/storage-node monitors, task runners for backup, migration, restart, etc.).
 - `db_controller.py` — Singleton `DBController` wrapping FoundationDB. All data access goes through this class.
-- `rpc_client.py` — JSON-RPC client for communicating with storage node SPDK processes. `Session` construction is pooled by `RPCSessionPool` (keyed on identity + retry; `timeout` stays per-call). `services/spdk_http_proxy_server.py`, the receiving end, supports HTTP/1.1 keep-alive so those pooled connections are actually reused end-to-end.
+- `rpc_client.py` — JSON-RPC client for communicating with storage node SPDK processes. `Session` construction is pooled by `RPCSessionPool` (keyed on identity + retry; `timeout` stays per-call). `services/spdk_http_proxy_server.py`, the receiving end, supports HTTP/1.1 keep-alive so those pooled connections are actually reused end-to-end. It is a FastAPI app on uvicorn: `create_app()` builds it, importing the module has no side effects, and it exposes a Prometheus endpoint on `/_meta/metrics` (same path as `simplyblock_web`, behind the same basic-auth credentials as the RPCs) alongside a periodic timing summary in its log. Per-request logging follows `simplyblock_web/app.py`: uvicorn's access log is off and an `AccessLogMiddleware` replaces it, enriched with the JSON-RPC method and the id that ties the access line to the request's own `Request:<id>` line.
 - `kms/` — Key management abstraction: HashiCorp Vault (`_hcp.py`) and FDB-based (`_fdb.py`) backends.
 
 ## Data Model Pattern
@@ -49,6 +49,8 @@ Clients in `rpc_client.py`, `snode_client.py`, and `fw_api_client.py` accept `Se
 3. Send the plaintext dict as JSON on the wire.
 
 Response-body logging is gated by `Settings().log_response_bodies` (default `False`). When off, only status code and content-length are logged.
+
+The request-side `logger.debug` in `_request2` / `_request3` masks by type for the params that are `SecretStr`, and passes every params dict through `redact_rpc_params` (`utils/secrets.py`) to cover the ones that arrive as plain `str` — the v1 API hands controllers raw JSON. The SPDK proxy applies the same redactor, since by the time a body reaches it the wrappers are gone.
 
 ## Tests
 
