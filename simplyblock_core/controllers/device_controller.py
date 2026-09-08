@@ -450,7 +450,13 @@ def probe_device_stack(device_obj, snode, rpc_client=None):
         subsys: list = []
 
         def _get_subsys():
-            subsys.extend(rpc_client.subsystem_get(device_obj.nvmf_nqn) or [])
+            # subsystem_get() returns one subsystem dict, or None.
+            # list.extend(dict) would append the dict's keys instead of the dict.
+            entry = rpc_client.subsystem_get(device_obj.nvmf_nqn)
+            if isinstance(entry, dict):
+                subsys.append(entry)
+            elif entry:
+                subsys.extend(entry)
             return subsys
 
         _safe("subsystem", _get_subsys)
