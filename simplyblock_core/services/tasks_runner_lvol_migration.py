@@ -1718,8 +1718,17 @@ def _take_intermediate_snapshot(migration):
     logger.info(
         f"[IO-FREEZE] {_now_ms()} intermediate snapshot starting: "
         f"lvol={migration.lvol_id} round={migration.intermediate_snap_rounds} name={snap_name}")
+    # Check the node actually serving the lvol right now, not the lvol's
+    # configured/home node -- during an HA fallback (primary offline/
+    # restarting) that's active_source_node_id, a healthy replica, while
+    # node_id still points at the restarting primary. Checking node_id
+    # unconditionally would see the primary's own restart-in-progress
+    # marker and reject every intermediate snapshot for as long as the
+    # primary is restarting, regardless of whether the active source is
+    # healthy.
     snap_uuid, err = snapshot_controller.add(
-        migration.lvol_id, snap_name, bypass_migration_check=True)
+        migration.lvol_id, snap_name, bypass_migration_check=True,
+        check_node_id=migration.active_source_node_id or migration.source_node_id)
     if err:
         logger.warning(f"Intermediate snapshot failed (proceeding without): {err}")
         migration.intermediate_snap_rounds = migration.max_intermediate_snap_rounds
