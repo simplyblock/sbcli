@@ -627,7 +627,19 @@ def check_snapshot_capacity(pool, cluster, lvol, all_lvols=None, all_snaps=None)
 
 
 def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
-        bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
+        bypass_migration_check=False, snap_type=SnapShot.TYPE_USER, check_node_id=None):
+    """
+    check_node_id: node to check for an in-progress LVStore restart before
+    creating the snapshot (see "Block during restart Phase 5" below).
+    Defaults to lvol.node_id -- the lvol's configured/home node. A caller
+    that already resolved a different node as the one actually serving this
+    lvol right now (e.g. a migration using active_source_node_id during an
+    HA fallback, where node_id still points at the offline/restarting
+    primary) should pass that resolved node id instead, or this check
+    always sees the primary's own restart-in-progress marker and rejects
+    every snapshot for as long as the primary is restarting -- regardless
+    of whether the node actually serving the lvol is healthy.
+    """
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError:
@@ -662,7 +674,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     # Block during restart Phase 5
     try:
-        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        snode = db_controller.get_storage_node_by_id(check_node_id or lvol.node_id)
         if snode.lvstore_status == "in_creation":
             msg = "Cannot create snapshot: node LVStore restart in progress"
             logger.error(msg)
