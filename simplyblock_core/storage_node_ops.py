@@ -10661,6 +10661,22 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 raise Exception(
                     f"Abort restart: leader detection RPC to peer {sec_node.get_id()} failed: {e}")
 
+        # TEST-ONLY (lvol-migration-from-replica-test): disable the
+        # leader-reclaim/fence sequence below (introduced in 4811e99ee).
+        # That sequence marks the CURRENT acting leader's lvstore_status
+        # "in_creation" and fences its port while snode (the original/
+        # configured primary) tries to reclaim leadership back. When that
+        # reclaim then aborts -- e.g. because snode's own client ports are
+        # still blocked, exactly the fallback-migration scenario this
+        # branch tests -- _abort_restart_and_unblock() releases the port
+        # fence but never restores lvstore_status, leaving the fallback
+        # secondary stuck at "in_creation" indefinitely. Nulling
+        # current_leader here skips that whole step (and the compression
+        # check right below) so this restart never touches the acting
+        # leader at all. Not a real fix -- just isolates whether removing
+        # this behavior unblocks the migration.
+        current_leader = None
+
         # Check compression and replication only on the current leader
         if current_leader:
             try:
