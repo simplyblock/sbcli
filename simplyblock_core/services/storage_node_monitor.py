@@ -1675,6 +1675,31 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
                          port, snode.get_id(), e)
 
 
+#: node_id -> the ``online_since`` stamp we last verified nvme options for.
+#: online_since is re-stamped on every ->ONLINE transition, so this
+#: re-verifies exactly once per online episode (i.e. once per SPDK restart)
+#: rather than on every monitor tick.
+_nvme_opts_verified: dict = {}
+
+
+def _verify_nvme_options_once(snode):
+    node_id = snode.get_id()
+    marker = getattr(snode, "online_since", None)
+    if _nvme_opts_verified.get(node_id) == marker:
+        return
+    try:
+        ok, _drift = storage_node_ops.ensure_nvme_options(
+            snode, context="monitor node check")
+    except Exception as e:
+        logger.warning("nvme options check on %s raised: %s", node_id[:8], e)
+        return
+    if ok:
+        # Only remember a clean result. A drifted node is re-reported every
+        # episode until it is restarted, which is the intent: a node with no
+        # command timeout must not go quiet.
+        _nvme_opts_verified[node_id] = marker
+
+
 def _abort_hung_spdk(snode, hung_for):
     """Kill SPDK on a node whose RPC hung while the process is still alive.
 
@@ -1949,6 +1974,13 @@ def check_node(snode):
            return False
     else:
         _note_rpc_ok(snode.get_id())
+        # SPDK's global nvme options can only be set before the first
+        # controller attach (spdk_bdev_nvme_set_opts returns -EPERM after
+        # that), so an SPDK that came up without the control plane's init
+        # sequence keeps compiled-in defaults for its entire lifetime --
+        # including timeout_us=0, i.e. no command timeout armed at all.
+        # Checked once per online episode: one RPC per restart, not per tick.
+        _verify_nvme_options_once(snode)
 
     decrement()
     if not node_rpc_check or not node_rpc_check_1:

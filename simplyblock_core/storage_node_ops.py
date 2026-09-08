@@ -43,7 +43,8 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException, namespace_matches, evict_cached_session
+from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches, evict_cached_session  # noqa: F401  (RPCClient kept as a patch target for tests)
+from simplyblock_core import rpc_client as rpc_client_module
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import dial_backoff
 from simplyblock_web import node_utils
@@ -9368,6 +9369,127 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
             (" for %s" % lvs_label) if lvs_label else "")
 
     return sorted(failures.items())
+
+
+#: bdev_nvme options that must be in force before ANY controller is attached.
+#: These are the ones whose absence is silently catastrophic rather than merely
+#: suboptimal -- see ensure_nvme_options().
+NVME_OPTS_CRITICAL_KEYS = (
+    "timeout_us",
+    "transport_ack_timeout",
+    "keep_alive_timeout_ms",
+    "ctrlr_loss_timeout_sec",
+    "reconnect_delay_sec",
+    "fast_io_fail_timeout_sec",
+    "bdev_retry_count",
+    "action_on_timeout",
+)
+
+
+def ensure_nvme_options(snode, context=""):
+    """Verify -- and where still possible, apply -- the bdev_nvme options.
+
+    Returns ``(ok, drift)``; ``drift`` maps option -> (effective, intended)
+    for every critical option that does not match.
+
+    Why this exists. spdk_bdev_nvme_set_opts() refuses once any NVMe bdev
+    controller is attached::
+
+        if (g_bdev_nvme_init_thread != NULL) {
+            if (!TAILQ_EMPTY(&g_nvme_bdev_ctrlrs)) {
+                return -EPERM;
+            }
+        }
+
+    so the options can only ever be set BEFORE the first
+    bdev_nvme_attach_controller. If an SPDK comes up without the control
+    plane's init sequence and we start attaching to it, the window shuts
+    permanently for that SPDK's whole lifetime and nothing later can reopen
+    it -- the instance keeps SPDK's compiled-in defaults, which are
+    timeout_us=0 (no command timeout registered AT ALL, bdev_nvme.c: the
+    callback is only registered `if (g_opts.timeout_us > 0)`),
+    transport_ack_timeout=0 (no TCP_USER_TIMEOUT, nvme_tcp.c: applied only
+    `if (ctrlr->opts.transport_ack_timeout)`) and keep_alive_timeout_ms at
+    the SPDK default.
+
+    2026-09-05, node 4424: the SPDK instance that served from 19:23:44 to
+    22:08:48 received none of the init RPCs -- no bdev_nvme_set_options, no
+    transport_create, no framework_start_init, no bdev_set_options, no
+    thread_set_cpumask -- yet took 4 nvmf_create_subsystem and 13
+    bdev_nvme_attach_controller calls. So when node 4422 was container_stopped,
+    the only liveness mechanism left on the parked READ was a default-interval
+    keep-alive, and nothing bounded the command: 7.11 s to notice a dead peer
+    that had RST'd other sockets within 255 ms, then 2.0 s of retries, 9.13 s
+    before the IO failed to distrib.
+
+    Detection is the point. If the options match, this is one cheap RPC. If
+    they have drifted and controllers already exist, only a restart of that
+    SPDK can fix it -- so say so, loudly, instead of leaving a node quietly
+    running with no IO timeout.
+    """
+    intended = rpc_client_module.nvme_bdev_opts_params()
+    try:
+        rpc = snode.rpc_client(timeout=10, retry=1)
+    except Exception as e:
+        logger.warning("ensure_nvme_options: no rpc_client for %s: %s",
+                       snode.get_id()[:8], e)
+        return False, {}
+
+    try:
+        effective = rpc.get_effective_nvme_options()
+    except Exception as e:
+        # Never let a verification probe propagate into the caller's flow —
+        # this runs inside the node monitor and the restart path.
+        logger.warning("ensure_nvme_options: readback on %s raised: %s",
+                       snode.get_id()[:8], e)
+        return False, {}
+    if not effective:
+        # Could not read the config back; do not guess, and do not attempt a
+        # blind set that might fail with EPERM and log noise.
+        logger.info("ensure_nvme_options: could not read bdev config on %s%s",
+                    snode.get_id()[:8], (" (%s)" % context) if context else "")
+        return False, {}
+
+    drift = {}
+    for key in NVME_OPTS_CRITICAL_KEYS:
+        if key not in intended:
+            continue
+        want = intended[key]
+        got = effective.get(key)
+        if got != want:
+            drift[key] = (got, want)
+
+    if not drift:
+        return True, {}
+
+    # Still fixable only while no controller is attached. Try, and let the
+    # result tell us which side of that line we are on.
+    try:
+        applied = rpc.bdev_nvme_set_options()
+    except Exception as e:
+        applied = False
+        logger.debug("ensure_nvme_options: set attempt on %s raised: %s",
+                     snode.get_id()[:8], e)
+
+    if applied:
+        logger.warning(
+            "Applied missing bdev_nvme options on %s%s (no controllers "
+            "attached yet, so the window was still open): %s",
+            snode.get_id()[:8], (" during %s" % context) if context else "",
+            ", ".join("%s %r->%r" % (k, v[0], v[1]) for k, v in sorted(drift.items())))
+        return True, drift
+
+    logger.error(
+        "NVME OPTIONS NOT IN FORCE on %s%s and no longer settable "
+        "(bdev_nvme_set_options returns -EPERM once a controller is "
+        "attached). This SPDK is running with defaults for: %s. "
+        "timeout_us=0 means NO command timeout is armed, so a dead peer is "
+        "only noticed by keep-alive. Only a restart of this SPDK can restore "
+        "them.",
+        snode.get_id()[:8], (" during %s" % context) if context else "",
+        ", ".join("%s effective=%r intended=%r" % (k, v[0], v[1])
+                  for k, v in sorted(drift.items())))
+    return False, drift
 
 
 def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primary_node, activation_mode=False, force=False):
