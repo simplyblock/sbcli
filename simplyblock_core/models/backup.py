@@ -38,8 +38,6 @@ class Backup(BaseModel):
     created_at: int = 0
     completed_at: int = 0
     error_message: str = ""
-    # Security params from the source lvol (for cross-cluster restore)
-    allowed_hosts: list[dict] = default_factory(list)
     #: Where this backup's objects live and how to interpret them, as a
     #: ``BackupLocation``. Stored as a dict because ``BaseModel`` cannot nest
     #: pydantic models; read it through :meth:`get_location`.

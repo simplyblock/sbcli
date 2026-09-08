@@ -5780,7 +5780,7 @@ def get_backup_extra_tests():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TC-BCK-150..154 – Backup / restore of a DHCHAP + crypto lvol
+#  TC-BCK-150..154 – Backup / restore of a crypto lvol
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBackupSecurityLvol(BackupTestBase):
@@ -5904,8 +5904,8 @@ class TestBackupSecurityLvol(BackupTestBase):
         self.logger.info(
             f"Registered host {self._host_nqn} to pool {pool_id}")
 
-        # TC-BCK-150: create DHCHAP+crypto lvol and write data
-        self.logger.info("TC-BCK-150: Creating DHCHAP+crypto lvol …")
+        # TC-BCK-150: create crypto lvol and write data
+        self.logger.info("TC-BCK-150: Creating crypto lvol …")
         lvol_name, lvol_id = self._create_lvol(crypto=True)
         device, mount = self._connect_and_mount_dhchap(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
