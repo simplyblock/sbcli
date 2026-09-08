@@ -4195,10 +4195,49 @@ def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller)
             # The primary is gone; nothing to relocate, just bookkeeping.
             continue
         if not _pick_replica_relocation_node(primary, removed_node, picker, db_controller):
-            return False, (
-                f"no host-disjoint node available to re-host the {picker} replica "
-                f"of primary {primary_id} (currently on the node being removed)")
+            # The greedy probe places one stranded replica at a time and never
+            # backtracks, so on a dense cluster it can report "nowhere to put
+            # this" while a valid host-disjoint layout exists that moves an
+            # already-placed replica too. Ask the planner before refusing.
+            if _planner_confirms_relocation_infeasible(removed_node, db_controller):
+                return False, (
+                    f"no host-disjoint node available to re-host the {picker} replica "
+                    f"of primary {primary_id} (currently on the node being removed)")
+            logger.info(
+                f"[REMOVAL] {removed_node.get_id()}: greedy probe found no home for the "
+                f"{picker} replica of {primary_id}, but the global planner found a valid "
+                f"host-disjoint layout; admitting the removal")
+            return True, ""
     return True, ""
+
+
+def _planner_confirms_relocation_infeasible(removed_node: StorageNode, db_controller) -> bool:
+    """Second opinion for the greedy probe on a cluster without failure domains.
+
+    Returns True when the planner also cannot find a layout (so the refusal
+    stands), and False when it finds one or cannot model this cluster at all
+    -- in the latter case there is no evidence to overturn the greedy answer,
+    but there is none to uphold it either, and admitting matches the
+    behaviour every caller had before the planner existed.
+    """
+    from simplyblock_core.controllers import replica_placement
+
+    inputs = _relocation_planner_inputs(removed_node, db_controller, allow_without_fd=True)
+    if inputs is None:
+        return True
+    surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt = inputs
+    try:
+        replica_placement.plan_diverse_layout(
+            surviving_ids, fd_by_node, current_layout, ftt,
+            host_by_node=host_by_node, label_by_node=label_by_node)
+    except replica_placement.InfeasiblePlacement:
+        return True
+    except Exception as e:  # planner cannot model it; keep the greedy answer
+        logger.warning(
+            f"[REMOVAL] {removed_node.get_id()}: planner second opinion failed ({e}); "
+            f"keeping the greedy refusal")
+        return True
+    return False
 
 
 def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_controller,
@@ -4936,7 +4975,8 @@ def _relocate_replicas_hosted_on(removed_node: StorageNode):
     return True
 
 
-def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
+def _relocation_planner_inputs(removed_node: StorageNode, db_controller,
+                               *, allow_without_fd: bool = False):
     """Gather the pure inputs the global placement planner needs, or ``None``
     when this cluster is not a case the planner handles.
 
@@ -4948,13 +4988,21 @@ def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
     ``removed_node`` as the move's origin so the existing mover can tear the
     old copy down and clear its back-reference exactly as before.
 
+    With ``allow_without_fd`` the planner is also offered clusters that have
+    failure domains OFF: every host becomes its own pseudo-domain, so the
+    "domains pairwise distinct" constraint degenerates to exactly the
+    host-disjointness the planner already enforces. Callers use this as a
+    SECOND OPINION after the greedy per-role path refuses -- that path places
+    one stranded replica at a time without backtracking, so on a dense
+    cluster (every survivor already at capacity) it can consume the one slot
+    another stranded replica needed and then refuse a removal for which a
+    valid host-disjoint layout demonstrably exists.
+
     Declines (returns ``None``) when:
 
-    * failure domains are off -- there is no diversity invariant to solve
-      for, and the long-standing greedy path already handles host-disjoint
-      re-homing;
-    * any surviving node has no failure domain set -- a partial domain map
-      cannot be reasoned about, only guessed at;
+    * failure domains are off and ``allow_without_fd`` was not passed;
+    * failure domains are ON but any surviving node has no failure domain
+      set -- a partial domain map cannot be reasoned about, only guessed at;
     * the cluster has dedicated secondary nodes (``is_secondary_node``),
       which may host more than one replica each and so break the
       one-slot-per-node permutation model the planner is built on;
@@ -4964,10 +5012,11 @@ def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
     from simplyblock_core.controllers import replica_placement
 
     cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
-    if not getattr(cluster, "enable_failure_domain", False):
+    fd_enabled = bool(getattr(cluster, "enable_failure_domain", False))
+    if not fd_enabled and not allow_without_fd:
         return None
-
     ftt = cluster.max_fault_tolerance if cluster.max_fault_tolerance in (1, 2) else 1
+
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
     survivors = [
         n for n in all_nodes
@@ -4979,11 +5028,22 @@ def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
         return None
     if any(n.status != StorageNode.STATUS_ONLINE for n in survivors):
         return None
-    if any(n.failure_domain < 0 for n in survivors):
+    if fd_enabled and any(n.failure_domain < 0 for n in survivors):
         return None
 
     surviving_ids = [n.get_id() for n in survivors]
-    fd_by_node = {n.get_id(): n.failure_domain for n in survivors}
+    if fd_enabled:
+        fd_by_node = {n.get_id(): n.failure_domain for n in survivors}
+    else:
+        # One pseudo-domain per HOST (not per node): a host may legitimately
+        # run several storage nodes, and two replicas on one host do not
+        # survive that host's loss. Keying on the host makes the planner's
+        # domain constraint and its host-disjointness constraint agree.
+        _fd_of_host: dict = {}
+        fd_by_node = {
+            n.get_id(): _fd_of_host.setdefault(n.mgmt_ip, len(_fd_of_host))
+            for n in survivors
+        }
     host_by_node = {n.get_id(): n.mgmt_ip for n in survivors}
     label_by_node = {n.get_id(): n.physical_label for n in survivors}
     current_layout = {
