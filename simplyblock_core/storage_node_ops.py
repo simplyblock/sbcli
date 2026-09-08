@@ -44,9 +44,8 @@ from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import (  # noqa: F401  (RPCClient kept as a patch target for tests)
-    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, JC_REPLACE_JM_UNKNOWN_VUID,
-    JC_REPLACE_JM_VUID_NOT_USING, RPC_UNSUPPORTED, RPCClient, RPCErrorCode,
-    RPCRemoteError, RPCException, namespace_matches)
+    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, RPC_UNSUPPORTED, RPCClient,
+    RPCErrorCode, RPCRemoteError, RPCException, namespace_matches)
 from simplyblock_core import rpc_client as rpc_client_module
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import dial_backoff
@@ -2917,6 +2916,43 @@ def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
     return huge_page_memory
 
 
+def reserve_cluster_hugepages(snode_api, nodes, cluster):
+    """Size every node_config's huge_page_memory to the cluster's real sizing,
+    then reserve the pages in the kernel -- once, after every entry reflects the
+    cluster.
+
+    snode_api.set_hugepages() reads huge_page_memory straight out of the node
+    config and reserves that many pages; the reservation is made once and is not
+    revisited during the add. Run against sn configure's config that means
+    reserving the product-ceiling (max_subsys = MAX_SUBSYSTEMS_PER_NODE) amount,
+    which the kernel then keeps even though apply_cluster_hugepages later rewrites
+    the config to the real size -- only a restart (reset_storage_node, which
+    already recomputes before it reserves) would bring the two back in step. So
+    recompute + persist every entry against the cluster's real max_subsys/cpu
+    layout first, then reserve. The per-node loop in add_node re-runs
+    apply_cluster_hugepages, which is then a no-op.
+
+    Returns False if sizing or persisting any entry fails.
+    """
+    hp_max_subsys = int(getattr(cluster, "max_subsys", 0) or 0)
+    hp_mem_floor = int(getattr(cluster, "hugepages_mem", 0) or 0)
+    for node_config in nodes:
+        if hp_max_subsys:
+            node_config["max_lvol"] = hp_max_subsys
+        hp_req_cpu = len(node_config.get("isolated") or [])
+        hp_max_prov = hp_mem_floor
+        if not hp_max_prov and node_config.get("max_size"):
+            hp_max_prov = int(utils.parse_size(node_config.get("max_size")))
+        if hp_max_prov < 0:
+            logger.error(f"Incorrect huge-page floor value {hp_max_prov}")
+            return False
+        if apply_cluster_hugepages(snode_api, node_config, hp_req_cpu, hp_max_prov) is None:
+            logger.error("Failed to size hugepages for the cluster before reserving them")
+            return False
+    snode_api.set_hugepages()
+    return True
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -2957,8 +2993,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             "rebalanced", cluster_id)
         return False
 
-    snode_api.set_hugepages()
-
     # Resize this host's core layout to the cluster's vcpu_count once, before
     # any node_config entry is consumed below, so every entry in the loop
     # already reflects it. A no-op when the host's layout already matches
@@ -2969,6 +3003,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             snode_api, node_info, nodes, cluster_vcpu_count):
         logger.error("Refusing the add -- could not resize node %s's CPU "
                      "layout to the cluster's vcpu-count", node_addr)
+        return False
+
+    # Reserve hugepages against the cluster's real sizing before the per-node
+    # loop below starts SPDK. This must run after apply_cluster_vcpu_count (the
+    # core layout feeds the sizing) and before any set_hugepages(); see
+    # reserve_cluster_hugepages for why the recompute-then-reserve order matters.
+    if not reserve_cluster_hugepages(snode_api, nodes, _cluster):
         return False
 
     for node_config in nodes:
