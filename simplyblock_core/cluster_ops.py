@@ -25,6 +25,7 @@ from simplyblock_core import utils, scripts, constants, mgmt_node_ops, release_u
 from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core import jm_raid
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -378,6 +379,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     # UPGRADED from a release without v2 goes through
     # `cluster switch-write-protection`.
     cluster.write_protection_v2 = True
+    # New clusters build journals with the current RAID 0+1 layout.
+    cluster.jm_raid_layout = jm_raid.LAYOUT_RAID01
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -618,6 +621,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     # UPGRADED from a release without v2 goes through
     # `cluster switch-write-protection`.
     cluster.write_protection_v2 = True
+    # New clusters build journals with the current RAID 0+1 layout.
+    cluster.jm_raid_layout = jm_raid.LAYOUT_RAID01
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -2804,6 +2809,26 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     # upgrade before anything was changed. Completed later by
     # `cluster upgrade-complete` (upgrade_complete below).
     release_upgrades.run_pre_update(cluster)
+
+    # Pin this cluster's JM RAID geometry BEFORE the rolling restart, while the
+    # JMDevice records still reflect what is on disk. The raid has no on-disk
+    # superblock, so an image whose planner changed would otherwise rebuild the
+    # journals under a different geometry and read the same bytes back scrambled
+    # (prod incident 2026-09-08). Detect from the current records: any JM device
+    # with recorded RAID0+1 legs means the cluster is raid01, else it is the
+    # legacy N-way mirror. Only set it when still unpinned.
+    if not (getattr(cluster, "jm_raid_layout", "") or "").strip():
+        _detected_layout = jm_raid.LAYOUT_LEGACY
+        for _n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            _jd = _n.jm_device
+            if _jd and (getattr(_jd, "jm_leg_bdevs", None) or []):
+                _detected_layout = jm_raid.LAYOUT_RAID01
+                break
+        db_controller.atomic_update(
+            db_controller.get_cluster_by_id(cluster_id),
+            lambda c, v=_detected_layout: setattr(c, "jm_raid_layout", v))
+        logger.info("Cluster %s JM RAID geometry pinned to %s for the upgrade",
+                    cluster_id, _detected_layout)
 
     # An upgraded cluster's existing distribs carry v1 write protection, and no
     # create parameter can retrofit a bdev that already exists -- only the
