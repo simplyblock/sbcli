@@ -676,7 +676,13 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
     memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
             1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(2.0 * memory_consumption)
+    # The computed pool + EXTRA_HUGE_PAGE_MEMORY figure is the reservation; it
+    # is not doubled. The historical 2.0x safety factor reserved ~twice the
+    # memory SPDK actually needs -- on a two-instances-per-socket host that was
+    # the difference between fitting a node and starving it -- so it is gone.
+    # If a workload is ever shown to need headroom, reintroduce it as a small,
+    # measured factor (peak_used / computed), not a blanket 2x.
+    return int(memory_consumption)
 
 
 def calculate_minimum_sys_memory(ssd_list):
