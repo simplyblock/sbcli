@@ -1171,9 +1171,12 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
 
+    pba_init_mode=1
+    if alceml_name == "alceml_jm_bf741c43-5e9a-4144-848f-53f641244f45":
+        pba_init_mode=3
     ret = snode.create_alceml(
         alceml_name, nvme_bdev, alceml_id,
-        pba_init_mode=1 if after_restart else 3,
+        pba_init_mode=pba_init_mode if after_restart else 3,
         pba_page_size=cluster.page_size_in_blocks,
         full_page_unmap=cluster.full_page_unmap
     )
