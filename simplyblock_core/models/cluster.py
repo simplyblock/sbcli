@@ -225,6 +225,18 @@ class Cluster(BaseModel):
     # durable "done" marker. Mirrors shared_placement_migration_pending.
     write_protection_migration_pending: bool = False
     full_page_unmap: bool = True
+    #: JM RAID geometry this cluster's journals were built with, and must be
+    #: rebuilt with forever (jm_raid.LAYOUT_LEGACY / LAYOUT_RAID01). The geometry
+    #: is not stored on disk (raid superblock=False), so rebuilding a journal
+    #: under a different geometry reads the same bytes back scrambled and the
+    #: alceml/distrib superblock fails to parse (prod incident 2026-09-08).
+    #:
+    #: This cluster-level value is authoritative and overrides the per-JMDevice
+    #: leg record, which a failed rebuild attempt can pollute. Empty means "not
+    #: pinned yet": a fresh cluster sets LAYOUT_RAID01 at create; an upgrade
+    #: pins it from the pre-restart JMDevice records; and _create_jm_stack_on_raid
+    #: falls back to the per-device record when it is still empty.
+    jm_raid_layout: str = ""
     is_single_node: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
     # operator-supplied failure_domain tag (rack/cabinet/DC) and placement

@@ -1185,11 +1185,47 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     # above is unchanged; the two raid0 legs are raid_jm_<node>_l{0,1}. This
     # caps journal write amplification at 2x/node instead of N-way mirroring.
     node = snode.get_id()
-    plan = jm_raid.plan_topology(jm_nvme_bdevs)
+
+    # Resolve the JM RAID geometry to build. It is NOT recorded on disk (raid
+    # superblock=False), so a JM's journal storage MUST be rebuilt with the same
+    # geometry it was first created under -- a mismatch reads the same bytes back
+    # scrambled and the alceml/journal/distrib superblock fails to parse (prod
+    # incident 2026-09-08). Authority order:
+    #   1. cluster.jm_raid_layout, when pinned -- the create/upgrade-verified
+    #      truth. It overrides the per-device leg record, which a failed rebuild
+    #      attempt can pollute (the incident's cluster had its JMDevice records
+    #      overwritten to raid01 by the failing upgrade even though the on-disk
+    #      journals were legacy N-way).
+    #   2. otherwise the JMDevice record: recorded legs => raid01; a raid_bdev
+    #      but no legs => legacy N-way (the old build path never recorded legs).
+    #   3. otherwise (a brand-new device) => the current default, RAID 0+1.
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    jm_dev = snode.jm_device
+    layout = (getattr(cluster, "jm_raid_layout", "") or "").strip()
+    if not layout:
+        prior_legs = list(getattr(jm_dev, "jm_leg_bdevs", None) or []) if jm_dev else []
+        prior_raid = getattr(jm_dev, "raid_bdev", "") if jm_dev else ""
+        if prior_raid and not prior_legs:
+            layout = jm_raid.LAYOUT_LEGACY
+        else:
+            layout = jm_raid.LAYOUT_RAID01
+    logger.info("JM RAID geometry for %s: %s (%d member(s))",
+                node[:8], layout, len(jm_nvme_bdevs))
+
+    plan = jm_raid.plan_topology(jm_nvme_bdevs, layout=layout)
     leg_bdevs = []
     leg_members = []
     if plan["level"] == jm_raid.RAID_NONE:
         raid_bdev = plan["base"]
+    elif plan["level"] == jm_raid.RAID_1_NWAY:
+        # Legacy: one raid1 mirror across every JM partition. Reproduces the
+        # pre-RAID0+1 on-disk layout so the existing journal reads back intact.
+        # leg_bdevs/leg_members stay empty -- the record keeps its legacy shape.
+        raid_bdev = f"raid_jm_{node}"
+        if not rpc_client.bdev_raid_create(raid_bdev, plan["members"], "1"):
+            logger.error(f"Failed to create legacy N-way raid_jm_{node}")
+            return False
     else:
         for i, leg in enumerate(plan["legs"]):
             if len(leg) == 1:
@@ -1210,8 +1246,6 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
 
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ret = snode.create_alceml(
         alceml_name, nvme_bdev, alceml_id,
         pba_init_mode=1 if after_restart else 3,
