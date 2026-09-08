@@ -348,7 +348,7 @@ When per-backup-ID deletion is added, add test cases verifying:
 
 | ID | Title | Steps | Expected Result | Automated | Class |
 |----|-------|-------|-----------------|-----------|-------|
-| TC-BCK-150 | DHCHAP+Crypto Lvol Created and FIO Written | 1. Create lvol with crypto=True 2. Connect + mount + FIO | Write succeeds | Yes | TestBackupSecurityLvol |
+| TC-BCK-150 | Crypto Lvol Created and FIO Written | 1. Create lvol with crypto=True 2. Connect + mount + FIO | Write succeeds | Yes | TestBackupSecurityLvol |
 | TC-BCK-151 | Snapshot With --backup Flag | 1. `snapshot add --backup` | Snapshot created, backup triggered | Yes | TestBackupSecurityLvol |
 | TC-BCK-152 | Backup Completes | 1. Poll backup list until 'done' | Backup status 'done' within 300s | Yes | TestBackupSecurityLvol |
 | TC-BCK-153 | Backup Restored to New Lvol | 1. `backup restore` to new name | Restored lvol appears in list | Yes | TestBackupSecurityLvol |

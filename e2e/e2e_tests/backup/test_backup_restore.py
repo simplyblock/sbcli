@@ -1064,24 +1064,6 @@ class BackupTestBase(TestClusterBase):
             f"got {crypto_val!r}. Full details: {d}")
         return d
 
-    def _verify_lvol_dhchap(self, lvol_id: str, label: str = ""):
-        """Assert that the lvol's connect string includes DHCHAP keys.
-
-        This verifies the restored lvol preserves DHCHAP authentication.
-        Returns the connect output for further inspection if needed.
-        """
-        connect_out, _ = self._sbcli(f"volume connect {lvol_id}")
-        self.logger.info(f"{label}: connect output: {connect_out[:300]}")
-        has_dhchap = (
-            "--dhchap-secret" in connect_out
-            or "--dhchap-ctrl-secret" in connect_out
-        )
-        self.logger.info(f"{label}: lvol {lvol_id} has_dhchap={has_dhchap}")
-        assert has_dhchap, (
-            f"{label}: restored lvol {lvol_id} expected DHCHAP keys in "
-            f"connect string, but none found: {connect_out}")
-        return connect_out
-
     # ── lvol / mount helpers ──────────────────────────────────────────────────
 
     def _create_lvol(self, name: str = None, size: str = None,
@@ -4997,15 +4979,15 @@ def get_backup_extra_tests():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TC-BCK-150..154 – Backup / restore of a DHCHAP + crypto lvol
+#  TC-BCK-150..154 – Backup / restore of a crypto lvol
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBackupSecurityLvol(BackupTestBase):
     """
-    Verifies that a DHCHAP+crypto lvol can be backed up and that the
-    restored lvol is accessible.
+    Verifies that a crypto lvol can be backed up and that the restored lvol
+    is accessible.
 
-    TC-BCK-150  Create DHCHAP+crypto lvol; write FIO data
+    TC-BCK-150  Create crypto lvol; write FIO data
     TC-BCK-151  Take snapshot with --backup flag
     TC-BCK-152  Wait for backup to complete
     TC-BCK-153  Restore backup to a new lvol name
@@ -5021,8 +5003,8 @@ class TestBackupSecurityLvol(BackupTestBase):
         self.fio_node = self.fio_node[0]
         self._ensure_pool_and_sc()
 
-        # TC-BCK-150: create DHCHAP+crypto lvol and write data
-        self.logger.info("TC-BCK-150: Creating DHCHAP+crypto lvol …")
+        # TC-BCK-150: create crypto lvol and write data
+        self.logger.info("TC-BCK-150: Creating crypto lvol …")
         lvol_name, lvol_id = self._create_lvol(crypto=True)
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
@@ -5061,11 +5043,6 @@ class TestBackupSecurityLvol(BackupTestBase):
         self.logger.info("TC-BCK-153b: verify restored lvol has crypto property")
         self._verify_lvol_crypto(restored_id, label="TC-BCK-153b")
         self.logger.info("TC-BCK-153b: crypto property preserved ✓")
-
-        # TC-BCK-153c: verify restored lvol has DHCHAP authentication
-        self.logger.info("TC-BCK-153c: verify restored lvol has DHCHAP keys in connect string")
-        self._verify_lvol_dhchap(restored_id, label="TC-BCK-153c")
-        self.logger.info("TC-BCK-153c: DHCHAP property preserved ✓")
 
         # TC-BCK-154: connect and verify data
         self.logger.info("TC-BCK-154: Verifying restored lvol data …")

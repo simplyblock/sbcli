@@ -144,17 +144,15 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         }
 
     # Validated in one go rather than copied onto: model_copy does not validate,
-    # and every value above comes off an untyped record -- an ha_type or an
-    # allowed-host entry the model does not recognise has to be caught here,
-    # while the backup is still being written, not by whoever reads the manifest
-    # during a recovery.
+    # and every value above comes off an untyped record -- an ha_type the model
+    # does not recognise has to be caught here, while the backup is still being
+    # written, not by whoever reads the manifest during a recovery.
     volume = backup_manifest.Volume.model_validate({
         "lvol_id": backup.lvol_id,
         "lvol_name": backup.lvol_name,
         "snapshot_id": backup.snapshot_id,
         "snapshot_name": backup.snapshot_name,
         "size": backup.size,
-        "allowed_hosts": backup.allowed_hosts or [],
         **settings,
     })
 
@@ -446,11 +444,6 @@ def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, locat
     backup.pool_uuid = lvol.pool_uuid
     backup.prev_backup_id = prev_backup.uuid if prev_backup else ""
     backup.size = snapshot.size
-    # NQNs only. The volume's entries also carry that host's DHCHAP keys and
-    # PSK; copying them here would duplicate live authentication material into a
-    # second record, and from there into every manifest, for no reader -- restore
-    # uses the NQNs and mints fresh keys from the target pool.
-    backup.allowed_hosts = [{"nqn": host["nqn"]} for host in (lvol.allowed_hosts or [])]
     backup.created_at = int(time.time())
     backup.status = Backup.STATUS_PENDING
     backup.encrypted = bool(lvol.crypto_bdev)
@@ -625,7 +618,6 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     # cannot run.
     s3_config = foreign_bucket_config(backup, cluster, s3_credentials)
 
-    logger.info(f"Backup allowed hosts: {backup.allowed_hosts}")
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
@@ -642,8 +634,6 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
         use_comp=False,
         distr_vuid=0,
         lvol_priority_class=0,
-        allowed_hosts=[h["nqn"] if isinstance(h, dict) else h
-                       for h in (backup.allowed_hosts or [])] or None,
         fabric="tcp",
     )
     if error or not lvol_id:
@@ -883,7 +873,6 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         backup.node_id = str(manifest.source.node_id)
         backup.prev_backup_id = str(manifest.prev_backup_id) if manifest.prev_backup_id else ""
         backup.size = manifest.size
-        backup.allowed_hosts = [{"nqn": nqn} for nqn in manifest.volume.allowed_hosts]
         backup.created_at = manifest.created_at
         backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED

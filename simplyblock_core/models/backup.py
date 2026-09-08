@@ -1,6 +1,6 @@
 # coding=utf-8
 import datetime
-from typing import ClassVar, List
+from typing import ClassVar
 
 from simplyblock_core.models.backup_config import BackupLocation
 from simplyblock_core.models.base_model import BaseModel, default_factory
@@ -39,8 +39,6 @@ class Backup(BaseModel):
     created_at: int = 0
     completed_at: int = 0
     error_message: str = ""
-    # Security params from the source lvol (for cross-cluster restore)
-    allowed_hosts: List[dict] = default_factory(list)
     #: Where this backup's objects live and how to interpret them, as a
     #: ``BackupLocation``. Stored as a dict because ``BaseModel`` cannot nest
     #: pydantic models; read it through :meth:`get_location`.
