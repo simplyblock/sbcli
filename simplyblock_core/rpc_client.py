@@ -112,6 +112,44 @@ _response_schema = {
 }
 
 
+def nvme_bdev_opts_params():
+    """The bdev_nvme global options this control plane intends to run with.
+
+    Single source of truth for bdev_nvme_set_options() and for verification
+    via RPCClient.get_effective_nvme_options() -- checking the live SPDK
+    against a stale second copy of the intent would be worse than not
+    checking at all.
+
+    bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an aborted
+    IO on the alternate path of an NVMe-oF multipath bdev, per
+    https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are multipath
+    whenever an FTT>=1 cluster exists, regardless of how many data NICs the
+    local node has, so the retries are set unconditionally. See
+    constants.BDEV_RETRY / constants.TRANSPORT_RETRY for the chosen values
+    and the worst-case retry budget.
+    """
+    params = {
+        "bdev_retry_count": constants.BDEV_RETRY,
+        "transport_retry_count": constants.TRANSPORT_RETRY,
+        "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
+        "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
+        "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
+        "keep_alive_timeout_ms": constants.KATO,
+        "timeout_us": constants.NVME_TIMEOUT_US,
+        "pci_timeout_us": constants.PCIE_TIMEOUT_US,
+        "transport_ack_timeout": constants.ACK_TO,
+        # action_on_timeout=abort caused multi-minute IO hangs when a
+        # remote target wedged: the timeout_cb sent an NVMe abort that
+        # itself never completed against the wedged qpair, and the bdev
+        # IO sat pending until something else (keep-alive, reset on
+        # abort_cpl failure) eventually disconnected the qpair. reset
+        # tears down the qpair immediately, which fails the in-flight
+        # IOs back up to the bdev/distrib layer with a clean error.
+        "action_on_timeout": "reset"
+    }
+    return params
+
+
 class RPCErrorCode(IntEnum):
     invalid_state = -1
     invalid_request = -32600
@@ -1167,35 +1205,38 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
+    def framework_get_config(self, name):
+        """Dump one SPDK subsystem's effective configuration.
+
+        Reads back what is actually in force on a running SPDK rather than
+        what we believe we told it. bdev_nvme writes its global options into
+        this dump (bdev_nvme.c, bdev_nvme_config_json), so the ``bdev``
+        subsystem carries the real timeout_us / transport_ack_timeout /
+        keep_alive_timeout_ms.
+        """
+        return self._request("framework_get_config", {"name": name})
+
+    def get_effective_nvme_options(self):
+        """The bdev_nvme global options actually in force; {} if unknown.
+
+        There is no bdev_nvme_get_options RPC in our SPDK, so this picks the
+        bdev_nvme_set_options entry out of the ``bdev`` subsystem config dump.
+        """
+        try:
+            cfg = self.framework_get_config("bdev")
+        except Exception as e:
+            logger.warning("framework_get_config(bdev) failed: %s", e)
+            return {}
+        if isinstance(cfg, dict):
+            cfg = cfg.get("config") or cfg.get("subsystems") or []
+        for entry in cfg or []:
+            if isinstance(entry, dict) and entry.get("method") == "bdev_nvme_set_options":
+                return entry.get("params") or {}
+        return {}
+
     def bdev_nvme_set_options(self):
-        # bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an
-        # aborted IO on the alternate path of an NVMe-oF multipath bdev,
-        # per https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are
-        # multipath whenever an FTT≥1 cluster exists, regardless of how
-        # many data NICs the local node has — so the retries are set
-        # unconditionally. See ``constants.BDEV_RETRY`` /
-        # ``constants.TRANSPORT_RETRY`` for the chosen values and the
-        # worst-case retry budget.
-        params = {
-            "bdev_retry_count": constants.BDEV_RETRY,
-            "transport_retry_count": constants.TRANSPORT_RETRY,
-            "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
-            "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
-            "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
-            "keep_alive_timeout_ms": constants.KATO,
-            "timeout_us": constants.NVME_TIMEOUT_US,
-            "pci_timeout_us": constants.PCIE_TIMEOUT_US,
-            "transport_ack_timeout": constants.ACK_TO,
-            # action_on_timeout=abort caused multi-minute IO hangs when a
-            # remote target wedged: the timeout_cb sent an NVMe abort that
-            # itself never completed against the wedged qpair, and the bdev
-            # IO sat pending until something else (keep-alive, reset on
-            # abort_cpl failure) eventually disconnected the qpair. reset
-            # tears down the qpair immediately, which fails the in-flight
-            # IOs back up to the bdev/distrib layer with a clean error.
-            "action_on_timeout": "reset"
-        }
-        return self._request("bdev_nvme_set_options", params)
+        return self._request("bdev_nvme_set_options", nvme_bdev_opts_params())
+
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
         params = {"bdev_auto_examine": False}
