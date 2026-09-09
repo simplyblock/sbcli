@@ -2884,7 +2884,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         service_env = service.attrs['Spec']['TaskTemplate']['ContainerSpec']['Env']
                         if "SIMPLYBLOCK_LOG_LEVEL=DEBUG" in service_env:
                             service_env.remove("SIMPLYBLOCK_LOG_LEVEL=DEBUG")
-                            service_env.add("SIMPLYBLOCK_LOG_LEVEL=INFO")
+                            service_env.append("SIMPLYBLOCK_LOG_LEVEL=INFO")
                         service.update(image=service_image, env=service_env, force_update=True)
                         service_names.append(service.attrs['Spec']['Name'])
                     break
