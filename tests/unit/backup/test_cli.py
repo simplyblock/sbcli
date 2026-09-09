@@ -4,6 +4,7 @@ Focused on the two helpers that turn command-line arguments into a
 ``BackupConfig``, because that is where a disaster-recovery operator's typing
 becomes the thing that decides whether a bucket can be read at all.
 """
+import json
 import zlib
 from unittest.mock import patch
 from uuid import UUID
@@ -13,12 +14,31 @@ import pytest
 from simplyblock_cli import clibase
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup.manifest import (
-    BackupManifest, DataPlane, FDBKeyDescriptor, Source, Volume)
-from simplyblock_core.models.backup_config import BackupConfig
+    BackupExport, BackupManifest, DataPlane, FDBKeyDescriptor,
+    LocatedManifests, Source, Volume)
+from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 
 
 def _id(name: str) -> UUID:
     return UUID(f"{zlib.crc32(name.encode()):08x}-0000-4000-8000-000000000000")
+
+
+
+def _manifest(seed: str = "b-1", prev=None) -> BackupManifest:
+    """A minimal well-formed manifest, distinct per *seed*."""
+    return BackupManifest(
+        backup_id=_id(seed),
+        s3_id=1,
+        created_at=100,
+        completed_at=200,
+        size=4096,
+        prev_backup_id=_id(prev) if prev is not None else None,
+        source=Source(cluster_id=_id("cluster"), node_id=_id("node")),
+        volume=Volume(lvol_id=_id("volume"), lvol_name="vol",
+                      snapshot_id=_id("snapshot"), snapshot_name="snap",
+                      size=4096),
+        dataplane=DataPlane(),
+    )
 
 
 class _Args:
@@ -177,3 +197,101 @@ class TestRegisteredCommands:
         assert not hasattr(cli, 'init_backup__source_list')
         assert not hasattr(clibase.CLIWrapperBase, 'backup__source_switch')
         assert not hasattr(clibase.CLIWrapperBase, 'backup__source_list')
+
+
+class TestExportImportFile:
+    """What `backup export` writes and `backup import --from-file` reads back.
+
+    The file is the whole contract between two clusters that may never talk to
+    each other, so what it does and does not carry is worth pinning down.
+    """
+
+    _LOCATION = BackupLocation(bucket_name="backups", region="eu-central-1")
+
+    def _export(self, tmp_path, groups, **args):
+        out = tmp_path / "backups.json"
+        document = BackupExport(groups=[
+            LocatedManifests(location=location, manifests=manifests)
+            for location, manifests in groups])
+        with patch.object(backup_controller, "export_backups",
+                          return_value=document) as export:
+            written = clibase.CLIWrapperBase.backup__export(
+                clibase.CLIWrapperBase.__new__(clibase.CLIWrapperBase),
+                "export", _Args(output=str(out), **args))
+        return written, out, export
+
+    def _import(self, path, **args):
+        with patch.object(backup_controller, "import_backups",
+                          return_value=1) as imported:
+            ok = clibase.CLIWrapperBase.backup__import(
+                clibase.CLIWrapperBase.__new__(clibase.CLIWrapperBase),
+                "import", _Args(from_file=str(path), bucket=None,
+                                cluster_id=None, **args))
+        return ok, imported
+
+    def test_the_file_says_where_its_backups_live(self, tmp_path):
+        written, out, _ = self._export(tmp_path, [(self._LOCATION, [_manifest()])])
+
+        assert written
+        document = json.loads(out.read_text())
+        assert document["groups"][0]["location"]["bucket_name"] == "backups"
+
+    def test_a_file_imports_without_naming_a_bucket(self, tmp_path):
+        _, out, _ = self._export(tmp_path, [(self._LOCATION, [_manifest()])])
+
+        ok, imported = self._import(out)
+
+        assert ok
+        (document,), _ = imported.call_args
+        assert document.groups[0].location.bucket_name == "backups"
+
+    def test_naming_a_bucket_alongside_a_file_is_refused(self, tmp_path, capsys):
+        """The file already says; a second answer could only contradict it."""
+        _, out, _ = self._export(tmp_path, [(self._LOCATION, [_manifest()])])
+
+        ok = clibase.CLIWrapperBase.backup__import(
+            clibase.CLIWrapperBase.__new__(clibase.CLIWrapperBase),
+            "import", _Args(from_file=str(out), bucket="elsewhere",
+                            cluster_id=None))
+
+        assert not ok
+        assert "exactly one" in capsys.readouterr().out
+
+    def test_a_file_spanning_buckets_keeps_both(self, tmp_path):
+        _, out, _ = self._export(tmp_path, [
+            (self._LOCATION, [_manifest()]),
+            (BackupLocation(bucket_name="dr-copy"), [_manifest(seed="other")]),
+        ])
+
+        ok, imported = self._import(out)
+
+        assert ok
+        (document,), _ = imported.call_args
+        assert [g.location.bucket_name for g in document.groups] == [
+            "backups", "dr-copy"]
+
+    def test_no_credential_reaches_the_file(self, tmp_path):
+        """`BackupLocation` cannot hold one, which is why the export carries it
+        rather than the `BackupConfig` it was resolved from."""
+        _, out, _ = self._export(tmp_path, [(self._LOCATION, [_manifest()])])
+
+        body = out.read_text()
+        assert "access_key" not in body and "secret" not in body
+
+    def test_a_chain_can_be_exported_on_its_own(self, tmp_path):
+        """The unit a restore needs, and the only selection that cannot span
+        buckets."""
+        _, _, export = self._export(
+            tmp_path, [(self._LOCATION, [_manifest()])], backup_id="b-1")
+
+        assert export.call_args.kwargs["backup_id"] == "b-1"
+
+    def test_a_file_from_a_later_build_is_refused(self, tmp_path, capsys):
+        out = tmp_path / "future.json"
+        out.write_text(json.dumps({"schema_version": 99, "groups": []}))
+
+        ok, imported = self._import(out)
+
+        assert not ok
+        assert "schema version 99" in capsys.readouterr().out
+        imported.assert_not_called()
