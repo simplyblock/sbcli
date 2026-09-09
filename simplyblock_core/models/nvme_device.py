@@ -66,6 +66,11 @@ class NVMeDevice(BaseModel):
     last_flap_tsc: float = 0.0
     serial_number: str = ""
     size: int = -1
+    # NVMe per-block metadata size in bytes, as reported by the bound SPDK bdev.
+    # >=8 means alceml can run in cv_md_method (no read/write amplification).
+    # 0 means alceml must use cv_fallback_method (extra md page per 2 MiB extent).
+    md_size: int = 0
+    md_supported: bool = False
     testing_bdev: str = ""
     hang_bdev: str = ""
     connecting_from_node: str = ""
@@ -73,6 +78,19 @@ class NVMeDevice(BaseModel):
     # Passthrough bdev UUID for cross-node nvme bdev identification,
     # meaning that remote bdev to this bdev would share the same uuid.
     pt_bdev_uuid: str = ""
+    # Base-bdev type discriminator: "nvme" (SPDK nvme bdev over a PCIe
+    # controller) or "aio" (SPDK AIO bdev over a Linux block device, lblk
+    # cluster mode). For "aio" devices, pcie_address and nvme_controller stay
+    # empty and nvme_bdev holds the AIO bdev name; identity is serial_number
+    # (lsblk SERIAL/WWN or a synthetic stable id), with device_path /
+    # by_id_path re-resolved from the live host on every restart.
+    bdev_type: str = "nvme"
+    # Current kernel device path (e.g. /dev/sdb) — informational; re-learned
+    # each restart, never used as identity when a serial is available.
+    device_path: str = ""
+    # Stable /dev/disk/by-id/... symlink when the device has one; preferred
+    # as the AIO bdev filename so udev renames cannot bite mid-flight.
+    by_id_path: str = ""
 
     def __change_dev_connection_to(self, connecting_from_node):
         # Targeted single-record write. The previous implementation scanned

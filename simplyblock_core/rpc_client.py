@@ -874,7 +874,9 @@ class RPCClient:
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
-                           write_protection=False, full_page_unmap=False):
+                           write_protection=False, full_page_unmap=False,
+                           checksum_method=0, cache_size=0, cache_eviction_threshold=0,
+                           force_4k_atomic=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -898,6 +900,19 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
+        # Inline CRC checksum validation. method: 0=off, 1=md-on-device, 2=fallback (extra md page).
+        # The data plane reads md_size from spdk_bdev_get_md_size and refuses method=1 when md_size==0,
+        # so the caller must pick method=2 for devices without NVMe metadata support.
+        if checksum_method:
+            params["checksum_validation_method"] = int(checksum_method)
+            if cache_size:
+                params["cache_size"] = int(cache_size)
+            if cache_eviction_threshold:
+                params["cache_eviction_threshold"] = int(cache_eviction_threshold)
+            # The device's logical block size is <4K but it guarantees 4K write
+            # atomicity (cluster.atomic_4k). Tell the data plane to skip its >=4K
+            # block-size gate for fallback-mode checksum validation.
+            params["cv_ignore_block_size"] = bool(force_4k_atomic)
         return self._request("bdev_alceml_create", params)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -1449,6 +1464,36 @@ class RPCClient:
     def bdev_wait_for_examine(self):
         return self._request("bdev_wait_for_examine")
 
+    def bdev_aio_create(self, name, filename, block_size=0):
+        """Create an SPDK AIO bdev over a Linux block device (lblk cluster
+        mode). ``filename`` is the device path — prefer the stable
+        /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
+        logical block size."""
+        params = {"name": name, "filename": filename}
+        if block_size:
+            params["block_size"] = block_size
+        return self._request("bdev_aio_create", params)
+
+    def bdev_aio_delete(self, name):
+        return self._request("bdev_aio_delete", {"name": name})
+
+    def bdev_aio_rescan(self, name):
+        """Re-read the backing device's size (device grow pickup)."""
+        return self._request("bdev_aio_rescan", {"name": name})
+
+    def bdev_set_qd_sampling_period(self, name, period_us):
+        """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
+        queue_depth/io_time — the hung-IO watchdog's signal for AIO base
+        bdevs (period 0 disables)."""
+        params = {"name": name, "period": period_us}
+        return self._request("bdev_set_qd_sampling_period", params)
+
+    def get_bdevs_2(self, name):
+        """(ret, err) probe variant of bdev_get_bdevs, mirroring
+        bdev_nvme_controller_list_2 — used where the caller must distinguish
+        'bdev gone' from RPC failure without raising."""
+        return self._request2("bdev_get_bdevs", {"name": name})
+
     def bdev_enable_histogram(self, name, enable=True, opc=None):
         # opc filters to a single I/O type (e.g. "read"/"write"); requires
         # SPDK >= 24.01. Toggling disable->enable clears the collected data,
@@ -1840,6 +1885,21 @@ class RPCClient:
         """
         return self._request2("jc_set_dual_node", {"enable": bool(enable)})
 
+    def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
+        """One crash-consistent snapshot per consistency-group member.
+
+        ``snapshots`` is a list of {"lvol_name": "LVS_1/LVOL_5",
+        "snapshot_name": "SNAP_123"}; all members must be in ``lvs_name``.
+        IO on every member is frozen before the first snapshot and released
+        after the last; a mid-sequence failure unfreezes first and then
+        garbage-collects the snapshots already taken (SPDK side).
+        Returns [{"lvol_name", "snapshot_name", "uuid"}, ...] or False.
+        """
+        return self._request2("bdev_lvol_snapshot_group", {
+            "lvs_name": lvs_name,
+            "snapshots": snapshots,
+        })
+
     def jc_suspend_compression(self, jm_vuid, suspend=False):
         params = {
             "jm_vuid": jm_vuid,
@@ -2032,22 +2092,43 @@ class RPCClient:
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
         return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
-    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0):
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
+                           allow_partial=False):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
 
         Returns the RPC result (truthy on success) or None on error.
         Poll progress with :meth:`bdev_lvol_transfer_stat`.
+
+        *allow_partial* opts this transfer into the dirty-bitmap delta path: the
+        SPDK side then ships only the ranges written since the previous snapshot
+        instead of every allocated cluster. It is a REQUEST, not a guarantee --
+        the fork gates the bitmap path on the snapshot carrying a COMPLETE
+        dirty generation and silently sends a full transfer whenever it does
+        not, so passing it can never produce less data than the destination
+        needs *from this transfer*.
+
+        What it does NOT excuse is the destination's starting content: a partial
+        transfer only ships the delta, so everything outside the delta must
+        already be on the destination. Pass it only when the landing volume is a
+        clone of the destination's copy of the PREVIOUS snapshot. Passing it for
+        a transfer into a fresh empty volume would silently drop every cluster
+        the delta does not cover.
         """
-        return self._request("bdev_lvol_transfer", {
+        params = {
             "lvol_name": name,
             "lvol_id": lvol_id,
             "offset": offset,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
             "operation": operation,
-        })
+        }
+        # Send the key only when opting in: the RPC parameter is optional on the
+        # SPDK side, so every existing caller keeps its exact current wire form.
+        if allow_partial:
+            params["allow_partial"] = True
+        return self._request("bdev_lvol_transfer", params)
 
     def bdev_lvol_transfer_stat(self, name):
         """

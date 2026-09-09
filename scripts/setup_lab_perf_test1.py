@@ -99,7 +99,7 @@ def wait_for_ssh(ip, timeout=300):
     return False
 
 
-def ssh_exec(ip, cmds, get_output=False, check=False):
+def ssh_exec(ip, cmds, get_output=False, check=False, timeout=600):
     results = []
     for cmd in cmds:
         print(f"  [{ip}] $ {cmd}")
@@ -108,7 +108,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
             env=_ssh_env(),
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=timeout,
         )
         out = proc.stdout
         err = proc.stderr

@@ -54,7 +54,7 @@ class _Snap:
         self.cluster_id = "C1"
         self.snap_bdev = "LVS_1/SNAP1"
         self.instances = []
-        self.lvol = type("L", (), {"lvs_name": "LVS_1", "node_id": "PRIMARY",
+        self.lvol = type("L", (), {"lvs_name": "LVS_1", "node_id": "PRIMARY", "ha_type": "ha",
                                    "get_id": lambda self: "LV1"})()
 
     def get_id(self):

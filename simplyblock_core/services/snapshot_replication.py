@@ -1,7 +1,8 @@
 import time
 import uuid
 
-from simplyblock_core import constants, db_controller, snapshot_retention, utils
+from simplyblock_core import (constants, db_controller, snapshot_retention,
+                              utils, xfer_timing)
 from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -126,9 +127,253 @@ def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
     return ("blocked", None, "chain deeper than 64 blobs")
 
 
+def _group_id_for_lvol(lvol):
+    """The consistency group *lvol* belongs to, or "".
+
+    A group is owned by a replication policy and pinned to one node/LVS.
+    """
+    policy_id = getattr(lvol, "replication_policy_id", "")
+    if not policy_id:
+        return ""
+    try:
+        group = db.get_consistency_group_for_policy(policy_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Could not resolve the consistency group of %s: %s",
+                       lvol.get_id(), e)
+        return ""
+    return group.get_id() if group else ""
+
+
+class _Held(int):
+    """Falsy like a failure, but tellable apart from one.
+
+    main() backs off 3s after a task returns False, which is right for an RPC
+    that failed and wrong for a transfer that was deliberately postponed. With
+    17 volumes held behind one cutover, that backoff cost ~51s per pass -- and
+    the cutover's OWN round-1 transfer was the last task in the pass, so rounds
+    that move 150ms of data were taking over a minute (run 20260829_010159).
+    """
+    def __new__(cls):
+        return super().__new__(cls, 0)
+
+
+HELD = _Held()
+
+
+def _cutover_in_flight(tasks):
+    """True while some volume holds a lvstore for its endgame."""
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        if (t.function_params or {}).get("cutover_lvs"):
+            return True
+    return False
+
+
+def _replication_order(tasks):
+    """Cutover owners first; everything else on their lvstore waits on them.
+
+    The runner walks tasks oldest-first. A volume enters its endgame LATE by
+    construction (it waits until it has caught up), so its round snapshots are
+    the NEWEST tasks -- last in the pass, behind every task it had itself put
+    on hold.
+    """
+    owners = set()
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        params = t.function_params or {}
+        if params.get("cutover_lvs") and params.get("lvol_id"):
+            owners.add(params["lvol_id"])
+    if not owners:
+        return tasks
+
+    def _rank(t):
+        if t.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+            return 1
+        snap_id = (t.function_params or {}).get("snapshot_id")
+        if not snap_id:
+            return 1
+        try:
+            lvol = db.get_snapshot_by_id(snap_id).lvol
+        except Exception:
+            return 1
+        return 0 if lvol and lvol.get_id() in owners else 1
+
+    return sorted(tasks, key=_rank)      # stable: order within a rank is kept
+
+
+def _lvs_transfer_hold(task, snapshot):
+    """Why this transfer must wait, or "" when it may start now.
+
+    Two priorities share one lvstore's bandwidth:
+
+    1. A volume in its FINAL CUTOVER owns the lvstore. Its convergence rounds
+       decide how long client IO freezes -- every second another volume steals
+       from a round is a second of writes the frozen final step must copy --
+       so nothing else on that lvstore transfers meanwhile. Members of the same
+       consistency group are exempt: the group cuts over together.
+
+    2. Consistency groups outrank loose volumes. A group's members transfer in
+       PARALLEL with each other (their snapshots belong to one generation and
+       are only useful together), and everything else on the lvstore waits, so
+       groups are effectively serialized against each other rather than
+       interleaved.
+    """
+    own_lvol = getattr(snapshot, "lvol", None)
+    lvs_name = getattr(own_lvol, "lvs_name", "") if own_lvol else ""
+    if not lvs_name:
+        return ""
+    assert own_lvol is not None  # narrowed by the lvs_name guard above
+    own_id = own_lvol.get_id()
+    own_group = _group_id_for_lvol(own_lvol)
+
+    tasks = db.get_job_tasks(task.cluster_id)
+
+    # --- priority 1: a cutover in progress on this lvstore -----------------
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        params = t.function_params or {}
+        if params.get("cutover_lvs") != lvs_name:
+            continue
+        holder = params.get("lvol_id")
+        if not holder or holder == own_id:
+            return ""                       # our own cutover: keep moving
+        holder_group = params.get("cutover_group") or ""
+        if holder_group and holder_group == own_group:
+            return ""                       # same group: cut over together
+        return (f"lvol {holder[:8]} is in final cutover on lvstore {lvs_name}")
+
+    # --- priority 2: a consistency group is transferring on this lvstore ---
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+            continue
+        if t.status != JobSchedule.STATUS_RUNNING or t.get_id() == task.get_id():
+            continue
+        other_snap_id = (t.function_params or {}).get("snapshot_id")
+        if not other_snap_id:
+            continue
+        try:
+            other_lvol = db.get_snapshot_by_id(other_snap_id).lvol
+        except KeyError:
+            continue
+        if getattr(other_lvol, "lvs_name", "") != lvs_name:
+            continue
+        other_group = _group_id_for_lvol(other_lvol)
+        if other_group and other_group != own_group:
+            return (f"consistency group {other_group.split('/')[-1][:8]} is "
+                    f"transferring on lvstore {lvs_name}")
+
+    return ""
+
+
+def _finish_completed_transfer(task, snapshot, offset):
+    """Chain, convert and mark the snapshot replicated. Returns True.
+
+    This is what sets target_replicated_snap_uuid, which is the signal a
+    cutover's convergence loop waits on -- so it must run as soon as the
+    transfer is known to be finished, not on some later pass.
+    """
+    # submit -> Done, measured. NOT a throughput: see fix_xfer_latency notes.
+    xfer_timing.gap("transfer_complete",
+                    task.function_params.get("xfer_submit_t"),
+                    snap=snapshot.get_id(), lvol=snapshot.lvol.get_id(),
+                    bytes=offset)
+    with xfer_timing.phase("replicate_finish", snap=snapshot.get_id(),
+                           lvol=snapshot.lvol.get_id()):
+        new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+    if new_snapshot_uuid:
+        task.function_result = new_snapshot_uuid
+        task.status = JobSchedule.STATUS_DONE
+        task.function_params["end_time"] = int(time.time())
+        task.write_to_db()
+    else:
+        task.function_result = "complete repl failed, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+    return True
+
+
+def _cutover_owns(lvol_id, cluster_id):
+    """True while a final cutover is running for this volume.
+
+    Such a volume already holds its lvstore and every other transfer on it is
+    held, so waiting inline for its transfer starves nothing -- and this is the
+    window the client's IO freeze is paying for.
+    """
+    if not lvol_id:
+        return False
+    try:
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception:                                     # noqa: BLE001
+        return False
+    for other in tasks:
+        if other.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if other.status == JobSchedule.STATUS_DONE or other.canceled:
+            continue
+        if (other.function_params or {}).get("lvol_id") == lvol_id:
+            return True
+    return False
+
+
+def _await_transfer_completion(task, snapshot, snode):
+    """Poll the just-submitted transfer at 100ms and finish it in this pass.
+
+    Returns True when the transfer completed and was finished here; False to
+    leave it for the pass-based path (still in flight, or the budget ran out).
+
+    Before this, submit and the Done check happened on DIFFERENT passes of the
+    runner loop, so a transfer that finished in milliseconds was not acted on
+    for a median of 81 SECONDS (run 20260828_115307: every poll found state
+    already 'Done', never once 'In progress').
+    """
+    budget = (constants.REPL_XFER_INLINE_WAIT_CUTOVER_SEC
+              if _cutover_owns(snapshot.lvol.get_id(), task.cluster_id)
+              else constants.REPL_XFER_INLINE_WAIT_SEC)
+    deadline = time.time() + budget
+    rpc = snode.rpc_client()
+    while time.time() < deadline:
+        try:
+            ret = rpc.bdev_lvol_transfer_stat(snapshot.snap_bdev)
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("transfer_stat for %s raised while waiting inline "
+                           "(%s); leaving it to the next pass",
+                           snapshot.get_id(), e)
+            return False
+        if not ret:
+            return False
+        state = ret.get("transfer_state")
+        if state == "Done":
+            return _finish_completed_transfer(task, snapshot, ret.get("offset"))
+        if state == "Failed":
+            return False              # the pass-based path records the retry
+        time.sleep(constants.REPL_XFER_POLL_INTERVAL_SEC)
+    xfer_timing.stamp("inline_wait_expired", snap=snapshot.get_id(),
+                      lvol=snapshot.lvol.get_id(), budget=budget)
+    return False
+
+
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
+    _t_landing = None          # set only if we create the landing volume below
+
+    hold = _lvs_transfer_hold(task, snapshot)
+    if hold:
+        # Not a failure and not a retry: come back when the lvstore frees up.
+        task.function_result = f"held: {hold}"
+        task.write_to_db()
+        logger.info("Holding replication of %s: %s", snapshot.get_id(), hold)
+        return HELD
     # Drive the transfer from whichever member of the SOURCE lvstore leads it
     # now — the snapshot exists on every member, so an outage of the recorded
     # primary must not stop replication (see _source_leader_node).
@@ -297,6 +542,7 @@ def process_snap_replicate_start(task, snapshot):
         # subsystem cap is a user-admission limit; enforcing it here only stops
         # replication on a node that is already full, which is precisely when
         # the transfers that would let retention free those slots are needed.
+        _t_landing = xfer_timing.now()
         lv_id, err = lvol_controller.add_lvol_ha(
             f"REP_{snapshot.snap_name}", snapshot.size, remote_node_uuid.get_id(), snapshot.lvol.ha_type,
             remote_pool_uuid, internal=True)
@@ -328,7 +574,12 @@ def process_snap_replicate_start(task, snapshot):
     # is not a valid transfer gateway. This mirrors the (working) migration
     # runner, which has always sent bulk transfers hub+map_id.
     from simplyblock_core.services.replication_final_step import ensure_hub_attached
-    _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
+    xfer_timing.gap("landing_volume_create", _t_landing,
+                    snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
+    with xfer_timing.phase("hub_attach", snap=snapshot.get_id(),
+                           lvol=snapshot.lvol.get_id(),
+                           tgt=remote_lv_node.get_id()):
+        _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
     if hub_err:
         logger.error(f"Transfer hub attach failed: {hub_err}")
         task.function_result = "transfer hub attach failed, retrying"
@@ -367,6 +618,15 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
 
+    allow_partial = _partial_transfer_decision(
+        task, snapshot, replicate_to_source, remote_lv, remote_lv_node)
+    logger.info("Transfer of %s into %s: %s", snapshot.get_id(),
+                remote_lv.top_bdev,
+                "PARTIAL allowed (landing volume is a clone of the previous "
+                "replicated snapshot on every online member)" if allow_partial
+                else "FULL (no delta basis on every online member; see above "
+                     "for which check declined)")
+
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
         offset = task.function_params["offset"]
@@ -399,6 +659,10 @@ def process_snap_replicate_start(task, snapshot):
             fresh.write_to_db()
 
     # 3 start replication
+    xfer_timing.stamp("transfer_submit", snap=snapshot.get_id(),
+                      lvol=snapshot.lvol.get_id(), size=snapshot.size)
+    task.function_params["xfer_submit_t"] = xfer_timing.now()
+    task.write_to_db()
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
@@ -410,11 +674,24 @@ def process_snap_replicate_start(task, snapshot):
         batch_size=16,
         bdev_name=hub_bdev,
         operation="replicate",
-        lvol_id=remote_map_id
+        lvol_id=remote_map_id,
+        # Safe only because the landing volume was chained onto the previous
+        # replicated snapshot above; the fork independently refuses the delta
+        # path unless the snapshot's dirty generation is complete.
+        allow_partial=allow_partial,
     )
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
     task.write_to_db()
+
+    # Do not hand the transfer back to the pass loop and forget about it: wait
+    # for it here, polling every 100ms, and finish it in this same pass. Before
+    # this, submit and the Done check happened on different passes and a
+    # transfer that finished in milliseconds went unnoticed for a median of 81
+    # SECONDS (run 20260828_115307). Returns False if it is still running when
+    # the budget expires, in which case the pass-based path picks it up as
+    # before.
+    _await_transfer_completion(task, snapshot, snode)
 
 
 def _receiving_leader_node(remote_lv):
@@ -646,6 +923,18 @@ def _prune_internal_snapshots(source_lvol):
     # Either way the newest `keep` are protected, because deleting a snapshot
     # swap-merges its segments into the successor chained to it.
     schedule = _retention_schedule_for(source_lvol)
+    # Say which retention is in force, every time it prunes. Soak run
+    # 20260827_224741 ended with 2 snapshots at consecutive cadence ticks after
+    # 124 minutes under `5m:15m,7m:30m,10m:1h` -- which is exactly what the FLAT
+    # keep-N path produces, and nothing in the log said which path ran. The
+    # ladder itself is provably correct (test_case11_retention_ladder), so the
+    # open question is whether the schedule reaches this function at all.
+    logger.info(
+        "Retention for lvol %s: %s (replicated internal snapshots: %d, keep=%d)",
+        source_lvol.get_id(),
+        ("schedule %s" % snapshot_retention.describe(schedule)) if schedule
+        else "FLAT keep-newest (no schedule on the policy)",
+        len(replicated_internal), keep)
     if schedule:
         retained_ts = snapshot_retention.select_retained(
             [s.created_at for s in replicated_internal], schedule,
@@ -825,6 +1114,154 @@ def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
     return {"snap_bdev": _snap_obj.snap_bdev}, _snap_obj, True
 
 
+def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
+                             remote_lv_node):
+    """Chain the landing volume onto the destination's copy of the PREVIOUS
+    snapshot, before the transfer runs, so only the delta has to be sent.
+
+    Returns True when the landing volume (and every online member of its HA
+    pair) is chained, which is the precondition for asking for a PARTIAL
+    transfer. Returns False to mean "send a full transfer", which is always
+    correct and is what this pipeline did unconditionally until now.
+
+    Why chaining first is what makes a partial transfer correct
+    -----------------------------------------------------------
+    ``bdev_lvol_transfer`` sends a blob's OWN cluster map and nothing else, so a
+    partial transfer ships only the ranges written since the previous snapshot.
+    Everything OUTSIDE that delta therefore has to be on the destination
+    already, and a fresh empty landing volume does not have it -- that is
+    exactly why the delta path has never been switched on. Chaining the landing
+    volume onto the predecessor's remote copy supplies it: a cluster the new
+    snapshot does not own stays unallocated and reads through to the parent,
+    and the first write into a cluster the delta DOES touch makes the blobstore
+    copy-on-write the whole cluster from that same parent before applying the
+    incoming range. Both halves of the destination image thus come from the
+    same predecessor the source computed its delta against.
+
+    This is the very ``bdev_lvol_add_clone`` the finish step used to issue AFTER
+    the transfer; issuing it BEFORE is what turns the landing volume into a
+    valid delta target. Nodes chained here are recorded on the task so the
+    finish step does not add the same clone entry twice.
+
+    The bar for returning True is deliberately high:
+      * a predecessor copy must resolve cleanly on this node (``ok`` and a
+        non-empty ``target_prev_snap`` from :func:`_resolve_chain_target`);
+      * the LVS leader must accept the chain;
+      * the secondary must be ONLINE and accept it too. The transfer lands on
+        the leader and the lvstore mirrors it to the secondary; an unchained
+        secondary would read zeros wherever the delta did not write, so a
+        degraded pair gets a full transfer rather than a delta.
+    Anything short of that logs why and falls back to a full transfer.
+    """
+    target_prev_snap, _prev_snap_for_db, ok = _resolve_chain_target(
+        snapshot, replicate_to_source, remote_lv_node)
+    if not ok:
+        logger.info(
+            "Landing volume %s stays a full-transfer target: the predecessor's "
+            "copy on the destination could not be resolved", remote_lv.top_bdev)
+        return False
+    if not target_prev_snap:
+        logger.info(
+            "Landing volume %s stays a full-transfer target: %s starts the "
+            "chain, so there is no predecessor to clone from",
+            remote_lv.top_bdev, snapshot.get_id())
+        return False
+
+    sec_node = None
+    if remote_lv_node.secondary_node_id:
+        try:
+            sec_node = db.get_storage_node_by_id(remote_lv_node.secondary_node_id)
+        except KeyError:
+            sec_node = None
+    if sec_node is None or sec_node.status != StorageNode.STATUS_ONLINE:
+        logger.info(
+            "Landing volume %s stays a full-transfer target: the secondary of "
+            "%s is not online, and a delta would leave holes on it",
+            remote_lv.top_bdev, remote_lv_node.get_id())
+        return False
+
+    prechained = list(task.function_params.get("prechained_node_ids") or [])
+
+    def _chain_on(node, role):
+        if node.get_id() in prechained:
+            return True
+        logger.info("Pre-chaining landing volume %s onto %s on %s (%s) so the "
+                    "transfer can ship only the delta",
+                    remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+                    node.get_id(), role)
+        try:
+            ret = node.rpc_client().bdev_lvol_add_clone(
+                remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+        except Exception as e:
+            logger.warning("Pre-chain of %s on %s (%s) raised %s; falling back "
+                           "to a full transfer", remote_lv.top_bdev,
+                           node.get_id(), role, e)
+            return False
+        if not ret:
+            logger.warning("Pre-chain of %s onto %s failed on %s (%s); falling "
+                           "back to a full transfer", remote_lv.top_bdev,
+                           target_prev_snap['snap_bdev'], node.get_id(), role)
+            return False
+        prechained.append(node.get_id())
+        return True
+
+    primary_ok = _chain_on(remote_lv_node, "primary")
+    # Record whatever actually landed even on the failure path: the entry exists
+    # on that node now, and the finish step must not add it a second time.
+    secondary_ok = _chain_on(sec_node, "secondary") if primary_ok else False
+    if prechained != (task.function_params.get("prechained_node_ids") or []):
+        task.function_params["prechained_node_ids"] = prechained
+        task.write_to_db()
+
+    if not (primary_ok and secondary_ok):
+        # A full transfer into a partially chained volume is still correct: it
+        # writes every cluster the snapshot owns, and the chained node reads the
+        # remainder from the parent exactly as it should.
+        return False
+    return True
+
+
+def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
+                               remote_lv_node):
+    """Whether this transfer may ship only the delta, chaining the landing
+    volume first if that has not happened yet.
+
+    The verdict is cached on the task so a resumed transfer (offset > 0) keeps
+    the mode its first attempt used -- but it is KEYED to the landing volume it
+    was made about. An interrupted attempt can delete a half-created landing
+    volume and build a fresh, unchained one (see the adoption block in
+    process_snap_replicate_start); carrying "partial is fine" onto that volume
+    would ship a delta into something that holds nothing, which is precisely
+    the silent data loss this design exists to avoid. A key mismatch throws
+    away the old verdict AND the old chain record and re-derives both.
+    """
+    landing_key = remote_lv.get_id()
+    if task.function_params.get("allow_partial_landing") == landing_key:
+        return bool(task.function_params.get("allow_partial"))
+
+    # Chain state recorded against a previous landing volume says nothing about
+    # this one.
+    task.function_params["prechained_node_ids"] = []
+    allow_partial = _prechain_landing_volume(
+        task, snapshot, replicate_to_source, remote_lv, remote_lv_node)
+    task.function_params["allow_partial"] = allow_partial
+    task.function_params["allow_partial_landing"] = landing_key
+    task.write_to_db()
+    return allow_partial
+
+
+def _prechained_nodes_for(task, remote_lv):
+    """Nodes already carrying the landing volume's clone entry.
+
+    Empty unless the record was made about THIS landing volume: adding the same
+    clone entry twice is not idempotent on the SPDK side, and trusting a stale
+    record would skip a chain the volume actually needs.
+    """
+    if task.function_params.get("allow_partial_landing") != remote_lv.get_id():
+        return set()
+    return set(task.function_params.get("prechained_node_ids") or [])
+
+
 def process_snap_replicate_finish(task, snapshot):
 
     # Close the transfer session — but ONLY when this was the last active
@@ -844,6 +1281,8 @@ def process_snap_replicate_finish(task, snapshot):
                  or db.get_storage_node_by_id(snapshot.lvol.node_id))
     if remote_snode.transfer_hublvol and remote_snode.transfer_hublvol.bdev_name:
         if not _other_active_transfers_to_node(task, remote_snode.get_id()):
+            xfer_timing.stamp("hub_detach", snap=snapshot.get_id(),
+                              lvol=snapshot.lvol.get_id())
             _src_node.rpc_client().bdev_nvme_detach_controller(
                 remote_snode.transfer_hublvol.bdev_name)
     replicate_to_source = task.function_params["replicate_to_source"]
@@ -870,16 +1309,30 @@ def process_snap_replicate_finish(task, snapshot):
     if not _require_lvs_leader(remote_snode, remote_lv.lvs_name, "add_clone/convert"):
         return False
 
+    # Nodes whose landing volume was already chained BEFORE the transfer, so it
+    # could receive a delta (see _prechain_landing_volume). Those must be
+    # skipped here: adding the same clone entry twice is not idempotent.
+    _prechained = _prechained_nodes_for(task, remote_lv)
+
     # chain snaps on primary
-    if target_prev_snap:
+    if target_prev_snap and remote_snode.get_id() not in _prechained:
         logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
-        ret = remote_snode.rpc_client().bdev_lvol_add_clone( remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+        with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
+                               lvol=snapshot.lvol.get_id(), node="primary"):
+            ret = remote_snode.rpc_client().bdev_lvol_add_clone( remote_lv.top_bdev, target_prev_snap['snap_bdev'])
         if not ret:
             logger.error("Failed to chain replicated snapshot on primary node")
             return False
+    elif target_prev_snap:
+        logger.info("Landing volume %s was already chained to %s on %s before "
+                    "the transfer; skipping the redundant add_clone",
+                    remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+                    remote_snode.get_id())
 
     # convert to snapshot on primary
-    ret = remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+    with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
+                           lvol=snapshot.lvol.get_id(), node="primary"):
+        ret = remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
     if not ret:
         logger.error("Failed to convert to snapshot on primary node")
         return False
@@ -887,15 +1340,24 @@ def process_snap_replicate_finish(task, snapshot):
     # chain snaps on secondary
     sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        if target_prev_snap:
+        if target_prev_snap and sec_node.get_id() not in _prechained:
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
-            ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+            with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
+                                   lvol=snapshot.lvol.get_id(), node="secondary"):
+                ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
             if not ret:
                 logger.error("Failed to chain replicated snapshot on secondary node")
                 return False
+        elif target_prev_snap:
+            logger.info("Landing volume %s was already chained to %s on %s "
+                        "before the transfer; skipping the redundant add_clone",
+                        remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+                        sec_node.get_id())
 
         # convert to snapshot on secondary
-        ret = sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+        with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
+                               lvol=snapshot.lvol.get_id(), node="secondary"):
+            ret = sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
         if not ret:
             logger.error("Failed to convert to snapshot on secondary node")
             return False
@@ -916,6 +1378,11 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.blobid = remote_lv.blobid
     new_snapshot.created_at = int(time.time())
     new_snapshot.status = SnapShot.STATUS_ONLINE
+    # Consistency-group provenance travels with the copy: the fail-over
+    # generation selector returns the TARGET record, and requirement 4's
+    # membership warnings are computed from (group_id, group_seq) on it.
+    new_snapshot.group_id = getattr(snapshot, "group_id", "")
+    new_snapshot.group_seq = getattr(snapshot, "group_seq", 0)
     snapshot.instances.append(new_snapshot)
     if not replicate_as_snap_instance:
         if replicate_to_source:
@@ -1057,6 +1524,13 @@ def task_runner(task: JobSchedule):
     elif task.status == JobSchedule.STATUS_RUNNING:
         snode = _source_leader_node(snapshot) or db.get_storage_node_by_id(snapshot.lvol.node_id)
         ret = snode.rpc_client().bdev_lvol_transfer_stat(snapshot.snap_bdev)
+        if ret:
+            # offset is the bytes moved so far: the ONLY direct read on actual
+            # transfer throughput, as distinct from round duration.
+            xfer_timing.stamp("transfer_running", snap=snapshot.get_id(),
+                              lvol=snapshot.lvol.get_id(),
+                              state=str(ret.get("transfer_state")).replace(" ", "_"),
+                              offset=ret.get("offset"))
         if not ret:
             logger.error("Failed to get transfer stat")
             return False
@@ -1080,18 +1554,7 @@ def task_runner(task: JobSchedule):
             task.write_to_db()
             return False
         if status == "Done":
-            new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
-            if new_snapshot_uuid:
-                task.function_result = new_snapshot_uuid
-                task.status = JobSchedule.STATUS_DONE
-                task.function_params["end_time"] = int(time.time())
-                task.write_to_db()
-            else:
-                task.function_result = "complete repl failed, retrying"
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.retry += 1
-                task.write_to_db()
-            return True
+            return _finish_completed_transfer(task, snapshot, offset)
 
 
 def main():
@@ -1104,12 +1567,14 @@ def main():
             time.sleep(3)
             continue
         clusters = db.get_clusters()
+        cutover_in_flight = False
         if not clusters:
             logger.error("No clusters found!")
         else:
             for cl in clusters:
                 tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-                for task in tasks:
+                cutover_in_flight = cutover_in_flight or _cutover_in_flight(tasks)
+                for task in _replication_order(tasks):
                     if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
                         if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
                             active_task = False
@@ -1135,10 +1600,19 @@ def main():
                                 logger.error("Replication task %s failed: %s",
                                              task.get_id(), e)
                                 res = False
-                            if not res:
+                            if not res and res is not HELD:
+                                # A hold is a decision, not a failure: sleeping
+                                # on it delays the very transfer it is waiting
+                                # for.
                                 time.sleep(3)
 
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        # A cutover round is a snapshot this loop has to move before the volume
+        # can take the next one, so the pass interval lands directly in the
+        # convergence time -- and at 10s it IS the convergence time, for a
+        # transfer that takes 150ms. Tighten the loop only while a cutover is
+        # actually in flight; the idle cadence is unchanged.
+        time.sleep(constants.REPL_CUTOVER_ACTIVE_POLL_SEC if cutover_in_flight
+                   else constants.TASK_EXEC_INTERVAL_SEC)
 
 
 if __name__ == "__main__":

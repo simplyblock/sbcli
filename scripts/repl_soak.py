@@ -1,6 +1,6 @@
 """One-liner for the async-replication soak: deploy a lab from a branch, run cases, report.
 
-    python scripts/repl_soak.py --cases case6,case7 --branch main
+    python scripts/repl_soak.py --cases case7,case9 --env CHAOS_EVENTS=100
     python scripts/repl_soak.py --cases case9 --env CHAOS_EVENTS=100 --teardown on-pass
     python scripts/repl_soak.py --cases case10,case11 --branch main --spdk-image public.ecr.aws/simply-block/ultra:main-latest-amd64
     python scripts/repl_soak.py --cases case3 --reuse-lab          # existing lab, no redeploy
@@ -36,8 +36,19 @@ SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
             "-o", "ConnectTimeout=30", "-i", KEY]
 
 
+# Any credential that reaches a log line is leaked: these logs are pasted into
+# tickets and chat, and the lab copies keep them on disk for the life of the
+# instance. The fetch URL carries a GitHub token, so redact before printing
+# rather than trusting each call site to remember.
+_SECRET_RE = re.compile(r"(x-access-token:)[^@\s]+(@)")
+
+
+def redact(msg):
+    return _SECRET_RE.sub(r"\1***\2", str(msg))
+
+
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[{time.strftime('%H:%M:%S')}] {redact(msg)}", flush=True)
 
 
 def sh(cmd, cwd=None, env=None, check=True, capture=False):
@@ -46,8 +57,8 @@ def sh(cmd, cwd=None, env=None, check=True, capture=False):
                        text=True, capture_output=capture)
     if check and r.returncode != 0:
         if capture:
-            print(r.stdout[-2000:], r.stderr[-2000:])
-        raise SystemExit(f"step failed (rc={r.returncode}): {cmd}")
+            print(redact(r.stdout[-2000:]), redact(r.stderr[-2000:]))
+        raise SystemExit(f"step failed (rc={r.returncode}): {redact(cmd)}")
     return r
 
 
@@ -172,9 +183,11 @@ def teardown(meta):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cases", required=True,
-                    help="comma list or group name for test_async_replication.py (e.g. case6,case7 | all9 | features)")
-    ap.add_argument("--branch", default="main", help="sbcli branch to deploy/hotfix/stage (default main)")
+    ap.add_argument("--cases", required=True, nargs="+", metavar="CASE",
+                    help="cases or a group name: 'case6,case7', 'case6 case7', "
+                         "'case6, case7' and 'all9' all work")
+    ap.add_argument("--branch", default="replication-features",
+                    help="sbcli branch to deploy/hotfix/stage (default replication-features)")
     ap.add_argument("--spdk-image", default="", help="ultra image ref; default = digest pinned in the deployer")
     ap.add_argument("--cp-image", default="", help="control-plane docker image (SIMPLYBLOCK_DOCKER_IMAGE)")
     ap.add_argument("--env", action="append", default=[], metavar="KEY=VAL",
@@ -183,6 +196,11 @@ def main():
     ap.add_argument("--no-hotfix", action="store_true", help="skip mounting the branch's python over the CP services")
     ap.add_argument("--teardown", choices=["never", "on-pass", "always"], default="never")
     args = ap.parse_args()
+    # Accept every shape a shell hands us: "a,b", "a, b" (the space makes the
+    # shell pass two argv entries) and "a b" all mean the same list.
+    args.cases = ",".join(c for tok in args.cases for c in tok.split(",") if c)
+    if not args.cases:
+        ap.error("--cases got no case names")
     for kv in args.env:
         if "=" not in kv:
             ap.error(f"--env expects KEY=VAL, got {kv!r}")

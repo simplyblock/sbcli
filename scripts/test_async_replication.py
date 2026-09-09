@@ -350,7 +350,8 @@ print(json.dumps(states))
 """, replayable=True)
 
 
-def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_TIMEOUT):
+def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_TIMEOUT,
+                               max_lag=None):
     """Wait until every volume is replicating steadily with a bounded lag.
 
     NOT outstanding_count == 0. `outstanding_count` counts internal snapshots
@@ -364,7 +365,7 @@ def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_
     keeping up; the residual delta is `replication-commit`'s job, which is
     documented to "minimize delta then fail the client over".
     """
-    max_lag = MAX_LAG_SECONDS
+    max_lag = max_lag or MAX_LAG_SECONDS
     print(f"Waiting for replication to reach a steady state (lag <= {max_lag}s) on all volumes...")
     start = time.time()
     stable = 0
@@ -440,6 +441,15 @@ def connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True, mount_base=
         mnt = f"{mount_base}{idx}"
         if fmt:
             run(client_ip, key_path, f"sudo mkfs.xfs -f {dev}")
+        held = run(client_ip, key_path,
+                   f"grep -E '^{dev} ' /proc/mounts | head -1 || true",
+                   check=False, quiet=True, timeout=60).strip()
+        if held:
+            raise RuntimeError(
+                f"{dev} is already mounted ({held}) before mounting {lv} at "
+                f"{mnt}: a previous case's mount is still live on this device. "
+                f"mount would fail with a bare 'already mounted or mount point "
+                f"busy' (case 11, run 20260827_110415).")
         run(client_ip, key_path, f"sudo mkdir -p {mnt} && sudo mount {dev} {mnt}")
         mounts.append({"lvol": lv, "nqn": conn["nqn"], "dev": dev, "mount": mnt})
         print(f"  vol {lv} -> {dev} @ {mnt}")
@@ -497,6 +507,57 @@ def write_fio_jobfile(client_ip, key_path, mounts,
     return jobfile
 
 
+def fio_bandwidth(client_ip, key_path, label=""):
+    """Print fio's own aggregate bandwidth, and return (read_mbps, write_mbps).
+
+    fio has been writing this all along under --status-interval=15; nothing
+    read it, so every earlier analysis inferred the client rate from round
+    durations instead (and was 5x out).
+    """
+    out = run(client_ip, key_path,
+              "grep -aE '^ *(READ|WRITE): bw=' %s 2>/dev/null | tail -4 || true"
+              % FIO_LOG, check=False, quiet=True)
+    rd = wr = None
+    for line in (out or "").splitlines():
+        m = re.search(r"\((\d+(?:\.\d+)?)([kMG]?B)/s\)", line)
+        if not m:
+            continue
+        val = float(m.group(1))
+        unit = m.group(2)
+        mbps = val / 1000.0 if unit == "kB" else (val * 1000.0 if unit == "GB" else val)
+        if line.strip().startswith("READ"):
+            rd = mbps
+        elif line.strip().startswith("WRITE"):
+            wr = mbps
+    if rd is not None or wr is not None:
+        print("  [fio %s] %s read %s MB/s, write %s MB/s"
+              % (label, client_ip,
+                 "%.0f" % rd if rd is not None else "?",
+                 "%.0f" % wr if wr is not None else "?"))
+    else:
+        print("  [fio %s] %s no aggregate lines yet" % (label, client_ip))
+    return rd, wr
+
+
+def collect_xfer_timing(mgmt_ip, key_path, label):
+    """Pull XFER-TIMING lines off the CP services into one file on the mgmt node.
+
+    Container clocks are skewed from the host's, so every line carries its own
+    epoch stamp and we sort on that rather than on docker's timestamps.
+    """
+    dest = "~/xfer_timing_%s.log" % label
+    services = ("app_TasksRunnerReplicationFinal app_SnapshotReplication "
+                "app_SnapshotMonitor app_LVolMonitor")
+    cmd = ("rm -f %s; for S in %s; do "
+           "sudo docker service logs $S 2>&1 | grep -a XFER-TIMING >> %s || true; "
+           "done; sort -t= -k2 -n %s -o %s 2>/dev/null || true; wc -l < %s"
+           % (dest, services, dest, dest, dest, dest))
+    out = run(mgmt_ip, key_path, cmd, check=False, quiet=True, timeout=600)
+    count = (out or "").strip().splitlines()[-1] if (out or "").strip() else "0"
+    print("  [timing %s] collected %s XFER-TIMING lines -> %s" % (label, count, dest))
+    return dest
+
+
 def start_fio(client_ip, key_path, jobfile):
     print("Starting continuous fio load...")
     run(client_ip, key_path,
@@ -531,6 +592,78 @@ def stop_fio(client_ip, key_path):
     time.sleep(3)
 
 
+def client_dirt(client_ip, key_path):
+    """What is still mounted or connected on the client. Empty dict = clean.
+
+    Reads /proc/mounts rather than trusting umount's exit code: a lazy unmount
+    reports success and leaves the mount live until its IO drains, which is
+    exactly how a finished case hands its devices to the next one.
+    """
+    mounts = run(client_ip, key_path,
+                 "grep -oE '/mnt/repl[^ ]*' /proc/mounts 2>/dev/null | sort -u || true",
+                 check=False, quiet=True, timeout=60)
+    subsys = run(client_ip, key_path,
+                 "sudo nvme list-subsys 2>/dev/null "
+                 "| grep -oE 'nqn\\.2023-02\\.io\\.simplyblock:[^ ,]+' | sort -u || true",
+                 check=False, quiet=True, timeout=90)
+    dirt = {}
+    if mounts.split():
+        dirt["mounts"] = mounts.split()
+    if subsys.split():
+        dirt["subsystems"] = subsys.split()
+    return dirt
+
+
+def force_client_clean(client_ip, key_path, rounds=3):
+    """Unmount and disconnect everything, and keep at it until it is gone.
+
+    Each round kills whatever holds the mount (hung fio keeps a lazy unmount
+    pinned forever), unmounts, disconnects every simplyblock subsystem, then
+    re-reads /proc/mounts. Returns the remaining dirt, empty when clean.
+    """
+    dirt = client_dirt(client_ip, key_path)
+    for attempt in range(rounds):
+        if not dirt:
+            return {}
+        if attempt:
+            print(f"  [{client_ip}] client still dirty ({dirt}); escalating "
+                  f"(round {attempt + 1}/{rounds})")
+        run(client_ip, key_path, "sudo pkill -x fio || true", check=False, timeout=60)
+        # Kill the holders first: umount -l on a mount someone still has open
+        # never completes, and the device stays mounted underneath.
+        run(client_ip, key_path,
+            "for m in $(grep -oE '/mnt/repl[^ ]*' /proc/mounts 2>/dev/null | sort -u); do "
+            "sudo timeout 20 fuser -km \"$m\" 2>/dev/null || true; "
+            "sudo timeout 15 umount \"$m\" 2>/dev/null "
+            "|| sudo timeout 15 umount -f \"$m\" 2>/dev/null "
+            "|| sudo timeout 15 umount -l \"$m\" 2>/dev/null || true; done",
+            check=False, timeout=300)
+        run(client_ip, key_path,
+            "for n in $(sudo nvme list-subsys 2>/dev/null "
+            "| grep -oE 'nqn\\.2023-02\\.io\\.simplyblock:[^ ,]+' | sort -u); do "
+            "sudo timeout 20 nvme disconnect -n \"$n\" >/dev/null 2>&1 || true; done",
+            check=False, timeout=300)
+        # A lazy unmount finishes asynchronously once its holders are gone.
+        for _ in range(10):
+            time.sleep(3)
+            dirt = client_dirt(client_ip, key_path)
+            if not dirt:
+                return {}
+    return dirt
+
+
+def assert_client_clean(client_ip, key_path, where):
+    """Refuse to run *where* on a client another case left dirty."""
+    dirt = force_client_clean(client_ip, key_path)
+    if dirt:
+        raise RuntimeError(
+            f"{where}: client {client_ip} could not be returned to a clean "
+            f"state -- still {dirt}. Whatever ran before it left mounts or "
+            f"controllers behind (a cutover freeze outlasting the 15s unmount "
+            f"timeout does exactly this), and starting here would test that "
+            f"debris instead of the case.")
+
+
 def cleanup_client(client_ip, key_path, mounts):
     # Unmount before disconnecting, with a lazy fallback: a plain (or forced)
     # unmount fails once the transport is dead, and disconnecting underneath a
@@ -547,6 +680,14 @@ def cleanup_client(client_ip, key_path, mounts):
             run(client_ip, key_path,
                 f"sudo timeout 30 nvme disconnect -n {m['nqn']} 2>/dev/null || true",
                 check=False, timeout=90)
+    # Verify, and escalate rather than hand the next case a live mount. Not
+    # fatal here -- the case that owns these mounts has already done its work
+    # and its verdict should stand -- but loud, because this is where the
+    # contamination starts and the NEXT case is where it gets blamed.
+    dirt = force_client_clean(client_ip, key_path)
+    if dirt:
+        print(f"  [{client_ip}] WARNING: cleanup left {dirt} behind; the next "
+              f"case will refuse to start until this clears")
 
 
 def prepare_mount_points(client_ip, key_path):
@@ -575,6 +716,10 @@ def prepare_mount_points(client_ip, key_path):
         "| grep -oE 'nqn\\.2023-02\\.io\\.simplyblock:[^ ,]+'); do "
         "sudo timeout 20 nvme disconnect -n \"$n\" >/dev/null 2>&1 || true; done",
         check=False, timeout=300)
+    # The commands above are best-effort by design; this is the part that
+    # decides whether we may proceed. A lazy unmount reports success while the
+    # mount is still live, so the only trustworthy check is /proc/mounts.
+    assert_client_clean(client_ip, key_path, "prepare_mount_points")
 
 
 # --------------------------------------------------------------------------- #
@@ -783,6 +928,8 @@ def ensure_replication_policy(mgmt_ip, key_path, from_cluster, target_name, mode
     plain one another case left behind.
     """
     suffix = "_x%08x" % (hash(extra_flags) & 0xffffffff) if extra_flags else ""
+    if interval_min != REPL_INTERVAL_MIN:
+        suffix += f"_i{interval_min}"
     name = name or f"pol_{mode}_{target_name}{suffix}"
     for row in _replication_list(mgmt_ip, key_path, "policy", from_cluster):
         if row.get("Name") == name:
@@ -795,7 +942,8 @@ def ensure_replication_policy(mgmt_ip, key_path, from_cluster, target_name, mode
 
 
 def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool_uuid,
-                            mode="migration", extra_flags=""):
+                            mode="migration", extra_flags="", policy_name=None,
+                            interval_min=REPL_INTERVAL_MIN):
     """Create the target + policy that let `from_cluster` replicate to `to_cluster`.
 
     Replication is NEVER started per volume any more: `volume replication-start`
@@ -811,7 +959,8 @@ def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool
     target = ensure_replication_target(mgmt_ip, key_path, from_cluster, to_cluster,
                                        to_pool_uuid)
     policy = ensure_replication_policy(mgmt_ip, key_path, from_cluster, target, mode,
-                                       extra_flags=extra_flags)
+                                       interval_min=interval_min,
+                                       name=policy_name, extra_flags=extra_flags)
 
     # PRODUCT GAP (bridge, delete once the readers consult the policy):
     # replicate_lvol_on_target_cluster() and tasks_runner_replication_final still
@@ -1008,9 +1157,14 @@ def delete_test_volumes(mgmt_ip, key_path, pools):
         f"after {drain_polls * 10}s")
 
 
+def lag_gate_for(interval_min):
+    """The steady-state lag a cadence can actually hold: 3 cadence periods."""
+    return max(1, int(interval_min)) * 60 * 3
+
+
 def create_volumes(mgmt_ip, key_path, src_uuid, pool, tgt_uuid, tgt_pool, mode,
                    count=NUM_VOLUMES, prefix="replvol", size=VOL_SIZE,
-                   extra_flags=""):
+                   extra_flags="", interval_min=REPL_INTERVAL_MIN):
     """Create the test volumes already following a replication policy.
 
     The policy IS the start: `volume add --replication-policy` attaches it, and
@@ -1019,7 +1173,7 @@ def create_volumes(mgmt_ip, key_path, src_uuid, pool, tgt_uuid, tgt_pool, mode,
     """
     policy = set_cluster_replication(mgmt_ip, key_path, src_uuid, tgt_uuid,
                                      pool_uuid_of(mgmt_ip, key_path, tgt_pool),
-                                     mode=mode)
+                                     mode=mode, interval_min=interval_min)
     lvols = []
     for i in range(count):
         name = f"{prefix}{i}"
@@ -1649,6 +1803,13 @@ def test_case_6(meta):
 NS_VOLUMES = int(os.environ.get("NS_VOLUMES", "20"))
 NS_PER_SUBSYS = int(os.environ.get("NS_PER_SUBSYS", "10"))
 NS_VOL_SIZE = os.environ.get("NS_VOL_SIZE", "20G")
+#: 20 volumes on a one-minute cadence means 20 transfers a minute
+#: competing for the same hub: the lag settles at ~240s, above the
+#: 180s gate, and the case times out in setup without ever reaching
+#: the fail-over it exists to test (run 20260826_205051, lag
+#: oscillating 216-285s for 35 minutes). Five minutes gives the same
+#: coverage with a backlog the cluster can actually hold.
+NS_INTERVAL_MIN = int(os.environ.get("NS_INTERVAL_MIN", "5"))
 
 PRESSURE_VOLUMES = int(os.environ.get("PRESSURE_VOLUMES", "2"))
 PRESSURE_VOL_SIZE = os.environ.get("PRESSURE_VOL_SIZE", "120G")
@@ -1766,6 +1927,7 @@ def test_case_7(meta):
     lvols = create_volumes(
         mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid, tgt["pool"],
         mode="failover", count=NS_VOLUMES, prefix="nsvol", size=NS_VOL_SIZE,
+        interval_min=NS_INTERVAL_MIN,
         extra_flags=f"--namespaced True --max-namespace-per-subsys {NS_PER_SUBSYS}")
 
     idents = lvol_identities(mgmt_ip, key_path, lvols)
@@ -1798,8 +1960,14 @@ def test_case_7(meta):
     for ip in assign:
         start_fio(ip, key_path, write_fio_jobfile(ip, key_path, mounts_by_client[ip],
                                                   size="1G"))
-    wait_replication_caught_up(mgmt_ip, key_path, lvols, timeout=3600)
+    ns_gate = lag_gate_for(NS_INTERVAL_MIN)
+    for ip in assign:
+        fio_bandwidth(ip, key_path, "steady-state")
+    wait_replication_caught_up(mgmt_ip, key_path, lvols, timeout=3600, max_lag=ns_gate)
     wait_data_replicated(mgmt_ip, key_path, lvols, baseline_ts, timeout=3600)
+    for ip in assign:
+        fio_bandwidth(ip, key_path, "pre-failover")
+    collect_xfer_timing(mgmt_ip, key_path, "case7_pre_failover")
 
     print("Killing the source cluster (both nodes)...")
     for ip in src["storage_public_ips"][:2]:
@@ -1855,20 +2023,37 @@ def test_case_7(meta):
                             pool_uuid_of(mgmt_ip, key_path, src["pool"]))
     for lv in tgt_lvols:
         failback(mgmt_ip, key_path, lv)
-    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600)
+    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600,
+                               max_lag=ns_gate)
     for lv in tgt_lvols:
         run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-commit {lv}")
 
     start = time.time()
     done = 0
-    while time.time() - start < CUTOVER_WAIT_TIMEOUT * 2:
-        states = replication_states(mgmt_ip, key_path, tgt_lvols)
-        done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
-        print(f"  fail-back cutovers done: {done}/{len(tgt_lvols)}")
-        if done == len(tgt_lvols):
-            break
-        time.sleep(15)
+    # The timing bundle is the whole point of the run, so collect it even when
+    # the poll itself blows up. Twice now a transient control-plane error inside
+    # this loop (`sbctl` rc=1) propagated out and skipped the collection, leaving
+    # the previous run's file in place -- which then looked like fresh data.
+    try:
+        while time.time() - start < CUTOVER_WAIT_TIMEOUT * 2:
+            try:
+                states = replication_states(mgmt_ip, key_path, tgt_lvols)
+            except Exception as e:                        # noqa: BLE001
+                # A CP hiccup must not end the case: log it, keep polling, and
+                # let the deadline decide.
+                print(f"  fail-back poll failed ({str(e)[:120]}); retrying")
+                time.sleep(15)
+                continue
+            done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
+            print(f"  fail-back cutovers done: {done}/{len(tgt_lvols)}")
+            if done == len(tgt_lvols):
+                break
+            time.sleep(15)
+    finally:
+        collect_xfer_timing(mgmt_ip, key_path, "case7_failback")
     if done != len(tgt_lvols):
+        # The breakdown matters MOST here: a stalled fail-back is the case we
+        # have failed to explain seven times.
         raise RuntimeError(f"FAIL: only {done}/{len(tgt_lvols)} fail-back cutovers completed")
 
     back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
@@ -2612,6 +2797,287 @@ print(json.dumps(dict((str(k), sorted(v)) for k, v in gens.items())))
     print("CASE 12 PASSED: CG snapshots complete per generation, retention "
           "correct, both fail-overs crash-consistent and generation-exact.")
 
+
+
+# --------------------------------------------------------------------------- #
+# Cases 13-15: a single node dies DURING fail-over / fail-back / cutover
+# --------------------------------------------------------------------------- #
+# One node is killed at a RANDOM instant inside the phase under test, repeated
+# so the kills land at many different points of it. Chaos is allowed to make
+# the operation fail -- what is NOT allowed is losing data, wedging the
+# cluster, or leaving a state a retry cannot get out of. Each round therefore
+# ends in one of two accepted verdicts (completed despite the kill / failed
+# then succeeded on retry after recovery) and any third outcome fails the case.
+CHAOS_PHASE_ROUNDS = int(os.environ.get("CHAOS_PHASE_ROUNDS", "20"))
+# 20 policies x 2 volumes = 40 volumes replicating at once. At the default
+# 1-minute cadence that is 40 transfers a minute and the cluster steady-states
+# at ~6 minutes of lag -- above the 3-period gate, so the setup phase never
+# completes (run 20260827_110415, killed after 50 minutes without a round).
+# The cadence has to be one this volume count can hold.
+CHAOS_PHASE_INTERVAL_MIN = int(os.environ.get("CHAOS_PHASE_INTERVAL_MIN", "10"))
+CHAOS_PHASE_VOLS_PER_POLICY = int(os.environ.get("CHAOS_PHASE_VOLS_PER_POLICY", "2"))
+CHAOS_PHASE_VOL_SIZE = os.environ.get("CHAOS_PHASE_VOL_SIZE", "10G")
+#: cap for the randomized kill delay when a phase turns out to be slow
+CHAOS_PHASE_MAX_DELAY = float(os.environ.get("CHAOS_PHASE_MAX_DELAY", "45"))
+
+
+def _kill_after(delay_s, ip, key_path, sink):
+    """Kill SPDK on *ip* after *delay_s*, off the main thread."""
+    import threading
+
+    def _run():
+        time.sleep(delay_s)
+        try:
+            kill_spdk(ip, key_path)
+            sink.append(("killed", ip, time.time()))
+        except Exception as exc:                      # noqa: BLE001 - recorded
+            sink.append(("kill-failed", ip, str(exc)))
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+def _await_cluster_healthy(mgmt_ip, key_path, timeout=NODE_STATE_TIMEOUT):
+    """Every node online AND healthy, every cluster active/degraded."""
+    deadline = time.time() + timeout
+    last = {}
+    while time.time() < deadline:
+        last = _all_nodes_online(mgmt_ip, key_path)
+        if last.get("all_online"):
+            return True, last
+        time.sleep(20)
+    return False, last
+
+
+def _phase_victims(meta, phase):
+    """Nodes worth killing for the phase under test, as (label, public_ip).
+
+    Fail-over and fail-back BUILD the copy on the destination, so the
+    destination cluster is where a kill bites; the cutover freezes and flips
+    the source, so both sides matter there.
+    """
+    _src_uuid, src, _tgt_uuid, tgt = _src_target(meta)
+    if phase == "failover":
+        pool = [("tgt", ip) for ip in tgt["storage_public_ips"]]
+    elif phase == "failback":
+        pool = [("src", ip) for ip in src["storage_public_ips"]]
+    else:
+        pool = ([("src", ip) for ip in src["storage_public_ips"]]
+                + [("tgt", ip) for ip in tgt["storage_public_ips"]])
+    return pool
+
+
+def _failover_all(mgmt_ip, key_path, lvols):
+    """Returns (ok, target_lvols, error). Never raises on a chaos failure."""
+    out = []
+    for lv in lvols:
+        fo = do_failover(mgmt_ip, key_path, lv)
+        if not isinstance(fo, dict) or not fo.get("connection_strings"):
+            return False, out, (f"{lv[:8]}: "
+                                f"{(fo or {}).get('error', '')} "
+                                f"{(fo or {}).get('log', '')}".strip()[:300])
+        out.append(fo["lvol_id"])
+    return True, out, ""
+
+
+def _commit_all(mgmt_ip, key_path, lvols, timeout=None):
+    """Drive replication-commit for every volume and wait for the cutovers."""
+    timeout = timeout or CUTOVER_WAIT_TIMEOUT
+    for lv in lvols:
+        run(mgmt_ip, key_path, "%s -d volume replication-commit %s" % (SBCTL, lv),
+            check=False)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        states = replication_states(mgmt_ip, key_path, lvols)
+        done = sum(1 for x in states.values() if x in ("cutover_done", "failed_over"))
+        if done == len(lvols):
+            return True, ""
+        time.sleep(15)
+    return False, "only %d/%d cutovers completed in %ds" % (done, len(lvols), timeout)
+
+
+def _failback_all(mgmt_ip, key_path, meta, tgt_lvols):
+    """Point replication home, fail back, commit, and return the new lvol ids."""
+    src_uuid, src, tgt_uuid, _tgt = _src_target(meta)
+    set_cluster_replication(mgmt_ip, key_path, tgt_uuid, src_uuid,
+                            pool_uuid_of(mgmt_ip, key_path, src["pool"]))
+    for t in tgt_lvols:
+        failback(mgmt_ip, key_path, t)
+    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600)
+    ok, why = _commit_all(mgmt_ip, key_path, tgt_lvols)
+    if not ok:
+        return False, [], why
+    back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
+    new = [back[t] for t in tgt_lvols if t in back]
+    if len(new) != len(tgt_lvols):
+        return False, new, "fail-back returned %d/%d volumes" % (len(new), len(tgt_lvols))
+    return True, new, ""
+
+
+def _chaos_phase_case(meta, phase, title):
+    """Kill ONE node at a random instant inside *phase*, once per POLICY.
+
+    Each round owns its own policy and its own volumes, so a round never has
+    to undo what the previous one did: no fail-back, no re-sync, no restore to
+    a "home shape". Set up CHAOS_PHASE_ROUNDS policies with
+    CHAOS_PHASE_VOLS_PER_POLICY volumes each, replicate them all once, then
+    walk the policies one at a time and attack the phase on that policy's
+    volumes with the kill landing at a random instant.
+    """
+    import random
+    print("\n========== %s ==========" % title)
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+    seed = int(os.environ.get("CHAOS_PHASE_SEED") or time.time())
+    rng = random.Random(seed)
+    # The cutover under test in case 15 is the FINAL MIGRATION STEP: a
+    # migration-mode policy committed on the SOURCE volumes.
+    mode = "migration" if phase == "commit" else "failover"
+    print("  seed=%d rounds=%d vols/policy=%d mode=%s phase=%s cadence=%dmin "
+          "lag_gate=%ds"
+          % (seed, CHAOS_PHASE_ROUNDS, CHAOS_PHASE_VOLS_PER_POLICY, mode, phase,
+             CHAOS_PHASE_INTERVAL_MIN, lag_gate_for(CHAOS_PHASE_INTERVAL_MIN)))
+
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
+
+    # --- one-time setup: N policies x M volumes, all replicating ------------
+    groups, all_lvols = [], []
+    for r in range(CHAOS_PHASE_ROUNDS):
+        policy = set_cluster_replication(
+            mgmt_ip, key_path, src_uuid, tgt_uuid,
+            pool_uuid_of(mgmt_ip, key_path, tgt["pool"]), mode=mode,
+            policy_name="pol_chaos_%s_%02d" % (phase, r),
+            interval_min=CHAOS_PHASE_INTERVAL_MIN)
+        vols = []
+        for v in range(CHAOS_PHASE_VOLS_PER_POLICY):
+            name = "replvol%02d_%d" % (r, v)
+            run(mgmt_ip, key_path,
+                "%s -d volume add %s %s %s --replication-policy %s"
+                % (SBCTL, name, CHAOS_PHASE_VOL_SIZE, src["pool"], policy))
+            vols.append(resolve_lvol(mgmt_ip, key_path, name)["uuid"])
+        groups.append({"policy": policy, "vols": vols})
+        all_lvols.extend(vols)
+    print("  created %d policies x %d volumes = %d volumes"
+          % (CHAOS_PHASE_ROUNDS, CHAOS_PHASE_VOLS_PER_POLICY, len(all_lvols)))
+
+    mounts = connect_and_mount(client_ip, key_path, mgmt_ip, all_lvols, fmt=True)
+    baseline = write_baseline(client_ip, key_path, mounts)
+    baseline_ts = time.time()
+    cleanup_client(client_ip, key_path, mounts)
+    wait_replication_caught_up(mgmt_ip, key_path, all_lvols, timeout=7200,
+                               max_lag=lag_gate_for(CHAOS_PHASE_INTERVAL_MIN))
+    wait_data_replicated(mgmt_ip, key_path, all_lvols, baseline_ts, timeout=7200)
+    print("  all %d volumes replicated; starting the rounds" % len(all_lvols))
+
+    victims = _phase_victims(meta, phase)
+    phase_secs = 20.0          # replaced by the first round's measurement
+    verdicts, retries, kills = [], 0, []
+
+    for rnd, grp in enumerate(groups, start=1):
+        vols = grp["vols"]
+        delay = round(rng.uniform(0.0, min(phase_secs * 1.2, CHAOS_PHASE_MAX_DELAY)), 1)
+        label, victim = rng.choice(victims)
+        print("--- round %d/%d (policy %s): kill %s node %s at T+%.1fs of %s ---"
+              % (rnd, CHAOS_PHASE_ROUNDS, grp["policy"], label, victim, delay, phase))
+        sink = []
+        started = time.time()
+
+        if phase == "failover":
+            _kill_after(delay, victim, key_path, sink)
+            ok, result_lvols, why = _failover_all(mgmt_ip, key_path, vols)
+        elif phase == "failback":
+            # The fail-BACK is under test, so the fail-over that sets it up runs
+            # clean; only then does the node die.
+            ok, tgt_lvols, why = _failover_all(mgmt_ip, key_path, vols)
+            if not ok:
+                raise RuntimeError("FAIL: round %d -- the setup fail-over failed "
+                                   "before the fail-back under test: %s" % (rnd, why))
+            _kill_after(delay, victim, key_path, sink)
+            ok, result_lvols, why = _failback_all(mgmt_ip, key_path, meta, tgt_lvols)
+        else:                                     # commit / online cutover
+            _kill_after(delay, victim, key_path, sink)
+            ok, why = _commit_all(mgmt_ip, key_path, vols)
+            result_lvols = []
+        measured = time.time() - started
+        if rnd == 1:
+            phase_secs = max(5.0, measured)
+            print("  measured %s phase: %.1fs (kill delays randomize over it)"
+                  % (phase, phase_secs))
+        kills.extend(sink)
+
+        healthy, state = _await_cluster_healthy(mgmt_ip, key_path)
+        if not healthy:
+            raise RuntimeError(
+                "FAIL: round %d -- cluster did not recover %ds after killing %s: "
+                "unhealthy=%s clusters=%s"
+                % (rnd, NODE_STATE_TIMEOUT, victim, state.get("offline"),
+                   state.get("clusters")))
+
+        if ok:
+            verdicts.append("completed")
+        else:
+            # Chaos may legitimately fail the operation. A RETRY once the
+            # cluster is healthy again must then succeed -- anything else is a
+            # wedged state, which is the bug this case hunts.
+            print("  operation failed under chaos (%s); retrying after recovery"
+                  % why[:160])
+            retries += 1
+            if phase == "failover":
+                ok, result_lvols, why = _failover_all(mgmt_ip, key_path, vols)
+            elif phase == "failback":
+                ok, result_lvols, why = _failback_all(mgmt_ip, key_path, meta, tgt_lvols)
+            else:
+                ok, why = _commit_all(mgmt_ip, key_path, vols)
+            if not ok:
+                raise RuntimeError("FAIL: round %d -- %s did not succeed even on a "
+                                   "retry after recovery: %s" % (rnd, phase, why))
+            verdicts.append("retry")
+
+        # Where the data ended up, and whether it is intact.
+        if phase == "commit":
+            after = failed_over_targets(mgmt_ip, key_path, vols)
+            result_lvols = [after[v] for v in vols if v in after]
+            if len(result_lvols) != len(vols):
+                raise RuntimeError("FAIL: round %d -- cutover produced %d/%d target "
+                                   "volumes" % (rnd, len(result_lvols), len(vols)))
+        check_base = dict(zip(result_lvols, [baseline[v] for v in vols]))
+        vmounts = connect_and_mount(client_ip, key_path, mgmt_ip, result_lvols,
+                                    fmt=False, mount_base=MOUNT_BASE + "_ph")
+        good, _ = verify_baseline(client_ip, key_path, vmounts, check_base)
+        cleanup_client(client_ip, key_path, vmounts)
+        if not good:
+            raise RuntimeError("FAIL: round %d -- data not intact after %s with a "
+                               "node killed at T+%.1fs (policy %s)"
+                               % (rnd, phase, delay, grp["policy"]))
+        # No restore: the next round owns different volumes entirely.
+
+    completed = verdicts.count("completed")
+    delivered = sum(1 for k in kills if k[0] == "killed")
+    print("  %d rounds: %d completed under the kill, %d needed a retry after "
+          "recovery, %d/%d kills delivered"
+          % (CHAOS_PHASE_ROUNDS, completed, retries, delivered, len(kills)))
+    print("%s PASSED: every round ended intact and unwedged (seed %d)."
+          % (title.split(":")[0], seed))
+
+
+def test_case_13(meta):
+    _chaos_phase_case(meta, "failover",
+                      "CASE 13: single node dies DURING fail-over")
+
+
+def test_case_14(meta):
+    _chaos_phase_case(meta, "failback",
+                      "CASE 14: single node dies DURING fail-back")
+
+
+def test_case_15(meta):
+    _chaos_phase_case(meta, "commit",
+                      "CASE 15: single node dies DURING the online cutover")
+
 CASES = {
     "case1": test_case_1,   # online migration cutover, no IO interruption
     "case2": test_case_2,   # DR fail-over on source-cluster loss
@@ -2625,6 +3091,9 @@ CASES = {
     "case10": test_case_10,  # migration under heavy IO + cutover freeze timing
     "case11": test_case_11,  # retention ladder + random-generation fail-overs
     "case12": test_case_12,  # consistency groups (needs the CG build)
+    "case13": test_case_13,  # node dies during fail-over, x20 random instants
+    "case14": test_case_14,  # node dies during fail-back, x20 random instants
+    "case15": test_case_15,  # node dies during the online cutover, x20
 }
 GROUPS = {
     "both": ["case1", "case2"],
@@ -2632,6 +3101,7 @@ GROUPS = {
     "errors": ["case5", "case6"],
     "extended": ["case7", "case8", "case9"],
     "features": ["case10", "case11", "case12"],
+    "phase-chaos": ["case13", "case14", "case15"],
     "all": ["case1", "case2", "case3", "case4", "case5", "case6"],
     # Case 3 last: it is the only case that needs the killed primary restored
     # and recovered, so a failure there cannot cost the other five cases.

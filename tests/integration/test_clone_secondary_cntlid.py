@@ -143,8 +143,14 @@ class TestCloneSecondaryCntlidIndex(unittest.TestCase):
             return ({"uuid": "bdev-uuid",
                      "driver_specific": {"lvol": {"blobid": 1}}}, None)
 
+        from simplyblock_core.controllers import lvol_controller as real_lvol_controller
+
         lvol_ctrl = MagicMock()
         lvol_ctrl.add_lvol_on_node.side_effect = _record_add
+        # clone() builds the record's `nodes` list through this pure helper;
+        # left as a bare MagicMock its return value lands in the lvol record
+        # and the FDB write fails on JSON-serializing a mock.
+        lvol_ctrl.role_secondary_ids.side_effect = real_lvol_controller.role_secondary_ids
         # Leader detection iterates candidates and breaks on the first truthy
         # result; the host (primary) is first, so a blanket True elects it.
         # Stubbed on BOTH the rebound module attribute and the real module:

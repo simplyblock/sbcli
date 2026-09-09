@@ -1,5 +1,6 @@
 import base64
 import builtins
+import copy
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from datetime import datetime, UTC
 import docker
 from kubernetes import client as k8s_client
 import requests
+import yaml
 
 from docker.errors import DockerException
 from pydantic import SecretStr
@@ -298,6 +300,16 @@ def parse_protocols(input_str: str):
         "rdma": "rdma" in parts,
     }
 
+def _validated_device_mode(device_mode) -> str:
+    """Normalize/validate the cluster device mode ("nvme" | "lblk").
+    Deploy-time only, like enable_failure_domain."""
+    mode = (device_mode or constants.DEVICE_MODE_NVME).lower()
+    if mode not in (constants.DEVICE_MODE_NVME, constants.DEVICE_MODE_LBLK):
+        raise ValueError(
+            f"invalid device_mode {device_mode!r}; must be "
+            f"'{constants.DEVICE_MODE_NVME}' or '{constants.DEVICE_MODE_LBLK}'")
+    return mode
+
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
@@ -308,9 +320,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
                    hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                    enable_failure_domain=False,
+                   device_mode=constants.DEVICE_MODE_NVME,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                    alert_config: dict[str, t.Any] | None = None,
+                   inline_checksum=False,
+                   atomic_4k=False,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -453,10 +468,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
     cluster.spdk_vcpu_count = spdk_vcpu_count or 0
+    cluster.device_mode = _validated_device_mode(device_mode)
     cluster.contact_point = contact_point or ""
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
     cluster.full_page_unmap = False
+    cluster.inline_checksum = bool(inline_checksum)
+    cluster.atomic_4k = bool(atomic_4k)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -559,6 +577,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                 enable_failure_domain=False,
+                device_mode=constants.DEVICE_MODE_NVME,
+                inline_checksum=False,
+                atomic_4k=False,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a ClusterCreateLock.
@@ -585,6 +606,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
         hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+        device_mode=device_mode,
+        inline_checksum=inline_checksum,
+        atomic_4k=atomic_4k,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -609,6 +633,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                 enable_failure_domain=False,
+                device_mode=constants.DEVICE_MODE_NVME,
+                inline_checksum=False,
+                atomic_4k=False,
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -653,6 +680,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.device_mode = _validated_device_mode(device_mode)
 
     if clusters:
         cfg = db_controller.get_deploy_config()
@@ -732,6 +760,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
     cluster.full_page_unmap = False
+    cluster.inline_checksum = bool(inline_checksum)
+    cluster.atomic_4k = bool(atomic_4k)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -1077,6 +1107,21 @@ def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> No
         raise
 
 
+def is_single_node_activation(cluster, online_nodes) -> bool:
+    """A cluster with exactly one storage node activates as non-HA regardless
+    of the chosen ha_type / EC schema: no secondary roles, no HA journaling
+    (single local journal), no physical labels. This is what makes 1-node
+    deployments activatable with the API defaults (ha_type='ha')."""
+    return bool(cluster.is_single_node or len(online_nodes) == 1)
+
+
+def activation_minimum_devices(cluster, single_node_cluster) -> int:
+    """ndcs+npcs devices are needed for placement; the +1 spare is rebuild
+    headroom that a single-node cluster (no data redundancy to rebuild onto
+    a spare) does not require."""
+    return cluster.distr_ndcs + cluster.distr_npcs + (0 if single_node_cluster else 1)
+
+
 def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
 
@@ -1133,6 +1178,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     online_nodes = []
     dev_count = 0
 
+    raw_device_size = 0
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
@@ -1142,7 +1188,13 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     dev_count += 1
-    minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
+                    raw_device_size += int(dev.size or 0)
+    single_node_cluster = is_single_node_activation(cluster, online_nodes)
+    if single_node_cluster and cluster.ha_type == "ha":
+        logger.warning("Single-node cluster: activating as non-HA "
+                       "(no secondary nodes, single journal) regardless of ha_type")
+
+    minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
     if dev_count < minimum_devices:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
@@ -1242,10 +1294,33 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             node.physical_label = 0
         else:
             node.physical_label = storage_node_ops.get_next_physical_device_order(node)
+        # Keep the per-device label copies in sync — the distrib cluster map
+        # emits dev.physical_label, not the node's, so a stale non-zero copy
+        # from node-add would re-enable label anti-affinity in the data plane.
+        for dev in node.nvme_devices:
+            dev.physical_label = node.physical_label
+        if single_node_cluster and node.enable_ha_jm and not node.lvstore:
+            # Fresh node in a single-node cluster: force the single-journal
+            # shape before the LVS is created (jm_vuid=1, no remote JMs). A
+            # node that already carries an lvstore keeps its shape.
+            logger.info(f"Single-node cluster: disabling HA journaling on node {node.get_id()}")
+            node.enable_ha_jm = False
         node.write_to_db()
 
+    # Cluster raw capacity, for the reported cluster_max_size (create_lvstore
+    # takes it but sizes its distribs from DISTRIB_SIZE_BYTES instead). The
+    # capacity collector has not necessarily run yet on a freshly deployed
+    # cluster — a single-node deployment reaches activation seconds after
+    # add-node — and the unguarded records[0] aborted activation with a bare
+    # "list index out of range". Fall back to the raw device sum.
     records = db_controller.get_cluster_capacity(cluster)
-    max_size = records[0]['size_total']
+    if records:
+        max_size = records[0]['size_total']
+    else:
+        max_size = raw_device_size
+        logger.warning(
+            "No cluster capacity record yet (stats collector has not run); "
+            "using the raw online-device sum %s as cluster max size", max_size)
 
     used_nodes_as_sec: builtins.list[str] = []
     used_nodes_as_tertiary: builtins.list[str] = []
@@ -1262,7 +1337,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Fresh FD+HA activation bypasses this fallback via fd_desired_layout,
     # but reactivation and non-HA/non-fresh paths still rely on it.
     snodes = sorted(snodes, key=lambda n: n.failure_domain)
-    if cluster.ha_type == "ha":
+    if cluster.ha_type == "ha" and not single_node_cluster:
         for snode in snodes:
             # Do not assign secondary to removed node
             if snode.status == StorageNode.STATUS_REMOVED:
@@ -1771,6 +1846,27 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # risk until it goes ACTIVE. (Use max_fault_tolerance - 1 instead if you
     # want headroom for an unplanned failure concurrent with a rollout.)
     utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
+
+    # JM mesh gate (2026-08-05 incident: nodes joined via add-node retries
+    # activated with peers missing their remote_jm controllers — the cluster
+    # reported healthy while a third of the journal mesh was unreachable,
+    # and the first journal load collapsed n_safe_jms into a cluster-wide
+    # JCERR). FRESH activation must not complete over such a hole; a
+    # RE-ACTIVATION is a recovery path that may legitimately run with one
+    # or two nodes unhealthy, so it repairs best-effort and only warns —
+    # the verifier already skips JMs whose owner node is not ONLINE.
+    if cluster.ha_type == "ha" and not single_node_cluster:
+        jm_problems = storage_node_ops.verify_jm_mesh_coverage(cl_id, repair=True)
+        if jm_problems:
+            if is_fresh_activation:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(
+                    "Failed to activate cluster: JM mesh coverage incomplete "
+                    "(journal quorum would silently run degraded): "
+                    + "; ".join(jm_problems))
+            logger.warning(
+                "JM mesh coverage incomplete on re-activation (continuing — "
+                "recovery path): %s", "; ".join(jm_problems))
 
     _record_activated_nodes(cl_id)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
@@ -2821,6 +2917,53 @@ def get_cluster(cl_id) -> dict:
 GRAFANA_RESTART_RELEASE = "26.3.0.4"
 
 
+#: Swarm service -> compose service, for the monitoring args reconciled on every
+#: Docker ``cluster update``. Those args are fixed at ``docker stack deploy``
+#: time, so a compose change otherwise never reaches a deployed cluster.
+#:
+#: An allowlist on purpose. Grafana must not be added: set_event_alerts() mutates
+#: its spec at runtime, and the compose file would overwrite that.
+_RECONCILED_MONITORING_ARGS = {"monitoring_node-exporter": "node-exporter"}
+
+
+def _compose_monitoring_command_args(compose: dict[str, t.Any], service_key: str) -> builtins.list[str]:
+    command = compose["services"][service_key]["command"]
+    if isinstance(command, str):
+        command = shlex.split(command)
+
+    # Compose escapes a literal '$' as '$$'; Swarm stores it interpolated.
+    return [arg.replace("$$", "$") for arg in command]
+
+
+def _reconcile_monitoring_args(cluster_docker) -> None:
+    compose_path = os.path.join(
+        os.path.dirname(scripts.__file__), "docker-compose-swarm-monitoring.yml")
+    with open(compose_path, encoding="utf-8") as f:
+        compose = yaml.safe_load(f)
+
+    for service_name, compose_key in _RECONCILED_MONITORING_ARGS.items():
+        desired = _compose_monitoring_command_args(compose, compose_key)
+        try:
+            service = cluster_docker.services.get(service_name)
+        except docker.errors.NotFound:
+            logger.info("%s is not deployed; nothing to reconcile", service_name)
+            continue
+
+        spec = service.attrs["Spec"]
+        current = spec["TaskTemplate"]["ContainerSpec"].get("Args", [])
+        if current == desired:
+            logger.info("%s args already current", service_name)
+            continue
+
+        logger.info("Reconciling %s args from %s to %s",
+                    service_name, current, desired)
+        task_template = copy.deepcopy(spec["TaskTemplate"])
+        task_template["ContainerSpec"]["Args"] = desired
+        cluster_docker.api.update_service(
+            service.id, service.attrs["Version"]["Index"],
+            task_template=task_template, fetch_current_spec=True)
+
+
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
                    max_subsys=None, hugepages_mem=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
@@ -2917,6 +3060,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_name="app_BackupService",
                 service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
+
+        if not cluster.disable_monitoring:
+            try:
+                _reconcile_monitoring_args(cluster_docker)
+            except Exception as e:
+                logger.error(f"Failed to reconcile monitoring service args: {e}")
 
         # Grafana reads provisioning at startup, and its upstream image is not
         # matched by the loop above, so the alert rules `pip` refreshed in the

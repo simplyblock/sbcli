@@ -84,9 +84,46 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--lblk"
+            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition."
+            dest: lblk
+            type: bool
+            action: store_true
+          - name: "--blk-names"
+            help: "Comma separated list of block device names to use, like sdb,sdc (requires --lblk). Requested devices must be eligible; a busy device is an error."
+            dest: blk_names
+            required: false
+            type: str
+            default: ""
+          - name: "--blk-names-exclude"
+            help: "Comma separated list of block device names to exclude, like sda (requires --lblk). All other eligible disks are used."
+            dest: blk_names_exclude
+            required: false
+            type: str
+            default: ""
+          - name: "--blk-serials"
+            help: "Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk)."
+            dest: blk_serials
+            required: false
+            type: str
+            default: ""
+          - name: "--jm-percent"
+            help: "Journal size in percent of the node's total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`."
+            dest: jm_percent
+            required: false
+            type: int
+            default: 3
           - name: "--force"
-            help: "Force format detected or passed nvme pci address to 4K and clean partitions."
+            help: "Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format."
             dest: force
+            type: bool
+            action: store_true
+          - name: "--enable-inline-checksum"
+            help: >
+              When formatting (with --force), prefer an LBAF that supports >=8 bytes of NVMe metadata per block,
+              so alceml can run inline checksum validation in md-on-device mode. Drives with no md-capable LBAF
+              still format to plain 4K and will use the fallback layout.
+            dest: inline_checksum
             type: bool
             action: store_true
           - name: "--calculate-hp-only"
@@ -157,6 +194,12 @@ commands:
           - name: "--enable-journal-device"
             help: "Enables the use of a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3% of total available raw disk space across all NVMe devices."
             dest: enable_journal_device
+            type: bool
+            default: false
+            action: store_true
+          - name: "--force-format"
+            help: "lblk cluster mode only: wipe partition tables and filesystem signatures from configured block devices that carry partitions (wipefs). Without this flag, partitioned devices are not eligible."
+            dest: force_format
             type: bool
             default: false
             action: store_true
@@ -977,6 +1020,31 @@ commands:
             dest: enable_failure_domain
             type: bool
             action: store_true
+          - name: "--device-mode"
+            help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
+            dest: device_mode
+            type: str
+            choices:
+              - nvme
+              - lblk
+            default: nvme
+          - name: "--enable-inline-checksum"
+            help: >
+              Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or
+              disabled after cluster creation. Per-device alceml mode (md-on-device vs fallback) is auto-detected at
+              add-node.
+            dest: inline_checksum
+            type: bool
+            action: store_true
+          - name: "--4k_atomic"
+            help: >
+              Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is
+              512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane
+              4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster
+              creation.
+            dest: atomic_4k
+            type: bool
+            action: store_true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1192,6 +1260,30 @@ commands:
           - name: "--enable-failure-domain"
             help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: enable_failure_domain
+            type: bool
+            action: store_true
+          - name: "--device-mode"
+            help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
+            dest: device_mode
+            type: str
+            choices:
+              - nvme
+              - lblk
+            default: nvme
+          - name: "--enable-inline-checksum"
+            help: >
+              Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or
+              disabled after cluster creation.
+            dest: inline_checksum
+            type: bool
+            action: store_true
+          - name: "--4k_atomic"
+            help: >
+              Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is
+              512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane
+              4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster
+              creation.
+            dest: atomic_4k
             type: bool
             action: store_true
           - name: "--name"

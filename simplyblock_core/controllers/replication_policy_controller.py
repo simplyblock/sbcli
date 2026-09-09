@@ -93,7 +93,7 @@ def remove_target(target_id):
 # --------------------------------------------------------------------------- #
 
 def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_replicated=None,
-               retention_schedule=None):
+               retention_schedule=None, consistency_group=False):
     """Create a policy on *target* (id or name)."""
     db.get_cluster_by_id(cluster_id)
     try:
@@ -141,8 +141,13 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         policy.keep_replicated = keep_replicated
     if retention_schedule is not None:
         policy.retention_schedule = retention_schedule
+    policy.consistency_group = bool(consistency_group)
     policy.status = ReplicationPolicy.STATUS_ACTIVE
     policy.write_to_db(db.kv_store)
+    if policy.consistency_group:
+        # Auto-created with the policy, auto-deleted with it (requirement 2).
+        from simplyblock_core.controllers import consistency_group_controller
+        consistency_group_controller.create_group_for_policy(policy)
     logger.info("Created replication policy %s on target %s (%s)",
                 policy_name, tgt.target_name, policy.get_id())
     return policy.get_id()
@@ -160,6 +165,9 @@ def remove_policy(policy_id):
         raise ReplicationConfigError(
             f"Replication policy {policy.policy_name} is followed by "
             f"{len(users)} volume(s); detach them first")
+    if getattr(policy, "consistency_group", False):
+        from simplyblock_core.controllers import consistency_group_controller
+        consistency_group_controller.delete_group_for_policy(policy.get_id())
     policy.remove(db.kv_store)
     logger.info("Removed replication policy %s", policy_id)
     return True
@@ -217,6 +225,12 @@ def attach_policy(lvol_id, policy):
         detach_policy(lvol_id)
         lvol = db.get_lvol_by_id(lvol_id)
 
+    if getattr(pol, "consistency_group", False):
+        # Requirement 1: all members share one LVS. Checked BEFORE any state
+        # is written, so a failed attachment leaves the volume untouched.
+        from simplyblock_core.controllers import consistency_group_controller
+        consistency_group_controller.add_member(pol, lvol)
+
     lvol.replication_policy_id = pol.get_id()
     lvol.write_to_db()
     ret = lvol_controller.replication_start(
@@ -231,6 +245,9 @@ def attach_policy(lvol_id, policy):
         lvol = db.get_lvol_by_id(lvol_id)
         lvol.replication_policy_id = ""
         lvol.write_to_db()
+        if getattr(pol, "consistency_group", False):
+            from simplyblock_core.controllers import consistency_group_controller
+            consistency_group_controller.remove_member(pol.get_id(), lvol_id)
         raise ReplicationConfigError(
             f"Could not start replication of {lvol_id} to target {target.target_name}")
     logger.info("Volume %s now follows policy %s (target %s)",
@@ -256,8 +273,18 @@ def detach_policy(lvol_id):
             f"Volume {lvol_id} has a cutover in flight; wait for it to finish "
             f"before detaching the replication policy")
 
+    detached_policy_id = lvol.replication_policy_id
     lvol.replication_policy_id = ""
     lvol.write_to_db()
+
+    if detached_policy_id:
+        try:
+            pol = db.get_replication_policy_by_id(detached_policy_id)
+        except KeyError:
+            pol = None
+        if pol is not None and getattr(pol, "consistency_group", False):
+            from simplyblock_core.controllers import consistency_group_controller
+            consistency_group_controller.remove_member(pol.get_id(), lvol_id)
 
     # Stops streaming and cancels the non-DONE FN_SNAPSHOT_REPLICATION tasks.
     lvol_controller.replication_stop(lvol_id, from_policy=True)
@@ -365,10 +392,29 @@ def _failover_volumes(volumes, what):
         elif isinstance(ret, dict):
             results.append({"lvol_id": lvol_id, "status": "failed_over",
                             "target_lvol_id": ret.get("lvol_id", ""),
-                            "connection_strings": ret.get("connection_strings", [])})
+                            "connection_strings": ret.get("connection_strings", []),
+                            "warnings": ret.get("warnings", [])})
         else:
             results.append({"lvol_id": lvol_id, "status": "failed_over", "target_lvol_id": str(ret)})
     return results
+
+
+def set_cutover_proceed(lvol_id):
+    """Signal that the operator has connected the target NVMe paths.
+
+    Finds the cutover_pending LVolReplication for *lvol_id* (source side) and
+    sets cutover_proceed = True so the task runner advances past the wait.
+
+    Returns the replication ID on success, raises KeyError when no matching
+    cutover_pending record is found.
+    """
+    rep = _active_relationship(lvol_id)
+    if rep is None or rep.state != LVolReplication.STATE_CUTOVER_PENDING:
+        raise KeyError(
+            f"No cutover_pending replication found for volume {lvol_id}")
+    rep.cutover_proceed = True
+    rep.write_to_db(db.kv_store)
+    return rep.get_id()
 
 
 def get_relationship(lvol_id):
@@ -399,6 +445,9 @@ def get_relationship(lvol_id):
             "target_lvol_id": target_id,
             "source_cluster_id": rep.source_cluster_id,
             "target_cluster_id": rep.target_cluster_id,
+            # Pool where the target volume lives — needed by the CSI driver to
+            # build the /connect URL when redirecting after delete_source.
+            "target_pool_id": getattr(rep.target_lvol, "pool_uuid", "") if rep.target_lvol else "",
             "mode": rep.mode,
             "state": rep.state,
             "direction": rep.direction,

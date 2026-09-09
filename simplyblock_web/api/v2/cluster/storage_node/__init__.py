@@ -69,6 +69,7 @@ class StorageNodeParams(BaseModel):
     spdk_sys_mem: str | None = None
     failure_domain: int | None = None
     expand: bool = False
+    force_format: bool = False
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -100,6 +101,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "spdk_sys_mem": parameters.spdk_sys_mem,
             "failure_domain": parameters.failure_domain,
             "expansion": parameters.expand,
+            "force_format": parameters.force_format,
         }
     )
     if not task_id_or_false:

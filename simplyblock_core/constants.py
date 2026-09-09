@@ -89,6 +89,40 @@ SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
 DEV_DISCOVERY_INTERVAL_SEC = 60
 
+# --- lblk cluster mode (Linux block devices via SPDK AIO bdevs) ---
+DEVICE_MODE_NVME = "nvme"
+DEVICE_MODE_LBLK = "lblk"
+# DPDK PCI allowlist placeholder used when starting SPDK in lblk mode: an
+# empty allowlist means "allow all" to DPDK (the k8s launch path passes an
+# empty PCI_ALLOWED today), which would let SPDK's nvme driver claim
+# kernel-owned NVMe disks. 0000:00:00.0 is the host bridge — syntactically a
+# valid BDF, never a storage device, no DPDK driver binds it.
+LBLK_PCI_ALLOWED_PLACEHOLDER = "0000:00:00.0"
+# Queue-depth sampling period enabled on every AIO base bdev so
+# bdev_get_iostat reports queue_depth (feeds the hung-IO watchdog).
+AIO_QD_SAMPLING_PERIOD_US = 100000  # 100 ms
+# Hung-IO watchdog: consecutive device_monitor polls (DEV_MONITOR_INTERVAL_SEC
+# apart) with queue_depth > 0 and zero completion progress before the device
+# is declared stalled (3 x 10s = 30s — deliberately above kernel SCSI/NVMe
+# timeouts, which convert most stalls into EIO for us via the distrib
+# error_* events; the watchdog only catches what the kernel never times out).
+AIO_HUNG_IO_STALL_POLLS = 3
+# Consecutive polls a configured block device may be absent from the host's
+# lsblk before it is treated as hot-removed (REMOVAL semantics).
+AIO_DEVICE_ABSENT_POLLS = 2
+# Kernel block devices never eligible for lblk data placement.
+LBLK_EXCLUDED_NAME_PREFIXES = ("ram", "loop", "sr", "fd", "zram", "nbd",
+                               "md", "dm-", "drbd")
+# Minimum storage units (whole SSDs or partitions) per lblk node: one journal
+# home plus at least one data device.
+LBLK_MIN_DEVICES_PER_NODE = 2
+# Journal sizing when the journal is carved out of a selected unit by
+# splitting it in two (partition-backed lblk nodes): jm_percent of the node's
+# total selected capacity, floored here, and never more than
+# LBLK_JM_SPLIT_MAX_FRACTION of the unit being split.
+LBLK_JM_MIN_SIZE = 2 * 1024 * 1024 * 1024
+LBLK_JM_SPLIT_MAX_FRACTION = 0.5
+
 PMEM_DIR = '/tmp/pmem'
 
 NVME_PROGRAM_FAIL_COUNT = 50
@@ -372,6 +406,74 @@ MAX_SUBSYSTEMS_PER_NODE = 75
 # (snapshot -> wait replicated -> snapshot -> wait) before the final freeze.
 # Two rounds normally complete within 2 replication intervals + transfer time.
 REPL_CUTOVER_SHRINK_TIMEOUT_SEC = 900
+# Safety timeout for the operator preconnect signal. The task suspends indefinitely
+# waiting for POST .../replication/cutover-proceed; this is the fallback deadline
+# if the operator is unavailable. Cutover proceeds regardless after this many seconds.
+REPL_CUTOVER_PROCEED_TIMEOUT_SEC = 120
+
+# --- cutover delta convergence -------------------------------------------
+# The IO freeze copies everything written since the last replicated snapshot,
+# so the cutover converges the delta FIRST: take a snapshot, transfer it, and
+# immediately take the next, until a round transfers in "low seconds". A fixed
+# two rounds (the previous behaviour) does not converge under load -- it just
+# stops.
+REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
+# Safety bound: a volume written faster than it replicates never converges, so
+# stop and freeze rather than looping forever.
+REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# When to stop converging in the open and take the lvstore for the endgame.
+# A round completing within this multiple of the target means the delta is
+# nearly converged, so the exclusive window that follows will be short. Claiming
+# earlier serialises the bulk catch-up, which is what produced 0/20 cutovers in
+# run 20260828_124859 (round 1 growing 340s -> 2584s purely from queueing).
+# The endgame starts once ordinary replication has the target within this many
+# seconds. Before that the cutover waits and takes NO snapshots of its own --
+# the iterative snapshots ARE the endgame.
+REPL_CUTOVER_ENDGAME_LAG_SEC = 50
+# Rounds must follow each other within MILLISECONDS. Returning to the task
+# scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
+# each time, which puts a floor under the delta no number of rounds can beat.
+REPL_CUTOVER_POLL_INTERVAL_SEC = 0.2
+# How long a single runner pass may stay inside the convergence loop.
+REPL_CUTOVER_CONVERGE_BUDGET_SEC = 60
+# Always worth polling inline for at least this long: a round that finishes
+# just after the pass is handed back costs a full TASK_EXEC_INTERVAL_SEC of
+# writes in the next round.
+# The snapshot-replication runner now finishes a transfer in the pass that
+# submitted it, so a convergence round completes in about the transfer's own
+# duration. Staying inline across that is what makes "next snapshot within a
+# second of completion" true; yielding mid-round reintroduces pass latency.
+REPL_CUTOVER_MIN_INLINE_SEC = 30
+
+# Whether to block the cutover on the operator's preconnect signal. The wait
+# sits BETWEEN the cutover clone's base snapshot and the freeze, so every
+# second of it is a second of writes the frozen final step must copy: with no
+# operator present the 120s fallback timeout fired 34 times in one soak run and
+# fed the 25-72s freezes. Deployments whose operator posts
+# .../replication/cutover-proceed set this True and accept that cost until the
+# clone's base can be advanced after the signal.
+REPL_CUTOVER_PROCEED_REQUIRED = False
+
+# --- noticing a finished transfer ----------------------------------------
+# A transfer that has completed must be acted on within a second: the next
+# convergence snapshot cannot be taken until the previous one is marked
+# replicated, so observation latency lands directly in the IO freeze.
+REPL_XFER_POLL_INTERVAL_SEC = 0.1
+# How long the submitting pass may wait inline for the transfer. The runner is
+# single-threaded, so this is a starvation budget, not a timeout: exceeding it
+# just falls back to being noticed on a later pass.
+REPL_XFER_INLINE_WAIT_SEC = 5.0
+# A volume in its final cutover already owns its lvstore and every other
+# transfer on it is held, so there is nothing to starve -- wait as long as the
+# transfer needs, because this is exactly the window the client freeze pays for.
+REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
+# Pass interval for the cutover runner while any cutover is mid-round. The
+# freeze pays for every millisecond between a transfer completing and the next
+# snapshot starting, so this must stay well under a second.
+# Pass interval while a cutover is mid-round. NOT sub-second: this loop reads
+# the task table per pass, and polling a database at 5Hz to detect an event is
+# the wrong shape. Sub-second reaction lives in the RPC-based inline wait.
+REPL_CUTOVER_ACTIVE_POLL_SEC = 1.0
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
