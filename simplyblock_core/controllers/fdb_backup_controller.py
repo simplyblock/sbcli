@@ -44,7 +44,6 @@ def create_backup(cluster_id):
         backup_obj = DBBackup()
         backup_obj.backup_name = backup_path
         backup_obj.cluster_id = cluster_id
-        backup_obj.created_at = int(time.time())
         fdb_backup_events.fdb_backup_created(backup_obj)
 
         return True
