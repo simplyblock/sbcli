@@ -131,6 +131,7 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerBackup",
     "TasksRunnerBackupMerge",
     "HAProxy",
+    "BackupService",
 ]
 
 CONTROL_PLANE_SERVICES_KUBERNETES = [

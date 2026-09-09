@@ -125,6 +125,7 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerBatchMigration",
     "TasksNodeRemovalRunner",
     "HAProxy",
+    "BackupService",
 ]
 
 CONTROL_PLANE_SERVICES_KUBERNETES = [
