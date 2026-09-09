@@ -99,3 +99,11 @@ class BackupPolicyAttachment(BaseModel):
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
+
+
+class DBBackup(BaseModel):
+    """FDB backup metadata."""
+
+    backup_name: str = ""
+    cluster_id: str = ""
+

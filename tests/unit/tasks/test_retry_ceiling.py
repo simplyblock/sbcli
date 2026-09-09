@@ -192,7 +192,7 @@ def test_fdb_backup_fails_when_max_retry_reached(fdb_backup_runner, monkeypatch)
     assert "max retry" in task.function_result
     create_backup.assert_not_called()
     fdb_backup_runner.fdb_backup_events.fdb_backup_failed.assert_called_once_with(
-        task.cluster_id, task.uuid)
+        task.cluster_id, task)
 
 
 def test_fdb_backup_runs_below_max_retry(fdb_backup_runner, monkeypatch):

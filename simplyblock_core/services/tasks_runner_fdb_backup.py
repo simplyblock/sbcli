@@ -1,5 +1,5 @@
 import time
-
+from datetime import datetime
 
 from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import fdb_backup_controller
@@ -11,6 +11,30 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+
+def prune_old_backups(cluster_id):
+    ret = fdb_backup_controller.list_backups(cluster_id)
+    if not ret:
+        return
+
+    if not isinstance(ret, (list, tuple)):
+        logger.error("Unexpected backup list response type: %s", type(ret).__name__)
+        return
+
+    cl = db.get_cluster_by_id(cluster_id)
+    logger.info("Pruning old backups")
+    date_to_delete_before = datetime.now()
+    date_to_delete_before = date_to_delete_before.replace(day=date_to_delete_before.day - cl.backup_retention_days)
+    for item in ret:
+        # date = datetime.datetime.strptime(param[1:-1], "%Y/%m/%d.%H:%M:%S+0000").strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            db_date = datetime.strptime(item.get("Date"), "%Y-%m-%d %H:%M:%S")
+            if db_date < date_to_delete_before:
+                logger.info("Deleting backup: %s", item.get("Name"))
+                fdb_backup_controller.backup_delete(cl.get_backup_path(item.get("Name")))
+        except Exception as e:
+            logger.error("Failed to parse date from backup item: %s, %s", item, e)
 
 
 def process_fdb_backup_task(task):
@@ -25,7 +49,7 @@ def process_fdb_backup_task(task):
         task.function_result = "max retry reached, stopping task"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
-        fdb_backup_events.fdb_backup_failed(task.cluster_id, task.uuid)
+        fdb_backup_events.fdb_backup_failed(task.cluster_id, task)
         return
 
     if task.status != JobSchedule.STATUS_RUNNING:
@@ -37,6 +61,7 @@ def process_fdb_backup_task(task):
         task.function_result = "Backup created"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
+        prune_old_backups(task.cluster_id)
     else:
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED
