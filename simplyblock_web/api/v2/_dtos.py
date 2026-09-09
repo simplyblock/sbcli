@@ -20,7 +20,7 @@ from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTa
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
-from simplyblock_core.controllers.backup.manifest import BackupManifest
+from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
 from simplyblock_core.models.backup_config import (
     BackupConfig, BackupLocation, UnresolvedBackupConfig,
 )
@@ -536,9 +536,9 @@ BackupConfigDTO = BackupConfig
 #: resolves it, so this shape reaches nothing beyond that call.
 UnresolvedBackupConfigDTO = UnresolvedBackupConfig
 
-#: Where a set of backups lives, without the credentials to reach it. What an
-#: inline import has to name, because the manifests it carries do not: they
-#: describe objects, and a reader has always had to say which bucket they are in.
+#: Where a set of backups lives, without the credentials to reach it. Carried
+#: inside an export rather than named beside one: the manifests describe objects
+#: and not where they are, so the document that collects them says instead.
 BackupLocationDTO = BackupLocation
 
 #: A backup's manifest as the API exchanges it: the response body of
@@ -549,6 +549,11 @@ BackupLocationDTO = BackupLocation
 #: is also its form in the bucket. Naming it separately still lets the API grow a
 #: field the stored document does not have.
 BackupManifestDTO = BackupManifest
+
+#: Backups as export and inline import exchange them: manifests grouped by the
+#: bucket they live in. Grouped because one cluster can hold backups in several
+#: -- its own and any it imported -- so a single location cannot describe them.
+BackupExportDTO = BackupExport
 
 
 class BackupDTO(BaseModel):

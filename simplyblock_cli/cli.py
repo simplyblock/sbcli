@@ -1142,6 +1142,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore.')
         subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('--backup-id', help='Export the chain ending at this backup and nothing else, which is the unit a restore needs.', type=str, dest='backup_id')
         subcommand.add_argument('--lvol', help='Filter exports to a specific logical volume name.', type=str, dest='lvol_name')
         subcommand.add_argument('-o', '--output', help='The output file path.', type=str, dest='output')
 
@@ -1158,8 +1159,8 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__import(self, subparser):
         subcommand = self.add_sub_command(subparser, 'import', 'Register the backups held in a bucket into this cluster.')
         subcommand.add_argument('--cluster-id', help='The target cluster to import into (required for cross-cluster restore).', type=str, dest='cluster_id')
-        subcommand.add_argument('--bucket', help='The bucket the backups live in. Required: a manifest describes its objects, not where they are.', type=str, dest='bucket')
-        subcommand.add_argument('--from-file', help='Import only the manifests in this JSON file, from \'backup export\', instead of every manifest in the bucket.', type=str, dest='from_file')
+        subcommand.add_argument('--bucket', help='Import every backup in this bucket. Give this or --from-file, not both.', type=str, dest='bucket')
+        subcommand.add_argument('--from-file', help='Import the backups in this file, from \'backup export\'. It records which bucket each one lives in, so --bucket is neither needed nor accepted.', type=str, dest='from_file')
         subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
         subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
         subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')

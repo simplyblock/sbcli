@@ -14,7 +14,7 @@ from simplyblock_core.models.lvol_model import LVol
 
 from .._dependencies import BackupResource, Cluster, Policy
 from .._dtos import (
-    BackupConfigDTO, BackupDTO, BackupLocationDTO, BackupManifestDTO,
+    BackupConfigDTO, BackupDTO, BackupExportDTO, BackupManifestDTO,
     BackupPolicyDTO)
 from ..util import CreationResponseFormatParameter, creation_response
 
@@ -71,18 +71,15 @@ def restore_backup(cluster: Cluster, parameters: _RestoreParams):
 
 
 class _ImportManifests(BaseModel):
-    """Manifests carried in the request itself, e.g. from an export file.
+    """An export carried in the request itself, e.g. read from a file.
 
-    The location is named separately because a manifest does not carry one --
-    it describes its objects, not how to reach them. Which bucket an export
-    file's backups are in is the caller's to state, and stating it is what lets
-    the file be imported against a copy of the bucket rather than only against
-    the original.
+    Nothing beside it names a bucket: an export groups its manifests by the
+    location each was read from, so the caller states nothing the document has
+    not already recorded, and backups from several buckets import in one go.
     """
     model_config = ConfigDict(extra="forbid")
 
-    metadata: List[BackupManifestDTO]
-    location: BackupLocationDTO
+    metadata: BackupExportDTO
 
 
 class _ImportFromBucket(BaseModel):
@@ -111,8 +108,7 @@ def import_backups(cluster: Cluster, parameters: _ImportParams):
                 parameters.bucket, cluster_id=cluster.get_id())
             if isinstance(parameters, _ImportFromBucket) else
             backup_controller.import_backups(
-                parameters.metadata, parameters.location,
-                cluster_id=cluster.get_id())
+                parameters.metadata, cluster_id=cluster.get_id())
         )
     except ManifestError as e:
         # The bucket named in the request could not be read. 400 rather than
@@ -143,7 +139,7 @@ def export_backups(
     cluster: Cluster,
     backup_id: Optional[str] = Query(None, description="Export only the chain ending at this backup UUID"),
     lvol_name: Optional[str] = Query(None, description="Export all completed backups for this lvol name"),
-) -> List[BackupManifestDTO]:
+) -> BackupExportDTO:
     if backup_id and not lvol_name:
         try:
             db.get_backup_by_id(backup_id)

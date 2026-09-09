@@ -15,6 +15,9 @@ from tests.unit.web.api.v2._factories import (
 
 BASE = f'/api/v2/clusters/{CLUSTER_ID}/backups'
 
+#: A second backup, for the cases that need two in one document.
+OTHER_BACKUP_ID = '22222222-2222-4222-8222-222222222222'
+
 
 class TestListBackups:
 
@@ -144,33 +147,59 @@ class TestImportBackups:
 
     _LOCATION: ClassVar[dict[str, str]] = {'bucket_name': 'backups', 'region': 'eu-central-1'}
 
+    @classmethod
+    def _export(cls, *groups: tuple[dict, list]) -> dict:
+        return {
+            'schema_version': 1,
+            'groups': [
+                {'location': location, 'manifests': manifests}
+                for location, manifests in (groups or ((cls._LOCATION, [cls._MANIFEST]),))
+            ],
+        }
+
     def test_inline_manifests_are_validated_by_the_body_type(
             self, client, db, cluster, backup_controller):
         backup_controller.import_backups.return_value = 1
 
-        response = client.post(f'{BASE}/import', json={
-            'metadata': [self._MANIFEST], 'location': self._LOCATION})
+        response = client.post(f'{BASE}/import', json={'metadata': self._export()})
 
         assert response.status_code == 200
         assert response.json() == {'imported': 1}
-        (manifests, location), kwargs = backup_controller.import_backups.call_args
-        assert [str(m.backup_id) for m in manifests] == [BACKUP_ID]
-        assert location.bucket_name == 'backups'
+        (export,), kwargs = backup_controller.import_backups.call_args
+        assert [str(m.backup_id) for m in export.groups[0].manifests] == [BACKUP_ID]
+        assert export.groups[0].location.bucket_name == 'backups'
 
-    def test_inline_manifests_must_name_their_bucket(
+    def test_an_export_carries_each_bucket_it_spans(
             self, client, db, cluster, backup_controller):
-        """A manifest describes its objects, not where they are, so an export
-        file alone does not say which bucket to record."""
-        response = client.post(f'{BASE}/import', json={'metadata': [self._MANIFEST]})
+        """A cluster holding backups in two buckets exports both, and neither
+        group may be re-pointed at the other's bucket on the way in."""
+        backup_controller.import_backups.return_value = 2
+        other = {**self._MANIFEST, 'backup_id': OTHER_BACKUP_ID}
+
+        response = client.post(f'{BASE}/import', json={'metadata': self._export(
+            (self._LOCATION, [self._MANIFEST]),
+            ({'bucket_name': 'dr-copy'}, [other]),
+        )})
+
+        assert response.status_code == 200
+        (export,), kwargs = backup_controller.import_backups.call_args
+        assert [g.location.bucket_name for g in export.groups] == ['backups', 'dr-copy']
+
+    def test_an_export_without_a_location_is_rejected(
+            self, client, db, cluster, backup_controller):
+        """A manifest describes its objects, not where they are; the group it
+        sits in is what says, so a group without one describes nothing."""
+        response = client.post(f'{BASE}/import', json={
+            'metadata': {'schema_version': 1,
+                         'groups': [{'manifests': [self._MANIFEST]}]}})
 
         assert response.status_code == 422
         backup_controller.import_backups.assert_not_called()
 
     def test_a_malformed_manifest_is_rejected_before_the_controller(
             self, client, db, cluster, backup_controller):
-        response = client.post(f'{BASE}/import', json={
-            'metadata': [{**self._MANIFEST, 's3_id': 'not-an-int'}],
-            'location': self._LOCATION})
+        response = client.post(f'{BASE}/import', json={'metadata': self._export(
+            (self._LOCATION, [{**self._MANIFEST, 's3_id': 'not-an-int'}]))})
 
         assert response.status_code == 422
         backup_controller.import_backups.assert_not_called()
@@ -189,8 +218,7 @@ class TestImportBackups:
             self, client, db, cluster, backup_controller):
         """extra="forbid" on both arms is what makes the union decide."""
         response = client.post(f'{BASE}/import', json={
-            'metadata': [self._MANIFEST], 'location': self._LOCATION,
-            'bucket': self._BUCKET})
+            'metadata': self._export(), 'bucket': self._BUCKET})
 
         assert response.status_code == 422
 
@@ -224,8 +252,7 @@ class TestImportBackups:
         backup_controller.import_backups.side_effect = PreconditionError('already exists')
 
         with pytest.raises(PreconditionError):
-            client.post(f'{BASE}/import', json={
-                'metadata': [self._MANIFEST], 'location': self._LOCATION})
+            client.post(f'{BASE}/import', json={'metadata': self._export()})
 
 
 class TestDiscoverBackups:

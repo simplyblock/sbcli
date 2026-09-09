@@ -9,6 +9,7 @@ Only boto3 is mocked -- it is an external service client. The database is real.
 from unittest.mock import patch
 
 import pytest
+from uuid import UUID
 
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
@@ -47,6 +48,37 @@ def _config(**overrides):
         "region": "eu-central-1",
         **overrides,
     })
+
+
+def _export(manifests, location):
+    """Wrap manifests as the one-location export an import takes.
+
+    Most cases here describe a single bucket; the ones that do not build a
+    ``BackupExport`` directly.
+    """
+    return backup_manifest.BackupExport(groups=[
+        backup_manifest.LocatedManifests(
+            location=location, manifests=list(manifests)),
+    ])
+
+
+def _manifests(export):
+    """Every manifest in an export, whichever group it landed in."""
+    return [m for group in export.groups for m in group.manifests]
+
+
+def _orphan_manifest(manifest):
+    """A copy of *manifest* under a new id, whose predecessor is not anywhere.
+
+    Enough to make one group unimportable without making it malformed, so what
+    is being tested is the batch rule rather than the parser.
+    """
+    return manifest.model_copy(update={
+        "backup_id": UUID(int=manifest.backup_id.int + 1),
+        "prev_backup_id": UUID(int=manifest.backup_id.int + 2),
+        "s3_id": manifest.s3_id + 1,
+    })
+
 
 
 @pytest.fixture
@@ -253,13 +285,14 @@ class TestExportImportRoundTrip:
         _backup(db, 2, prev=1, encrypted=True,
                 encryption=_encryption(_backup_id(2)))
 
-        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
         for backup in db.get_backups():
             backup.remove(db.kv_store)
         assert db.get_backups() == []
 
         count = backup_controller.import_backups(
-            exported, _config().location(), cluster_id=OTHER_CLUSTER_ID)
+            _export(exported, _config().location()),
+            cluster_id=OTHER_CLUSTER_ID)
 
         assert count == 2
         restored = db.get_backup_by_id(_backup_id(2))
@@ -272,11 +305,12 @@ class TestExportImportRoundTrip:
     def test_encrypted_flag_survives(self, db, cluster, lvol):
         """It used to be dropped, restoring a plaintext volume over ciphertext."""
         _backup(db, 1, encrypted=True, encryption=_encryption(_backup_id(1)))
-        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
         db.get_backup_by_id(_backup_id(1)).remove(db.kv_store)
 
         backup_controller.import_backups(
-            exported, _config().location(), cluster_id=OTHER_CLUSTER_ID)
+            _export(exported, _config().location()),
+            cluster_id=OTHER_CLUSTER_ID)
 
         assert db.get_backup_by_id(_backup_id(1)).encrypted is True
 
@@ -284,7 +318,7 @@ class TestExportImportRoundTrip:
         """One format, so a file and a bucket read are interchangeable."""
         _backup(db, 1)
 
-        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
 
         assert backup_manifest._parse(
             exported[0].model_dump_json().encode(), "k") == exported[0]
@@ -293,7 +327,7 @@ class TestExportImportRoundTrip:
         _backup(db, 1)
         _backup(db, 2, status=Backup.STATUS_FAILED)
 
-        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
 
         assert [str(m.backup_id) for m in exported] == [_backup_id(1)]
 
@@ -306,34 +340,39 @@ class TestExportImportRoundTrip:
 
     def test_duplicate_id_rejects_the_whole_batch(self, db, cluster, lvol):
         _backup(db, 1)
-        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
 
         with pytest.raises(PreconditionError, match="already exists"):
             backup_controller.import_backups(
-                exported, _config().location(), cluster_id=OTHER_CLUSTER_ID)
+                _export(exported, _config().location()),
+                cluster_id=OTHER_CLUSTER_ID)
 
     def test_same_id_listed_twice_rejects_the_whole_batch(self, db, cluster, lvol):
         """Backup lookups are not cluster-scoped, so a reused uuid unaddresses both."""
         _backup(db, 1)
-        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
         db.get_backup_by_id(_backup_id(1)).remove(db.kv_store)
 
         with pytest.raises(ValueError, match="listed more than once"):
             backup_controller.import_backups(
-                exported + exported, _config().location(), cluster_id=OTHER_CLUSTER_ID)
+                _export(exported + exported, _config().location()),
+                cluster_id=OTHER_CLUSTER_ID)
 
         assert db.get_backups() == []
 
     def test_import_records_the_bucket_it_was_read_from(self, db, cluster, lvol):
         """Replicate a bucket and its manifests are unchanged -- they describe
-        objects, not a location. So the copy imports as itself, rather than as
-        the original it would then try and fail to restore from."""
+        objects, not a location. What decides is the location on the group that
+        carries them, which reading the copy fills in with the copy. So it
+        imports as itself, rather than as the original it would then try and
+        fail to restore from."""
         _backup(db, 1)
-        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
         db.get_backup_by_id(_backup_id(1)).remove(db.kv_store)
 
         backup_controller.import_backups(
-            exported, _config(bucket_name="dr-copy", region="us-east-1").location(),
+            _export(exported,
+                    _config(bucket_name="dr-copy", region="us-east-1").location()),
             cluster_id=OTHER_CLUSTER_ID)
 
         location = db.get_backup_by_id(_backup_id(1)).get_location()
@@ -345,18 +384,61 @@ class TestExportImportRoundTrip:
         backup = _backup(db, 1)
         backup.location = _config(with_compression=True).location().model_dump(mode="json")
         backup.write_to_db(db.kv_store)
-        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
         db.get_backup_by_id(_backup_id(1)).remove(db.kv_store)
 
         backup_controller.import_backups(
-            exported, _config(bucket_name="dr-copy").location(),
+            _export(exported, _config(bucket_name="dr-copy").location()),
             cluster_id=OTHER_CLUSTER_ID)
 
         assert db.get_backup_by_id(_backup_id(1)).get_location().with_compression is True
 
+    def test_each_group_keeps_its_own_bucket(self, db, cluster, lvol):
+        """A cluster holding backups in two buckets exports both, and the
+        import has to stamp each with the one it actually came from. Applying a
+        single bucket to the batch used to leave the others pointing somewhere
+        their objects are not -- restorable-looking, and unrestorable."""
+        first, second = _backup(db, 1), _backup(db, 2)
+        second.location = _config(bucket_name="imported-from").location().model_dump(mode="json")
+        second.write_to_db(db.kv_store)
+
+        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        assert [g.location.bucket_name for g in exported.groups] == [
+            "imported-from", _config().bucket_name]
+        for backup in (first, second):
+            db.get_backup_by_id(backup.uuid).remove(db.kv_store)
+
+        backup_controller.import_backups(exported, cluster_id=OTHER_CLUSTER_ID)
+
+        assert db.get_backup_by_id(_backup_id(1)).get_location().bucket_name == \
+            _config().bucket_name
+        assert db.get_backup_by_id(_backup_id(2)).get_location().bucket_name == \
+            "imported-from"
+
+    def test_a_bad_group_leaves_the_good_ones_unimported(self, db, cluster, lvol):
+        """The batch is all-or-nothing across the whole document, not one group
+        at a time: validating group by group as each is written would land the
+        first and refuse the second."""
+        _backup(db, 1)
+        exported = _manifests(backup_controller.export_backups(cluster_id=CLUSTER_ID))
+        db.get_backup_by_id(_backup_id(1)).remove(db.kv_store)
+
+        document = backup_manifest.BackupExport(groups=[
+            backup_manifest.LocatedManifests(
+                location=_config().location(), manifests=exported),
+            backup_manifest.LocatedManifests(
+                location=_config(bucket_name="other").location(),
+                manifests=[_orphan_manifest(exported[0])]),
+        ])
+
+        with pytest.raises(PreconditionError):
+            backup_controller.import_backups(document, cluster_id=OTHER_CLUSTER_ID)
+
+        assert db.get_backups() == []
+
     def test_nothing_to_import_is_not_an_error(self, db, cluster, lvol):
         assert backup_controller.import_backups(
-            [], _config().location(), cluster_id=OTHER_CLUSTER_ID) == 0
+            _export([], _config().location()), cluster_id=OTHER_CLUSTER_ID) == 0
 
 
 class TestBucketDiscovery:

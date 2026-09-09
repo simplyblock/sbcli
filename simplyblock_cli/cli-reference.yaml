@@ -2779,6 +2779,10 @@ commands:
             help: "The cluster id."
             dest: cluster_id
             type: str
+          - name: "--backup-id"
+            help: "Export the chain ending at this backup and nothing else, which is the unit a restore needs."
+            dest: backup_id
+            type: str
           - name: "--lvol"
             help: "Filter exports to a specific logical volume name."
             dest: lvol_name
@@ -2831,11 +2835,11 @@ commands:
             dest: cluster_id
             type: str
           - name: "--bucket"
-            help: "The bucket the backups live in. Required: a manifest describes its objects, not where they are."
+            help: "Import every backup in this bucket. Give this or --from-file, not both."
             dest: bucket
             type: str
           - name: "--from-file"
-            help: "Import only the manifests in this JSON file, from 'backup export', instead of every manifest in the bucket."
+            help: "Import the backups in this file, from 'backup export'. It records which bucket each one lives in, so --bucket is neither needed nor accepted."
             dest: from_file
             type: str
           - name: "--region"
