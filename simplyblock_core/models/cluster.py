@@ -276,6 +276,7 @@ class Cluster(BaseModel):
     installed_release: str = ""
     backup_local_path: str = constants.KVD_DB_BACKUP_PATH
     backup_frequency_seconds: int = 3*60*60
+    backup_retention_days: int = 7
     backup_s3_bucket: str = ""
     backup_s3_region: str = ""
     backup_s3_cred: str = ""
