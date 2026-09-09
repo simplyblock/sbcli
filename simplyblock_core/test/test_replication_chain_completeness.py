@@ -393,6 +393,11 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             self.lvstore = "LVS_1"
             self.status = lc.StorageNode.STATUS_ONLINE
             self.cluster_id = "CL_tgt"
+        def get_lvol_subsys_port(self, lvstore):
+            # Real StorageNode resolves a per-lvstore listener port; the clone
+            # copies it onto the new volume so suspend_lvol addresses the right
+            # listener.
+            return 9100
         def get_id(self):
             return self._id
 
