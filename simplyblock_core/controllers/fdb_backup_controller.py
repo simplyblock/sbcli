@@ -49,7 +49,7 @@ def create_backup(cluster_id):
         return True
     return False
 
-def list_backups(cluster_id):
+def list_backups(cluster_id, is_json=False):
     container = __get_fdb_cont()
     data = []
     if container:
@@ -94,7 +94,8 @@ def list_backups(cluster_id):
                 "Restorable": restorable,
                 "Date": date,
             })
-
+        if is_json:
+            return data
         return utils.print_table(data)
 
     return True
@@ -107,6 +108,15 @@ def backup_status():
         res = container.exec_run(cmd="fdbbackup status")
         cont = res.output.decode("utf-8")
         logger.info(f"backup status: \n{cont.strip()}")
+        return True
+
+
+def backup_delete(backup_path):
+    container = __get_fdb_cont()
+    if container:
+        res = container.exec_run(cmd=f"fdbbackup delete -d {backup_path}")
+        cont = res.output.decode("utf-8")
+        logger.info({cont.strip()})
         return True
 
 
