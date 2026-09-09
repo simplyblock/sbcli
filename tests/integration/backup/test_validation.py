@@ -12,6 +12,7 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import policy as backup_policy
+from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.manifest import BackupManifest
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
@@ -46,6 +47,23 @@ def _config(**overrides):
         "region": "eu-central-1",
         **overrides,
     })
+
+
+def _export(manifests, location):
+    """Wrap manifests as the one-location export an import takes.
+
+    Most cases here describe a single bucket; the ones that do not build a
+    ``BackupExport`` directly.
+    """
+    return backup_manifest.BackupExport(groups=[
+        backup_manifest.LocatedManifests(
+            location=location, manifests=list(manifests)),
+    ])
+
+
+def _manifests(export):
+    """Every manifest in an export, whichever group it landed in."""
+    return [m for group in export.groups for m in group.manifests]
 
 
 @pytest.fixture
@@ -283,14 +301,15 @@ class TestImportPreconditions:
         """A delta whose ancestors are missing looks restorable until it is tried."""
         with pytest.raises(PreconditionError, match="neither in this import nor already known"):
             backup_controller.import_backups(
-                [self._manifest(2, prev=1)], _config().location(),
+                _export([self._manifest(2, prev=1)], _config().location()),
                 cluster_id=CLUSTER_ID)
 
         assert db.get_backups() == []
 
     def test_chain_satisfied_within_the_batch_is_accepted(self, db, cluster):
         count = backup_controller.import_backups(
-            self._line(2), _config().location(), cluster_id=CLUSTER_ID)
+            _export(self._line(2), _config().location()),
+            cluster_id=CLUSTER_ID)
 
         assert count == 2
 
@@ -298,19 +317,18 @@ class TestImportPreconditions:
         _backup(db, 1)
 
         count = backup_controller.import_backups(
-            [self._manifest(2, prev=1)], _config().location(),
+            _export([self._manifest(2, prev=1)], _config().location()),
             cluster_id=CLUSTER_ID)
 
         assert count == 1
 
     def test_chain_mixing_encodings_is_refused(self, db, cluster):
-        """A batch comes from one bucket, so the divergence it can still carry is
-        in the encoding -- which each manifest states for itself."""
+        """A chain comes from one bucket -- the group it arrives in says which --
+        so the divergence a chain can still carry is in the encoding, which each
+        manifest states for itself."""
         with pytest.raises(PreconditionError, match="cannot span buckets or encodings"):
-            backup_controller.import_backups(
-                [self._manifest(1, with_compression=True),
-                 self._manifest(2, prev=1)],
-                _config().location(), cluster_id=CLUSTER_ID)
+            backup_controller.import_backups(_export([self._manifest(1, with_compression=True),
+                 self._manifest(2, prev=1)], _config().location()), cluster_id=CLUSTER_ID)
 
         assert db.get_backups() == []
 
@@ -320,7 +338,7 @@ class TestImportPreconditions:
 
         with pytest.raises(PreconditionError, match="cannot span buckets or encodings"):
             backup_controller.import_backups(
-                [self._manifest(2, prev=1)], _config().location(),
+                _export([self._manifest(2, prev=1)], _config().location()),
                 cluster_id=CLUSTER_ID)
 
         assert [b.uuid for b in db.get_backups()] == [_backup_id(1)]
@@ -328,8 +346,8 @@ class TestImportPreconditions:
     def test_overlong_chain_is_refused(self, db, cluster):
         with pytest.raises(PreconditionError, match="data plane accepts at most"):
             backup_controller.import_backups(
-                self._line(constants.BACKUP_MAX_CHAIN_LENGTH + 1),
-                _config().location(), cluster_id=CLUSTER_ID)
+                _export(self._line(constants.BACKUP_MAX_CHAIN_LENGTH + 1), _config().location()),
+                cluster_id=CLUSTER_ID)
 
         assert db.get_backups() == []
 
@@ -343,14 +361,14 @@ class TestImportPreconditions:
 
         with pytest.raises(PreconditionError, match="data plane accepts at most"):
             backup_controller.import_backups(
-                [self._manifest(999, prev=previous, s3_id=999)],
-                _config().location(), cluster_id=CLUSTER_ID)
+                _export([self._manifest(999, prev=previous, s3_id=999)], _config().location()),
+                cluster_id=CLUSTER_ID)
 
     def test_a_cyclic_chain_is_refused_rather_than_looping(self, db, cluster):
         with pytest.raises(PreconditionError, match="cyclic"):
             backup_controller.import_backups(
-                [self._manifest(1, prev=2), self._manifest(2, prev=1)],
-                _config().location(), cluster_id=CLUSTER_ID)
+                _export([self._manifest(1, prev=2), self._manifest(2, prev=1)], _config().location()),
+                cluster_id=CLUSTER_ID)
 
     def test_chain_mixing_encryption_is_refused(self, db, cluster):
         """Import used to check buckets, encodings and length but not encryption,
@@ -360,7 +378,7 @@ class TestImportPreconditions:
 
         with pytest.raises(PreconditionError, match="cannot mix encrypted and unencrypted"):
             backup_controller.import_backups(
-                [self._manifest(2, prev=1)], _config().location(),
+                _export([self._manifest(2, prev=1)], _config().location()),
                 cluster_id=CLUSTER_ID)
 
         assert [b.uuid for b in db.get_backups()] == [_backup_id(1)]
@@ -444,8 +462,8 @@ class TestExportSelection:
             backup.node_id = NODE_ID
             backup.write_to_db(db.kv_store)
 
-        manifests = backup_controller.export_backups(
-            cluster_id=CLUSTER_ID, backup_id=_backup_id(2))
+        manifests = _manifests(backup_controller.export_backups(
+            cluster_id=CLUSTER_ID, backup_id=_backup_id(2)))
 
         assert [str(m.backup_id) for m in manifests] == [_backup_id(1), _backup_id(2)]
 
@@ -455,7 +473,7 @@ class TestExportSelection:
             backup.node_id = NODE_ID
             backup.write_to_db(db.kv_store)
 
-        manifests = backup_controller.export_backups(
-            cluster_id=CLUSTER_ID, lvol_name="vol")
+        manifests = _manifests(backup_controller.export_backups(
+            cluster_id=CLUSTER_ID, lvol_name="vol"))
 
         assert len(manifests) == 3

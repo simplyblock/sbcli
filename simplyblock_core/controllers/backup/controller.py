@@ -2,7 +2,7 @@
 """Creating, restoring, importing, exporting and discovering backups."""
 import logging
 import time
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -751,12 +751,13 @@ def list_backups(cluster_id=None):
 
 
 def export_backups(cluster_id=None, lvol_name=None,
-                   backup_id=None) -> List[backup_manifest.BackupManifest]:
-    """Export completed backups as manifests, for import into another cluster.
+                   backup_id=None) -> backup_manifest.BackupExport:
+    """Export completed backups, for import into another cluster.
 
-    Emits the same shape that lives in the bucket, so a hand-carried file and a
-    bucket read are interchangeable. Previously this produced a third, narrower
-    format of its own -- which is how it came to omit `encrypted`.
+    The manifests are the same shape that lives in the bucket, so a
+    hand-carried file and a bucket read describe a backup identically.
+    Previously this produced a third, narrower format of its own -- which is how
+    it came to omit `encrypted`.
 
     Args:
         backup_id: Export the chain ending at this backup, and nothing else --
@@ -766,12 +767,16 @@ def export_backups(cluster_id=None, lvol_name=None,
             can outlive the volume's name).
         lvol_name: Export every completed backup of a volume, chains and all.
 
-    Returns the manifests themselves; whoever is writing them out decides how
-    they are rendered.
+    Returns the manifests grouped by the location they live in, which the
+    records carry and the manifests deliberately do not. A cluster can hold
+    backups in more than one bucket -- its own, plus any it has imported -- so
+    the broader selections above can span several, while a chain never does.
 
     Raises:
         PreconditionError: `backup_id` names a backup whose chain is broken or
             not there.
+        ValueError: One of the selected backups records no usable location, and
+            so cannot be described.
     """
     if backup_id is not None:
         try:
@@ -779,14 +784,34 @@ def export_backups(cluster_id=None, lvol_name=None,
                 UUID(str(backup_id)), db_controller.get_backups(cluster_id))
         except ValueError as e:
             raise PreconditionError(str(e)) from e
-        return [build_manifest(b) for b in chain.records()]
+        return _group_by_location(chain.records())
 
     backups = db_controller.get_backups(cluster_id)
     completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
     if lvol_name:
         completed = [b for b in completed if b.lvol_name == lvol_name]
 
-    return [build_manifest(b) for b in completed]
+    return _group_by_location(completed)
+
+
+def _group_by_location(backups: Iterable[Backup]) -> backup_manifest.BackupExport:
+    """Collect records into one group per location they live in.
+
+    Keyed by the serialized location rather than the model so that two records
+    naming the same bucket in the same way land together whatever order their
+    fields were written in.
+    """
+    groups: Dict[str, Tuple[BackupLocation, List[backup_manifest.BackupManifest]]] = {}
+    for backup in backups:
+        location = backup.get_location()
+        key = location.model_dump_json()
+        groups.setdefault(key, (location, []))[1].append(build_manifest(backup))
+
+    return backup_manifest.BackupExport(groups=[
+        backup_manifest.LocatedManifests(location=location, manifests=manifests)
+        for location, manifests in (
+            groups[key] for key in sorted(groups))
+    ])
 
 
 def discover_backups(config: BackupConfig) -> List[backup_manifest.BackupManifest]:
@@ -803,25 +828,26 @@ def discover_backups(config: BackupConfig) -> List[backup_manifest.BackupManifes
     return backup_manifest.list_all(config)
 
 
-def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
-                   location: BackupLocation, cluster_id=None) -> int:
+def import_backups(export: backup_manifest.BackupExport, cluster_id=None) -> int:
     """Register backups described by manifests into this cluster's database.
 
     The backups keep their original ids -- both their uuid and their s3_id,
     which names their objects in the bucket and therefore cannot be reassigned.
 
     Args:
-        manifests: validated manifests, from `discover_backups`,
-            `export_backups`, or a file parsed into them. Taking the models
-            rather than dicts means "is this a manifest at all" is answered by
-            whoever read the bytes -- the API by its request body's type, the CLI
-            when it parses the file -- and reported where the input came from.
-        location: The bucket these manifests describe backups in. Required
-            because a manifest does not say: it is read out of a bucket the
-            reader already named, and an export file is just those manifests in
-            another envelope, so the bucket has to be named again there. That is
-            what lets a replicated bucket be imported as itself rather than as
-            the original it was copied from.
+        export: validated manifests grouped by the location they live in, from
+            `discover_backups`, `export_backups`, or a file parsed into one.
+            Taking the models rather than dicts means "is this a manifest at all"
+            is answered by whoever read the bytes -- the API by its request
+            body's type, the CLI when it parses the file -- and reported where
+            the input came from.
+
+            Grouped because a manifest does not say where its objects are, and
+            one import can carry backups from several buckets: a cluster that has
+            imported from elsewhere holds records for more than one, and
+            exporting it emits all of them. Applying a single location to the
+            whole batch would leave every backup outside that bucket pointing at
+            the wrong one, restorable-looking and unrestorable.
         cluster_id: Target cluster to import into, so the backups are visible in
             its namespace.
 
@@ -830,22 +856,27 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
             lookups are not scoped by cluster, so a UUID reused across clusters
             would make either record unaddressable. Everything is checked before
             the first record is written, so a bad batch imports nothing rather
-            than half of itself.
-        ValueError: The same backup is listed twice.
+            than half of itself. That holds across the whole document, not one
+            group at a time: a failure in the last group leaves the first
+            unimported.
+        ValueError: The same backup is listed twice, in one group or across two.
     """
     pending: Dict[UUID, backup_manifest.BackupManifest] = {}
-    for manifest in manifests:
-        backup_id = manifest.backup_id
+    located: Dict[UUID, BackupLocation] = {}
+    for group in export.groups:
+        for manifest in group.manifests:
+            backup_id = manifest.backup_id
 
-        if backup_id in pending:
-            raise ValueError(f"Backup {backup_id} is listed more than once")
+            if backup_id in pending:
+                raise ValueError(f"Backup {backup_id} is listed more than once")
 
-        try:
-            existing = db_controller.get_backup_by_id(str(backup_id))
-        except KeyError:
-            pending[backup_id] = manifest
-        else:
-            raise PreconditionError(f"Backup {backup_id} already exists in cluster {existing.cluster_id}")
+            try:
+                existing = db_controller.get_backup_by_id(str(backup_id))
+            except KeyError:
+                pending[backup_id] = manifest
+                located[backup_id] = group.location
+            else:
+                raise PreconditionError(f"Backup {backup_id} already exists in cluster {existing.cluster_id}")
 
     # Each manifest's own chain has to be restorable once landed. An import that
     # lands a backup whose ancestors are missing produces a record that looks
@@ -855,7 +886,8 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
     stored = db_controller.get_backups()
     for manifest in pending.values():
         BackupChain.importing(
-            manifest, pending, stored, location).require_restorable(
+            manifest, pending, stored,
+            located[manifest.backup_id]).require_restorable(
                 what=f"The chain of backup {manifest.backup_id}")
 
     # Back to strings on the way into the record: `Backup` is a hand-rolled
@@ -876,7 +908,7 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         backup.created_at = manifest.created_at
         backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED
-        backup.location = location_of(manifest, location).model_dump(mode="json")
+        backup.location = location_of(manifest, located[backup_id]).model_dump(mode="json")
         # Import used to drop this, so an imported encrypted backup restored as
         # use_crypto=False -- a plaintext volume over ciphertext, silently.
         backup.encrypted = manifest.encryption is not None
@@ -896,4 +928,9 @@ def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
         PreconditionError: the manifests it holds cannot be imported as a batch.
     """
     return import_backups(
-        discover_backups(config), config.location(), cluster_id=cluster_id)
+        backup_manifest.BackupExport(groups=[
+            backup_manifest.LocatedManifests(
+                location=config.location(),
+                manifests=discover_backups(config)),
+        ]),
+        cluster_id=cluster_id)

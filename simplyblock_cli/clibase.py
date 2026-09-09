@@ -13,7 +13,7 @@ from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.controllers.backup.chain import BackupChain
 from simplyblock_core.controllers.backup.manifest import (
-    BackupManifest, ManifestError)
+    ManifestError, parse_export)
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
@@ -1283,49 +1283,51 @@ class CLIWrapperBase:
         } for m in manifests]
 
     def backup__export(self, sub_command, args):
-        manifests = backup_controller.export_backups(
-            cluster_id=getattr(args, 'cluster_id', None),
-            lvol_name=getattr(args, 'lvol_name', None))
-        if not manifests:
+        try:
+            export = backup_controller.export_backups(
+                cluster_id=getattr(args, 'cluster_id', None),
+                lvol_name=getattr(args, 'lvol_name', None),
+                backup_id=getattr(args, 'backup_id', None))
+        except (PreconditionError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+
+        count = sum(len(group.manifests) for group in export.groups)
+        if not count:
             print("No completed backups found")
             return False
-        output = _format_json([m.model_dump(mode="json") for m in manifests])
+
+        output = _format_json(export.model_dump(mode="json"))
         output_file = getattr(args, 'output', None)
         if output_file:
             with open(output_file, 'w') as f:
                 f.write(output)
-            print(f"Exported {len(manifests)} backup(s) to {output_file}")
+            print(f"Exported {count} backup(s) to {output_file}")
         else:
             print(output)
         return True
 
     def backup__import(self, sub_command, args):
         from_file = getattr(args, 'from_file', None)
+        bucket = getattr(args, 'bucket', None)
 
-        # The bucket is needed either way. A manifest describes its objects but
-        # not where they are, so an export file is a filter over a bucket that
-        # still has to be named -- and naming it is what lets a file be imported
-        # against a copy of the bucket instead of only against the original.
-        if not getattr(args, 'bucket', None):
-            print("Error: --bucket is required")
+        # An export file records the location of everything in it, so naming a
+        # bucket alongside one could only contradict it. Reading a bucket needs
+        # the opposite: the name is how the manifests are found at all.
+        if bool(from_file) == bool(bucket):
+            print("Error: give exactly one of --from-file or --bucket")
             return False
 
-        config = _bucket_config(args)
         cluster_id = getattr(args, 'cluster_id', None)
         try:
-            if not from_file:
+            if bucket:
                 count = backup_controller.import_from_bucket(
-                    config, cluster_id=cluster_id)
+                    _bucket_config(args), cluster_id=cluster_id)
             else:
-                with open(str(from_file), 'r') as f:
-                    entries = json.load(f)
-                if not isinstance(entries, list):
-                    entries = [entries]
-                # Parsed here rather than in the controller so a malformed file
-                # is reported as a problem with the file, naming it.
-                manifests = [BackupManifest.model_validate(e) for e in entries]
+                with open(str(from_file), 'rb') as f:
+                    export = parse_export(f.read(), str(from_file))
                 count = backup_controller.import_backups(
-                    manifests, config.location(), cluster_id=cluster_id)
+                    export, cluster_id=cluster_id)
         except (ManifestError, PreconditionError, ValueError, OSError) as e:
             print(f"Error: {e}")
             return False
