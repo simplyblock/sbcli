@@ -680,7 +680,7 @@ class ReplicationRelationshipDTO(BaseModel):
     target_nqn: str
     target_ns_id: int
     is_source: bool
-    active: Optional[str] = None
+    active: str | None = None
     active_lvol_id: util.OptionalUUID = None
 
 

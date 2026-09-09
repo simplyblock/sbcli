@@ -146,7 +146,7 @@ class CommitParams(BaseModel):
 @api.post('/commit', name='clusters:storage-pools:volumes:replication:commit',
           status_code=202, responses={202: {"content": None}})
 def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
-           body: Optional[CommitParams] = None) -> Response:
+           body: CommitParams | None = None) -> Response:
     """Queue the planned cutover. Progress is the returned task.
 
     delete_source=True instructs the task runner to delete the source volume

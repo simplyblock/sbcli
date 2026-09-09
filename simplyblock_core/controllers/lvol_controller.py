@@ -3946,17 +3946,16 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
     _src_ns_uuid = lvol.uuid if for_migration else new_lvol.uuid
 
-    # For migration/failover, preserve the source nsid so the kernel can
-    # match target paths to source paths under the same NQN. new_lvol is a
-    # deepcopy of the source lvol, so new_lvol.ns_id is already the source
-    # nsid. Passing it explicitly prevents auto-assignment from choosing a
-    # different position on the target (concurrent migration tasks for
-    # sibling namespaces would arrive in arbitrary order, diverging the nsid
-    # map from the source and triggering "IDs don't match for shared
-    # namespace N" in the client kernel during preconnect).
+    # Pin the nsid _claim_target_nsid chose across the whole target HA set so
+    # the primary and every replica register the namespace at the same number
+    # (concurrent migration tasks for sibling namespaces would otherwise
+    # auto-assign in arbitrary arrival order, diverging the nsid map and
+    # triggering "IDs don't match for shared namespace N" in the client kernel
+    # during preconnect). A claim of 0 means the subsystem exists nowhere yet:
+    # nothing to collide with, so leave the pin off and let SPDK auto-assign.
     lvol_bdev, error = add_lvol_on_node(new_lvol, target_node,
                                          min_cntlid=_tgt_cntlids[0], ns_uuid=_src_ns_uuid,
-                                         primary_nsid=new_lvol.ns_id)
+                                         primary_nsid=new_lvol.ns_id or None)
     if error:
         logger.error(error)
         db_controller.release_lvol_ns_slot(new_lvol)

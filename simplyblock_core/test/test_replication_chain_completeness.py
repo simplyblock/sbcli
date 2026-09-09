@@ -378,7 +378,9 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     cutover back: 0/5. The clone path must evict per node."""
     from simplyblock_core.controllers import lvol_controller as lc
 
-    def _fake_add_lvol_on_node(lvol, node, is_primary=True):
+    def _fake_add_lvol_on_node(lvol, node, is_primary=True, **kw):
+        # The real signature also takes min_cntlid / ns_uuid / primary_nsid;
+        # accept them so this fake cannot drift out of call-compatibility.
         added.append((node.get_id(), is_primary))
         return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
 
@@ -425,6 +427,7 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
         ns_id = 7
         lvol_bdev = "LVOL_C"
         crypto_bdev = ""
+        namespace = ""
         def __deepcopy__(self, memo):
             c = _Lvol()
             c.__dict__.update(self.__dict__)
