@@ -13,6 +13,10 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 
+def prune_old_backups(cluster_id):
+    pass
+
+
 def process_fdb_backup_task(task):
     task = db.get_task_by_id(task.uuid)
     if task.canceled:
@@ -25,7 +29,7 @@ def process_fdb_backup_task(task):
         task.function_result = "max retry reached, stopping task"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
-        fdb_backup_events.fdb_backup_failed(task.cluster_id, task.uuid)
+        fdb_backup_events.fdb_backup_failed(task.cluster_id, task)
         return
 
     if task.status != JobSchedule.STATUS_RUNNING:
@@ -37,6 +41,7 @@ def process_fdb_backup_task(task):
         task.function_result = "Backup created"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
+        prune_old_backups(task.cluster_id)
     else:
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED
