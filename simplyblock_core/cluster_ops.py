@@ -2823,15 +2823,12 @@ def get_cluster(cl_id) -> dict:
 GRAFANA_RESTART_RELEASE = "26.3.0.4"
 
 
-#: Monitoring services whose compose ``command:`` is reconciled on every
-#: Docker ``cluster update``. Their images are not matched by the image-update
-#: loop, and their args live in the Swarm service spec set at initial
-#: ``docker stack deploy`` time, so compose changes would otherwise never reach
-#: an already-deployed cluster.
+#: Swarm service -> compose service, for the monitoring args reconciled on every
+#: Docker ``cluster update``. Those args are fixed at ``docker stack deploy``
+#: time, so a compose change otherwise never reaches a deployed cluster.
 #:
-#: Deliberately an allowlist. Grafana must not be added: event-log alerts
-#: mutate its spec at runtime (--env-add / --mount-add in set_event_alerts),
-#: and resetting it from the compose file would wipe that live configuration.
+#: An allowlist on purpose. Grafana must not be added: set_event_alerts() mutates
+#: its spec at runtime, and the compose file would overwrite that.
 _RECONCILED_MONITORING_ARGS = {"monitoring_node-exporter": "node-exporter"}
 
 
@@ -2840,8 +2837,7 @@ def _compose_monitoring_command_args(compose: dict[str, t.Any], service_key: str
     if isinstance(command, str):
         command = shlex.split(command)
 
-    # Compose escapes a literal '$' as '$$'. Swarm stores the interpolated value
-    # in ContainerSpec.Args, so compare against the post-compose representation.
+    # Compose escapes a literal '$' as '$$'; Swarm stores it interpolated.
     return [arg.replace("$$", "$") for arg in command]
 
 
