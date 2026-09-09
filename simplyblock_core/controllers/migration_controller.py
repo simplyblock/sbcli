@@ -42,7 +42,7 @@ import time
 import uuid
 from datetime import datetime
 
-from simplyblock_core import constants
+from simplyblock_core import constants, utils
 from simplyblock_core.controllers import migration_events, tasks_controller
 from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
@@ -512,8 +512,18 @@ def _resolve_active_source_node(primary_node, target_node_id):
     Raises ValueError if the primary is unreachable and no replica is
     online either. Raises PreconditionError if the resolved node is the
     same as target_node_id (can't migrate a replica onto itself).
+
+    TEST-ONLY (lvol-migration-from-replica-test): SB_TEST_FORCE_SOURCE_FALLBACK
+    forces the fallback branch below even when the primary is healthy, so
+    tests can exercise migrate-from-secondary without any real fault
+    injection (port-block, device-fail, or a real `sn shutdown`) and the
+    cluster-wide side effects those carry -- confirmed live 2026-09-09 that
+    a real primary shutdown can destabilize the secondary itself ~5 minutes
+    later (restart_guard-triggered auto-restart), unrelated to anything the
+    test does on purpose. Never set in production.
     """
-    if primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+    force_fallback = (utils.get_env_var("SB_TEST_FORCE_SOURCE_FALLBACK", "") or "").lower() in ("1", "true", "yes")
+    if not force_fallback and primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
         active_node = primary_node
     else:
         active_node = None
