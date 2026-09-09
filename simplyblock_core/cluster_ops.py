@@ -2885,17 +2885,8 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         if "SIMPLYBLOCK_LOG_LEVEL=DEBUG" in service_env:
                             service_env.remove("SIMPLYBLOCK_LOG_LEVEL=DEBUG")
                             service_env.append("SIMPLYBLOCK_LOG_LEVEL=INFO")
-                        mgmt_ip = ""
-                        for mgmt_node in db_controller.get_mgmt_nodes():
-                            mgmt_ip = mgmt_node.mgmt_ip
-                            break
-                        log_driver_config = {
-                            "gelf-address": f"tcp://{mgmt_ip}:12202",
-                            "max-buffer-size" : "40m",
-                            "mode" : "non-blocking",
-                        }
 
-                        service.update(image=service_image, env=service_env, log_driver_options=log_driver_config, force_update=True)
+                        service.update(image=service_image, env=service_env, force_update=True)
                         service_names.append(service.attrs['Spec']['Name'])
                     break
 
