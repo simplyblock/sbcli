@@ -763,17 +763,23 @@ def _load_k8s_config(kubeconfig=None):
 
     Falls back to ~/.kube/config (or $KUBECONFIG) when not running inside a pod.
     Pass --kubeconfig to override the file path explicitly.
+
+    Returns True on success, False when no config is available. A missing config
+    is not fatal: it only means the Kubernetes-pod-log step is skipped, and the
+    logs already gathered from docker and Graylog/OpenSearch must survive rather
+    than being discarded by a hard exit.
     """
     try:
         k8s_config.load_incluster_config()
-        return
+        return True
     except k8s_config.ConfigException:
         pass
     try:
         k8s_config.load_kube_config(config_file=kubeconfig)
+        return True
     except k8s_config.ConfigException as exc:
-        print(f"ERROR: could not load kubernetes config: {exc}", file=sys.stderr)
-        sys.exit(1)
+        print(f"  !! could not load kubernetes config: {exc}", file=sys.stderr)
+        return False
 
 
 def _list_pods(api, namespace: str, prefix: str) -> list[str]:
@@ -1275,10 +1281,18 @@ def main():
 
         # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
 
+        # Kubernetes pod logs only exist in a kubernetes deployment. A docker
+        # deployment has no pods and no kubeconfig, so this step is skipped
+        # there rather than failing on a config lookup that cannot succeed.
         k8s_ns = args.namespace
-        if k8s_ns:
+        if args.mode != "kubernetes":
+            print(f"\n[7] Skipping Kubernetes pod logs (deploy mode is {args.mode}).")
+        elif not k8s_ns:
+            print("\n[7] Skipping Kubernetes pod logs (namespace collection disabled).")
+        elif not _load_k8s_config(args.kubeconfig):
+            print("\n[7] Skipping Kubernetes pod logs (no kubernetes config available).")
+        else:
             print(f"\n[7] Collecting Kubernetes pod logs (namespace: {k8s_ns}) …")
-            _load_k8s_config(args.kubeconfig)
             v1 = k8s_client.CoreV1Api()
             k8s_dir = log_root / "k8s_pods"
             k8s_dir.mkdir()
@@ -1327,8 +1341,6 @@ def main():
                     collect_k8s_pod_logs(v1, k8s_ns, pod, sn_ds_dir, from_iso, to_iso)
             else:
                 print(f"  No simplyblock-storage-node-ds pods found in namespace {k8s_ns}.")
-        else:
-            print("\n[7] Skipping Kubernetes pod logs (--namespace not set).")
 
         # ── 10. sbctl cluster / node snapshots ───────────────────────────────
 

@@ -1374,8 +1374,15 @@ def main():
 
         # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
 
+        # Kubernetes pod logs only exist in a kubernetes deployment. A docker
+        # deployment has no pods, so this step is skipped there rather than
+        # shelling out to kubectl against a cluster that is not there.
         k8s_ns = args.namespace
-        if k8s_ns:
+        if args.mode != "kubernetes":
+            print(f"\n[7] Skipping Kubernetes pod logs (deploy mode is {args.mode}).")
+        elif not k8s_ns:
+            print("\n[7] Skipping Kubernetes pod logs (namespace collection disabled).")
+        else:
             print(f"\n[7] Collecting Kubernetes pod logs (namespace: {k8s_ns}) …")
             k8s_dir = log_root / "k8s_pods"
             k8s_dir.mkdir()
@@ -1424,8 +1431,6 @@ def main():
                     collect_k8s_pod_logs(k8s_ns, pod, sn_ds_dir, from_iso, to_iso)
             else:
                 print(f"  No simplyblock-storage-node-ds pods found in namespace {k8s_ns}.")
-        else:
-            print("\n[7] Skipping Kubernetes pod logs (--namespace not set).")
 
         # ── 10. sbctl cluster / node snapshots ───────────────────────────────
 
