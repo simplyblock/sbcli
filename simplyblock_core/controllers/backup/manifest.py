@@ -23,6 +23,12 @@ reader supplies the connection.
 What survives is what reading the bucket cannot tell you: the key layout and
 whether the bodies are compressed, both on ``dataplane``.
 
+An *export* is the one document that does record a location, because it is not
+stored in the bucket it describes: ``BackupExport`` carries manifests grouped by
+where they were read from, so a file handed to another cluster says where its
+backups live and the reader names nothing. The self-reference above does not
+arise -- the file is not a copy of the thing it points at.
+
 Each manifest describes exactly one backup and names only its immediate
 predecessor. Chains are walked at read time, by ``chain.BackupChain``, not
 stored: a stored chain would have to be rewritten in every descendant's manifest
@@ -46,7 +52,7 @@ from pydantic import (
     BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter)
 
 from simplyblock_core.kms import KMS
-from simplyblock_core.models.backup_config import BackupConfig
+from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 from simplyblock_core.utils.secrets import unwrap_secret
 
 
@@ -267,6 +273,36 @@ class BackupManifest(BaseModel):
     dataplane: DataPlane
 
 
+EXPORT_SCHEMA_VERSION = 1
+
+
+class LocatedManifests(BaseModel):
+    """Manifests that were read from one location, and that location."""
+    model_config = ConfigDict(extra="forbid")
+
+    location: BackupLocation
+    manifests: List[BackupManifest]
+
+
+class BackupExport(BaseModel):
+    """Backups carried out of a cluster in a file, grouped by where they live.
+
+    Grouped rather than one location for the whole document because a cluster
+    can hold backups in several buckets at once -- its own, plus any it has
+    imported -- and stamping all of them with a single bucket leaves the ones it
+    does not describe unrestorable, which is discovered during the recovery they
+    were meant to serve.
+
+    A group's manifests are all in one bucket by construction: a chain cannot
+    span buckets, so the only way to collect backups from several is to walk
+    more than one chain.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = EXPORT_SCHEMA_VERSION
+    groups: List[LocatedManifests]
+
+
 class ManifestError(Exception):
     """A manifest could not be read, written, or understood."""
 
@@ -398,3 +434,29 @@ def _parse(body: bytes, key: str) -> BackupManifest:
         return BackupManifest.model_validate(data)
     except ValueError as e:
         raise ManifestError(f"Manifest {key} is malformed: {e}") from e
+
+
+def parse_export(body: bytes, source: str) -> BackupExport:
+    """Read an export document, naming *source* in anything it rejects.
+
+    Raises:
+        ManifestError: It is not valid JSON, states a schema version this build
+            does not understand, or is not shaped like an export.
+    """
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        raise ManifestError(f"{source} is not valid JSON") from e
+
+    version = data.get("schema_version") if isinstance(data, dict) else None
+    if version != EXPORT_SCHEMA_VERSION:
+        # Refused rather than guessed at, for the reason `_parse` refuses a
+        # manifest: the field names may not mean the same thing.
+        raise ManifestError(
+            f"{source} has export schema version {version}, "
+            f"this build understands {EXPORT_SCHEMA_VERSION}")
+
+    try:
+        return BackupExport.model_validate(data)
+    except ValueError as e:
+        raise ManifestError(f"{source} is malformed: {e}") from e
