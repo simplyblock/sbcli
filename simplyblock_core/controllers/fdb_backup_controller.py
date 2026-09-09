@@ -118,6 +118,7 @@ def backup_delete(backup_path):
         cont = res.output.decode("utf-8")
         logger.info({cont.strip()})
         return True
+    return False
 
 
 def backup_restore(backup_name, cluster_id):
