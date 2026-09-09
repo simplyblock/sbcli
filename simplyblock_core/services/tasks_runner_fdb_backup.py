@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-
+from datetime import datetime
 
 from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import fdb_backup_controller
@@ -15,7 +15,21 @@ db = db_controller.DBController()
 
 
 def prune_old_backups(cluster_id):
-    pass
+    ret = fdb_backup_controller.list_backups(cluster_id)
+    if ret:
+        cl = db.get_cluster_by_id(cluster_id)
+        logger.info("Pruning old backups")
+        date_to_delete_before = datetime.now()
+        date_to_delete_before = date_to_delete_before.replace(day=date_to_delete_before.day - cl.backup_retention_days)
+        for item in ret:
+            # date = datetime.datetime.strptime(param[1:-1], "%Y/%m/%d.%H:%M:%S+0000").strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                db_date = datetime.strptime(item.get("Date"), "%Y-%m-%d %H:%M:%S")
+                if db_date < date_to_delete_before:
+                    logger.info("Deleting backup: %s", item.get("Name"))
+                    fdb_backup_controller.backup_delete(cl.get_backup_path(item.get("Name")))
+            except Exception as e:
+                logger.error("Failed to parse date from backup item: %s, %s", item, e)
 
 
 def process_fdb_backup_task(task):
