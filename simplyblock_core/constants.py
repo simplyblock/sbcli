@@ -594,6 +594,18 @@ NON_LEADER_BLOCK_QUIESCE_SEC = 0.2
 # Anything that overruns its budget must release the fence and abort the
 # restart; the task runner re-queues it. A retried restart is cheap, a
 # quiesced client path is not.
+#: Backoff between self-repair attempts on an `unavailable` device, indexed by
+#: the number of attempts already made. Five entries: immediate, then 10s, 60s,
+#: 3m, 10m. After the last one the device sets retries_exhausted and stays
+#: unavailable until it is failed or repaired by hand.
+#:
+#: Spaced rather than immediate-repeat because the cause is often not local at
+#: all: a device is marked unavailable by CONSENSUS -- more than half the nodes
+#: failing to reach it over NVMe-oF -- so a network problem produces the same
+#: verdict as a broken bdev stack. The later attempts exist to catch a cause
+#: that clears on its own.
+DEVICE_REPAIR_BACKOFF_SEC = [0, 10, 60, 180, 600]
+
 FENCE_RPC_TIMEOUT_SEC = 0.5
 #: Per-peer budget for the data-plane quorum vote, and the ceiling on waiting
 #: for the vote threads.

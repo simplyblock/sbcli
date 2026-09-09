@@ -25,6 +25,26 @@ The orchestration that issues the bdev_raid RPCs lives in storage_node_ops.
 
 RAID_NONE = "none"        # single base device, no raid bdev
 RAID_0PLUS1 = "raid01"    # raid1 over two raid0 legs (2 devices => 2-way mirror)
+RAID_1_NWAY = "raid1_nway"  # legacy: one raid1 mirror across ALL members
+
+# Cluster-level JM RAID geometry selectors (Cluster.jm_raid_layout).
+#
+# The geometry is NOT recorded on disk -- the JM raid is created with
+# superblock=False -- so a change to this planner silently reinterprets the
+# same on-disk bytes under a different layout. RAID 0+1 stripes each leg's data
+# 4 KiB at a time across its drives, whereas the legacy N-way RAID1 kept a full
+# linear copy on every drive; reading legacy-written journal storage back
+# through RAID 0+1 (or vice versa) returns scrambled bytes, so the alceml PBA
+# header / journal records / distrib superblock fail to parse. (Production
+# incident 2026-09-08: an old cluster whose journals were built N-way was
+# rebuilt RAID 0+1 on upgrade; every LVS superblock read back "unsupported
+# version" and activation failed. No data was written -- a fresh RAID1 create
+# with both legs present neither resyncs nor writes -- so it was recoverable by
+# reproducing the original geometry.)
+#
+# Therefore a cluster's JM layout is pinned once and reproduced forever:
+LAYOUT_LEGACY = "legacy_nway"   # journals built by the pre-RAID0+1 N-way mirror
+LAYOUT_RAID01 = "raid01"        # journals built by the RAID 0+1 planner
 
 
 def split_two_groups(items: list) -> tuple[list, list]:
@@ -37,12 +57,22 @@ def split_two_groups(items: list) -> tuple[list, list]:
     return list(items[:half]), list(items[half:])
 
 
-def plan_topology(members: list[str]) -> dict:
+def plan_topology(members: list[str], layout: str = LAYOUT_RAID01) -> dict:
     """Decide the JM RAID topology for the given base bdevs.
 
+    ``layout`` selects the geometry and MUST match the one the JM's storage was
+    first created under (see the module docstring on why a mismatch corrupts
+    the read):
+
+      * LAYOUT_RAID01  -> RAID 0+1 (the current default for new clusters).
+      * LAYOUT_LEGACY  -> one N-way RAID1 mirror across every member (the
+                          pre-RAID0+1 layout that clusters upgraded from an
+                          older release were built with).
+
     Returns:
-        {'level': RAID_NONE,   'base': <bdev>, 'legs': []}              for 1 member
-        {'level': RAID_0PLUS1, 'base': None,   'legs': [groupA, groupB]} for >=2
+        {'level': RAID_NONE,    'base': <bdev>, 'legs': []}                 1 member
+        {'level': RAID_1_NWAY,  'base': None,   'members': [all]}           legacy, >=2
+        {'level': RAID_0PLUS1,  'base': None,   'legs': [groupA, groupB]}   raid01, >=2
 
     Raises ValueError if there are no members.
     """
@@ -51,6 +81,8 @@ def plan_topology(members: list[str]) -> dict:
         raise ValueError("cannot plan a JM RAID over zero devices")
     if n == 1:
         return {"level": RAID_NONE, "base": members[0], "legs": []}
+    if layout == LAYOUT_LEGACY:
+        return {"level": RAID_1_NWAY, "base": None, "members": list(members)}
     a, b = split_two_groups(members)
     return {"level": RAID_0PLUS1, "base": None, "legs": [a, b]}
 
