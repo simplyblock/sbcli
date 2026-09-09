@@ -156,7 +156,7 @@ def _await_delete_completion(node, bdev_name, wait_sec):
     return ret
 
 
-def process_lvol_delete_finish(cluster, lvol):
+def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
     # Re-read the record: `lvol` comes from the cycle-start snapshot in
@@ -169,7 +169,6 @@ def process_lvol_delete_finish(cluster, lvol):
     except KeyError:
         return  # already finalised by another pass
 
-    # check leadership
     snode = db.get_storage_node_by_id(lvol.node_id)
     sec_nodes = []
     for sec_id in lvol.nodes[1:]:
@@ -177,9 +176,56 @@ def process_lvol_delete_finish(cluster, lvol):
             sec_nodes.append(db.get_storage_node_by_id(sec_id))
         except KeyError:
             pass
-    leader_node = None
+
+    _ONLINE = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+               StorageNode.STATUS_DOWN]
+
+    if leader_independent:
+        # The data-plane async delete is already DONE (get_lvol_delete_status
+        # returned 3: "async done, leadership changed, sync now blocked"). The
+        # clusters are freed; every remaining sync delete is just per-node
+        # record / subsystem / bdev cleanup and does NOT depend on who holds
+        # LVS leadership now. So skip the leader probe entirely and drive the
+        # sync deletes in the fixed sequence: the node the async delete ran on
+        # first (deletion_status), then primary -> secondary -> tertiary,
+        # whichever is online and not yet done.
+        #
+        # Without this, ret == 3 fell through with only a log line: leadership
+        # had moved off the async node, delete_lvol_from_node then hit
+        # check_non_leader_for_operation and skipped/queued the leader-side sync
+        # delete forever, so the blob + bdev survived and the record was never
+        # removed. LVolMonitor logged "error code: 3" thousands of times with
+        # no state change while retried client DELETEs short-circuited on
+        # in_deletion and returned success in ms (prod run
+        # n_plus_k_failover_multi_client_ha_all_nodes-20260908-174343: 2250x for
+        # one lvol, still going 14 min after the test gave up).
+        leader_node = None
+        if lvol.deletion_status:
+            try:
+                _asy = db.get_storage_node_by_id(lvol.deletion_status)
+                if _asy.status in _ONLINE:
+                    leader_node = _asy
+            except KeyError:
+                pass
+        if leader_node is None:
+            for _nid in lvol.nodes:
+                try:
+                    _n = db.get_storage_node_by_id(_nid)
+                except KeyError:
+                    continue
+                if _n.status in _ONLINE:
+                    leader_node = _n
+                    break
+        if leader_node is None:
+            logger.warning(
+                "LVol %s: async delete done but no online node to complete the "
+                "sync delete on; will retry next pass", lvol.get_id())
+            return
+
+    else:
+        leader_node = None
     snode = db.get_storage_node_by_id(snode.get_id())
-    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+    if not leader_independent and snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
         if not ret:
             raise Exception("Failed to get LVol info")
@@ -187,37 +233,41 @@ def process_lvol_delete_finish(cluster, lvol):
         if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
             leader_node = snode
 
-    if not leader_node:
-        for sec_node in sec_nodes:
-            if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                if ret:
-                    lvs_info = ret[0]
-                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                        leader_node = sec_node
-                        break
+    if not leader_independent:
+        if not leader_node:
+            for sec_node in sec_nodes:
+                if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                    if ret:
+                        lvs_info = ret[0]
+                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                            leader_node = sec_node
+                            break
 
-    if not leader_node:
-        raise Exception("Failed to get leader node")
+        if not leader_node:
+            raise Exception("Failed to get leader node")
 
-    # Leader stickiness (same rationale as check_node): the async delete
-    # already completed on the deletion_status node — finish THERE while
-    # it is reachable instead of restarting the whole delete on a node
-    # that grabbed leadership during a flap.
-    if lvol.deletion_status and lvol.deletion_status != leader_node.get_id():
-        try:
-            owner = db.get_storage_node_by_id(lvol.deletion_status)
-            if owner.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                                StorageNode.STATUS_DOWN]:
-                leader_node = owner
-        except KeyError:
-            pass
+        # Leader stickiness (same rationale as check_node): the async delete
+        # already completed on the deletion_status node — finish THERE while
+        # it is reachable instead of restarting the whole delete on a node
+        # that grabbed leadership during a flap.
+        if lvol.deletion_status and lvol.deletion_status != leader_node.get_id():
+            try:
+                owner = db.get_storage_node_by_id(lvol.deletion_status)
+                if owner.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+                                    StorageNode.STATUS_DOWN]:
+                    leader_node = owner
+            except KeyError:
+                pass
 
-    if lvol.deletion_status != leader_node.get_id():
-        with snapshot_controller.lvstore_op_lock(
-                cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
-            lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
-        return
+        if lvol.deletion_status != leader_node.get_id():
+            with snapshot_controller.lvstore_op_lock(
+                    cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
+                lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
+            return
+
+    # Both paths above set leader_node or returned/raised.
+    assert leader_node is not None
 
     # Determine non-leader nodes for sync delete
     non_leader_nodes = []
@@ -255,7 +305,9 @@ def process_lvol_delete_finish(cluster, lvol):
                 break
         with snapshot_controller.lvstore_op_lock(
                 cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
-            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), sync=True)
+            ret = lvol_controller.delete_lvol_from_node(
+                lvol.get_id(), primary_node.get_id(), sync=True,
+                force=leader_independent)
         if not ret:
             logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
@@ -496,8 +548,16 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                     pre_lvol_delete_rebalance()
 
                 elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
-                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                    logger.error("Async deletion is done, but leadership has changed (sync deletion is now blocked)")
+                    # Data is already gone (async unmap completed); only the
+                    # per-node record/subsystem/bdev cleanup remains, and that
+                    # does not depend on current leadership. Complete it
+                    # leader-independently instead of logging forever. See the
+                    # process_lvol_delete_finish leader_independent branch.
+                    logger.info(
+                        f"LVol {lvol.get_id()}: async delete done, leadership "
+                        f"moved -> completing sync deletes leader-independently")
+                    process_lvol_delete_finish(cluster, lvol,
+                                               leader_independent=True)
 
                 elif ret == 4:  # No async delete request exists for this lvol
                     # Transient during leadership/RPC churn (e.g. a peer down +
