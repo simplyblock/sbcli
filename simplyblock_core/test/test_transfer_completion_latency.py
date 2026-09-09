@@ -32,7 +32,7 @@ class TestInlineCompletion(unittest.TestCase):
         self.finish = patch.object(sr, "_finish_completed_transfer",
                                    return_value=True).start()
         patch.object(sr, "_cutover_owns", return_value=False).start()
-        self.slept = []
+        self.slept: list = []
         patch.object(sr.time, "sleep", side_effect=self.slept.append).start()
 
         self.snap = MagicMock()

@@ -228,6 +228,7 @@ def _lvs_transfer_hold(task, snapshot):
     lvs_name = getattr(own_lvol, "lvs_name", "") if own_lvol else ""
     if not lvs_name:
         return ""
+    assert own_lvol is not None  # narrowed by the lvs_name guard above
     own_id = own_lvol.get_id()
     own_group = _group_id_for_lvol(own_lvol)
 

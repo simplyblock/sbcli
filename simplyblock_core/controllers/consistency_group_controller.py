@@ -305,15 +305,17 @@ def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True
         return None, (f"Group snapshot RPC failed on {primary_node.get_id()}; "
                       f"SPDK rolled the partial group back")
 
+    group_lvs_name = group.lvs_name
+
     def _rollback_all():
         for p in plan:
-            _rollback_snapshot_bdev(pool.cluster_id, group.lvs_name,
+            _rollback_snapshot_bdev(pool.cluster_id, group_lvs_name,
                                     primary_node, p["snap_bdev_name"],
                                     all_nodes, lock=lock)
 
     # Everything below mirrors snapshot_controller.add's tail per member:
     # read back uuid/blobid, register on the HA peers, then the record.
-    created_ids = []
+    created_ids: list = []
     for p in plan:
         lvol = p["lvol"]
         snap_bdev = rpc_client.get_bdevs(f"{group.lvs_name}/{p['snap_bdev_name']}")

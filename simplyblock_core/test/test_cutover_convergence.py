@@ -30,6 +30,8 @@ class _Task:
         self.function_result = ""
         self.status = ""
         self.retry = 0
+        self.max_retry = 0
+        self.canceled = False
         self.cluster_id = "CL"
 
     def write_to_db(self, *a, **kw):
@@ -95,7 +97,7 @@ class TestConvergence(unittest.TestCase):
             task_.function_params["shrink_started_at"] = clock.now
             return "S%d" % state["i"], None
 
-        patches = [
+        patches: list = [
             patch.object(runner.time, "time", clock),
             patch.object(runner.time, "sleep", clock.sleep),
             patch.object(runner, "_shrink_round_done", side_effect=_done),
@@ -240,7 +242,7 @@ class TestLvsAdmission(unittest.TestCase):
         patcher = patch.object(sr, "db")
         self.db = patcher.start()
         self.addCleanup(patcher.stop)
-        self.groups = {}                     # lvol id -> group id
+        self.groups: dict = {}               # lvol id -> group id
         gp = patch.object(sr, "_group_id_for_lvol",
                           side_effect=lambda lv: self.groups.get(lv.get_id(), ""))
         gp.start()

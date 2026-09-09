@@ -77,7 +77,7 @@ class TestOwnerGoesFirst(unittest.TestCase):
     def setUp(self):
         self.db = patch.object(sr, "db").start()
         self.addCleanup(patch.stopall)
-        self._lvols = {}
+        self._lvols: dict = {}
 
         def _snap(sid):
             lvol = MagicMock()

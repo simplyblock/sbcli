@@ -55,7 +55,7 @@ def get_spdk_pcie_list() -> list[PCIAddress]:
     Get a list of PCIe devices bound to SPDK-compatible drivers.
 
     Returns:
-        List[PCIAddress]: List of PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
+        list[PCIAddress]: List of PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
     """
     return pci_utils.list_devices(driver_name='uio_pci_generic') or pci_utils.list_devices(driver_name='vfio-pci')
 
@@ -65,7 +65,7 @@ def get_nvme_pcie_list() -> list[PCIAddress]:
     Get a list of NVMe PCIe devices.
 
     Returns:
-        List[PCIAddress]: List of NVMe PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
+        list[PCIAddress]: List of NVMe PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
     """
     return pci_utils.list_devices(driver_name='nvme')
 
@@ -75,7 +75,7 @@ def get_nvme_pcie() -> list[tuple[str, tuple[int, int]]]:
     Get a list of NVMe PCIe devices with their vendor and device IDs.
 
     Returns:
-        List[Tuple[str, Tuple[int, int]]]: List of tuples containing
+        list[tuple[str, tuple[int, int]]]: List of tuples containing
             (pci_address, (vendor_id, device_id))
     """
     return [
@@ -89,7 +89,7 @@ def get_nvme_devices() -> list[NVMeDevice]:
     Get detailed information about NVMe devices in the system.
 
     Returns:
-        List[NVMeDevice]: A list of dictionaries containing NVMe device information
+        list[NVMeDevice]: A list of dictionaries containing NVMe device information
     """
     logger.debug("function:get_nvme_devices start")
     out, err, rc = shell_utils.run_command("nvme list -v -o json")
@@ -154,11 +154,11 @@ def _read_sysfs(path: str) -> str:
         return ""
 
 
-def _disk_holders(name: str) -> List[str]:
+def _disk_holders(name: str) -> list[str]:
     """Union of /sys/block/<d>/holders and every partition's holders —
     catches LVM PVs, md members and dm-crypt without a mountpoint."""
     import os
-    holders: List[str] = []
+    holders: list[str] = []
     base = f"/sys/block/{name}"
     try:
         holders.extend(os.listdir(f"{base}/holders"))
@@ -182,7 +182,7 @@ def _disk_by_id_path(name: str) -> str:
     import os
     by_id_dir = "/dev/disk/by-id"
     target = f"/dev/{name}"
-    candidates: List[str] = []
+    candidates: list[str] = []
     try:
         for entry in os.listdir(by_id_dir):
             if "-part" in entry:
@@ -215,7 +215,7 @@ def _partition_by_id_path(name: str, partuuid: str) -> str:
             pass
     by_id_dir = "/dev/disk/by-id"
     target = f"/dev/{name}"
-    candidates: List[str] = []
+    candidates: list[str] = []
     try:
         for entry in os.listdir(by_id_dir):
             if "-part" not in entry:
@@ -234,7 +234,7 @@ def _partition_by_id_path(name: str, partuuid: str) -> str:
     return candidates[0]
 
 
-def _partition_holders(disk_name: str, part_name: str) -> List[str]:
+def _partition_holders(disk_name: str, part_name: str) -> list[str]:
     """Holders of a single partition (/sys/block/<disk>/<part>/holders)."""
     import os
     try:
@@ -243,7 +243,7 @@ def _partition_holders(disk_name: str, part_name: str) -> List[str]:
         return []
 
 
-def _root_disk_names() -> List[str]:
+def _root_disk_names() -> list[str]:
     """Kernel names of the disk(s) backing the root filesystem."""
     out, _, rc = shell_utils.run_command("findmnt -no SOURCE /")
     if rc != 0 or not out.strip():
@@ -267,7 +267,7 @@ def _subtree_mounted(dev: dict) -> bool:
     return any(_subtree_mounted(child) for child in dev.get("children") or [])
 
 
-def get_block_devices_info() -> List[dict]:
+def get_block_devices_info() -> list[dict]:
     """Inventory of block devices (whole disks AND their partitions) for the
     lblk cluster mode.
 
@@ -301,7 +301,7 @@ def get_block_devices_info() -> List[dict]:
 
     root_disks = _root_disk_names()
     hostname = socket.gethostname()
-    devices: List[dict] = []
+    devices: list[dict] = []
     for dev in data.get("blockdevices", []):
         if dev.get("type") != "disk":
             continue
@@ -378,7 +378,7 @@ def get_block_devices_info() -> List[dict]:
 SB_GPT_PARTITION_TYPECODE = "6527994e-2c5a-4eec-9613-8f5944074e8b"
 
 
-def split_partition_for_journal(part_name: str, jm_bytes: int) -> Tuple[dict, dict]:
+def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, dict]:
     """Split an existing GPT partition into two: a journal partition of
     ``jm_bytes`` at its original start and a data partition covering the
     remainder. Used by lblk nodes running on partitions, where the journal
@@ -480,7 +480,7 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> Tuple[dict, di
     return inventory[jm_name], inventory[data_name]
 
 
-def wipe_block_device_signatures(device_name: str) -> Tuple[bool, str]:
+def wipe_block_device_signatures(device_name: str) -> tuple[bool, str]:
     """Wipe partition-table / filesystem signatures from a whole disk
     (`--force-format` on lblk add-node). Re-validates that the device is not
     busy before touching it: any mountpoint in the subtree or any holder

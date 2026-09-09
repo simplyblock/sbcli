@@ -604,7 +604,7 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                    if getattr(p, "consistency_group", False)}
     if cg_policies:
         from simplyblock_core.controllers import consistency_group_controller
-        grouped_ids = set()
+        grouped_ids: set = set()
         for policy_id, policy in cg_policies.items():
             members = [lv for lv in repl_lvols
                        if getattr(lv, "replication_policy_id", "") == policy_id]

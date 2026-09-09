@@ -289,9 +289,9 @@ def _transfer_params(**kwargs):
 
     class _C(RPCClient):
         def __init__(self):
-            self.sent = None
+            self.sent: tuple = ()
 
-        def _request(self, method, params):
+        def _request(self, method, params=None, request_timeout=None):
             self.sent = (method, params)
             return True
 
@@ -299,6 +299,7 @@ def _transfer_params(**kwargs):
     c.bdev_lvol_transfer(name="LVS/SNAP_2", offset=0, batch_size=16,
                          bdev_name="hub0", operation="replicate", lvol_id=7,
                          **kwargs)
+    assert c.sent
     method, params = c.sent
     assert method == "bdev_lvol_transfer"
     return params
