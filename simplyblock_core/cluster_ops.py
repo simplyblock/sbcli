@@ -1,5 +1,6 @@
 import base64
 import builtins
+import copy
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from datetime import datetime, UTC
 import docker
 from kubernetes import client as k8s_client
 import requests
+import yaml
 
 from docker.errors import DockerException
 from pydantic import SecretStr
@@ -2821,6 +2823,57 @@ def get_cluster(cl_id) -> dict:
 GRAFANA_RESTART_RELEASE = "26.3.0.4"
 
 
+#: Monitoring services whose compose ``command:`` is reconciled on every
+#: Docker ``cluster update``. Their images are not matched by the image-update
+#: loop, and their args live in the Swarm service spec set at initial
+#: ``docker stack deploy`` time, so compose changes would otherwise never reach
+#: an already-deployed cluster.
+#:
+#: Deliberately an allowlist. Grafana must not be added: event-log alerts
+#: mutate its spec at runtime (--env-add / --mount-add in set_event_alerts),
+#: and resetting it from the compose file would wipe that live configuration.
+_RECONCILED_MONITORING_ARGS = {"monitoring_node-exporter": "node-exporter"}
+
+
+def _compose_monitoring_command_args(compose: dict[str, t.Any], service_key: str) -> builtins.list[str]:
+    command = compose["services"][service_key]["command"]
+    if isinstance(command, str):
+        command = shlex.split(command)
+
+    # Compose escapes a literal '$' as '$$'. Swarm stores the interpolated value
+    # in ContainerSpec.Args, so compare against the post-compose representation.
+    return [arg.replace("$$", "$") for arg in command]
+
+
+def _reconcile_monitoring_args(cluster_docker) -> None:
+    compose_path = os.path.join(
+        os.path.dirname(scripts.__file__), "docker-compose-swarm-monitoring.yml")
+    with open(compose_path, encoding="utf-8") as f:
+        compose = yaml.safe_load(f)
+
+    for service_name, compose_key in _RECONCILED_MONITORING_ARGS.items():
+        desired = _compose_monitoring_command_args(compose, compose_key)
+        try:
+            service = cluster_docker.services.get(service_name)
+        except docker.errors.NotFound:
+            logger.info("%s is not deployed; nothing to reconcile", service_name)
+            continue
+
+        spec = service.attrs["Spec"]
+        current = spec["TaskTemplate"]["ContainerSpec"].get("Args", [])
+        if current == desired:
+            logger.info("%s args already current", service_name)
+            continue
+
+        logger.info("Reconciling %s args from %s to %s",
+                    service_name, current, desired)
+        task_template = copy.deepcopy(spec["TaskTemplate"])
+        task_template["ContainerSpec"]["Args"] = desired
+        cluster_docker.api.update_service(
+            service.id, service.attrs["Version"]["Index"],
+            task_template=task_template, fetch_current_spec=True)
+
+
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
                    max_subsys=None, hugepages_mem=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
@@ -2912,6 +2965,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_name="app_BackupService",
                 service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
+
+        if not cluster.disable_monitoring:
+            try:
+                _reconcile_monitoring_args(cluster_docker)
+            except Exception as e:
+                logger.error(f"Failed to reconcile monitoring service args: {e}")
 
         # Grafana reads provisioning at startup, and its upstream image is not
         # matched by the loop above, so the alert rules `pip` refreshed in the
