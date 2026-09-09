@@ -11133,8 +11133,43 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # leader flap: tertiary's LVOL listener stays open and serves writes
             # whose hublvol redirect target is mid-transition, producing
             # writer_conflict events on the journal. Non-leader peers are blocked
-            # once, after the leader's replication is confirmed suspended. Each peer
-            # stays blocked until its connect_to_hublvol succeeds in ### 8b.
+            # each peer stays blocked until its connect_to_hublvol succeeds in ### 8b.
+            #
+            # ORDER MATTERS. Block the non-leader peers FIRST, then the leader,
+            # and only then start the leader's demote (replication suspend +
+            # leadership drop below). A non-leader (e.g. the tertiary) left
+            # serving while the leader is mid-demote keeps its LVOL listener
+            # open, accepts client IO, and redirects it through the hublvol to a
+            # leader whose leadership is in transition -> writer_conflict on the
+            # journal. Blocking the leader first (as this used to) left exactly
+            # that window open between the leader's replication-disable and the
+            # non-leader block.
+            for sec_node in sec_nodes:
+                if sec_node is current_leader:
+                    continue
+                if sec_node.get_id() in disconnected_peers:
+                    continue
+                if sec_node in blocked_peers:
+                    continue
+                try:
+                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
+                    _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
+                    blocked_peers.append(sec_node)
+                    _block_started[sec_node.get_id()] = time.monotonic()
+                    rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                          constants.FENCE_RPC_RETRY)
+                except Exception as e:
+                    # Cannot safely decide "peer gone" vs "peer slow" before
+                    # snode has reconnected to peer hublvols. A non-leader peer
+                    # left serving on snode_lvs_port during the leader flap can
+                    # accept client IO whose hublvol redirect is mid-transition,
+                    # producing a writer conflict.
+                    _abort_restart_and_unblock(
+                        f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
+
+            # Now block the leader and suspend its replication. Every non-leader
+            # port is already shut, so the demote below starts only once ALL
+            # ports are blocked.
             if current_leader and current_leader.get_id() not in disconnected_peers:
                 _REPL_SUSPEND_MAX_ATTEMPTS = 10
                 replication_suspended = False
@@ -11256,33 +11291,6 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     _abort_restart_and_unblock(
                         f"Could not suspend journal replication on leader "
                         f"{current_leader.get_id()} after {_REPL_SUSPEND_MAX_ATTEMPTS} attempts")
-
-            # Also block non-leader peers (tertiary). The leader's demote+drain
-            # below is leader-specific; non-leaders just need the port shut so
-            # IO can't leak to them during the flap.
-            for sec_node in sec_nodes:
-                if sec_node is current_leader:
-                    continue
-                if sec_node.get_id() in disconnected_peers:
-                    continue
-                if sec_node in blocked_peers:
-                    continue
-                try:
-                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
-                    _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
-                    blocked_peers.append(sec_node)
-                    _block_started[sec_node.get_id()] = time.monotonic()
-                    rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
-                                          constants.FENCE_RPC_RETRY)
-                except Exception as e:
-                    # Same rationale as the leader port-block: cannot safely
-                    # decide "peer gone" vs "peer slow" before snode has
-                    # reconnected to peer hublvols. A non-leader peer left
-                    # serving on snode_lvs_port during the leader flap can
-                    # accept client IO whose hublvol redirect is mid-transition,
-                    # producing a writer conflict.
-                    _abort_restart_and_unblock(
-                        f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
 
             if current_leader and current_leader in blocked_peers:
                 # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
