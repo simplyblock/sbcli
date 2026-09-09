@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for lblk-mode device eligibility, detection, identity and
 node-config schema (pure helpers in simplyblock_core.utils).
 
@@ -15,6 +14,7 @@ Covered:
 """
 
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
 from simplyblock_core import utils
@@ -233,7 +233,7 @@ class TestAioBdevName(unittest.TestCase):
 
 class TestResolveLblkEntries(unittest.TestCase):
 
-    CONFIGURED = [
+    CONFIGURED: ClassVar[list] = [
         {"name": "sdb", "serial": "S1", "by_id": "/dev/disk/by-id/wwn-1",
          "size": 100, "numa": 0},
         {"name": "sdc", "serial": "S2", "by_id": "", "size": 200, "numa": 1},

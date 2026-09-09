@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for lblk partition support.
 
 Covered:
@@ -19,6 +18,7 @@ Covered:
 
 import json
 import unittest
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants, storage_node_ops, utils
@@ -57,7 +57,7 @@ def _inv(name, serial=None, size=100 * GIB, dtype="disk", partuuid="",
 
 
 class TestInventoryPartitions(unittest.TestCase):
-    LSBLK = {
+    LSBLK: ClassVar[dict] = {
         "blockdevices": [
             {"name": "nvme1n1", "type": "disk", "size": 200 * GIB,
              "serial": "VOL-A", "wwn": "", "mountpoint": None,

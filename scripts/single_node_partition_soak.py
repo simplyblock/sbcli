@@ -75,7 +75,7 @@ def create_and_connect_lvols(meta):
         ran = False
         for line in connect_cmds.splitlines():
             line = line.strip()
-            if line.startswith("sudo nvme connect") or line.startswith("nvme connect"):
+            if line.startswith(("sudo nvme connect", "nvme connect")):
                 cmd = line if line.startswith("sudo") else f"sudo {line}"
                 # generous loss tolerance: the restart window must not drop
                 # the controller

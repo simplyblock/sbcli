@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for single-node (non-HA) cluster support.
 
 Covered:

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the lblk (aio) branches in controllers/device_controller.py
 and the mode-aware late-event gate in services/main_distr_event_collector.py.
 

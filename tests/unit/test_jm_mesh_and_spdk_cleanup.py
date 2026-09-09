@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the two 2026-08-05 incident fixes:
 
 1. verify_jm_mesh_coverage — the activation JM-mesh gate: every ONLINE

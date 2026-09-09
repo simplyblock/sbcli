@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for lblk-mode device onboarding.
 
 Covered:
@@ -139,7 +138,7 @@ class TestAddAioDevices(unittest.TestCase):
 
     def test_create_failure_raises(self):
         rpc = _FakeRpc(create_ok=False)
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(Exception, "bdev_aio_create failed"):
             utils.addAioDevices(rpc, _snode(), [_entry()])
 
     def test_multiple_devices(self):

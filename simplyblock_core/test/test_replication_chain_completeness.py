@@ -18,6 +18,8 @@ already existent on the target by every other descendant.
 """
 
 
+from typing import ClassVar
+
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_replication as sr
 
@@ -659,7 +661,6 @@ def test_dedicated_subsystem_needs_no_probe():
 def test_probe_failure_falls_back_to_the_record():
     """A probe that raises must not decide: assume the record is right
     (attach), which is the pre-existing behaviour."""
-    from simplyblock_core.controllers import lvol_controller as lc
 
     class _Boom:
         def subsystem_get(self, nqn):
@@ -704,7 +705,7 @@ def test_replica_rollback_clears_its_namespace_and_syncs_the_delete():
     class _Lvol:
         nqn = "nqn.test:lvol:SHARED"
         top_bdev = "LVS_1/LVOL_NEW"
-        bdev_stack = [{"type": "bdev_lvol_clone", "name": "LVS_1/LVOL_NEW"}]
+        bdev_stack: ClassVar[list] = [{"type": "bdev_lvol_clone", "name": "LVS_1/LVOL_NEW"}]
         status = ""
         def get_id(self):
             return "LV_NEW"

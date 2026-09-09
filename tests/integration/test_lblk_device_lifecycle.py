@@ -1,4 +1,3 @@
-# coding=utf-8
 """Integration tests for the lblk (Linux block device / SPDK AIO) device
 mode against a real FoundationDB (testcontainer via tests/integration/
 conftest.py).

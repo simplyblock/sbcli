@@ -663,11 +663,10 @@ def main():
                     continue
                 task = db.get_task_by_id(task.uuid)
                 try:
-                    res = task_runner(task, cluster_tasks)
+                    task_runner(task, cluster_tasks)
                 except Exception as e:
                     logger.error(f"replication-final task {task.uuid} failed: {e}", exc_info=True)
-                    res = False
-                # No blanket backoff here. `res is False` is the NORMAL result
+                # No blanket backoff here. A False result is the NORMAL one
                 # for a task that is queued or mid-round, and sleeping 3s per
                 # such task cost ~70s per pass with 20 volumes -- which landed
                 # directly in the client's IO freeze.

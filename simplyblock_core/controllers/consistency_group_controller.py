@@ -1,4 +1,3 @@
-# coding=utf-8
 """Consistency groups: group-wide crash-consistent snapshots for a policy.
 
 A replication policy created with ``consistency_group=True`` owns exactly one
@@ -33,8 +32,7 @@ from simplyblock_core import db_controller as db_mod
 from simplyblock_core import utils
 from simplyblock_core.controllers import snapshot_events, tasks_controller
 from simplyblock_core.controllers.snapshot_controller import (
-    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock,
-    object_mutation_lock)
+    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock)
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the lblk hung-IO watchdog and device-disappearance sweep
 in services/device_monitor.py.
 

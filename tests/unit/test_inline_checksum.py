@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_inline_checksum.py – unit tests for the per-cluster inline CRC checksum
 validation feature (TD.100226.1).
