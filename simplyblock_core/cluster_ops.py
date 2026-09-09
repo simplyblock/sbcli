@@ -2885,7 +2885,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         if "SIMPLYBLOCK_LOG_LEVEL=DEBUG" in service_env:
                             service_env.remove("SIMPLYBLOCK_LOG_LEVEL=DEBUG")
                             service_env.append("SIMPLYBLOCK_LOG_LEVEL=INFO")
-                        service.update(image=service_image, env=service_env, force_update=True)
+                        log_driver_config = service.attrs['Spec']['TaskTemplate']['LogDriver']['Options']
+                        if log_driver_config.get("max-buffer-size") != "40m":
+                            log_driver_config["max-buffer-size"] = "40m"
+                        if log_driver_config.get("mode") != "non-blocking":
+                            log_driver_config["mode"] = "non-blocking"
+                        service.update(image=service_image, env=service_env, log_driver=service.attrs['Spec']['TaskTemplate']['LogDriver'], force_update=True)
                         service_names.append(service.attrs['Spec']['Name'])
                     break
 
