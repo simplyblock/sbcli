@@ -1,5 +1,8 @@
 import logging
 import os
+
+from simplyblock_core._version import __version__
+
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
@@ -13,7 +16,7 @@ def get_config_var(name, default=None):
         return os.getenv(name)
     else:
         with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
-            for line in fh.readlines():
+            for line in fh:
                 if line.startswith(name):
                     return line.split("=", 1)[1].strip()
     return default
@@ -85,6 +88,40 @@ CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
 DEV_DISCOVERY_INTERVAL_SEC = 60
+
+# --- lblk cluster mode (Linux block devices via SPDK AIO bdevs) ---
+DEVICE_MODE_NVME = "nvme"
+DEVICE_MODE_LBLK = "lblk"
+# DPDK PCI allowlist placeholder used when starting SPDK in lblk mode: an
+# empty allowlist means "allow all" to DPDK (the k8s launch path passes an
+# empty PCI_ALLOWED today), which would let SPDK's nvme driver claim
+# kernel-owned NVMe disks. 0000:00:00.0 is the host bridge — syntactically a
+# valid BDF, never a storage device, no DPDK driver binds it.
+LBLK_PCI_ALLOWED_PLACEHOLDER = "0000:00:00.0"
+# Queue-depth sampling period enabled on every AIO base bdev so
+# bdev_get_iostat reports queue_depth (feeds the hung-IO watchdog).
+AIO_QD_SAMPLING_PERIOD_US = 100000  # 100 ms
+# Hung-IO watchdog: consecutive device_monitor polls (DEV_MONITOR_INTERVAL_SEC
+# apart) with queue_depth > 0 and zero completion progress before the device
+# is declared stalled (3 x 10s = 30s — deliberately above kernel SCSI/NVMe
+# timeouts, which convert most stalls into EIO for us via the distrib
+# error_* events; the watchdog only catches what the kernel never times out).
+AIO_HUNG_IO_STALL_POLLS = 3
+# Consecutive polls a configured block device may be absent from the host's
+# lsblk before it is treated as hot-removed (REMOVAL semantics).
+AIO_DEVICE_ABSENT_POLLS = 2
+# Kernel block devices never eligible for lblk data placement.
+LBLK_EXCLUDED_NAME_PREFIXES = ("ram", "loop", "sr", "fd", "zram", "nbd",
+                               "md", "dm-", "drbd")
+# Minimum storage units (whole SSDs or partitions) per lblk node: one journal
+# home plus at least one data device.
+LBLK_MIN_DEVICES_PER_NODE = 2
+# Journal sizing when the journal is carved out of a selected unit by
+# splitting it in two (partition-backed lblk nodes): jm_percent of the node's
+# total selected capacity, floored here, and never more than
+# LBLK_JM_SPLIT_MAX_FRACTION of the unit being split.
+LBLK_JM_MIN_SIZE = 2 * 1024 * 1024 * 1024
+LBLK_JM_SPLIT_MAX_FRACTION = 0.5
 
 PMEM_DIR = '/tmp/pmem'
 
@@ -291,7 +328,7 @@ SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
         "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
-SIMPLY_BLOCK_VERSION = get_config_var("SIMPLY_BLOCK_VERSION", "1")
+SIMPLY_BLOCK_VERSION = __version__
 
 GELF_PORT = 12202
 
@@ -416,12 +453,11 @@ REPL_CUTOVER_MIN_INLINE_SEC = 30
 # .../replication/cutover-proceed set this True and accept that cost until the
 # clone's base can be advanced after the signal.
 #
-# Enabled 2026-09-02: the operator's reconcileCutoverPending runs the
-# preconnect Job and posts cutover-proceed for both migration and failback
-# (annotFailbackTarget routes the call to the target cluster on failback).
-# Without the gate, the flip races the client: the 2026-09-02 failback run
-# flipped ANA on listeners no client had connected to and deleted the DR-side
-# subsystem 150ms later, orphaning every connected client for ctrl_loss_tmo.
+# Enabled by PR #1276: the operator's reconcileCutoverPending posts
+# cutover-proceed for migration AND failback (annotFailbackTarget routes the
+# call to the target cluster on failback). Without the gate the ANA flip races
+# the client's preconnect, flipping ANA on listeners no client is connected to
+# and then deleting the source subsystem, stranding every live client.
 REPL_CUTOVER_PROCEED_REQUIRED = True
 
 # --- noticing a finished transfer ----------------------------------------
@@ -437,27 +473,13 @@ REPL_XFER_INLINE_WAIT_SEC = 5.0
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
 REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
-# Cooldown between hub-attach retry attempts when the target node is down or
-# recovering (covers control-plane lag before the DB reflects the down state).
-REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
-# Max consecutive hub-attach failures with the node still appearing online
-# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
-REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# Pass interval for the cutover runner while any cutover is mid-round. The
+# freeze pays for every millisecond between a transfer completing and the next
+# snapshot starting, so this must stay well under a second.
 # Pass interval while a cutover is mid-round. NOT sub-second: this loop reads
 # the task table per pass, and polling a database at 5Hz to detect an event is
 # the wrong shape. Sub-second reaction lives in the RPC-based inline wait.
 REPL_CUTOVER_ACTIVE_POLL_SEC = 1.0
-# Delete the superseded original volume BEFORE building the fail-back clone
-# (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
-# original's blob id while its parent snapshot's clone registry is already
-# inconsistent ("Clone entry not found for blob ... under snapshot ..."), the
-# clone created seconds later reuses the freed id, and every final-step delta
-# write to it fails rc -1 (-EPERM) -> transfer_state Failed on all fail-back
-# cutovers. The SPDK-side namespace slot is still freed by
-# _evict_stale_namespace, and the original's DB record is removed after a
-# successful cutover by _swap_failback_lvol_uuid. Re-enable once the fork's
-# clone-entry/blob-id-reuse defect is fixed.
-REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER = False
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
@@ -843,3 +865,21 @@ BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
 BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
+# --- Failback-cutover constants from PR #1276 (reconcile-1276) ---
+# Cooldown between hub-attach retry attempts when the target node is down or
+# recovering (covers control-plane lag before the DB reflects the down state).
+REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
+# Max consecutive hub-attach failures with the node still appearing online
+# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
+REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# Delete the superseded original volume BEFORE building the fail-back clone
+# (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
+# original's blob id while its parent snapshot's clone registry is already
+# inconsistent ("Clone entry not found for blob ... under snapshot ..."), the
+# clone created seconds later reuses the freed id, and every final-step delta
+# write to it fails rc -1 (-EPERM) -> transfer_state Failed on all fail-back
+# cutovers. The SPDK-side namespace slot is still freed by
+# _evict_stale_namespace, and the original's DB record is removed after a
+# successful cutover by _swap_failback_lvol_uuid. Re-enable once the fork's
+# clone-entry/blob-id-reuse defect is fixed.
+REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER = False

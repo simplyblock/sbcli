@@ -1,4 +1,3 @@
-# coding=utf-8
 """Consistency groups: group-wide crash-consistent snapshots for a policy.
 
 A replication policy created with ``consistency_group=True`` owns exactly one

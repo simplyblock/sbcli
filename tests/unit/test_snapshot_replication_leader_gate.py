@@ -1,4 +1,3 @@
-# coding=utf-8
 """The LVS-leader gate in the snapshot-replication service.
 
 Pure logic over a mocked ``is_node_leader`` — no model state, no DB — so it

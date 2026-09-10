@@ -22,6 +22,7 @@ import argparse
 import re
 import sys
 from collections import defaultdict
+import itertools
 
 LINE = re.compile(r"XFER-TIMING\s+(.*)$")
 KV = re.compile(r"(\w+)=(\S+)")
@@ -182,7 +183,7 @@ def report(events, csv_path=None):
         gaps = []
         for _lvol, times in passes.items():
             times.sort()
-            gaps += [b - a for a, b in zip(times, times[1:])]
+            gaps += [b - a for a, b in itertools.pairwise(times)]
         if gaps:
             gaps.sort()
             print("\ntask-runner pass spacing: n=%d  median=%.1fs  max=%.1fs"

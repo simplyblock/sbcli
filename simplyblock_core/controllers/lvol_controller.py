@@ -1,11 +1,10 @@
-# coding=utf-8
 import copy
 import random
 import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import ops_gate
@@ -278,7 +277,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
     utils.print_table_dict(node_start_end)
     #############
 
-    selected_node_ids: List[str] = []
+    selected_node_ids: list[str] = []
     while len(selected_node_ids) < min(len(node_stats), 3):
         r_index = random.randint(0, n_start)
         print(f"Random is {r_index}/{n_start}")
@@ -321,7 +320,7 @@ def is_hex(s: str) -> bool:
     except ValueError:
         return False
 
-def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
+def validate_aes_xts_keys(key1: str, key2: str) -> tuple[bool, str]:
     """
     Key Length: each key should be either 128 or 256 bits long.
     since hex values of the keys are expected, the key lengths should be either 32 or 64
@@ -2179,7 +2178,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
         # Nodes whose sync leg completes here are recorded on the lvol so
         # lvol_monitor does not issue a second one when it finalises the
         # record.
-        sync_done: List[str] = []
+        sync_done: list[str] = []
         non_leaders = [n for n in all_nodes if actual_leader and n.get_id() != actual_leader.get_id()]
         for nl in non_leaders:
             # Under the chain lock: same reasoning as the create path --
@@ -2611,7 +2610,7 @@ def get_replication_info(lvol_id_or_name):
     # Heterogeneous status payload (str / int / None / list). Annotated so the
     # numeric comparisons further down ("lag > lag_budget",
     # "outstanding_count > 0") are not inferred as int-vs-object.
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "last_snapshot_id": "",
         "last_replication_time": "",
         "last_replication_duration": "",
@@ -3565,7 +3564,7 @@ def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
     """
     if all_snaps is None:
         all_snaps = db_controller.get_snapshots()
-    by_lvol: Dict[str, list] = {}
+    by_lvol: dict[str, list] = {}
     for s in all_snaps:
         by_lvol.setdefault(s.lvol.uuid, []).append(s)
 
@@ -5252,7 +5251,7 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None)-> Optional[LVol]:
+def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None)-> LVol | None:
     """``exclude_nqns`` skips subsystems the caller knows are unusable even
     though the DB count says they have room (SPDK rejected the add with
     -32602 — SPDK is the authority on its own namespace table)."""
@@ -5292,3 +5291,46 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
     if ret:
         return ret[random.randint(0, len(ret) - 1)]
     return None
+
+
+# --- Functions carried over from main (reconcile-1276): SSE watch + HA role helper ---
+def role_secondary_ids(host_node):
+    """The host's non-empty secondary/tertiary node ids, in role order.
+    Non-HA topologies have none; never emit empty-string ids into
+    ``lvol.nodes`` (every ``lvol.nodes[1:]`` consumer would iterate them)."""
+    return [i for i in (host_node.secondary_node_id,
+                        host_node.tertiary_node_id) if i]
+
+
+async def watch_volumes(cluster_id, pool_id):
+    """Stream volume changes for one pool (same scope as get_lvols_by_pool_id)."""
+    db = DBController()
+    async for batch in db.watch(
+            LVol, scope=(pool_id,),
+            select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
+        yield batch
+
+
+async def watch_volume(cluster_id, pool_id, volume_id):
+    """Stream changes for a single volume."""
+    db = DBController()
+    async for batch in db.watch(
+            LVol, scope=(pool_id,), entity_id=volume_id,
+            # Reuse the pool getter so deleted volumes leave the set (soft-delete
+            # -> deleted event + close), matching the list endpoint's filter.
+            select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
+        yield batch
+
+
+def resolve_effective_ha_type(ha_type, host_node):
+    """The ha_type an lvol can actually be created with on ``host_node``.
+
+    A host without a secondary (single-node / non-HA cluster) cannot serve an
+    HA lvol — every lifecycle op must then run on exactly one node. Downgrade
+    instead of failing: cluster ha_type defaults to "ha" even on deployments
+    that never assign secondaries."""
+    if ha_type == "ha" and not host_node.secondary_node_id:
+        return "single"
+    return ha_type

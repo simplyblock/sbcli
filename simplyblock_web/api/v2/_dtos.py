@@ -667,7 +667,7 @@ class ReplicationPolicyDTO(BaseModel):
     group_last_seq: int = 0
 
     @staticmethod
-    def from_model(model: ReplicationPolicy, group: Optional[ConsistencyGroup] = None):
+    def from_model(model: ReplicationPolicy, group: ConsistencyGroup | None = None):
         return ReplicationPolicyDTO(
             id=UUID(model.uuid),
             cluster_id=UUID(model.cluster_id),

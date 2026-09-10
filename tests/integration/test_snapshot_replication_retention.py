@@ -1,4 +1,3 @@
-# coding=utf-8
 """Retention for replication-driven internal snapshots (D2), against real FDB.
 
 ``snapshot_replication._prune_internal_snapshots`` decides which internal
@@ -35,6 +34,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import snapshot_replication as sr
+import itertools
 
 CLUSTER_ID = "cluster-1"
 POOL_ID = "pool-1"
@@ -137,7 +137,7 @@ def _healthy_chain(source_snaps):
         per_lvol.setdefault(s.lvol.get_id(), []).append(s)
     for snaps in per_lvol.values():
         snaps.sort(key=lambda s: s.created_at)
-        for prev, nxt in zip(snaps, snaps[1:]):
+        for prev, nxt in itertools.pairwise(snaps):
             chain[nxt.target_replicated_snap_uuid] = prev.target_replicated_snap_uuid
     return chain
 

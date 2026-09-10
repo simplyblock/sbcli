@@ -1,4 +1,3 @@
-# coding=utf-8
 """Task runner for cross-cluster replication cutover (FN_REPLICATION_FINAL).
 
 Consumes the task enqueued by migration-commit (D7) and fail-back (D8) and
