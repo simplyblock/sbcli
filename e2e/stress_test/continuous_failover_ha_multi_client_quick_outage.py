@@ -47,7 +47,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         # Validation cadence & FIO runtime
         self.validate_every = 5
         self._iter = 0
-        self._per_wave_fio_runtime = 900      # 60 minutes
+        self._per_wave_fio_runtime = 900      # 15 minutes
         self._fio_wait_timeout = 1800         # wait for all to finish
 
         # Internal state
@@ -601,6 +601,28 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         self.max_fault_tolerance = 1       # overwritten in run()
         self._last_outage_node = None      # for non-related node selection
         self.k8s_utils = None              # initialised in run() when k8s_test=True
+        # Gap accounting (MAX_OUTAGE_GAP_SEC, _node_online_ts,
+        # _outaged_since_checkpoint) comes from TestClusterBase.
+        # Bootstrap objects are pinned: mounted, running FIO, never deleted, so
+        # they age across the whole run and we see how long-lived volumes
+        # recover. Churn objects are API-only and are the ones we delete.
+        self.total_lvols = 12
+        self.MAX_TOTAL_OBJECTS = 65       # lvols + clones, pinned and churn together
+        self.CHURN_CREATE_PER_CHECKPOINT = (5, 10)
+        self._churn_lvols = {}            # name -> id, no dependents
+        # lvol+snapshot+clone chains, only ever deleted whole and in order
+        self._churn_groups = []           # [{lvol, snap, clone}]
+        self._churn_ns_parent = None      # namespaced-subsystem parent lvol name
+        self.max_namespace_per_subsys = 10
+        # FIO is kicked once per checkpoint, so one wave has to outlast every
+        # outage in the window. A 2+2 cluster runs dual outages at roughly
+        # 150-400s each; at 900s (the inherited value) FIO would expire around
+        # the third outage and the rest of the window would run against an idle
+        # cluster. The wait timeout has to exceed the runtime or the checkpoint
+        # join gives up on FIO that is still legitimately running.
+        self.EXPECTED_ITERATION_SEC = 400
+        self._per_wave_fio_runtime = self.validate_every * self.EXPECTED_ITERATION_SEC
+        self._fio_wait_timeout = self._per_wave_fio_runtime + 1200
 
     # ── helper: ft-aware single-node selection ───────────────────────────────
 
@@ -769,8 +791,10 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         if self.first_outage_ts is None:
             self.first_outage_ts = int(datetime.now().timestamp())
 
-        # Collect diagnostics for ALL nodes before outage (parallel)
-        self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
+        # Diagnostics deliberately NOT collected here. On docker this is ~40
+        # sequential SSH commands and was the single biggest contributor to the
+        # gap before the next outage; it now runs once per checkpoint instead.
+        self._check_outage_gap()
 
         self.outage_start_time = int(datetime.now().timestamp())
         self._log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -782,6 +806,7 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
         node_ip = node_details[0]["mgmt_ip"]
         node_rpc_port = node_details[0]["rpc_port"]
+        self._outaged_since_checkpoint.add(node_ip)
 
         if outage_type == "graceful_shutdown":
             deadline = time.time() + 300
@@ -858,17 +883,9 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             max_retries = 4
             retry_delay = 10
             for attempt in range(max_retries):
-                # Restart container logging before each restart attempt
-                if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        self.ssh_obj.restart_docker_logging(
-                            node_ip=node,
-                            containers=self.container_nodes[node],
-                            log_dir=os.path.join(self.docker_logs_path, node),
-                            test_name=self.test_name,
-                        )
-                else:
-                    self.runner_k8s_log.restart_logging()
+                # Logging is restarted once after recovery, not around every
+                # attempt -- three sweeps across every storage node cost more
+                # than the whole gap budget.
                 try:
                     force = (attempt == max_retries - 1)
                     if force:
@@ -885,16 +902,6 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                             node_id=self.current_outage_node,
                             force=force,
                         )
-                    if not self.k8s_test:
-                        for node in self.storage_nodes:
-                            self.ssh_obj.restart_docker_logging(
-                                node_ip=node,
-                                containers=self.container_nodes[node],
-                                log_dir=os.path.join(self.docker_logs_path, node),
-                                test_name=self.test_name,
-                            )
-                    else:
-                        self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(
                         self.current_outage_node, "online", timeout=300
                     )
@@ -934,8 +941,8 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             self.ssh_obj.flush_local_logs_to_nfs(_nip, _local_dir, nfs_target)
             self.logger.info(f"[V2] Flushed local outage logs to NFS: {nfs_target}")
 
-        # Collect diagnostics for ALL nodes after recovery (parallel)
-        self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
+        # Diagnostics and per-lvol block-size probing both moved to the
+        # checkpoint; see _perform_outage for why.
 
         # Restart container log streaming
         if not self.k8s_test:
@@ -949,10 +956,190 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         else:
             self.runner_k8s_log.restart_logging()
 
-        self._log_block_sizes("post_recovery")
-
-        # small cool-down before next outage (dumps already add delay)
+        # small cool-down before next outage
         sleep_n_sec(10)
+        self._mark_nodes_online()
+
+    # ── churn: exercise create/delete while migration is still in flight ─────
+
+    def _total_object_count(self):
+        """Everything backed by an lvol: pinned bootstrap objects plus churn.
+
+        A group contributes its lvol and, when the clone was created, the
+        clone; the snapshot is not itself an lvol.
+        """
+        grouped = sum(1 + (1 if g.get("clone") else 0) for g in self._churn_groups)
+        return (len(self.lvol_mount_details) + len(self.clone_mount_details)
+                + len(self._churn_lvols) + grouped)
+
+    def _churn_create(self):
+        """Create a few dynamic lvols, and snapshot/clone some of them.
+
+        API only -- no connect, no mkfs, no mount. _seed_snapshots_and_clones
+        does all of that and takes minutes per object (it contains two
+        get_snapshot_id polls that each block up to 600s); this is 2-4 API
+        calls per object, which is what makes it affordable at a checkpoint.
+        """
+        # An lvol add against a cluster still in activation comes back 400, so
+        # settle first. This is the checkpoint, where a wait is already fine.
+        try:
+            self._wait_cluster_active()
+        except Exception as exc:
+            self.logger.warning(
+                f"[churn] Cluster did not report active ({exc}); skipping create"
+            )
+            return
+
+        low, high = self.CHURN_CREATE_PER_CHECKPOINT
+        wanted = random.randint(low, high)
+        created = 0
+        for _ in range(wanted):
+            if self._total_object_count() >= self.MAX_TOTAL_OBJECTS:
+                self.logger.info(
+                    f"[churn] At object cap {self.MAX_TOTAL_OBJECTS}; stopping create"
+                )
+                break
+
+            name = f"churn{_rand_id(10, first_alpha=False)}"
+            shape = random.choice(["plain", "crypto", "namespaced"])
+            kwargs = {
+                "lvol_name": name,
+                "pool_name": self.pool_name,
+                "size": self.lvol_size,
+                "crypto": shape == "crypto",
+            }
+            if shape == "namespaced":
+                if self._churn_ns_parent is None:
+                    # The first namespaced lvol opens a subsystem that later
+                    # ones are auto-grouped into, so they share one NVMe
+                    # subsystem and each take their own NSID.
+                    kwargs["max_namespace_per_subsys"] = self.max_namespace_per_subsys
+                else:
+                    kwargs["namespace"] = True
+
+            try:
+                self.sbcli_utils.add_lvol(**kwargs)
+                lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)
+            except Exception as exc:
+                self.logger.warning(f"[churn] create failed for {name} ({shape}): {exc}")
+                continue
+            if not lvol_id:
+                self.logger.warning(f"[churn] {name} created but no id resolved")
+                continue
+
+            if shape == "namespaced" and self._churn_ns_parent is None:
+                self._churn_ns_parent = name
+
+            created += 1
+            self.logger.info(f"[churn] created {shape} lvol {name} ({lvol_id})")
+
+            # Snapshot + clone roughly half of them, so the delete path has
+            # dependent objects to work through rather than bare lvols. Those
+            # become a group that is only ever deleted as a unit, in dependency
+            # order, because a snapshot cannot go while a clone of it exists
+            # and an lvol cannot go while it still has a snapshot.
+            group = None
+            if random.random() < 0.5:
+                group = self._churn_snapshot_and_clone(name, lvol_id)
+            if group:
+                group["lvol"] = (name, lvol_id)
+                self._churn_groups.append(group)
+            else:
+                self._churn_lvols[name] = lvol_id
+
+        self.logger.info(
+            f"[churn] created {created} lvol(s); total objects now "
+            f"{self._total_object_count()}/{self.MAX_TOTAL_OBJECTS}"
+        )
+
+    def _churn_snapshot_and_clone(self, lvol_name, lvol_id):
+        """Snapshot *lvol_name* and clone it. Returns the group, or None."""
+        snap_name = f"csnap{_rand_id(10, first_alpha=False)}"
+        try:
+            self.sbcli_utils.add_snapshot(lvol_id, snap_name)
+            snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
+        except Exception as exc:
+            self.logger.warning(f"[churn] snapshot failed for {lvol_name}: {exc}")
+            return None
+        if not snap_id:
+            self.logger.warning(f"[churn] snapshot {snap_name} created but no id resolved")
+            return None
+
+        clone_name = f"cclone{_rand_id(10, first_alpha=False)}"
+        try:
+            self.sbcli_utils.add_clone(snap_id, clone_name)
+            clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
+        except Exception as exc:
+            self.logger.warning(f"[churn] clone failed for {snap_name}: {exc}")
+            clone_id = None
+
+        self.logger.info(
+            f"[churn] created snapshot {snap_name}"
+            + (f" + clone {clone_name}" if clone_id else " (clone failed)")
+        )
+        return {
+            "snap": (snap_name, snap_id),
+            "clone": (clone_name, clone_id) if clone_id else None,
+        }
+
+    def _fire_lvol_delete(self, name, lvol_id, kind):
+        """Issue a delete and defer the verification to the next checkpoint.
+
+        sbcli_utils.delete_lvol polls for up to 15 minutes, which is unusable
+        even at a checkpoint, so send the raw DELETE and let
+        validate_pending_deletions reconcile later.
+        """
+        try:
+            self.sbcli_utils.delete_request(api_url=f"/lvol/{lvol_id}")
+            self.logger.info(f"[churn] delete issued for {kind} {name} ({lvol_id})")
+        except Exception as exc:
+            self.logger.warning(f"[churn] delete request failed for {name}: {exc}")
+        self.record_pending_lvol_delete(name, lvol_id)
+
+    def _churn_delete(self):
+        """Delete a subset of churn objects, without waiting for any of them.
+
+        Dependency order is not optional here: a snapshot cannot be deleted
+        while a clone of it exists, and an lvol cannot be deleted while it
+        still has a snapshot. Groups are therefore deleted whole -- clone,
+        then snapshot, then lvol -- so we never leave the reconciler chasing a
+        delete that can never succeed.
+        """
+        # Plain lvols: nothing depends on them.
+        plain = [n for n in self._churn_lvols if n != self._churn_ns_parent]
+        for name in random.sample(plain, len(plain) // 2):
+            self._fire_lvol_delete(name, self._churn_lvols.pop(name), "lvol")
+
+        # Groups: whole chain or nothing.
+        doomed = random.sample(self._churn_groups, len(self._churn_groups) // 2)
+        for group in doomed:
+            self._churn_groups.remove(group)
+            if group.get("clone"):
+                cname, cid = group["clone"]
+                self._fire_lvol_delete(cname, cid, "clone")
+            sname, sid = group["snap"]
+            try:
+                self.sbcli_utils.delete_snapshot(
+                    snap_id=sid, skip_error=True, wait=False
+                )
+                self.logger.info(f"[churn] delete issued for snapshot {sname} ({sid})")
+            except Exception as exc:
+                self.logger.warning(f"[churn] snapshot delete failed for {sname}: {exc}")
+            self.record_pending_snapshot_delete(sname, sid)
+
+            lname, lid = group["lvol"]
+            if lname == self._churn_ns_parent:
+                # Deleting the subsystem owner would strand its namespaced
+                # children, so it stays for the life of the run.
+                self._churn_lvols[lname] = lid
+                continue
+            self._fire_lvol_delete(lname, lid, "lvol")
+
+    def _run_checkpoint_churn(self):
+        """Reconcile last checkpoint's deletes, then create and delete more."""
+        self.validate_pending_deletions()
+        self._churn_delete()
+        self._churn_create()
 
     # ── Override 4: dual (simultaneous) outage support ───────────────────────
 
@@ -1010,6 +1197,7 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             nd = self.sbcli_utils.get_storage_node_details(node_uuid)
             node_ip = nd[0]["mgmt_ip"]
             node_rpc_port = nd[0]["rpc_port"]
+            self._outaged_since_checkpoint.add(node_ip)
 
             available_types = list(self.outage_types)
             if self.k8s_test:
@@ -1141,8 +1329,8 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         if self.first_outage_ts is None:
             self.first_outage_ts = int(datetime.now().timestamp())
 
-        # Collect diagnostics for ALL nodes before dual outage (parallel)
-        self.collect_outage_diagnostics(f"pre_dual_outage_{node_a}_{node_b}")
+        # Diagnostics moved to the checkpoint; see _perform_outage.
+        self._check_outage_gap()
 
         self.outage_start_time = int(datetime.now().timestamp())
 
@@ -1197,9 +1385,6 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         self.outage_end_time = int(datetime.now().timestamp())
         self._last_outage_node = node_b
 
-        # Collect diagnostics for ALL nodes after dual recovery (parallel)
-        self.collect_outage_diagnostics(f"post_dual_recovery_{node_a}_{node_b}")
-
         # Restart container/k8s logging after all nodes are recovered
         if not self.k8s_test:
             for node in self.storage_nodes:
@@ -1214,8 +1399,12 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
 
         self.logger.info("[V2-dual] Both nodes online; waiting 10s before next outage.")
         sleep_n_sec(10)
+        self._mark_nodes_online()
 
         return result_dict
+
+    def _pre_bootstrap_hook(self):
+        """Runs just before the cluster is bootstrapped. Override to alter setup."""
 
     # ── Override 5: run — read cluster config then delegate ──────────────────
 
@@ -1257,9 +1446,27 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         # Delegate to parent bootstrap + outage loop.
         # All overridden methods (_create_lvols, _perform_outage,
         # restart_nodes_after_failover) are dispatched through self.
+        self._pre_bootstrap_hook()
         self._bootstrap_cluster()
         sleep_n_sec(5)
+        self._mark_nodes_online()
 
+        try:
+            self._outage_loop()
+        except Exception:
+            # Per-iteration diagnostics were dropped to keep the outage gap under
+            # budget, so this is now the only place that captures cluster state
+            # at the moment things broke.
+            self.logger.exception("[V2] Outage loop failed; collecting diagnostics")
+            try:
+                self.collect_outage_diagnostics("failure")
+                self.check_core_dump(nodes=self._outaged_since_checkpoint)
+            except Exception:
+                self.logger.exception("[V2] Failure diagnostics collection failed")
+            raise
+
+    def _outage_loop(self):
+        """Outage, recover, and checkpoint until something raises."""
         iteration = 1
         while True:
             if self.dump_validation_errors:
@@ -1296,11 +1503,19 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 )
 
                 self.collect_outage_diagnostics("validation_checkpoint")
+                self._log_block_sizes("checkpoint")
+
+                # Only the nodes actually outaged since the last checkpoint can
+                # have dropped a core -- a network outage aborts the node.
+                self.check_core_dump(nodes=self._outaged_since_checkpoint)
+                self._outaged_since_checkpoint.clear()
 
                 for lvol, det in self.lvol_mount_details.items():
                     self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
                 for cname, det in self.clone_mount_details.items():
                     self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
+
+                self._run_checkpoint_churn()
 
                 self.logger.info("[V2] FIO validated; pausing briefly for migration window")
                 sleep_n_sec(10)
@@ -1319,8 +1534,13 @@ class RandomRapidFailoverNoGapV2NoMigration(RandomRapidFailoverNoGapV2WithMigrat
 
     Before any test activity the Docker Swarm service
     ``app_TasksRunnerMigration`` is scaled to 0 replicas so that migration
-    tasks are never processed.  Because tasks will be created but never
-    completed, the migration-window pause after FIO validation is skipped.
+    tasks are never processed, via the ``_pre_bootstrap_hook`` the parent calls.
+    Everything else -- outage loop, gap budget, churn, checkpoint -- is
+    inherited, so the two variants cannot drift apart.
+
+    Note this is a no-op under k8s: there is no equivalent scale-to-zero for
+    the k8s migration task runner, so on k8s this behaves exactly like the
+    WithMigration variant.
     """
 
     def __init__(self, **kwargs):
@@ -1339,87 +1559,5 @@ class RandomRapidFailoverNoGapV2NoMigration(RandomRapidFailoverNoGapV2WithMigrat
         )
         self.logger.info(f"[V2-NM] Migration service update: out={out!r} err={err!r}")
 
-    def run(self):
-        self.logger.info("[V2-NM] Starting RandomRapidFailoverNoGapV2NoMigration")
-
-        cluster_details = self.sbcli_utils.get_cluster_details()
-
-        fabric_rdma = cluster_details.get("fabric_rdma", False)
-        fabric_tcp = cluster_details.get("fabric_tcp", True)
-        if fabric_rdma and fabric_tcp:
-            self.available_fabrics = ["tcp", "rdma"]
-        elif fabric_rdma:
-            self.available_fabrics = ["rdma"]
-        else:
-            self.available_fabrics = ["tcp"]
-
-        self.max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
-        self.logger.info(
-            f"[V2-NM] fabrics={self.available_fabrics}, "
-            f"ft={self.max_fault_tolerance}, npcs_cli={self.npcs}"
-        )
-
-        if self.k8s_test:
-            from utils.k8s_utils import K8sUtils
-            self.k8s_utils = K8sUtils(
-                ssh_obj=self.ssh_obj,
-                mgmt_node=self.mgmt_nodes[0],
-            )
-            self.outage_types = [
-                t for t in self.outage_types if "network_interrupt" not in t
-            ]
-            self.logger.info(f"[V2-NM] K8s mode — outage types: {self.outage_types}")
-
-        # Disable migration before any test activity
+    def _pre_bootstrap_hook(self):
         self._disable_migration_service()
-
-        self._bootstrap_cluster()
-        sleep_n_sec(5)
-
-        iteration = 1
-        while True:
-            if self.dump_validation_errors:
-                raise RuntimeError(
-                    f"[V2-NM] Placement dump validation failed: {self.dump_validation_errors}"
-                )
-            pair = self._pick_outage_pair()
-            if pair:
-                self.logger.info(
-                    f"[V2-NM] Dual outage (npcs={self.npcs}, ft={self.max_fault_tolerance}): "
-                    f"{pair[0]} + {pair[1]}"
-                )
-                self._dual_outage_cycle(*pair)
-            else:
-                self.logger.info(
-                    f"[V2-NM] Single outage (npcs={self.npcs}, ft={self.max_fault_tolerance})"
-                )
-                outage_type = self._perform_outage()
-                self.restart_nodes_after_failover(outage_type)
-
-            self._iter += 1
-            if self._iter % self.validate_every == 0:
-                self.logger.info(f"[V2-NM] {self._iter} outages → wait & validate all FIO")
-                for t in self.fio_threads:
-                    t.join(timeout=10)
-                self.fio_threads = []
-
-                self.common_utils.manage_fio_threads(
-                    self.fio_node, [], timeout=self._fio_wait_timeout
-                )
-
-                self.collect_outage_diagnostics("validation_checkpoint")
-
-                for lvol, det in self.lvol_mount_details.items():
-                    self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
-                for cname, det in self.clone_mount_details.items():
-                    self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
-
-                # Migration disabled — skip migration window pause
-                self.logger.info("[V2-NM] FIO validated; migration disabled, skipping migration window")
-
-                self._compute_fio_size()
-                self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)
-                self.logger.info("[V2-NM] Next FIO wave started")
-
-            self.logger.info(f"[V2-NM] Iter {iteration} complete → starting next outage")
-            iteration += 1

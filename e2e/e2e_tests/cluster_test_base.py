@@ -154,6 +154,12 @@ class TestClusterBase:
         self.ssh_obj = SshUtils(bastion_server=self.bastion_server)
         self.logger = setup_logger(__name__)
         self.k8s_test = kwargs.get("k8s_run", False)
+        # Outage-gap accounting; only the rapid-failover tests act on these.
+        self.MAX_OUTAGE_GAP_SEC = 60
+        self._node_online_ts = None
+        # Storage-node IPs outaged since the last checkpoint. A network outage
+        # aborts the node, so these are the only ones worth scanning for cores.
+        self._outaged_since_checkpoint = set()
         if self.k8s_test and not self.api_base_url:
             # K8s mode: route all sbcli calls through kubectl exec into admin pod.
             # K8sUtils needs the first management node IP from MNODES / K3S_MNODES.
@@ -4041,14 +4047,54 @@ class TestClusterBase:
             f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds."
         )
     
-    def check_core_dump(self):
+    # ── outage-gap accounting ────────────────────────────────────────────────
+    # Used by the rapid-failover tests, whose whole purpose is to land the next
+    # outage while migration from the previous one is still in flight. The time
+    # between "node online" and "next outage" is therefore a correctness
+    # property of those tests, not a performance detail, so it is measured and
+    # warned on rather than assumed.
+
+    def _mark_nodes_online(self):
+        """Start the clock on the gap before the next outage."""
+        self._node_online_ts = time.monotonic()
+
+    def _check_outage_gap(self):
+        """Log the idle time since recovery, and warn when it blows the budget."""
+        if getattr(self, "_node_online_ts", None) is None:
+            return
+        gap = time.monotonic() - self._node_online_ts
+        self._node_online_ts = None
+        if gap > self.MAX_OUTAGE_GAP_SEC:
+            self.logger.warning(
+                f"[gap] {gap:.1f}s since nodes came online, over the "
+                f"{self.MAX_OUTAGE_GAP_SEC}s budget -- migration may have drained "
+                f"before this outage, weakening the test"
+            )
+        else:
+            self.logger.info(f"[gap] {gap:.1f}s since nodes came online")
+
+    def check_core_dump(self, nodes=None):
+        """Look for SPDK core dumps and, on docker, produce backtraces for them.
+
+        *nodes* optionally narrows the scan to specific storage-node IPs. Tests
+        that outage a couple of nodes per cycle use it to check just those --
+        a network outage aborts the node, so that is where a core lands -- and
+        skip the cluster-wide sweep. When omitted the behaviour is unchanged:
+        every storage node plus every management node is scanned.
+        """
+        full_sweep = nodes is None
+        targets = [n for n in (self.storage_nodes if full_sweep else nodes) if n]
+        if not targets:
+            self.logger.info("check_core_dump: no target nodes, skipping.")
+            return
+
         if self.k8s_test:
             k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
             if not k8s_obj:
                 self.logger.info("check_core_dump: k8s_utils not available, skipping.")
                 return
 
-            for node_ip in self.storage_nodes:
+            for node_ip in targets:
                 files = k8s_obj.list_files_in_spdk_pod(node_ip, "/etc/simplyblock/")
                 self.logger.info(f"Files in /etc/simplyblock (spdk pod for {node_ip}): {files}")
                 if any("core" in f for f in files) and not any("tmp_cores" in f for f in files):
@@ -4067,11 +4113,12 @@ class TestClusterBase:
                                 f"for {node_ip}: {exc}"
                             )
 
-            # Collect host-level core dumps from K8s node hosts
-            self._check_host_core_dumps_k8s(k8s_obj)
+            # Host-level dumps are a whole-cluster scan, so only on a full sweep
+            if full_sweep:
+                self._check_host_core_dumps_k8s(k8s_obj)
             return
 
-        for node in self.storage_nodes:
+        for node in targets:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
             if "core" in files and "tmp_cores" not in files:
@@ -4079,7 +4126,7 @@ class TestClusterBase:
                 self.logger.info(f"Core file found on storage node {node} at {cur_date}")
                 self._analyze_core_dumps_docker(node)
 
-        for node in self.mgmt_nodes:
+        for node in (self.mgmt_nodes if full_sweep else []):
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
             if "core" in files and "tmp_cores" not in files:
