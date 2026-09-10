@@ -93,7 +93,7 @@ def list_generations(cluster: Cluster, group: ConsistencyGroupResource) -> built
 
 
 @instance_api.post('/snapshots', name='clusters:consistency-groups:snapshots:take',
-                   status_code=201, response_model=ConsistencyGroupGenerationDTO)
+                   response_model=ConsistencyGroupGenerationDTO)
 def take_generation(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupGenerationDTO:
     """Take one crash-consistent generation across every current member (§5)."""
     _ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
