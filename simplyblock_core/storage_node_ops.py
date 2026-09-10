@@ -5235,11 +5235,36 @@ def _finalize_node_removal(removed_node: StorageNode):
     logger.info("done")
 
 
+def _build_data_nics_from_names(node_info, names):
+    """Build IFace entries for the given interface names from a node's live
+    ``network_interface`` info (as returned by the node agent's ``info()``).
+
+    Returns ``(ifaces, missing)``: ``missing`` is the first requested name that
+    the node does not expose (``ifaces`` is then the partial list built so far),
+    or ``None`` when every name resolved. Pure and RPC-free so the data-nic
+    replacement on restart is unit-testable.
+    """
+    available = (node_info or {}).get('network_interface', {})
+    ifaces: list = []
+    for if_name in names:
+        if if_name not in available:
+            return ifaces, if_name
+        device = available[if_name]
+        ifaces.append(IFace({
+            'uuid': str(uuid.uuid4()),
+            'if_name': if_name,
+            'ip4_address': device['ip'],
+            'status': device['status'],
+            'net_type': device['net_type']}))
+    return ifaces, None
+
+
 def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        new_data_nics=[],
         force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None):
     """Wrapper that guarantees the node is reset to OFFLINE if the restart
     fails after THIS call set the RESTARTING status. Without this, any
@@ -5357,7 +5382,7 @@ def restart_storage_node(
             spdk_image=spdk_image, set_spdk_debug=set_spdk_debug,
             small_bufsize=small_bufsize, large_bufsize=large_bufsize,
             force=force, node_address=node_address, reattach_volume=reattach_volume,
-            clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
+            clear_data=clear_data, new_ssd_pcie=new_ssd_pcie, new_data_nics=new_data_nics,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image,
             current_restart_task_id=current_restart_task_id or _owned_task_id,
             restart_claim_token=_claim_token)
@@ -5556,6 +5581,7 @@ def _restart_storage_node_impl(
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        new_data_nics=[],
         force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None,
         restart_claim_token=""):
     db_controller = DBController()
@@ -5701,6 +5727,22 @@ def _restart_storage_node_impl(
     fabric_tcp = cluster.fabric_tcp
     fabric_rdma = cluster.fabric_rdma
     snode_api = snode.client(timeout=5 * 60, retry=3)
+    # Replace the node's data NIC set on restart. This lets an operator swap a
+    # failed/renamed storage NIC for a different one without re-adding the node:
+    # the requested interfaces are looked up on the live host and become the new
+    # data_nics, so the SPDK restart re-advertises the NVMe-oF listeners on the
+    # new IPs. Mirrors the node_address path, but changes the interface NAMES.
+    if new_data_nics:
+        nic_info, _ = snode_api.info()
+        rebuilt, missing = _build_data_nics_from_names(nic_info, new_data_nics)
+        if missing:
+            available = list((nic_info or {}).get('network_interface', {}).keys())
+            logger.error(
+                f"Requested data nic '{missing}' not found on node "
+                f"{snode.get_id()}; available: {available}")
+            return False
+        snode.data_nics = rebuilt
+        logger.info(f"Replacing data nics on {snode.get_id()} with: {new_data_nics}")
     for nic in snode.data_nics:
         if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
             nic.trtype = "RDMA"
@@ -5712,6 +5754,11 @@ def _restart_storage_node_impl(
             active_tcp = True
     snode.active_tcp = active_tcp
     snode.active_rdma = active_rdma
+    if new_data_nics and not active_tcp and not active_rdma:
+        logger.error(
+            f"None of the requested data nics {new_data_nics} on {snode.get_id()} "
+            f"is a usable storage interface (TCP/RDMA); aborting restart")
+        return False
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
     node_info, _ = snode_api.info()
