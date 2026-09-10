@@ -37,34 +37,12 @@ MAX_LVOL = "75"  # capped by constants.MAX_SUBSYSTEMS_PER_NODE (75): above it, v
 # Replace this with your actual Subnet ID (e.g., "subnet-0593459d6b931ee4c")
 SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
-#: Root disk of the mgmt node. 30G filled to 100% four hours into the
-#: 2026-08-31 soak: /etc/foundationdb/backup reached 7.0G (524 unpruned
-#: ~28MB backups, one per minute) on top of ~14G of fixed overhead
-#: (containerd blobs 9.9G, Graylog/OpenSearch indices 4.2G). A full disk
-#: made FDB transactions time out (error 1031), `sbctl sn list --json`
-#: returned rc=1, and the run aborted at iteration 37 of 40 with 36 passes
-#: and no product failure. 60G buys roughly 27h at that backup rate; the
-#: real fix is retention on fdb_backup.
-MGMT_ROOT_GB = 60
-
 SN_TYPE = "i3en.2xlarge"
 #: Pin the SPDK/ultra image so a run is reproducible and comparable against
 #: another run. Without it, sn add-node takes the control-plane default, which
 #: drifts as main is rebuilt -- useless when the whole point of a run is to
 #: hold the build constant. Empty string = control-plane default.
-#: NOTE ultra publishes per-arch "<branch>-<sha>-amd64" tags for main, but the
-#: dbg-main branch has only the plain "<branch>-<sha>" tag -- appending -amd64
-#: gives a 404. dbg-main-84cece66 is itself a single linux/amd64 manifest.
-SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:dbg-main-84cece66"
-
-
-#: Dedicated client disk for fio --write_iolog history. 300 GB holds ~3h at
-#: the observed ~95 GB/h across six volumes; the soak trims to
-#: --iolog-keep-hours regardless. Kept off the root filesystem because
-#: filling that stops fio and the client itself.
-IOLOG_DISK_GB = 300
-IOLOG_DEVICE = '/dev/sdf'
-IOLOG_MOUNT = '/iolog'
+SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:main-d91ff03a-amd64"
 
 SN_COUNT = 6
 MGMT_TYPE = "m6i.2xlarge"
@@ -85,9 +63,9 @@ VOLUME_PLAN = [
 ]
 
 
-# --- Helper: Management Node with 60GB Root ---
+# --- Helper: Management Node with 30GB Root ---
 def launch_mgmt():
-    print(f"Launching Management Node with {MGMT_ROOT_GB}GB Root Volume...")
+    print("Launching Management Node with 30GB Root Volume...")
     return ec2.create_instances(
         KeyName=KEY_NAME,
         MinCount=1,
@@ -98,7 +76,7 @@ def launch_mgmt():
         BlockDeviceMappings=[{
             'DeviceName': '/dev/sda1',
             'Ebs': {
-                'VolumeSize': MGMT_ROOT_GB,
+                'VolumeSize': 30,
                 'DeleteOnTermination': True,
                 'VolumeType': 'gp3'
             }
@@ -338,20 +316,6 @@ def create_aws_clients(count, instance_type):
         MaxCount=count,
         KeyName=KEY_NAME,
 
-        # A dedicated disk for fio's write history. On 2026-08-26 the iologs
-        # filled the client's 8.8G root in about four minutes (6.3 GiB,
-        # ~95 GB/hour across six volumes), and a full root while fio is
-        # running can itself manufacture I/O errors. One hour of history needs
-        # ~100 GB, so this is sized for it and kept off the root entirely.
-        BlockDeviceMappings=[
-            {'DeviceName': '/dev/sda1',
-             'Ebs': {'VolumeSize': 30, 'VolumeType': 'gp3',
-                     'DeleteOnTermination': True}},
-            {'DeviceName': IOLOG_DEVICE,
-             'Ebs': {'VolumeSize': IOLOG_DISK_GB, 'VolumeType': 'gp3',
-                     'DeleteOnTermination': True}},
-        ],
-
         NetworkInterfaces=[{
             'DeviceIndex': 0,
             'SubnetId': SUBNET_ID,
@@ -432,7 +396,7 @@ class PersistentSSH:
 #: the metadata this script writes, and its own source there.
 SOAK_SCRIPT = "aws_dual_node_outage_soak_multipath.py"
 SOAK_LAUNCHER = "start_soak_base.sh"
-SOAK_EXTRA_FILES = ("collect_logs.py", "iolog_trimmer.sh")
+SOAK_EXTRA_FILES = ("collect_logs.py",)
 METADATA_FILE = "cluster_metadata_base.json"
 
 
@@ -554,23 +518,13 @@ def main():
             t.result()
     print("Phase 2b: DONE - all SNs configured.")
 
-    # Detached, like 2a -- but for a different reason than 2a's load spike.
-    # `sn deploy` leaves the SNodeAPI container running, and a plain
-    # exec_command hands that daemon the channel's stdout, so the pipe never
-    # reaches EOF: stdout.read() blocks past the command's own exit and dies
-    # on paramiko's inactivity timeout instead. Observed 2026-08-31 -- all six
-    # nodes had SNodeAPI up and answering 200 by 19:04, and the deploy still
-    # aborted at 2c with TimeoutError, discarding a cluster that was fine.
-    # Redirecting to a file detaches the daemon from the channel.
     print("Phase 2c: Deploying storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
-        raise RuntimeError("The command below references an unbound variable")
-        #tasks = [executor.submit(
-        #    ssh_exec_detached, ip,
-        #    f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}",
-        #    label="sn deploy") for ip in sn_ips]
-        #for t in tasks:
-        #    t.result()
+        tasks = [executor.submit(ssh_exec, ip, [
+            f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}"
+        ], check=True) for ip in sn_ips]
+        for t in tasks:
+            t.result()
     print("Phase 2c: DONE - all SNs deployed. Rebooting...")
 
     # Reboot all SNs in parallel (reboot returns non-zero, don't check)
@@ -654,26 +608,10 @@ def main():
     print("Pool created.")
 
     # Commands for Performance Clients
-    # The iolog disk is attached as IOLOG_DEVICE but surfaces under a nitro
-    # name (/dev/nvme?n1), so find it by size and by having no filesystem
-    # rather than by device path. Mounted before fio starts, because fio's
-    # --write_iolog target directory must exist up front.
-    iolog_mount_cmd = (
-        "set -e; "
-        "dev=$(lsblk -dpno NAME,SIZE,FSTYPE | awk '$2 ~ /^" + str(IOLOG_DISK_GB) + "G/ && $3 == \"\" {print $1; exit}'); "
-        "if [ -z \"$dev\" ]; then echo 'iolog disk NOT found -- history will be disabled'; exit 0; fi; "
-        "echo \"iolog disk: $dev\"; "
-        "sudo blkid \"$dev\" >/dev/null 2>&1 || sudo mkfs.xfs -f \"$dev\"; "
-        "sudo mkdir -p " + IOLOG_MOUNT + "; "
-        "mountpoint -q " + IOLOG_MOUNT + " || sudo mount \"$dev\" " + IOLOG_MOUNT + "; "
-        "sudo chown ec2-user:ec2-user " + IOLOG_MOUNT + "; "
-        "df -h " + IOLOG_MOUNT + " | tail -1"
-    )
     client_prep_cmds = [
         "sudo dnf install nvme-cli fio -y",
         "sudo modprobe nvme-tcp",
-        "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
-        iolog_mount_cmd,
+        "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf"
     ]
 
 

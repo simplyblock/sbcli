@@ -1,3 +1,4 @@
+# coding=utf-8
 """Retention for replication-driven internal snapshots (D2), against real FDB.
 
 ``snapshot_replication._prune_internal_snapshots`` decides which internal
@@ -27,7 +28,6 @@ Mocked here — everything *above* the database, per the tier's rule:
   integration tier never talks to a storage node.
 """
 
-import itertools
 import pytest
 
 from simplyblock_core.db_controller import DBController
@@ -137,7 +137,7 @@ def _healthy_chain(source_snaps):
         per_lvol.setdefault(s.lvol.get_id(), []).append(s)
     for snaps in per_lvol.values():
         snaps.sort(key=lambda s: s.created_at)
-        for prev, nxt in itertools.pairwise(snaps):
+        for prev, nxt in zip(snaps, snaps[1:]):
             chain[nxt.target_replicated_snap_uuid] = prev.target_replicated_snap_uuid
     return chain
 

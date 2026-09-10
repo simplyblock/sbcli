@@ -194,15 +194,20 @@ _LEADERLESS_WARN_INTERVAL_SEC = 60
 
 def _warn_leaderless(lvs_name):
     now = time.monotonic()
-    last, suppressed = _leaderless_warn_memo.get(lvs_name, (0.0, 0))
-    if now - last >= _LEADERLESS_WARN_INTERVAL_SEC:
+    entry = _leaderless_warn_memo.get(lvs_name)
+    # An unseen lvs must warn NOW. Seeding "last" with 0.0 instead suppressed
+    # the FIRST warning whenever monotonic() itself was still under the
+    # interval — i.e. for the first 60s after boot, which is exactly when a
+    # leadership flap is most likely to be happening.
+    if entry is None or now - entry[0] >= _LEADERLESS_WARN_INTERVAL_SEC:
+        suppressed = entry[1] if entry else 0
         logger.warning(
             f"No confirmed leader for {lvs_name} — snapshot deletes needing "
             f"phase-1 are deferred ({suppressed} similar messages suppressed "
             f"in the last {_LEADERLESS_WARN_INTERVAL_SEC}s)")
         _leaderless_warn_memo[lvs_name] = (now, 0)
     else:
-        _leaderless_warn_memo[lvs_name] = (last, suppressed + 1)
+        _leaderless_warn_memo[lvs_name] = (entry[0], entry[1] + 1)
 
 
 def _poll_delete_status(node, bdev_name):

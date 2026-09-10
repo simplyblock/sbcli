@@ -1,4 +1,6 @@
-from typing import Annotated
+from typing import Annotated, List, Optional
+
+from simplyblock_core.models.replication import ConsistencyGroup
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -25,16 +27,30 @@ db = DBController()
 class TargetParams(BaseModel):
     target_name: str
     target_cluster_id: UUID
-    target_pool_id: UUID | None = None
-    timeout_sec: util.Unsigned | None = None
+    target_pool_id: Optional[UUID] = None
+    timeout_sec: Optional[util.Unsigned] = None
 
 
 class PolicyParams(BaseModel):
     policy_name: str
     target_id: UUID
     interval_min: util.Unsigned = 1
-    mode: ReplicationMode | None = None
-    keep_replicated: Annotated[int, Field(ge=2)] | None = None
+    mode: Optional[ReplicationMode] = None
+    keep_replicated: Optional[Annotated[int, Field(ge=2)]] = None
+    #: Group the policy's volumes into ONE crash-consistent unit: snapshots are
+    #: taken as atomically frozen generations and the members fail over
+    #: together. Decided at creation only — the group record is created with
+    #: the policy and members pin placement from the first attach.
+    consistency_group: bool = False
+
+
+def _group_for(policy: ReplicationPolicy) -> Optional[ConsistencyGroup]:
+    """The policy's consistency group, or None for an ordinary policy —
+    resolved here so the DTO can report the pinned placement without the
+    model layer knowing about DTOs."""
+    if not getattr(policy, 'consistency_group', False):
+        return None
+    return db.get_consistency_group_for_policy(policy.get_id())
 
 
 def _config_error(e: ReplicationConfigError):
@@ -56,7 +72,7 @@ targets_api = APIRouter()
 
 
 @targets_api.get('/', name='clusters:replication:targets:list')
-def list_targets(cluster: Cluster) -> list[ReplicationTargetDTO]:
+def list_targets(cluster: Cluster) -> List[ReplicationTargetDTO]:
     return [
         ReplicationTargetDTO.from_model(target)
         for target in replication_policy_controller.list_targets(cluster.get_id())
@@ -106,7 +122,7 @@ def delete_target(cluster: Cluster, target: ReplicationTarget) -> Response:
 
 
 @target_instance_api.post('/failover', name='clusters:replication:targets:failover')
-def failover_target(cluster: Cluster, target: ReplicationTarget) -> list[FailoverResultDTO]:
+def failover_target(cluster: Cluster, target: ReplicationTarget) -> List[FailoverResultDTO]:
     """Fail over EVERY volume replicating to this target.
 
     A site loss has to move all volumes at once; doing it volume by volume was
@@ -123,9 +139,9 @@ policies_api = APIRouter()
 
 
 @policies_api.get('/', name='clusters:replication:policies:list')
-def list_policies(cluster: Cluster) -> list[ReplicationPolicyDTO]:
+def list_policies(cluster: Cluster) -> List[ReplicationPolicyDTO]:
     return [
-        ReplicationPolicyDTO.from_model(policy)
+        ReplicationPolicyDTO.from_model(policy, group=_group_for(policy))
         for policy in replication_policy_controller.list_policies(cluster.get_id())
     ]
 
@@ -138,7 +154,8 @@ def create_policy(request: Request, cluster: Cluster, parameters: PolicyParams,
         policy_id = replication_policy_controller.add_policy(
             cluster.get_id(), parameters.policy_name, str(parameters.target_id),
             interval_min=parameters.interval_min, mode=parameters.mode,
-            keep_replicated=parameters.keep_replicated)
+            keep_replicated=parameters.keep_replicated,
+            consistency_group=parameters.consistency_group)
     except ReplicationConfigError as e:
         raise _config_error(e)
     except KeyError as e:
@@ -150,7 +167,7 @@ def create_policy(request: Request, cluster: Cluster, parameters: PolicyParams,
         entity_id=UUID(policy.uuid),
         route_name='clusters:replication:policies:detail',
         route_kwargs={'cluster_id': UUID(cluster.get_id()), 'policy_id': UUID(policy.uuid)},
-        get_full=lambda _: ReplicationPolicyDTO.from_model(policy),
+        get_full=lambda _: ReplicationPolicyDTO.from_model(policy, group=_group_for(policy)),
     )
 
 
@@ -159,7 +176,7 @@ policy_instance_api = APIRouter(prefix='/{policy_id}')
 
 @policy_instance_api.get('/', name='clusters:replication:policies:detail')
 def get_policy(cluster: Cluster, policy: ReplicationPolicy) -> ReplicationPolicyDTO:
-    return ReplicationPolicyDTO.from_model(policy)
+    return ReplicationPolicyDTO.from_model(policy, group=_group_for(policy))
 
 
 @policy_instance_api.delete('/', name='clusters:replication:policies:delete',
@@ -173,7 +190,7 @@ def delete_policy(cluster: Cluster, policy: ReplicationPolicy) -> Response:
 
 
 @policy_instance_api.post('/failover', name='clusters:replication:policies:failover')
-def failover_policy(cluster: Cluster, policy: ReplicationPolicy) -> list[FailoverResultDTO]:
+def failover_policy(cluster: Cluster, policy: ReplicationPolicy) -> List[FailoverResultDTO]:
     return [
         FailoverResultDTO(**result)
         for result in replication_policy_controller.failover_policy(policy.get_id())

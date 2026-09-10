@@ -668,12 +668,25 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
         if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
             continue
 
+        if not getattr(lvol, "from_source", True):
+            # The retired SOURCE of a fail-over: its namespace was removed
+            # deliberately (_retire_source_data_path) and the record only
+            # survives as the fail-back delta base. Checking it always fails,
+            # and the self-heal below would register the namespace back —
+            # resurrecting the stale device the retirement removed.
+            continue
+
         if snode.lvstore_status != "ready":
             continue
 
         passed = True
         try:
-            passed &= health_controller.check_subsystem(lvol.nqn, rpc_client=snode.rpc_client(), ns_uuid=lvol.uuid)
+            # Verify against the WIRE identity: after a fail-back the record
+            # uuid differs from the namespace's advertised uuid, and checking
+            # the record uuid here marked healthy volumes unhealthy and drove
+            # the self-heal below into re-registering the wrong identity.
+            passed &= health_controller.check_subsystem(
+                lvol.nqn, rpc_client=snode.rpc_client(), ns_uuid=lvol.get_ns_uuid())
         except Exception as e:
             logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
             logger.error(e)
@@ -687,7 +700,8 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                     try:
                         ret = health_controller.check_subsystem(
-                            lvol.nqn, rpc_client=sec_node.rpc_client(), ns_uuid=lvol.uuid)
+                            lvol.nqn, rpc_client=sec_node.rpc_client(),
+                            ns_uuid=lvol.get_ns_uuid())
                         if not ret:
                             passed = False
                             # Explicit, greppable degraded-path signal. Without

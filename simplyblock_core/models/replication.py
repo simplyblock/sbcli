@@ -1,3 +1,4 @@
+# coding=utf-8
 """Replication targets and policies.
 
 Three levels: a source cluster has any number of **targets** (named
@@ -41,7 +42,7 @@ class ReplicationTarget(BaseModel):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
         super().write_to_db(kv_store)
 
 
@@ -88,7 +89,7 @@ class ReplicationPolicy(BaseModel):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
         super().write_to_db(kv_store)
 
 
@@ -123,7 +124,7 @@ class ConsistencyGroup(BaseModel):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
         super().write_to_db(kv_store)
 
     def included_in_seq(self, lvol_id, seq):

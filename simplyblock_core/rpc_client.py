@@ -1,11 +1,8 @@
 import errno
-import hashlib
 import json
-import threading
-from collections import OrderedDict
 from enum import IntEnum
 from json import JSONDecodeError
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Optional
 
 import jsonschema
 import requests
@@ -199,97 +196,6 @@ RPC_METHOD_NOT_FOUND = -32601
 RPC_UNSUPPORTED = "__rpc_unsupported__"
 
 
-def _build_session(host, port, username, password: SecretStr, retry: int,
-                   settings: Settings) -> requests.Session:
-    """Build one fully-configured ``requests.Session``. Split out of
-    ``RPCClient.__init__`` so ``RPCSessionPool`` can memoize it."""
-    session = requests.session()
-    if settings.tls_connect != "disabled":
-        session.verify = str(settings.tls_certificate_authority)
-    session.auth = (username, password.get_secret_value())
-    retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
-                    allowed_methods=RPCClient.DEFAULT_ALLOWED_METHODS)
-    session.mount("http://", HTTPAdapter(max_retries=retries))
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    if settings.tls_connect == "authenticated":
-        session.cert = (str(settings.tls_certificate), str(settings.tls_key))
-    return session
-
-
-class RPCSessionPool:
-    """Process-local cache of configured ``requests.Session`` objects,
-    shared across ``RPCClient`` instances instead of building a fresh one
-    (TCP+TLS+auth setup) per instance.
-
-    Key is ``(host, port, username, password, tls_connect, retry)`` —
-    ``retry`` is included because it's baked into the mounted ``Retry`` at
-    ``Session``-construction time; ``timeout`` is deliberately excluded
-    because it's already applied per-call (``effective_timeout`` in
-    ``_request2``/``_request3``) and never touches the ``Session`` itself.
-
-    Bounded LRU rather than unbounded, in case a node's identity churns
-    (IP failover, credential rotation) faster than ``evict()`` is called.
-    """
-
-    _MAX_ENTRIES = 256
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._sessions: OrderedDict[tuple, requests.Session] = OrderedDict()
-
-    @staticmethod
-    def _fingerprint(password: SecretStr) -> str:
-        # Hashed rather than stored raw so the key tuple never carries the
-        # plaintext secret (e.g. into a repr() in a stack trace). Not a
-        # security comparison, so a plain hash is fine here.
-        return hashlib.sha256(password.get_secret_value().encode()).hexdigest()
-
-    def get(self, host, port, username, password: SecretStr, retry: int,
-            settings: Settings) -> requests.Session:
-        key = (host, port, username, self._fingerprint(password),
-               settings.tls_connect, retry)
-        with self._lock:
-            session = self._sessions.get(key)
-            if session is not None:
-                self._sessions.move_to_end(key)
-                return session
-        # Built outside the lock — no sockets are opened here, so a race
-        # costs at most a duplicate build, never a lock held during I/O.
-        session = _build_session(host, port, username, password, retry, settings)
-        with self._lock:
-            existing = self._sessions.get(key)
-            if existing is not None:
-                self._sessions.move_to_end(key)
-                return existing
-            self._sessions[key] = session
-            if len(self._sessions) > self._MAX_ENTRIES:
-                self._sessions.popitem(last=False)
-        return session
-
-    def evict(self, host, port) -> None:
-        """Drop every cached session for ``(host, port)`` (all retry
-        buckets/credentials). Call wherever a node's ``mgmt_ip`` or RPC
-        credentials change, so a stale session isn't reused afterward."""
-        with self._lock:
-            for key in [k for k in self._sessions if k[0] == host and k[1] == port]:
-                del self._sessions[key]
-
-    def clear(self) -> None:
-        """Drop every cached session. Test-only, for pool-reset fixtures."""
-        with self._lock:
-            self._sessions.clear()
-
-
-#: One pool per process, shared by every RPCClient constructed in it.
-_session_pool = RPCSessionPool()
-
-
-def evict_cached_session(host, port) -> None:
-    """Public wrapper around ``_session_pool.evict()`` for callers outside
-    this module (e.g. ``storage_node_ops`` on node restart/failover)."""
-    _session_pool.evict(host, port)
-
-
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
@@ -314,8 +220,16 @@ class RPCClient:
         self.username = username
         self.password = password
         self.timeout = timeout
-        self.retry = retry
-        self.session = _session_pool.get(host, port, username, password, retry, settings)
+        self.session = requests.session()
+        if settings.tls_connect != "disabled":
+            self.session.verify = str(settings.tls_certificate_authority)
+        self.session.auth = (self.username, self.password.get_secret_value())
+        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
+                        allowed_methods=self.DEFAULT_ALLOWED_METHODS)
+        self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        if settings.tls_connect == "authenticated":
+            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
 
     def _request(self, method, params=None, request_timeout=None):
         ret, _ = self._request2(method, params, request_timeout=request_timeout)
@@ -412,7 +326,7 @@ class RPCClient:
     def subsystem_list(self) -> list[dict]:
         return self._request3("nvmf_get_subsystems")
 
-    def subsystem_get(self, nqn: str) -> dict | None:
+    def subsystem_get(self, nqn: str) -> Optional[dict]:
         try:
             return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
         except RPCRemoteError as e:
@@ -912,9 +826,7 @@ class RPCClient:
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
-                           write_protection=False, full_page_unmap=False,
-                           checksum_method=0, cache_size=0, cache_eviction_threshold=0,
-                           force_4k_atomic=False):
+                           write_protection=False, full_page_unmap=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -938,19 +850,6 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
-        # Inline CRC checksum validation. method: 0=off, 1=md-on-device, 2=fallback (extra md page).
-        # The data plane reads md_size from spdk_bdev_get_md_size and refuses method=1 when md_size==0,
-        # so the caller must pick method=2 for devices without NVMe metadata support.
-        if checksum_method:
-            params["checksum_validation_method"] = int(checksum_method)
-            if cache_size:
-                params["cache_size"] = int(cache_size)
-            if cache_eviction_threshold:
-                params["cache_eviction_threshold"] = int(cache_eviction_threshold)
-            # The device's logical block size is <4K but it guarantees 4K write
-            # atomicity (cluster.atomic_4k). Tell the data plane to skip its >=4K
-            # block-size gate for fallback-mode checksum validation.
-            params["cv_ignore_block_size"] = bool(force_4k_atomic)
         return self._request("bdev_alceml_create", params)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -1504,36 +1403,6 @@ class RPCClient:
 
     def bdev_wait_for_examine(self):
         return self._request("bdev_wait_for_examine")
-
-    def bdev_aio_create(self, name, filename, block_size=0):
-        """Create an SPDK AIO bdev over a Linux block device (lblk cluster
-        mode). ``filename`` is the device path — prefer the stable
-        /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
-        logical block size."""
-        params = {"name": name, "filename": filename}
-        if block_size:
-            params["block_size"] = block_size
-        return self._request("bdev_aio_create", params)
-
-    def bdev_aio_delete(self, name):
-        return self._request("bdev_aio_delete", {"name": name})
-
-    def bdev_aio_rescan(self, name):
-        """Re-read the backing device's size (device grow pickup)."""
-        return self._request("bdev_aio_rescan", {"name": name})
-
-    def bdev_set_qd_sampling_period(self, name, period_us):
-        """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
-        queue_depth/io_time — the hung-IO watchdog's signal for AIO base
-        bdevs (period 0 disables)."""
-        params = {"name": name, "period": period_us}
-        return self._request("bdev_set_qd_sampling_period", params)
-
-    def get_bdevs_2(self, name):
-        """(ret, err) probe variant of bdev_get_bdevs, mirroring
-        bdev_nvme_controller_list_2 — used where the caller must distinguish
-        'bdev gone' from RPC failure without raising."""
-        return self._request2("bdev_get_bdevs", {"name": name})
 
     def bdev_enable_histogram(self, name, enable=True, opc=None):
         # opc filters to a single I/O type (e.g. "read"/"write"); requires
@@ -2167,8 +2036,8 @@ class RPCClient:
         }
         # Send the key only when opting in: the RPC parameter is optional on the
         # SPDK side, so every existing caller keeps its exact current wire form.
-        if allow_partial:
-            params["allow_partial"] = True
+        # if allow_partial:
+        #     params["allow_partial"] = True
         return self._request("bdev_lvol_transfer", params)
 
     def bdev_lvol_transfer_stat(self, name):

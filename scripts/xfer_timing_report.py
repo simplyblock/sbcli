@@ -19,7 +19,6 @@ fine). Lines look like:
                 snap=a0f48bf5 round=2 ms=1843.2 bytes=33554432 mbps=18.2 ok=1
 """
 import argparse
-import itertools
 import re
 import sys
 from collections import defaultdict
@@ -183,7 +182,7 @@ def report(events, csv_path=None):
         gaps = []
         for _lvol, times in passes.items():
             times.sort()
-            gaps += [b - a for a, b in itertools.pairwise(times)]
+            gaps += [b - a for a, b in zip(times, times[1:])]
         if gaps:
             gaps.sort()
             print("\ntask-runner pass spacing: n=%d  median=%.1fs  max=%.1fs"

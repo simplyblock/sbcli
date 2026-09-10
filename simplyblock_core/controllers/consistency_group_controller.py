@@ -1,3 +1,4 @@
+# coding=utf-8
 """Consistency groups: group-wide crash-consistent snapshots for a policy.
 
 A replication policy created with ``consistency_group=True`` owns exactly one
@@ -303,6 +304,8 @@ def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True
         return None, (f"Group snapshot RPC failed on {primary_node.get_id()}; "
                       f"SPDK rolled the partial group back")
 
+    # Bound outside the closure: mypy does not carry the ``group is None``
+    # guard's narrowing into nested functions.
     group_lvs_name = group.lvs_name
 
     def _rollback_all():
