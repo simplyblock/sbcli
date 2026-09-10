@@ -1,14 +1,14 @@
 # Findings ignored here are not fixable from our side: they are CPython
-# stdlib issues that upstream has explicitly declined to backport to the 3.14
-# branch the image's interpreter comes from, so no 3.14.x release will ever
-# clear them and `only-fixed` does not filter them out — Grype sees a fix
-# version (an alpha of the *next* minor) and reports the match.
+# stdlib issues with no fix in any 3.14.x release of the image's interpreter,
+# whether because upstream declined the backport outright or simply hasn't
+# shipped one yet, so `only-fixed` does not filter them out — Grype sees a fix
+# version (an alpha/rc of the *next* minor) and reports the match.
 #
 # Each entry is scoped to the interpreter binary alone, so the same CVE in any
 # other package still fails the build.
 #
 # Re-check when the image moves to a Python minor that carries the fix (the
-# `PYTHON_VERSION` arg in docker/Dockerfile), or if upstream reverses the
+# `PYTHON_VERSION` arg in docker/Dockerfile), or if upstream reverses a
 # will-not-fix decision, and drop the entry then.
 ignore:
   # poplib command injection via newlines in user-controlled commands.
@@ -18,6 +18,28 @@ ignore:
   # The control plane never imports poplib — it speaks JSON-RPC and HTTP, not
   # POP3 — so nothing in the image reaches the affected code.
   - vulnerability: CVE-2025-15367
+    package:
+      name: python
+      type: binary
+
+  # stringprep/idna table mismatch: IDNA domain-name normalization can drift
+  # from RFC 3454 tables B.2/B.3, letting one Unicode hostname decode to two
+  # different ASCII (punycode) domains. Fixed in 3.15.0rc2 only.
+  # Nothing in the image calls `str.encode('idna')` or otherwise touches
+  # `stringprep`/the idna codec: hosts are addressed by IP or plain-ASCII
+  # name, never resolved through IDNA.
+  - vulnerability: CVE-2026-17084
+    package:
+      name: python
+      type: binary
+
+  # urllib.request.HTTPPasswordMgr (and its subclasses) matched stored
+  # credentials to a request URL without checking the scheme, so an
+  # HTTPS-scoped credential could leak over a downgraded http:// request.
+  # Fixed in 3.15.0rc2 only.
+  # The control plane never constructs an HTTPPasswordMgr or any of its
+  # subclasses — it doesn't use urllib.request's basic-auth handling at all.
+  - vulnerability: CVE-2026-15806
     package:
       name: python
       type: binary
