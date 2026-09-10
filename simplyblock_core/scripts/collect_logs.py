@@ -65,6 +65,7 @@ try:
     from kubernetes import client as k8s_client, config as k8s_config
     from kubernetes.client.rest import ApiException
     from kubernetes.stream import stream as k8s_stream
+    from urllib3.exceptions import HTTPError as K8sTransportError
 except ImportError:
     print(
         "ERROR: the 'kubernetes' library is required.\n"
@@ -747,7 +748,7 @@ def _list_pods(api, namespace: str, prefix: str) -> list[str]:
         ret = api.list_namespaced_pod(namespace)
         return [pod.metadata.name for pod in ret.items
                 if pod.metadata.name.startswith(prefix)]
-    except ApiException as exc:
+    except (ApiException, K8sTransportError) as exc:
         print(f"    WARN: could not list pods in {namespace}: {exc}", file=sys.stderr)
         return []
 
@@ -950,7 +951,8 @@ def main():
         metavar="NS",
         help=(
             "Kubernetes namespace to collect CSI / storage-node DS pod logs from "
-            "(default: simplyblock).  Pass an empty string to skip collection."
+            "(default: simplyblock).  Pass an empty string to skip collection; "
+            "ignored unless --mode kubernetes."
         ),
     )
     parser.add_argument(
@@ -1240,7 +1242,7 @@ def main():
 
         # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
 
-        k8s_ns = args.namespace
+        k8s_ns = args.namespace if args.mode == "kubernetes" else ""
         if k8s_ns:
             print(f"\n[7] Collecting Kubernetes pod logs (namespace: {k8s_ns}) …")
             _load_k8s_config(args.kubeconfig)
