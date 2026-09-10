@@ -4335,28 +4335,29 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         )
 
     def _ensure_namespace_storage_class(self):
-        """Create the namespaced StorageClass once, on first use."""
+        """Make sure the namespaced StorageClass exists.
+
+        run() creates it alongside every other StorageClass, so this is only a
+        safety net for a caller that reaches churn without that having happened.
+        It deliberately does NOT swallow a failure: falling back to the default
+        class would put each PVC in its own subsystem and only surface later as
+        a confusing "nothing shared" assertion.
+        """
         if self._namespace_sc_ready:
             return
-        try:
-            self.k8s_utils.create_storage_class(
-                name=self.NAMESPACE_SC_NAME,
-                cluster_id=self.cluster_id or "",
-                pool_name=self.pool_name,
-                ndcs=self.ndcs,
-                npcs=self.npcs,
-                max_namespace_per_subsys=self.max_namespace_per_subsys,
-            )
-            self._namespace_sc_ready = True
-            self.logger.info(
-                f"[churn] Namespaced StorageClass {self.NAMESPACE_SC_NAME} ready "
-                f"(max_namespace_per_subsys={self.max_namespace_per_subsys})"
-            )
-        except Exception as exc:
-            self.logger.warning(
-                f"[churn] Could not create namespaced StorageClass: {exc}; "
-                f"falling back to the default class for namespaced churn"
-            )
+        self.k8s_utils.create_storage_class(
+            name=self.NAMESPACE_SC_NAME,
+            cluster_id=self.cluster_id or "",
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            max_namespace_per_subsys=self.max_namespace_per_subsys,
+        )
+        self._namespace_sc_ready = True
+        self.logger.info(
+            f"[namespace] StorageClass {self.NAMESPACE_SC_NAME} created late "
+            f"(max_namespace_per_subsys={self.max_namespace_per_subsys})"
+        )
 
     def _create_namespaced_permanent_pvcs(self):
         """Create a pinned group of namespaced PVCs on each of a few nodes.
@@ -4368,13 +4369,6 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         the whole run.
         """
         self._ensure_namespace_storage_class()
-        if not self._namespace_sc_ready:
-            self.logger.warning(
-                "[namespace] namespaced StorageClass unavailable; standing set will "
-                "have no shared-subsystem PVCs"
-            )
-            return
-
         group = min(self.NAMESPACED_PVCS_PER_NODE, self.max_namespace_per_subsys)
         before = set(self.pvc_details)
         for node_id in self.sn_nodes[:self.NAMESPACED_NODE_COUNT]:
@@ -5118,6 +5112,24 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             npcs=self.npcs,
             fs_type="xfs",
         )
+        # Namespaced (shared-subsystem) StorageClass. Created here with the
+        # others rather than lazily on first use: a silent fallback to the
+        # default class would leave every PVC in its own subsystem and surface
+        # much later as a confusing "nothing shared" assertion. Same shape as
+        # k8s_native_namespace_failover.py.
+        self.k8s_utils.create_storage_class(
+            name=self.NAMESPACE_SC_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            max_namespace_per_subsys=self.max_namespace_per_subsys,
+        )
+        self._namespace_sc_ready = True
+        self.logger.info(
+            f"[namespace] StorageClass {self.NAMESPACE_SC_NAME} ready "
+            f"(max_namespace_per_subsys={self.max_namespace_per_subsys})"
+        )
         if self.tls_enabled:
             self.logger.info("TLS enabled — ensuring encryption pool exists")
             self.sbcli_utils.ensure_pool_exists(
@@ -5512,10 +5524,13 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
                 self.logger.info(f"[churn] Creating {plain_count} dynamic PVC(s)")
                 self.create_pvcs_with_fio(plain_count)
             if ns_count:
+                # run() already created the class; this only covers a caller
+                # that got here without it. No fallback to the default class --
+                # that would quietly produce unshared PVCs.
                 self._ensure_namespace_storage_class()
-                sc = self.NAMESPACE_SC_NAME if self._namespace_sc_ready else None
                 self.logger.info(f"[churn] Creating {ns_count} namespaced PVC(s)")
-                self.create_pvcs_with_fio(ns_count, storage_class=sc)
+                self.create_pvcs_with_fio(
+                    ns_count, storage_class=self.NAMESPACE_SC_NAME)
 
         if fully_online:
             self.create_snapshots_and_clones()
