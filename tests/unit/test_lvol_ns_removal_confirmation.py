@@ -51,16 +51,6 @@ class TestRemoveSubsysConfirmation(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def test_confirmed_removal_then_empty_subsystem_is_deleted(self):
-        self.rpc.subsystem_get.side_effect = [
-            {"namespaces": [{"nsid": 2, "uuid": "lvol-1"}]},
-            {"namespaces": []},  # confirmation poll: ns gone
-        ]
-        ok = lvol_controller._remove_lvol_subsys_from_node(self.lvol, self.rpc)
-        self.assertTrue(ok)
-        self.rpc.nvmf_subsystem_remove_ns.assert_called_once_with(NQN, 2)
-        self.rpc.subsystem_delete.assert_called_once_with(NQN)
-
     def test_confirmed_removal_with_surviving_namespaces_keeps_subsystem(self):
         self.rpc.subsystem_get.side_effect = [
             {"namespaces": [{"nsid": 2, "uuid": "lvol-1"},

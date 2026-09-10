@@ -374,6 +374,91 @@ REPL_CUTOVER_SHRINK_TIMEOUT_SEC = 900
 # if the operator is unavailable. Cutover proceeds regardless after this many seconds.
 REPL_CUTOVER_PROCEED_TIMEOUT_SEC = 120
 
+# --- cutover delta convergence -------------------------------------------
+# The IO freeze copies everything written since the last replicated snapshot,
+# so the cutover converges the delta FIRST: take a snapshot, transfer it, and
+# immediately take the next, until a round transfers in "low seconds". A fixed
+# two rounds (the previous behaviour) does not converge under load -- it just
+# stops.
+REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
+# Safety bound: a volume written faster than it replicates never converges, so
+# stop and freeze rather than looping forever.
+REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# When to stop converging in the open and take the lvstore for the endgame.
+# A round completing within this multiple of the target means the delta is
+# nearly converged, so the exclusive window that follows will be short. Claiming
+# earlier serialises the bulk catch-up, which is what produced 0/20 cutovers in
+# run 20260828_124859 (round 1 growing 340s -> 2584s purely from queueing).
+# The endgame starts once ordinary replication has the target within this many
+# seconds. Before that the cutover waits and takes NO snapshots of its own --
+# the iterative snapshots ARE the endgame.
+REPL_CUTOVER_ENDGAME_LAG_SEC = 50
+# Rounds must follow each other within MILLISECONDS. Returning to the task
+# scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
+# each time, which puts a floor under the delta no number of rounds can beat.
+REPL_CUTOVER_POLL_INTERVAL_SEC = 0.2
+# How long a single runner pass may stay inside the convergence loop.
+REPL_CUTOVER_CONVERGE_BUDGET_SEC = 60
+# Always worth polling inline for at least this long: a round that finishes
+# just after the pass is handed back costs a full TASK_EXEC_INTERVAL_SEC of
+# writes in the next round.
+# The snapshot-replication runner now finishes a transfer in the pass that
+# submitted it, so a convergence round completes in about the transfer's own
+# duration. Staying inline across that is what makes "next snapshot within a
+# second of completion" true; yielding mid-round reintroduces pass latency.
+REPL_CUTOVER_MIN_INLINE_SEC = 30
+
+# Whether to block the cutover on the operator's preconnect signal. The wait
+# sits BETWEEN the cutover clone's base snapshot and the freeze, so every
+# second of it is a second of writes the frozen final step must copy: with no
+# operator present the 120s fallback timeout fired 34 times in one soak run and
+# fed the 25-72s freezes. Deployments whose operator posts
+# .../replication/cutover-proceed set this True and accept that cost until the
+# clone's base can be advanced after the signal.
+#
+# Enabled 2026-09-02: the operator's reconcileCutoverPending runs the
+# preconnect Job and posts cutover-proceed for both migration and failback
+# (annotFailbackTarget routes the call to the target cluster on failback).
+# Without the gate, the flip races the client: the 2026-09-02 failback run
+# flipped ANA on listeners no client had connected to and deleted the DR-side
+# subsystem 150ms later, orphaning every connected client for ctrl_loss_tmo.
+REPL_CUTOVER_PROCEED_REQUIRED = True
+
+# --- noticing a finished transfer ----------------------------------------
+# A transfer that has completed must be acted on within a second: the next
+# convergence snapshot cannot be taken until the previous one is marked
+# replicated, so observation latency lands directly in the IO freeze.
+REPL_XFER_POLL_INTERVAL_SEC = 0.1
+# How long the submitting pass may wait inline for the transfer. The runner is
+# single-threaded, so this is a starvation budget, not a timeout: exceeding it
+# just falls back to being noticed on a later pass.
+REPL_XFER_INLINE_WAIT_SEC = 5.0
+# A volume in its final cutover already owns its lvstore and every other
+# transfer on it is held, so there is nothing to starve -- wait as long as the
+# transfer needs, because this is exactly the window the client freeze pays for.
+REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
+# Cooldown between hub-attach retry attempts when the target node is down or
+# recovering (covers control-plane lag before the DB reflects the down state).
+REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
+# Max consecutive hub-attach failures with the node still appearing online
+# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
+REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# Pass interval while a cutover is mid-round. NOT sub-second: this loop reads
+# the task table per pass, and polling a database at 5Hz to detect an event is
+# the wrong shape. Sub-second reaction lives in the RPC-based inline wait.
+REPL_CUTOVER_ACTIVE_POLL_SEC = 1.0
+# Delete the superseded original volume BEFORE building the fail-back clone
+# (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
+# original's blob id while its parent snapshot's clone registry is already
+# inconsistent ("Clone entry not found for blob ... under snapshot ..."), the
+# clone created seconds later reuses the freed id, and every final-step delta
+# write to it fails rc -1 (-EPERM) -> transfer_state Failed on all fail-back
+# cutovers. The SPDK-side namespace slot is still freed by
+# _evict_stale_namespace, and the original's DB record is removed after a
+# successful cutover by _swap_failback_lvol_uuid. Re-enable once the fork's
+# clone-entry/blob-id-reuse defect is fixed.
+REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER = False
+
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2

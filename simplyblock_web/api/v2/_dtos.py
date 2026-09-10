@@ -16,7 +16,8 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.utils.nvme import NvmeConnectEntry
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
+from simplyblock_core.models.replication import (
+    ConsistencyGroup, ReplicationPolicy, ReplicationTarget)
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
@@ -607,9 +608,17 @@ class ReplicationPolicyDTO(BaseModel):
     mode: ReplicationMode
     keep_replicated: int
     status: ReplicationPolicyStatus
+    consistency_group: bool = False
+    #: Pinned placement of the policy's consistency group, set by its first
+    #: member: every further member volume must be created on this node/LVS.
+    #: The operator reads these to place new volumes; null until the first
+    #: member joins (or for a policy without a consistency group).
+    group_node_id: util.OptionalUUID = None
+    group_lvs_name: str = ""
+    group_last_seq: int = 0
 
     @staticmethod
-    def from_model(model: ReplicationPolicy):
+    def from_model(model: ReplicationPolicy, group: Optional[ConsistencyGroup] = None):
         return ReplicationPolicyDTO(
             id=UUID(model.uuid),
             cluster_id=UUID(model.cluster_id),
@@ -619,6 +628,10 @@ class ReplicationPolicyDTO(BaseModel):
             mode=cast(ReplicationMode, model.mode),
             keep_replicated=model.keep_replicated,
             status=cast(ReplicationPolicyStatus, model.status),
+            consistency_group=bool(getattr(model, 'consistency_group', False)),
+            group_node_id=UUID(group.node_id) if group is not None and group.node_id else None,
+            group_lvs_name=group.lvs_name if group is not None else "",
+            group_last_seq=group.last_group_seq if group is not None else 0,
         )
 
 

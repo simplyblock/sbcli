@@ -39,6 +39,10 @@ class SnapShot(BaseModel):
     target_replicated_snap_uuid: str = ""
     source_replicated_snap_uuid: str = ""
     snap_type: str = "user"
+    #: consistency-group provenance: which group and which group generation
+    #: this snapshot belongs to (0 = not a group snapshot).
+    group_id: str = ""
+    group_seq: int = 0
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
     instances: list[dict] = default_factory(list)
