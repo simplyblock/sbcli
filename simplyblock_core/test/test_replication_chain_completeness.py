@@ -17,7 +17,6 @@ TREE, a shared ancestor must be transferred exactly ONCE and recognized as
 already existent on the target by every other descendant.
 """
 
-
 from typing import ClassVar
 
 from simplyblock_core.models.snapshot import SnapShot
@@ -292,6 +291,9 @@ class _EvictRPC:
 
 
 class _EvictNode:
+    secondary_node_id = None
+    tertiary_node_id = None
+
     def __init__(self, rpc):
         self._rpc = rpc
 
@@ -380,15 +382,16 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     cutover back: 0/5. The clone path must evict per node."""
     from simplyblock_core.controllers import lvol_controller as lc
 
+    evicted, added = [], []
+    monkeypatch.setattr(lc, "_evict_stale_namespace",
+                        lambda lvol, node, **kw: evicted.append(node.get_id()))
+
     def _fake_add_lvol_on_node(lvol, node, is_primary=True, **kw):
         # The real signature also takes min_cntlid / ns_uuid / primary_nsid;
         # accept them so this fake cannot drift out of call-compatibility.
         added.append((node.get_id(), is_primary))
         return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
 
-    evicted, added = [], []
-    monkeypatch.setattr(lc, "_evict_stale_namespace",
-                        lambda lvol, node: evicted.append(node.get_id()))
     monkeypatch.setattr(lc, "add_lvol_on_node", _fake_add_lvol_on_node)
 
     class _N:
@@ -397,11 +400,22 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             self.lvstore = "LVS_1"
             self.status = lc.StorageNode.STATUS_ONLINE
             self.cluster_id = "CL_tgt"
+            self.lvol_subsys_port = 4420
+
+        def rpc_client(self):
+            # Real StorageNode hands out an RPC client; the nsid claim asks it
+            # what this subsystem already holds. Nothing here yet.
+            class _R:
+                @staticmethod
+                def subsystem_get(nqn):
+                    return None
+            return _R()
+
         def get_lvol_subsys_port(self, lvstore):
             # Real StorageNode resolves a per-lvstore listener port; the clone
             # copies it onto the new volume so suspend_lvol addresses the right
             # listener.
-            return 9100
+            return self.lvol_subsys_port
         def get_id(self):
             return self._id
 
@@ -424,22 +438,19 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             return []
 
     class _Lvol:
-        uuid = "ORIG"
-        nqn = "nqn.test:lvol:ORIG"
-        ns_id = 7
-        lvol_bdev = "LVOL_C"
-        crypto_bdev = ""
+        uuid = "ORIG"; nqn = "nqn.test:lvol:ORIG"; ns_id = 7
+        # Real LVol carries these; the clone reads namespace to decide whether
+        # it attaches to a sibling's subsystem or creates its own.
         namespace = ""
+        max_namespace_per_subsys = 1
+        lvol_bdev = "LVOL_C"; crypto_bdev = ""
         def __deepcopy__(self, memo):
-            c = _Lvol()
-            c.__dict__.update(self.__dict__)
-            return c
+            c = _Lvol(); c.__dict__.update(self.__dict__); return c
         def write_to_db(self, kv=None):
             pass
 
     class _Snap:
-        cluster_id = "C1"
-        snap_bdev = "LVS_1/SNAP_1"
+        cluster_id = "C1"; snap_bdev = "LVS_1/SNAP_1"
         def get_id(self):
             return "SNAP1"
 
@@ -448,6 +459,110 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     assert evicted == ["P", "S"], \
         "stale-namespace eviction must run on the primary AND every online HA peer"
     assert ("S", False) in added
+
+
+def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
+    """The fail-back clone must advertise the SOURCE's wire identity — what
+    the connected client's multipath head currently holds — or the kernel
+    rejects every preconnected target path ("IDs don't match for shared
+    namespace N") and deleteSource then removes the head's only live paths
+    (run 2026-09-02 ~19:00, subsystem 20d8a917: no available path, XFS
+    shutdown on a restaged pod). Explicitly NOT the superseded original's
+    uuid: that variant was tried (run 2026-09-02 17:00) and only served
+    clients still riding the unfenced superseded original, whose writes
+    fail-back discards anyway."""
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    added = []
+    monkeypatch.setattr(lc, "_evict_stale_namespace", lambda lvol, node, **kw: None)
+    monkeypatch.setattr(lc.utils, "get_random_vuid", lambda *a, **kw: 999)
+
+    def _fake_add_lvol_on_node(lvol, node, is_primary=True, ns_uuid=None, **kw):
+        added.append((node.get_id(), ns_uuid, lvol.guid))
+        return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
+
+    monkeypatch.setattr(lc, "add_lvol_on_node", _fake_add_lvol_on_node)
+
+    class _Original:
+        uuid = "ORIG_ID"
+        guid = "ORIG_NGUID"
+
+    monkeypatch.setattr(lc, "_superseded_original", lambda *a, **kw: _Original())
+
+    class _N:
+        def __init__(self, nid, secondary=""):
+            self._id, self.secondary_node_id, self.tertiary_node_id = nid, secondary, ""
+            self.lvstore = "LVS_1"
+            self.status = lc.StorageNode.STATUS_ONLINE
+            self.cluster_id = "CL_tgt"
+
+        def get_lvol_subsys_port(self, lvstore):
+            return 4420
+
+        def get_id(self):
+            return self._id
+
+    primary = _N("P", secondary="S")
+    peer = _N("S")
+
+    class _DB:
+        kv_store = None
+
+        def get_storage_node_by_id(self, nid):
+            return {"P": primary, "S": peer}[nid]
+
+        def release_lvol_ns_slot(self, lvol):
+            pass
+
+        def get_lvols(self):
+            return []
+
+    class _Lvol:
+        uuid = "DR_ID"; nqn = "nqn.test:lvol:SHARED"; ns_id = 3
+        guid = "DR_NGUID"
+        ns_uuid = ""
+        namespace = ""
+        max_namespace_per_subsys = 10
+        lvol_bdev = "LVOL_28"; crypto_bdev = ""
+
+        def __deepcopy__(self, memo):
+            c = _Lvol(); c.__dict__.update(self.__dict__); return c
+
+        def write_to_db(self, kv=None):
+            pass
+
+    class _Snap:
+        cluster_id = "C1"; snap_bdev = "LVS_1/SNAP_1"
+
+        def get_id(self):
+            return "SNAP1"
+
+    new_lvol, error = lc._create_target_lvol_clone(
+        _DB(), _Lvol(), primary, "POOL", _Snap(), for_migration=True)
+    assert error is None
+    # Every node's add_ns must carry the DR source's wire identity — what the
+    # client's head holds — never the superseded original's.
+    assert [(nid, ns) for nid, ns, _ in added] == [("P", "DR_ID"), ("S", "DR_ID")]
+    assert all(guid == "DR_NGUID" for _, _, guid in added)
+    # The wire identity is persisted so connect_lvol can report it.
+    assert new_lvol.ns_uuid == "DR_ID"
+    # And the clone still got its own bdev name (adoption guard).
+    assert new_lvol.lvol_bdev == "LVOL_999"
+
+    # A second fail-back cycle: the DR source's own wire identity is already
+    # borrowed (its ns_uuid points at an earlier generation). The chain must
+    # propagate — the client's head knows only the ORIGINAL wire id.
+    added.clear()
+
+    class _Gen2Lvol(_Lvol):
+        ns_uuid = "GEN0_WIRE_ID"
+
+    new_lvol, error = lc._create_target_lvol_clone(
+        _DB(), _Gen2Lvol(), primary, "POOL", _Snap(), for_migration=True)
+    assert error is None
+    assert [(nid, ns) for nid, ns, _ in added] == [
+        ("P", "GEN0_WIRE_ID"), ("S", "GEN0_WIRE_ID")]
+    assert new_lvol.ns_uuid == "GEN0_WIRE_ID"
 
 
 def test_interrupted_landing_volume_is_adopted_or_cleared():
@@ -480,8 +595,16 @@ def test_failover_guard_matches_nqn_and_nsid_not_nqn_alone():
     import inspect
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
-    assert "lv.nqn == lvol.nqn and lv.ns_id == lvol.ns_id" in src, \
-        "the fail-over existing-copy guard must match nqn AND nsid"
+    # The guard now resolves the copy through the replication record, because
+    # merging R26.3 made BOTH string matches unreliable: siblings share the
+    # NQN, and a fail-over claims a target-local nsid so the numbers need not
+    # match. nqn+nsid remains the fallback when no record exists yet.
+    assert "own_copies" in src, \
+        "the fail-over existing-copy guard must identify the copy explicitly"
+    assert "rep.source_lvol.get_id() == lvol.get_id()" in src, \
+        "the copy is the target of THIS volume's replication record"
+    assert "lv.ns_id != lvol.ns_id" in src, \
+        "nqn+nsid must remain the fallback when there is no record"
 
 
 def test_namespaced_siblings_replicate_to_the_same_target_node():
@@ -705,7 +828,8 @@ def test_replica_rollback_clears_its_namespace_and_syncs_the_delete():
     class _Lvol:
         nqn = "nqn.test:lvol:SHARED"
         top_bdev = "LVS_1/LVOL_NEW"
-        bdev_stack: ClassVar[list] = [{"type": "bdev_lvol_clone", "name": "LVS_1/LVOL_NEW"}]
+        bdev_stack: ClassVar[list] = [
+            {"type": "bdev_lvol_clone", "name": "LVS_1/LVOL_NEW"}]
         status = ""
         def get_id(self):
             return "LV_NEW"

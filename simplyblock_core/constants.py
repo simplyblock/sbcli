@@ -452,7 +452,13 @@ REPL_CUTOVER_MIN_INLINE_SEC = 30
 # fed the 25-72s freezes. Deployments whose operator posts
 # .../replication/cutover-proceed set this True and accept that cost until the
 # clone's base can be advanced after the signal.
-REPL_CUTOVER_PROCEED_REQUIRED = False
+#
+# Enabled by PR #1276: the operator's reconcileCutoverPending posts
+# cutover-proceed for migration AND failback (annotFailbackTarget routes the
+# call to the target cluster on failback). Without the gate the ANA flip races
+# the client's preconnect, flipping ANA on listeners no client is connected to
+# and then deleting the source subsystem, stranding every live client.
+REPL_CUTOVER_PROCEED_REQUIRED = True
 
 # --- noticing a finished transfer ----------------------------------------
 # A transfer that has completed must be acted on within a second: the next
@@ -859,3 +865,21 @@ BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
 BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
+# --- Failback-cutover constants from PR #1276 (reconcile-1276) ---
+# Cooldown between hub-attach retry attempts when the target node is down or
+# recovering (covers control-plane lag before the DB reflects the down state).
+REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
+# Max consecutive hub-attach failures with the node still appearing online
+# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
+REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# Delete the superseded original volume BEFORE building the fail-back clone
+# (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
+# original's blob id while its parent snapshot's clone registry is already
+# inconsistent ("Clone entry not found for blob ... under snapshot ..."), the
+# clone created seconds later reuses the freed id, and every final-step delta
+# write to it fails rc -1 (-EPERM) -> transfer_state Failed on all fail-back
+# cutovers. The SPDK-side namespace slot is still freed by
+# _evict_stale_namespace, and the original's DB record is removed after a
+# successful cutover by _swap_failback_lvol_uuid. Re-enable once the fork's
+# clone-entry/blob-id-reuse defect is fixed.
+REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER = False

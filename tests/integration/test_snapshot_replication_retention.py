@@ -27,7 +27,6 @@ Mocked here — everything *above* the database, per the tier's rule:
   integration tier never talks to a storage node.
 """
 
-import itertools
 import pytest
 
 from simplyblock_core.db_controller import DBController
@@ -35,6 +34,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import snapshot_replication as sr
+import itertools
 
 CLUSTER_ID = "cluster-1"
 POOL_ID = "pool-1"

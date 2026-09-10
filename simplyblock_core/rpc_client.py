@@ -2165,10 +2165,13 @@ class RPCClient:
             "gateway": bdev_name,
             "operation": operation,
         }
-        # Send the key only when opting in: the RPC parameter is optional on the
-        # SPDK side, so every existing caller keeps its exact current wire form.
-        if allow_partial:
-            params["allow_partial"] = True
+        # The delta path is DISABLED (PR #1276, commit 52e75afb2): the SPDK
+        # fork's fragment write path corrupts partial transfers, so
+        # allow_partial is never emitted and every transfer is a full one,
+        # regardless of what the caller requests. Re-enable the emission once
+        # the fork is fixed.
+        # if allow_partial:
+        #     params["allow_partial"] = True
         return self._request("bdev_lvol_transfer", params)
 
     def bdev_lvol_transfer_stat(self, name):

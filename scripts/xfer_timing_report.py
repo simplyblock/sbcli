@@ -19,10 +19,10 @@ fine). Lines look like:
                 snap=a0f48bf5 round=2 ms=1843.2 bytes=33554432 mbps=18.2 ok=1
 """
 import argparse
-import itertools
 import re
 import sys
 from collections import defaultdict
+import itertools
 
 LINE = re.compile(r"XFER-TIMING\s+(.*)$")
 KV = re.compile(r"(\w+)=(\S+)")

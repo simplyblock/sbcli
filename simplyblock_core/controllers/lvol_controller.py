@@ -1,5 +1,6 @@
 import copy
 import random
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -26,28 +27,6 @@ from simplyblock_core.prom_client import PromClient
 
 
 logger = utils.get_logger(__name__)
-
-
-async def watch_volumes(cluster_id, pool_id):
-    """Stream volume changes for one pool (same scope as get_lvols_by_pool_id)."""
-    db = DBController()
-    async for batch in db.watch(
-            LVol, scope=(pool_id,),
-            select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
-            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
-        yield batch
-
-
-async def watch_volume(cluster_id, pool_id, volume_id):
-    """Stream changes for a single volume."""
-    db = DBController()
-    async for batch in db.watch(
-            LVol, scope=(pool_id,), entity_id=volume_id,
-            # Reuse the pool getter so deleted volumes leave the set (soft-delete
-            # -> deleted event + close), matching the list endpoint's filter.
-            select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
-            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
-        yield batch
 
 
 def _create_crypto_lvol(rpc_client, lvol, cluster):
@@ -102,6 +81,33 @@ def _create_compress_lvol(rpc_client, base_bdev_name):
         logger.error("failed to create compress LVol on the storage node")
         return False
     return ret
+
+
+def ask_for_device_number(devices_list):
+    question = f"Enter the device number [1-{len(devices_list)}]: "
+    while True:
+        sys.stdout.write(question)
+        choice = str(input())
+        try:
+            ch = int(choice.strip())
+            ch -= 1
+            return devices_list[ch]
+        except Exception as e:
+            logger.debug(e)
+            sys.stdout.write(f"Please respond with numbers 1 - {len(devices_list)}\n")
+
+
+def ask_for_lvol_vuid():
+    question = "Enter VUID number: "
+    while True:
+        sys.stdout.write(question)
+        choice = str(input())
+        try:
+            ch = int(choice.strip())
+            return ch
+        except Exception as e:
+            logger.debug(e)
+            sys.stdout.write("Please respond with numbers")
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
@@ -304,6 +310,36 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
     else:
         return online_nodes
 
+def is_hex(s: str) -> bool:
+    """
+    given an input checks if the value is hex encoded or not
+    """
+    try:
+        int(s, 16)
+        return True
+    except ValueError:
+        return False
+
+def validate_aes_xts_keys(key1: str, key2: str) -> tuple[bool, str]:
+    """
+    Key Length: each key should be either 128 or 256 bits long.
+    since hex values of the keys are expected, the key lengths should be either 32 or 64
+    """
+
+    if len(key1) != len(key2):
+        return False, "both the keys should be of the same length"
+
+    if len(key1) not in [32, 64] or len(key2) not in [32, 64]:
+        return False, "each key should be either 16 or 32 bytes long"
+
+    if not is_hex(key1):
+        return False, "please provide hex encoded value for crypto_key1"
+
+    if not is_hex(key2):
+        return False, "please provide hex encoded value for crypto_key2"
+
+    return True, ""
+
 
 def _sibling_replication_node(lvol, cl, all_lvols=None):
     """Target node an already-replicating sibling of ``lvol``'s subsystem uses.
@@ -423,26 +459,6 @@ def check_lvstore_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
                 f"objects (lvols/clones: {lvol_count}, snapshots: "
                 f"{snap_count}); the hard limit is {limit} per lvstore")
     return None
-
-
-def resolve_effective_ha_type(ha_type, host_node):
-    """The ha_type an lvol can actually be created with on ``host_node``.
-
-    A host without a secondary (single-node / non-HA cluster) cannot serve an
-    HA lvol — every lifecycle op must then run on exactly one node. Downgrade
-    instead of failing: cluster ha_type defaults to "ha" even on deployments
-    that never assign secondaries."""
-    if ha_type == "ha" and not host_node.secondary_node_id:
-        return "single"
-    return ha_type
-
-
-def role_secondary_ids(host_node):
-    """The host's non-empty secondary/tertiary node ids, in role order.
-    Non-HA topologies have none; never emit empty-string ids into
-    ``lvol.nodes`` (every ``lvol.nodes[1:]`` consumer would iterate them)."""
-    return [i for i in (host_node.secondary_node_id,
-                        host_node.tertiary_node_id) if i]
 
 
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
@@ -582,11 +598,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 if dev.status == dev.STATUS_ONLINE:
                     dev_count += 1
                     cluster_size_total_raw += dev.size
-                    # Inline-checksum fallback layout reserves 6 of every 510 data blocks
-                    # per 2 MiB extent for the extended md page + filler. Charge that as
-                    # initial utilization rather than reducing reported raw capacity.
-                    if cl.inline_checksum and not dev.md_supported:
-                        cluster_size_prov += utils.alceml_fallback_overhead_bytes(cl, dev.size)
     # NVMeDevice.size is RAW (physical, parity-inclusive); cluster_size_prov is
     # the sum of provisioned lvol sizes, which is EFFECTIVE. Comparing them
     # directly understated provisioned utilisation by (ndcs+npcs)/ndcs -- 1.5x on
@@ -712,20 +723,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.error(error)
         return False, error
 
-    effective_ha_type = resolve_effective_ha_type(ha_type, host_node)
-    if effective_ha_type != ha_type:
-        logger.info(f"Host node {host_node.get_id()} has no secondary node; "
-                    f"creating lvol with ha_type=single")
-        ha_type = effective_ha_type
-        lvol.ha_type = effective_ha_type
-
+    s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
-    if not getattr(host_node, attr_name):
+    is_active_primary = getattr(host_node, attr_name)
+    is_active_secondary = getattr(s_node, attr_name)
+    if not is_active_primary:
         return False, f"Primary node fabric {fabric} is not active"
-    if ha_type == "ha":
-        s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        if not getattr(s_node, attr_name):
-            return False, f"Secondary node fabric {fabric} is not active"
+    if not is_active_secondary:
+        return False, f"Secondary node fabric {fabric} is not active"
 
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
@@ -906,8 +911,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 execute_on_leader_with_failover,
             )
 
-            # Build nodes list (skip empty role ids — non-HA topologies)
-            secondary_ids = role_secondary_ids(host_node)
+            # Build nodes list
+            secondary_ids = [host_node.secondary_node_id]
+            if host_node.tertiary_node_id:
+                secondary_ids.append(host_node.tertiary_node_id)
             lvol.nodes = [host_node.get_id()] + secondary_ids
 
             all_nodes = [host_node]
@@ -1481,15 +1488,13 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
     # nsid (ns_id == 0, e.g. a drain-queued registration firing early)
     # must fail loudly instead of guessing.
     if is_primary:
-        # primary_nsid is set by migration/failover callers to pin the nsid
-        # explicitly: the client connects to both source and target under the
-        # same NQN during preconnect, and if nsid positions differ the kernel
-        # rejects the target namespaces ("IDs don't match for shared
-        # namespace N"). Without a pin, a fail-over copy arrives with an nsid
-        # the CONTROL PLANE claimed across the whole target HA set in
-        # lvol.ns_id (see _claim_target_nsid), and 0/unset means "let SPDK
-        # auto-assign", which is what an ordinary create wants.
-        requested_nsid = primary_nsid if primary_nsid is not None else (lvol.ns_id or None)
+        # Two callers can dictate the primary's nsid, and both outrank
+        # auto-assignment. R26.3's migration/fail-over callers pass it
+        # explicitly as primary_nsid to preserve the source cluster's
+        # assignment; the fail-over path additionally pre-claims one across the
+        # whole target HA set and leaves it on the record (_claim_target_nsid).
+        # An ordinary create has neither and lets SPDK assign.
+        requested_nsid = primary_nsid or (lvol.ns_id or None)
     else:
         if not lvol.ns_id:
             return _fail_after_bdev(
@@ -1499,20 +1504,41 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 f"maps across the shared subsystem's paths)", is_primary=is_primary)
         requested_nsid = lvol.ns_id
     ret, err = rpc_client.nvmf_subsystem_add_ns2(
-        lvol.nqn, lvol.top_bdev, ns_uuid or lvol.uuid, lvol.guid, nsid=requested_nsid)
+        lvol.nqn, lvol.top_bdev, ns_uuid or lvol.get_ns_uuid(), lvol.guid,
+        nsid=requested_nsid)
     if err:
+        def _ns_add_detail():
+            """What the node actually holds for this subsystem.
+
+            The bare "Failed to add bdev to subsystem" costs a full lab run to
+            diagnose, and the cause is always in this table: the nsid is taken
+            by another bdev, or max_namespaces is smaller than the nsid asked
+            for."""
+            try:
+                subsys = rpc_client.subsystem_get(lvol.nqn)
+            except Exception as diag_exc:              # noqa: BLE001
+                return f" [could not read the subsystem: {diag_exc}]"
+            if not subsys:
+                return (f" [subsystem {lvol.nqn} does not exist on "
+                        f"{snode.get_id()[:8]}]")
+            existing = sorted((n.get("nsid"), n.get("bdev_name"))
+                              for n in (subsys.get("namespaces") or []))
+            return (f" [node {snode.get_id()[:8]} wanted nsid={requested_nsid} "
+                    f"max_namespaces={subsys.get('max_namespaces')} "
+                    f"holds={existing}]")
+
         if err["code"] == -32602 and lvol.namespace:
             # -32602 from nvmf_subsystem_add_ns has two distinct causes:
             #   A) subsystem exists on this node but the nsid slot is occupied
             #   B) subsystem does not exist on this node at all (cross-LVS:
             #      the shared subsystem's LVS has no nodes in common with this
-            #      lvol's LVS — e.g. a failover clone on LVS_6 whose shared
+            #      lvol's LVS - e.g. a failover clone on LVS_6 whose shared
             #      subsystem lives on LVS_1)
             # nvmf_subsystem_add_ns2 already ran the idempotency probe and
             # returned the original error, so subsystem_get here distinguishes A/B.
             subsys_here = rpc_client.subsystem_get(lvol.nqn)
             if subsys_here is None:
-                # Case B — cross-LVS: subsystem not on this node.
+                # Case B - cross-LVS: subsystem not on this node.
                 # Primary: the namespace cannot be registered from this LVS;
                 #   log a warning so the operator can investigate placement.
                 # Secondary: the primary already registered it on the subsystem's
@@ -1525,7 +1551,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                     snode.get_id(), lvol.nqn, lvol.get_id())
                 # The lvol is a deepcopy of the source: lvol_uuid/blobid still
                 # carry the source cluster's values. The bdev_lvol_clone just
-                # created has its own uuid/blobid — read them back so the caller
+                # created has its own uuid/blobid - read them back so the caller
                 # can pass correct values to bdev_lvol_clone_register on HA peers.
                 actual = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
                 if actual:
@@ -1533,22 +1559,22 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 return {'uuid': lvol.lvol_uuid,
                         'driver_specific': {'lvol': {'blobid': lvol.blobid}}}, None
 
-            # Case A — subsystem IS on this node; the nsid slot is occupied.
+            # Case A - subsystem IS on this node; the nsid slot is occupied.
             if lvol.node_id == snode.get_id():
-                if primary_nsid is not None:
-                    # Caller pinned a specific nsid (migration/failover preserve-nsid
-                    # path). Re-claiming to a different subsystem would lose the shared
-                    # NQN, making the target invisible to the client. Fail hard so the
-                    # caller can diagnose rather than silently migrating into the wrong
-                    # subsystem. _evict_stale_namespace should have cleared any occupant
-                    # before this call; if we still got -32602 the state is unexpected.
+                if requested_nsid is not None:
+                    # The nsid was dictated - explicitly by a migration/fail-over
+                    # caller, or by the control plane's claim - so re-claiming
+                    # into a different subsystem would lose the shared NQN.
+                    # _evict_stale_namespace should have cleared the occupant; a
+                    # persistent -32602 means genuine unexpected state.
                     return _fail_after_bdev(
                         lvol, rpc_client,
-                        f"Failed to add bdev to subsystem at requested nsid={primary_nsid}: "
-                        f"nsid already occupied and eviction did not clear it")
+                        f"Failed to add bdev to subsystem at requested nsid="
+                        f"{requested_nsid}: nsid occupied and eviction did not "
+                        f"clear it" + _ns_add_detail(), is_primary=is_primary)
                 logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
                 # Re-claim transactionally, excluding the subsystem SPDK just
-                # rejected (the DB count said it had room — SPDK is the authority
+                # rejected (the DB count said it had room - SPDK is the authority
                 # on its own namespace table). The lvol's record is rewritten in
                 # the same transaction, so its slot moves atomically from the
                 # rejected subsystem to the new one (or to a standalone one).
@@ -1560,33 +1586,18 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                         exclude_nqns={lvol.nqn})
                 except SubsystemCapacityError as e:
                     logger.error(str(e))
-                    return _fail_after_bdev(lvol, rpc_client, str(e), is_primary=is_primary)
+                    return _fail_after_bdev(lvol, rpc_client, str(e),
+                                            is_primary=is_primary)
                 return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
-        # Any other rejection (a REPLICA -32602 included: it cannot re-claim a
-        # slot, its nsid is dictated by the primary, so this ends the whole
-        # create/fail-over). Say WHY: dump what the node actually has for this
-        # subsystem, because the bare message costs a full lab run to diagnose
-        # and the cause is always in this table -- nsid already taken by
-        # another bdev, or a max_namespaces smaller than the requested nsid.
-        detail = ""
-        try:
-            subsys = rpc_client.subsystem_get(lvol.nqn)
-            if subsys:
-                existing = sorted(
-                    (n.get("nsid"), n.get("bdev_name"))
-                    for n in (subsys.get("namespaces") or []))
-                detail = (f" [node {snode.get_id()[:8]} wanted nsid="
-                          f"{requested_nsid} max_namespaces="
-                          f"{subsys.get('max_namespaces')} holds={existing}]")
-            else:
-                detail = (f" [subsystem {lvol.nqn} does not exist on "
-                          f"{snode.get_id()[:8]}]")
-        except Exception as diag_exc:              # noqa: BLE001
-            detail = f" [could not read the subsystem: {diag_exc}]"
+
+        # A REPLICA add cannot re-claim a slot (its nsid is dictated by the
+        # primary), so -32602 here ends the whole create/fail-over. Say WHY.
+        detail = _ns_add_detail()
         logger.error("Namespace add rejected on %s for %s:%s",
                      snode.get_id()[:8], lvol.get_id(), detail)
         return _fail_after_bdev(
-            lvol, rpc_client, "Failed to add bdev to subsystem" + detail, is_primary=is_primary)
+            lvol, rpc_client, "Failed to add bdev to subsystem" + detail,
+            is_primary=is_primary)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
@@ -1704,7 +1715,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
     # correct nsid as well. Only a record with ns_id unset falls back to
     # auto-assignment.
     ret = rpc_client.nvmf_subsystem_add_ns(
-        lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid,
+        lvol.nqn, lvol.top_bdev, lvol.get_ns_uuid(), lvol.guid,
         nsid=lvol.ns_id if lvol.ns_id else None)
     if not ret:
         # FATAL, deliberately. This used to log and fall through to the
@@ -1920,7 +1931,10 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
         return True
 
     for ns in subsystem["namespaces"]:
-        if ns["uuid"] == lvol.uuid:
+        # Match by the WIRE identity: a failed-back volume's namespace
+        # advertises ns_uuid, not the record uuid — matching the record uuid
+        # here leaves the namespace behind on a shared subsystem forever.
+        if ns["uuid"] == lvol.get_ns_uuid():
             logger.info("Removing namespace %s from subsystem %s", ns["uuid"], lvol.nqn)
             ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns['nsid']))
             if not ret:
@@ -2799,6 +2813,38 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
             for entry in entries:
                 entry.target_lvol_id = clone_id
         out.extend(entries)
+
+    # Device-lookup identity for the FAIL-BACK shape. A clone's wire NSUUID
+    # may be borrowed from another volume (the kernel merges multipath paths
+    # only on matching NSUUIDs), so the client's /dev/disk/by-id links can
+    # carry an id that is not the record's own. After a forward migration the
+    # requested volume is the relationship's source end, the loop above
+    # redirects to the target and target_lvol_id points at the right device.
+    # After a fail-back the UUID swap makes the requested volume the TARGET
+    # end under its original id, clone_id == uuid for every entry, and
+    # nothing would report the id the device actually advertises — the CSI
+    # then cannot find the block device. The record's ns_uuid carries the
+    # wire identity: for a fail-back over a still-live original it equals the
+    # restored original uuid (no override needed — the CSI's own-id lookup
+    # matches), while a fail-back to a fresh cluster keeps the DR source's
+    # id and must be reported.
+    if not any(e.target_lvol_id for e in out):
+        wire_id = getattr(lvol, "ns_uuid", "")
+        if wire_id:
+            if wire_id != uuid:
+                for entry in out:
+                    entry.target_lvol_id = wire_id
+        else:
+            # Legacy records created before ns_uuid was persisted: the only
+            # fail-back shape that existed then inherited the DR source's
+            # NSUUID, recoverable from the relationship's other end (only its
+            # ID is needed, so a source record since deleted still resolves).
+            rep = _replication_for_lvol(db_controller, uuid)
+            if (rep is not None and rep.state == LVolReplication.STATE_CUTOVER_DONE
+                    and rep.target_lvol and rep.target_lvol.get_id() == uuid
+                    and rep.source_lvol and rep.source_lvol.get_id() != uuid):
+                for entry in out:
+                    entry.target_lvol_id = rep.source_lvol.get_id()
     return out, None
 
 
@@ -2825,16 +2871,7 @@ def _connect_path_volumes(db_controller, lvol):
     destination primary and may differ -- so every path returned here
     aggregates into one multipath device on the client.
     """
-    from simplyblock_core.models.lvol_model import LVolReplication
-
-    lvol_id = lvol.get_id()
-    rep = None
-    for candidate in reversed(db_controller.get_lvol_replication_objects()):
-        source_id = candidate.source_lvol.get_id() if candidate.source_lvol else ""
-        target_id = candidate.target_lvol.get_id() if candidate.target_lvol else ""
-        if lvol_id in (source_id, target_id):
-            rep = candidate
-            break
+    rep = _replication_for_lvol(db_controller, lvol.get_id())
 
     if rep is None or rep.state == LVolReplication.STATE_REPLICATING:
         return [lvol]
@@ -2855,6 +2892,20 @@ def _connect_path_volumes(db_controller, lvol):
         return [v for v in (target, source) if v is not None] or [lvol]
     # failed_over and cutover_done: the volume now lives on the target side.
     return [target or source or lvol]
+
+
+def _replication_for_lvol(db_controller, lvol_id):
+    """The most recent replication relationship *lvol_id* is an end of, or None.
+
+    Newest-first so a volume that went through several cycles (fail-over then
+    fail-back) resolves to the relationship describing its CURRENT location.
+    """
+    for candidate in reversed(db_controller.get_lvol_replication_objects()):
+        source_id = candidate.source_lvol.get_id() if candidate.source_lvol else ""
+        target_id = candidate.target_lvol.get_id() if candidate.target_lvol else ""
+        if lvol_id in (source_id, target_id):
+            return candidate
+    return None
 
 
 def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, host_nqn):
@@ -3405,16 +3456,34 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         if not replication_cluster_id:
             logger.error(f"Cluster: {snode.cluster_id} not replicated")
             return False
-        # Volumes sharing a subsystem MUST replicate to the same target node
-        # (see _sibling_replication_node). add_lvol_ha enforces that for a
-        # volume created with a replication cluster; this is the OTHER entry
-        # point -- attaching a policy -- and it used to pick purely by
-        # capacity, which is how soak case 7 kept splitting one 10-namespace
-        # subsystem across three target primaries (run 20260826_233417: nsids
-        # 1,2,3,6 on one node, 1,2,4,5,7..10 on a second, 3..10 on a third).
-        # No node then advertised the whole subsystem, and the client's kernel
-        # showed 0 of the 10 namespaces on one of its paths.
+        # Volumes sharing a subsystem MUST replicate to the same target node.
+        # Two reasons, one from each branch: their failover clones have to land
+        # on the same LVS (bdev_lvol_clone_register fails cross-LVS, so a split
+        # group cannot share a subsystem on the target at all), and a split
+        # group leaves no node advertising the whole subsystem -- soak case 7
+        # run 20260826_233417 put one 10-namespace subsystem on three target
+        # primaries (nsids 1,2,3,6 / 1,2,4,5,7..10 / 3..10) and the client's
+        # kernel showed 0 of the 10 namespaces on one of its paths.
+        #
+        # add_lvol_ha enforces this for a volume created with a replication
+        # cluster; this is the OTHER entry point -- attaching a policy -- which
+        # used to pick purely by capacity.
         sibling_node_id = _sibling_replication_node(lvol, cluster)
+        if sibling_node_id:
+            try:
+                sib_node = db_controller.get_storage_node_by_id(sibling_node_id)
+            except KeyError:
+                sib_node = None
+            if sib_node is None or sib_node.status != StorageNode.STATUS_ONLINE:
+                # An offline node cannot host the clone. Fall through to the
+                # capacity pick; _create_target_lvol_clone re-checks at creation
+                # time and refuses to split the subsystem rather than quietly
+                # building an incoherent one.
+                logger.warning(
+                    "LVol %s should follow subsystem %s to node %s, but that "
+                    "node is not online; picking by capacity instead",
+                    lvol.get_id(), lvol.nqn, sibling_node_id)
+                sibling_node_id = ""
         if sibling_node_id and sibling_node_id in excluded_nodes:
             # Keeping a subsystem whole outranks the clone/origin placement
             # preference, which is only an optimisation.
@@ -3425,7 +3494,8 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         if sibling_node_id:
             logger.info(
                 "Replicating on node %s: it is where subsystem %s already "
-                "replicates", sibling_node_id, lvol.nqn)
+                "replicates (co-locating the group's snapshots on one LVS)",
+                sibling_node_id, lvol.nqn)
             lvol.replication_node_id = sibling_node_id
             lvol.write_to_db()
         else:
@@ -3735,6 +3805,34 @@ def _claim_target_nsid(db_controller, new_lvol, target_node):
     return 0
 
 
+def _superseded_original(db_controller, lvol, dest_cluster_id):
+    """The still-live volume a fail-back of *lvol* supersedes on
+    *dest_cluster_id* — the original this copy descends from — or None when
+    nothing is in the way (first fail-over, original already deleted, or the
+    original lives on some other cluster)."""
+    original = None
+    for rep in db_controller.get_lvol_replication_objects():
+        target = getattr(rep, "target_lvol", None)
+        if target and target.get_id() == lvol.get_id() and rep.source_lvol:
+            original = rep.source_lvol          # keep the LAST match: the
+                                                # most recent fail-over wins
+    if not original:
+        return None
+    try:
+        current = db_controller.get_lvol_by_id(original.get_id())
+    except KeyError:
+        return None                              # already gone
+    if current.status in (LVol.STATUS_DELETED, LVol.STATUS_IN_DELETION):
+        return None
+    try:
+        node = db_controller.get_storage_node_by_id(current.node_id)
+    except KeyError:
+        return None
+    if node.cluster_id != dest_cluster_id:
+        return None                              # not in our way
+    return current
+
+
 def _retire_superseded_original(db_controller, lvol, dest_cluster_id):
     """Delete the volume a fail-back replaces. Returns (ok, error).
 
@@ -3756,26 +3854,9 @@ def _retire_superseded_original(db_controller, lvol, dest_cluster_id):
     A no-op unless *lvol* is itself a fail-over copy whose original still
     lives on the destination cluster, so a first fail-over deletes nothing.
     """
-    original = None
-    for rep in db_controller.get_lvol_replication_objects():
-        target = getattr(rep, "target_lvol", None)
-        if target and target.get_id() == lvol.get_id() and rep.source_lvol:
-            original = rep.source_lvol          # keep the LAST match: the
-                                                # most recent fail-over wins
-    if not original:
+    current = _superseded_original(db_controller, lvol, dest_cluster_id)
+    if current is None:
         return True, ""
-    try:
-        current = db_controller.get_lvol_by_id(original.get_id())
-    except KeyError:
-        return True, ""                          # already gone
-    if current.status in (LVol.STATUS_DELETED, LVol.STATUS_IN_DELETION):
-        return True, ""
-    try:
-        node = db_controller.get_storage_node_by_id(current.node_id)
-    except KeyError:
-        return True, ""
-    if node.cluster_id != dest_cluster_id:
-        return True, ""                          # not in our way
 
     logger.info(
         "Fail-back: deleting the superseded original %s (nsid %s of subsystem "
@@ -3824,10 +3905,23 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # A fail-back returns into the subsystem the original still occupies, so
     # the original has to go first (its snapshots stay: they are the delta
     # base). A first fail-over has no original here and this does nothing.
-    ok, err = _retire_superseded_original(db_controller, lvol,
+    #
+    # Gated off while the fork's blob-id-reuse defect is open: this delete
+    # frees the original's blob id, the clone reuses it seconds later, and the
+    # cutover's delta writes then fail rc -1 (see the constant's comment).
+    # The namespace slot the delete used to free is still reclaimed by
+    # _evict_stale_namespace below; the DB-level slot claim may report the
+    # subsystem full on groups at max_namespaces until the original is
+    # removed post-cutover by _swap_failback_lvol_uuid.
+    superseded = None
+    if constants.REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER:
+        ok, err = _retire_superseded_original(db_controller, lvol,
+                                              target_node.cluster_id)
+        if not ok:
+            return None, err
+    else:
+        superseded = _superseded_original(db_controller, lvol,
                                           target_node.cluster_id)
-    if not ok:
-        return None, err
 
     # Last line of defence for the one-subsystem-one-primary invariant. The
     # target node was chosen when the policy was attached, long before this
@@ -3857,6 +3951,17 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     new_lvol = copy.deepcopy(lvol)
     new_lvol.uuid = str(uuid.uuid4())
+    if superseded is not None:
+        # The superseded original is left alive (see the constant) and still
+        # owns this deep-copied bdev name on the target lvstore. Creating the
+        # clone under the same name would not fail: the idempotency probe in
+        # _create_bdev_stack finds the original's bdev, skips the create, and
+        # add_lvol_on_node returns the ORIGINAL's uuid/blobid as the clone's —
+        # aiming the cutover delta at the original's stale data. Give the
+        # clone its own name; client identity is carried by
+        # NQN/nsid/namespace-UUID, never the bdev name.
+        new_lvol.vuid = utils.get_random_vuid()
+        new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
     new_lvol.create_dt = str(datetime.now())
     new_lvol.node_id = target_node.get_id()
     new_lvol.nodes = [target_node.get_id()]
@@ -3879,27 +3984,25 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # node may use a different per-lvstore port. Update it now so that
     # suspend_lvol (and any future ANA flip) addresses the right listener.
     new_lvol.subsys_port = target_node.get_lvol_subsys_port(target_node.lvstore)
-    # Preserve the ORIGINAL subsystem NQN: the client must reconnect to the
-    # SAME NQN on the target cluster — only the IP/port differ. new_lvol is a
-    # deep copy of lvol, so the nqn is already identical; do NOT rewrite it
-    # with the target cluster's prefix. The NSID is a different matter: it is
-    # local to a subsystem's own HA set, clients resolve their paths through
-    # connect_lvol, and the source's number may already be taken on the
-    # target — so it is re-claimed below rather than carried over.
+    # Preserve the ORIGINAL subsystem NQN and namespace id: the client must
+    # reconnect to the SAME NQN/NS on the target cluster — only the IP/port
+    # differ. new_lvol is a deep copy of lvol, so nqn/ns_id are already
+    # identical; do NOT rewrite the NQN with the target cluster's prefix.
     #
-    # Determine the namespace pointer for the target clone. A non-empty
-    # namespace makes add_lvol_on_node skip subsystem_create (attach to a
-    # pre-existing subsystem); empty means "create the subsystem". The
-    # deepcopy carries the source cluster's namespace UUID, which means
-    # nothing on the target and causes subsystem_create to be skipped even
-    # though the shared NQN has never been registered there
+    # Determine the namespace pointer for the target clone.
+    # _resolve_namespaced_subsystem returns (not lvol.namespace): non-empty
+    # → skip subsystem_create (attach to pre-existing subsystem); empty →
+    # create subsystem. The deepcopy carries the source cluster's namespace
+    # UUID, which means nothing on the target and causes subsystem_create to
+    # be skipped even though the shared NQN has never been registered there
     # (nvmf_subsystem_add_ns2 then fails -32602, Case B fires, clone left as
     # unreachable bdev — Health: False).
     #
     # For namespaced volumes (lvol.namespace non-empty on source), mirror
-    # what the regular create path does: if a sibling clone already owns the
-    # shared NQN subsystem on the target, attach to it; otherwise this clone
-    # creates the subsystem. For standalone volumes, just clear it.
+    # what _claim_lvol_ns_slot_tx does on the regular create path: if a
+    # sibling clone already owns the shared NQN subsystem on the target,
+    # attach to it; otherwise this clone creates the subsystem.
+    # For standalone volumes (lvol.namespace empty), just clear it.
     if lvol.namespace:
         new_lvol.namespace = ""  # default: this clone creates the subsystem
         for lv in db_controller.get_lvols(target_node.cluster_id):
@@ -3923,15 +4026,57 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     if new_lvol.crypto_bdev:
         new_lvol.bdev_stack.append({"type": "crypto"})
 
-    # The deep copy carries the SOURCE cluster's nsid, which means nothing on
-    # the target. Replace it with one claimed across the whole target HA set
-    # (0 = nothing there yet, auto-assign) BEFORE the record is written, so the
-    # primary and every replica add the namespace at the same number.
-    new_lvol.ns_id = _claim_target_nsid(db_controller, new_lvol, target_node)
+    # Whether the source's nsid carries over depends on what the client is
+    # doing, and the two cases are opposites:
+    #
+    #   MIGRATION -- the client is connected to the source AND the target at
+    #     the same time under this one NQN, so the nsid positions must match
+    #     or the kernel rejects the target namespaces ("IDs don't match for
+    #     shared namespace N"). Keep the source's number (the deep copy
+    #     already carries it).
+    #   FAIL-OVER -- the client reconnects afterwards and resolves its paths
+    #     through connect_lvol, so cross-cluster equality buys nothing, while
+    #     insisting on it collides with whichever sibling already holds that
+    #     slot on the target. Claim a number across the whole target HA set
+    #     instead, so the primary and every replica add at the same one.
+    #
+    # Either way this must be settled BEFORE the record is written, because
+    # add_lvol_on_node reads it back as primary_nsid.
+    if not for_migration:
+        new_lvol.ns_id = _claim_target_nsid(db_controller, new_lvol, target_node)
+
+    # Which identity the clone's namespace advertises on the wire:
+    #
+    # Migration and fail-back: preserve the SOURCE's wire identity — what the
+    # connected client's multipath head currently holds — so the kernel can
+    # merge source and target paths during the preconnect phase (the ANA flip
+    # requires matching NSUUIDs on both paths). The source's own wire identity
+    # may itself be borrowed (its ns_uuid, e.g. a fail-back clone from an
+    # earlier cycle), so propagate the chain, not the record uuid.
+    # Failover: the source is gone — use the clone's own UUID so it appears as
+    # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
+    #
+    # Do NOT use the superseded original's uuid here. That was tried (run
+    # 2026-09-02 17:00) to serve clients whose heads still held the ORIGINAL
+    # identity — but such clients only exist because failover leaves the
+    # original unfenced and their writes land on superseded data that fail-back
+    # discards anyway. For the canonical shape — pods restaged onto the DR side
+    # after failover, heads built from the DR identity — restoring the original
+    # uuid made the kernel reject every preconnected target path ("IDs don't
+    # match for shared namespace N"), and deleteSource then removed the head's
+    # only live paths: no available path, XFS shutdown (run 2026-09-02 ~19:00,
+    # subsystem 20d8a917 nsid 1).
+    if for_migration:
+        _src_ns_uuid = getattr(lvol, "ns_uuid", "") or lvol.uuid
+    else:
+        _src_ns_uuid = new_lvol.uuid
+    # Persist the wire identity when it is borrowed, so connect_lvol can tell
+    # the CSI which /dev/disk/by-id/nvme-uuid.<id> the device really carries.
+    new_lvol.ns_uuid = _src_ns_uuid if _src_ns_uuid != new_lvol.uuid else ""
 
     new_lvol.write_to_db(db_controller.kv_store)
 
-    _evict_stale_namespace(new_lvol, target_node)
+    _evict_stale_namespace(new_lvol, target_node, superseded=superseded)
 
     # The target clone shares the source NQN.  During preconnect the host has
     # live paths to the source (cntlids 1, 1000, 2000) AND tries to add paths
@@ -3944,23 +4089,17 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         random.randint(6001, 6500),  # tertiary
     ]
 
-    # Migration: preserve the source UUID as the NVMe namespace UUID so the kernel
-    # can merge source and target paths into the same multipath namespace during
-    # the preconnect phase (ANA flip requires matching NSUUID on both paths).
-    # Failover: the source is gone — use the clone's own UUID so it appears as
-    # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
-    _src_ns_uuid = lvol.uuid if for_migration else new_lvol.uuid
-
-    # Pin the nsid _claim_target_nsid chose across the whole target HA set so
-    # the primary and every replica register the namespace at the same number
-    # (concurrent migration tasks for sibling namespaces would otherwise
-    # auto-assign in arbitrary arrival order, diverging the nsid map and
-    # triggering "IDs don't match for shared namespace N" in the client kernel
-    # during preconnect). A claim of 0 means the subsystem exists nowhere yet:
-    # nothing to collide with, so leave the pin off and let SPDK auto-assign.
+    # For migration/failover, preserve the source nsid so the kernel can
+    # match target paths to source paths under the same NQN. new_lvol is a
+    # deepcopy of the source lvol, so new_lvol.ns_id is already the source
+    # nsid. Passing it explicitly prevents auto-assignment from choosing a
+    # different position on the target (concurrent migration tasks for
+    # sibling namespaces would arrive in arbitrary order, diverging the nsid
+    # map from the source and triggering "IDs don't match for shared
+    # namespace N" in the client kernel during preconnect).
     lvol_bdev, error = add_lvol_on_node(new_lvol, target_node,
                                          min_cntlid=_tgt_cntlids[0], ns_uuid=_src_ns_uuid,
-                                         primary_nsid=new_lvol.ns_id or None)
+                                         primary_nsid=new_lvol.ns_id)
     if error:
         logger.error(error)
         db_controller.release_lvol_ns_slot(new_lvol)
@@ -3991,7 +4130,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         # succeed while the peer's failed with the same -32602, and the
         # peer failure rolled the whole cutover back (run 20260824_113711:
         # primary add_ns result:1, peer -32602, 0/5 cutovers).
-        _evict_stale_namespace(new_lvol, peer_node)
+        _evict_stale_namespace(new_lvol, peer_node, superseded=superseded)
         _peer_cntlid = next(_tgt_cntlid_iter, None)
         lvol_bdev, error = add_lvol_on_node(new_lvol, peer_node, is_primary=False,
                                              min_cntlid=_peer_cntlid, ns_uuid=_src_ns_uuid)
@@ -4026,7 +4165,8 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
-def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0):
+def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
+                                     pin_snapshot_id=None):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
 
@@ -4059,6 +4199,12 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generat
         snaps.append(snap)
 
     snaps.sort(key=lambda x: x.created_at, reverse=True)
+    # A pinned snapshot (consistency-group fail-over) is not a preference but
+    # a requirement: the group resolved ONE generation for every member, and
+    # falling back to a different snapshot here would silently split the
+    # group across two cuts. Filter, never widen.
+    if pin_snapshot_id:
+        snaps = [s for s in snaps if s.get_id() == pin_snapshot_id]
     # generation 0 = newest replicated point-in-time (the default and the only
     # behaviour before tiered retention existed). A higher generation walks
     # BACK through the retained history, which is what a retention schedule is
@@ -4088,8 +4234,17 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generat
     return None
 
 
-def _evict_stale_namespace(new_lvol, target_node):
+def _evict_stale_namespace(new_lvol, target_node, superseded=None):
     """Make room for the preserved identity on a RECOVERED fail-back target.
+
+    ``superseded`` is the still-live original volume this fail-back replaces
+    (from :func:`_superseded_original`, present since the pre-cutover retire
+    was disabled). Its namespace carries the ORIGINAL record's uuid — not the
+    clone's — so on a SHARED subsystem the own-uuid match below cannot see it
+    and the clone's add_ns fails -32602 forever (2026-09-02: shared subsystem
+    holding nsids 1-5, clone wanted nsid 1, occupant was the original).
+    Matching on the superseded original's identity is safe on shared
+    subsystems: it names exactly one namespace, never a sibling's.
 
     The cutover clone keeps the ORIGINAL volume's NQN and nsid so the client
     reconnects to the same identity. Failing back to a recovered source means
@@ -4100,73 +4255,112 @@ def _evict_stale_namespace(new_lvol, target_node):
     retry: 2026-08-24, 5/5 fail-back cutovers, 40x "Failed to add bdev to
     subsystem". Evict a namespace occupying the clone's nsid unless it is
     already the clone's own bdev (idempotent re-run).
+
+    The eviction must cover all HA peer nodes (secondary, tertiary) as well as
+    the primary. add_lvol_on_node registers the new namespace on every peer, so
+    any peer that still holds the old namespace at nsid also fails with -32602
+    and blocks the entire cutover.
     """
-    try:
-        rpc = target_node.rpc_client()
-        # subsystem_get returns ONE subsystem dict (single_or_none), not a
-        # list -- indexing it with [0] raised KeyError(0), the best-effort
-        # except swallowed it, and the eviction silently never ran (run
-        # 20260824_104449: same 40x add_ns -32602 with the fix "in place").
-        subsystem = rpc.subsystem_get(new_lvol.nqn)
-        if not subsystem:
-            return
-        # Match on the volume's UUID -- that is what identifies THIS volume's
-        # own stale namespace. An nsid match is only safe when the subsystem
-        # cannot hold anyone else's namespace.
-        #
-        # nsid is NOT identity on a SHARED (namespaced) subsystem: siblings
-        # occupy the other slots, and new_lvol.ns_id here is still the SOURCE
-        # cluster's number (the destination primary auto-assigns and only then
-        # overwrites the record). Matching on it could evict a sibling's live,
-        # already-failed-over namespace -- taking a healthy volume's device
-        # away from its client. Cross-cluster nsid equality is not required
-        # anyway: the client looks its paths up through connect_lvol.
-        namespaces = subsystem.get("namespaces") or []
-        single_namespace_subsystem = len(namespaces) <= 1
-        own_uuid = getattr(new_lvol, "uuid", None)
-        own_nsid = getattr(new_lvol, "ns_id", None)
-        stale = [ns for ns in namespaces
-                 if ((own_uuid is not None and ns.get("uuid") == own_uuid)
-                     or (single_namespace_subsystem
-                         and own_nsid is not None
-                         and ns.get("nsid") == own_nsid))
-                 and ns.get("bdev_name") != new_lvol.top_bdev]
-        if not stale:
-            return
-        for ns in stale:
-            logger.info(
-                f"Fail-back cutover: evicting stale namespace nsid={ns.get('nsid')} "
-                f"(bdev {ns.get('bdev_name')}) from {new_lvol.nqn} on "
-                f"{target_node.get_id()} -- superseded by the failed-over data")
-            rpc.nvmf_subsystem_remove_ns(new_lvol.nqn, ns.get("nsid"))
-        # remove_ns ACKNOWLEDGES before it completes (the same async
-        # false-success that dropped a shared subsystem in the PVC-expand
-        # incident; its fix polls for confirmation, eb127eed). Without this
-        # poll the follow-up add_ns raced the removal and lost on all 8
-        # retries (run 20260824_110959: 40 evictions logged, 40 add_ns
-        # -32602 right behind them).
-        stale_ids = {ns.get("nsid") for ns in stale}
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            current = rpc.subsystem_get(new_lvol.nqn) or {}
-            if not any(ns.get("nsid") in stale_ids
-                       for ns in (current.get("namespaces") or [])):
-                return
-            time.sleep(1)
-        logger.error(
-            f"Stale namespace(s) {sorted(stale_ids)} on {new_lvol.nqn} did not "
-            f"disappear within 20s of removal on {target_node.get_id()}; the "
-            f"cutover's add_ns will fail and retry")
-    except Exception as e:
-        # Best effort: if the subsystem is not there, add_lvol_on_node creates
-        # it; if the eviction genuinely failed, add_ns will say so loudly.
-        logger.warning(f"Stale-namespace check on {target_node.get_id()} for "
-                       f"{new_lvol.nqn} raised: {e}")
+    # Evict on the primary node AND every HA peer (secondary, tertiary).
+    # add_lvol_on_node registers the new namespace on all peers, so any peer
+    # that still holds the old namespace at this nsid also fails with -32602.
+    peer_ids = [target_node.secondary_node_id, target_node.tertiary_node_id]
+    db = DBController()
+    nodes_to_evict = [target_node]
+    for pid in peer_ids:
+        if not pid:
+            continue
+        try:
+            nodes_to_evict.append(db.get_storage_node_by_id(pid))
+        except KeyError:
+            # A peer id with no record holds no stale namespace to evict, and
+            # this eviction is best-effort — it must not abort the fail-over.
+            logger.warning("Stale-namespace eviction: peer node %s of %s not "
+                           "found; skipping it", pid, target_node.get_id())
+    for node in nodes_to_evict:
+        try:
+            rpc = node.rpc_client()
+            # subsystem_get returns ONE subsystem dict (single_or_none), not a
+            # list — indexing with [0] raised KeyError(0), the best-effort
+            # except swallowed it, and the eviction silently never ran (run
+            # 20260824_104449: same 40x add_ns -32602 with the fix "in place").
+            subsystem = rpc.subsystem_get(new_lvol.nqn)
+            if not subsystem:
+                continue
+            # Match on the volume's UUID — that is what identifies THIS volume's
+            # own stale namespace. An nsid match is only safe when the subsystem
+            # cannot hold anyone else's namespace.
+            #
+            # nsid is NOT identity on a SHARED (namespaced) subsystem: siblings
+            # occupy the other slots, and new_lvol.ns_id here is still the SOURCE
+            # cluster's number (the destination primary auto-assigns and only then
+            # overwrites the record). Matching on it could evict a sibling's live,
+            # already-failed-over namespace — taking a healthy volume's device
+            # away from its client. Cross-cluster nsid equality is not required
+            # anyway: the client looks its paths up through connect_lvol.
+            namespaces = subsystem.get("namespaces") or []
+            single_namespace_subsystem = len(namespaces) <= 1
+            own_uuid = getattr(new_lvol, "uuid", None)
+            own_nsid = getattr(new_lvol, "ns_id", None)
+            # The superseded original's namespace is identified by ITS record
+            # uuid (the ns uuid it was added with) or its bdev — SPDK reports
+            # lvol namespaces' bdev_name as the raw lvol_uuid.
+            superseded_ids = set()
+            if superseded is not None:
+                # ns_uuid first: a multi-cycle superseded original is itself an
+                # earlier fail-back clone whose namespace advertises a borrowed
+                # wire identity, not its record uuid.
+                superseded_ids = {
+                    v for v in (getattr(superseded, "ns_uuid", None),
+                                getattr(superseded, "uuid", None),
+                                getattr(superseded, "lvol_uuid", None),
+                                getattr(superseded, "top_bdev", None))
+                    if v}
+            stale = [ns for ns in namespaces
+                     if ((own_uuid is not None and ns.get("uuid") == own_uuid)
+                         or ns.get("uuid") in superseded_ids
+                         or ns.get("bdev_name") in superseded_ids
+                         or (single_namespace_subsystem
+                             and own_nsid is not None
+                             and ns.get("nsid") == own_nsid))
+                     and ns.get("bdev_name") != new_lvol.top_bdev]
+            if not stale:
+                continue
+            for ns in stale:
+                logger.info(
+                    f"Fail-back cutover: evicting stale namespace nsid={ns.get('nsid')} "
+                    f"(bdev {ns.get('bdev_name')}) from {new_lvol.nqn} on "
+                    f"{node.get_id()} -- superseded by the failed-over data")
+                rpc.nvmf_subsystem_remove_ns(new_lvol.nqn, ns.get("nsid"))
+            # remove_ns ACKNOWLEDGES before it completes (the same async
+            # false-success that dropped a shared subsystem in the PVC-expand
+            # incident; its fix polls for confirmation, eb127eed). Without this
+            # poll the follow-up add_ns raced the removal and lost on all 8
+            # retries (run 20260824_110959: 40 evictions logged, 40 add_ns
+            # -32602 right behind them).
+            stale_ids = {ns.get("nsid") for ns in stale}
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                current = rpc.subsystem_get(new_lvol.nqn) or {}
+                if not any(ns.get("nsid") in stale_ids
+                           for ns in (current.get("namespaces") or [])):
+                    break  # eviction confirmed on this node
+                time.sleep(1)
+            else:
+                logger.error(
+                    f"Stale namespace(s) {sorted(stale_ids)} on {new_lvol.nqn} did not "
+                    f"disappear within 20s of removal on {node.get_id()}; the "
+                    f"cutover's add_ns will fail and retry")
+        except Exception as e:
+            # Best effort: if the subsystem is not there, add_lvol_on_node creates
+            # it; if the eviction genuinely failed, add_ns will say so loudly.
+            logger.warning(f"Stale-namespace check on {node.get_id()} for "
+                           f"{new_lvol.nqn} raised: {e}")
 
 
 def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_uuid,
                                 cluster_id, attempts=3, generation=0,
-                                for_migration=False):
+                                for_migration=False, pin_snapshot_id=None):
     """Pick the last fully replicated target snapshot and clone from it ATOMICALLY.
 
     Selecting and then cloning as two unsynchronised steps loses the data: the
@@ -4188,8 +4382,13 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
     """
     for _ in range(attempts):
         snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
-                                                    generation=generation)
+                                                    generation=generation,
+                                                    pin_snapshot_id=pin_snapshot_id)
         if not snapshot:
+            if pin_snapshot_id:
+                return None, None, (
+                    f"Pinned snapshot {pin_snapshot_id} is no longer a valid "
+                    f"fail-over point (pruned or unreplicated)")
             return None, None, (
                 f"No replicated snapshot on target for generation {generation}"
                 if generation else "No replicated snapshot on target yet")
@@ -4254,7 +4453,55 @@ def resolve_replication_destination(db_controller, lvol, target_node, source_nod
     return target_cluster, ""
 
 
-def replicate_lvol_on_target_cluster(lvol_id, generation=0):
+def _retire_source_data_path(db_controller, lvol):
+    """Fence and unpublish the SOURCE volume's data path after a fail-over.
+
+    The source is only ASSUMED dead. When it is in fact alive (administrative
+    or test fail-over), leaving its path published breaks everything
+    downstream: the client keeps writing to the superseded original (all of
+    it discarded at fail-back), and a namespaced volume's restage re-attaches
+    to the ORIGINAL device — the shared subsystem's controllers survive the
+    unstage, the stale device matches the same model/nsid glob, and the DR
+    clone's namespace is rejected against the original-identity head ("IDs
+    don't match for shared namespace N") — so pods never actually reach the
+    DR cluster (run 2026-09-03 ~09:00: all three namespaced pods remounted
+    on the originals after fail-over; fail-back's eviction then shut down
+    all three filesystems mid-IO).
+
+    Best-effort: an unreachable source (a genuine DR event) changes nothing
+    here, and a source that recovers later comes back without the namespace
+    registered — fenced by absence. The DB record stays (it is the fail-back
+    delta base); its from_source=False marks it retired so the lvol monitor
+    and the non-leader repair do not register the namespace back.
+    """
+    try:
+        if not suspend_lvol(lvol.get_id()):
+            logger.warning("Fail-over: could not fence the source listeners "
+                           "of %s", lvol.get_id())
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning("Fail-over: fencing the source of %s failed: %s",
+                       lvol.get_id(), e)
+
+    for node_id in (lvol.nodes or [lvol.node_id]):
+        if not node_id:
+            continue
+        try:
+            snode = db_controller.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            if not _remove_lvol_subsys_from_node(
+                    lvol, snode.rpc_client(timeout=5, retry=1)):
+                logger.warning("Fail-over: source namespace of %s not removed "
+                               "on %s", lvol.get_id(), node_id)
+        except Exception as e:                               # noqa: BLE001
+            logger.warning("Fail-over: removing the source namespace of %s "
+                           "on %s failed: %s", lvol.get_id(), node_id, e)
+
+
+def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -4286,14 +4533,33 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0):
     # namespaces 2..N returned ITS id and were never failed over at all —
     # silent loss of 9 of 10 volumes in a DR event, reported as success
     # (soak case 7, run 20260824_174611).
+    # Which of the target cluster's volumes is THIS volume's copy? Every
+    # sibling of a shared subsystem matches on NQN, and the nsid is no longer
+    # a reliable discriminator either: a fail-over claims a target-LOCAL nsid
+    # (see _claim_target_nsid), so the copy's number need not equal the
+    # source's. Ask the replication record, which links source to target
+    # explicitly, and fall back to nqn+nsid only when no record exists yet.
+    own_copies = {
+        rep.target_lvol.get_id()
+        for rep in db_controller.get_lvol_replication_objects()
+        if rep.source_lvol and getattr(rep, "target_lvol", None)
+        and rep.source_lvol.get_id() == lvol.get_id()
+    }
     for lv in db_controller.get_lvols(target_cluster.get_id()):
-        if lv.nqn == lvol.nqn and lv.ns_id == lvol.ns_id:
-            logger.info(f"LVol with same nqn+nsid already exists on target cluster: {lv.get_id()}")
-            return lv.get_id()
+        if lv.nqn != lvol.nqn:
+            continue
+        if own_copies:
+            if lv.get_id() not in own_copies:
+                continue                       # a sibling's copy, not ours
+        elif lv.ns_id != lvol.ns_id:
+            continue                           # no record: nsid is all we have
+        logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+        return lv.get_id()
 
     new_lvol, _snapshot, error = _clone_from_last_replicated(
         db_controller, lvol_id, lvol, target_node,
-        target_pool_uuid, source_node.cluster_id, generation=generation)
+        target_pool_uuid, source_node.cluster_id, generation=generation,
+        pin_snapshot_id=pin_snapshot_id)
     if error:
         logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
         return False, error
@@ -4340,6 +4606,12 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0):
     lvol_replication.write_to_db(db_controller.kv_store)
 
     lvol_events.lvol_replicated(lvol, new_lvol)
+
+    # The relationship is durable and the DR copy is online: retire the
+    # source's data path NOW (fence + namespace removal, best-effort) so a
+    # still-alive source cannot keep serving superseded data. See
+    # _retire_source_data_path for the failure chain this closes.
+    _retire_source_data_path(db_controller, lvol)
 
     # Provide the new connection paths (primary/secondary/tertiary) — identical
     # NQN, different IP/port — so the client can fail over to the target cluster.
@@ -5019,3 +5291,46 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
     if ret:
         return ret[random.randint(0, len(ret) - 1)]
     return None
+
+
+# --- Functions carried over from main (reconcile-1276): SSE watch + HA role helper ---
+def role_secondary_ids(host_node):
+    """The host's non-empty secondary/tertiary node ids, in role order.
+    Non-HA topologies have none; never emit empty-string ids into
+    ``lvol.nodes`` (every ``lvol.nodes[1:]`` consumer would iterate them)."""
+    return [i for i in (host_node.secondary_node_id,
+                        host_node.tertiary_node_id) if i]
+
+
+async def watch_volumes(cluster_id, pool_id):
+    """Stream volume changes for one pool (same scope as get_lvols_by_pool_id)."""
+    db = DBController()
+    async for batch in db.watch(
+            LVol, scope=(pool_id,),
+            select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
+        yield batch
+
+
+async def watch_volume(cluster_id, pool_id, volume_id):
+    """Stream changes for a single volume."""
+    db = DBController()
+    async for batch in db.watch(
+            LVol, scope=(pool_id,), entity_id=volume_id,
+            # Reuse the pool getter so deleted volumes leave the set (soft-delete
+            # -> deleted event + close), matching the list endpoint's filter.
+            select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
+        yield batch
+
+
+def resolve_effective_ha_type(ha_type, host_node):
+    """The ha_type an lvol can actually be created with on ``host_node``.
+
+    A host without a secondary (single-node / non-HA cluster) cannot serve an
+    HA lvol — every lifecycle op must then run on exactly one node. Downgrade
+    instead of failing: cluster ha_type defaults to "ha" even on deployments
+    that never assign secondaries."""
+    if ha_type == "ha" and not host_node.secondary_node_id:
+        return "single"
+    return ha_type

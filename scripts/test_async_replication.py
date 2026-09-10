@@ -30,7 +30,6 @@ non-interruption in case 1 assumes the client holds the target multipath paths
 before the ANA flip — the script connects them right after replication-commit,
 before the cutover runner flips ANA.
 """
-import itertools
 import json
 import os
 import re
@@ -39,6 +38,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import paramiko
+import itertools
 
 METADATA_FILE = os.environ.get("REPL_METADATA", "cluster_metadata_repl.json")
 

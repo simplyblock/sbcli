@@ -181,12 +181,15 @@ class TestConvergence(unittest.TestCase):
         self.assertIn("disappeared", err)
 
     def test_the_deadline_still_bounds_the_phase(self):
+        """The deadline bounds the phase by handing over to the freeze, not by
+        failing: proceeding with a slightly larger residual always beats
+        burning a retry on another 900-second shrink window."""
         task = _Task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=0, lvol_id="LV1")
         with patch.object(runner, "_shrink_round_done", return_value=False):
             done, err = runner._shrink_step(task, _lvol())
-        self.assertFalse(done)
-        self.assertIn("timed out", err)
+        self.assertTrue(done)
+        self.assertIsNone(err)
 
     def test_it_yields_the_pass_when_the_budget_runs_out(self):
         """A very slow transfer must not hog the runner forever."""
@@ -207,19 +210,29 @@ class TestConvergence(unittest.TestCase):
 class TestProceedGate(unittest.TestCase):
     """The preconnect wait must be opt-in: it costs freeze time."""
 
-    def test_disabled_by_default(self):
-        self.assertFalse(
+    def test_enabled_now_that_the_operator_signals(self):
+        """Flipped 2026-09-02: the operator's reconcileCutoverPending posts
+        cutover-proceed for migration AND failback (annotFailbackTarget routes
+        the call to the target cluster). Without the gate the ANA flip races
+        the client's preconnect: the 2026-09-02 failback run flipped listeners
+        no client had connected to and deleted the DR-side subsystem 150ms
+        later, orphaning every connected client for ctrl_loss_tmo."""
+        self.assertTrue(
             constants.REPL_CUTOVER_PROCEED_REQUIRED,
-            "waiting for a signal nobody sends put 120s of writes into the "
-            "frozen final step")
+            "cutover must wait for the operator's preconnect signal; "
+            "flipping ANA on listeners no client is connected to and then "
+            "deleting the source subsystem strands every live client")
 
     def test_the_wait_is_guarded_by_the_flag(self):
         import inspect
         src = inspect.getsource(runner.task_runner)
         self.assertIn("constants.REPL_CUTOVER_PROCEED_REQUIRED", src)
+        # Compare against the actual freeze CALL SITE, not the first "run_cutover"
+        # occurrence — the string also appears earlier in a comment about the
+        # retry path, which is not the freeze.
         self.assertLess(
             src.index("REPL_CUTOVER_PROCEED_REQUIRED"),
-            src.index("run_cutover"),
+            src.index("replication_final_step.run_cutover"),
             "the gate must be evaluated before the freeze")
 
 
@@ -242,7 +255,7 @@ class TestLvsAdmission(unittest.TestCase):
         patcher = patch.object(sr, "db")
         self.db = patcher.start()
         self.addCleanup(patcher.stop)
-        self.groups: dict = {}               # lvol id -> group id
+        self.groups: dict = {}                     # lvol id -> group id
         gp = patch.object(sr, "_group_id_for_lvol",
                           side_effect=lambda lv: self.groups.get(lv.get_id(), ""))
         gp.start()
@@ -507,6 +520,38 @@ class TestCutoverQueue(unittest.TestCase):
         me, other = self._task("T1"), self._task("T2", lvs="LVS_9")
         self.db.get_job_tasks.return_value = [me, other]
         self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1"))
+
+    def test_circular_stall_is_broken_when_both_tasks_hold_the_claim(self):
+        """Both tasks race and both write cutover_lvs — only one wins.
+
+        Regression for production stall:
+          36418f5d queued_for_lvstore_LVS_1_behind_309d3aeb
+          309d3aeb queued_for_lvstore_LVS_1_behind_36418f5d
+
+        Root cause: _lvs_cutover_owner excluded the calling task from the scan.
+        When two threads both raced through the check before either wrote its
+        claim, both stored cutover_lvs.  On every subsequent pass each task's
+        candidate set was exactly {the other}, so each always deferred to the
+        other — a permanent cycle.  The fix: include self in the sort, return
+        None iff the caller is the winner.
+        """
+        # Simulate the post-race DB state: both have cutover_lvs set.
+        early = self._task("T1", lvs="LVS_1", created="2026-01-01")
+        late = self._task("T2", lvs="LVS_1", created="2026-06-01")
+        self.db.get_job_tasks.return_value = [early, late]
+
+        # From T1's perspective: T1 is the earliest claimant → it is the owner.
+        self.assertIsNone(
+            runner._lvs_cutover_owner(early, "LVS_1"),
+            "the earliest claimant must see itself as the winner (None), "
+            "not defer to the only other claimant")
+
+        # From T2's perspective: T1 is the earliest claimant → T2 must yield.
+        owner_seen_by_late = runner._lvs_cutover_owner(late, "LVS_1")
+        self.assertIsNotNone(owner_seen_by_late,
+                             "the later claimant must see an owner")
+        self.assertEqual(owner_seen_by_late.get_id(), "T1",
+                         "the later claimant must defer to the earlier one")
 
 
 class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
