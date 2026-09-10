@@ -615,12 +615,17 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         self._churn_ns_parent = None      # namespaced-subsystem parent lvol name
         self.max_namespace_per_subsys = 10
         # FIO is kicked once per checkpoint, so one wave has to outlast every
-        # outage in the window. A 2+2 cluster runs dual outages at roughly
-        # 150-400s each; at 900s (the inherited value) FIO would expire around
-        # the third outage and the rest of the window would run against an idle
-        # cluster. The wait timeout has to exceed the runtime or the checkpoint
-        # join gives up on FIO that is still legitimately running.
-        self.EXPECTED_ITERATION_SEC = 400
+        # outage in the window, and the wait timeout has to exceed the runtime
+        # or the checkpoint join gives up on FIO that is still legitimately
+        # running.
+        #
+        # Measured, not estimated: in the 20260910 run one dual iteration took
+        # 877s (14:11:28 outage to 14:26:05 next outage), dominated by
+        # graceful_shutdown recovery at 853s -- _recover_node_after_failover
+        # allows 8 attempts, each a restart plus a 300s wait, with 60s backoff
+        # when a concurrent restart is rejected. An earlier 400s estimate would
+        # have left FIO covering barely two of the five outages in a window.
+        self.EXPECTED_ITERATION_SEC = 900
         self._per_wave_fio_runtime = self.validate_every * self.EXPECTED_ITERATION_SEC
         self._fio_wait_timeout = self._per_wave_fio_runtime + 1200
 
@@ -931,6 +936,10 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             )
 
         self._log_outage_event(self.current_outage_node, outage_type, "Node online")
+        # Start the gap clock here, not at the end of this method: everything
+        # below (log flush, logging restart, cooldown) is exactly the idle time
+        # the budget is meant to cover.
+        self._mark_nodes_online()
         self.outage_end_time = int(datetime.now().timestamp())
         self._last_outage_node = self.current_outage_node
 
@@ -958,7 +967,6 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
 
         # small cool-down before next outage
         sleep_n_sec(10)
-        self._mark_nodes_online()
 
     # ── churn: exercise create/delete while migration is still in flight ─────
 
@@ -1382,6 +1390,8 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         if rec_errors:
             raise RuntimeError(f"[V2-dual] Recovery errors: {rec_errors}")
 
+        # Both nodes are online as of here; see the note in the single path.
+        self._mark_nodes_online()
         self.outage_end_time = int(datetime.now().timestamp())
         self._last_outage_node = node_b
 
@@ -1399,7 +1409,6 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
 
         self.logger.info("[V2-dual] Both nodes online; waiting 10s before next outage.")
         sleep_n_sec(10)
-        self._mark_nodes_online()
 
         return result_dict
 

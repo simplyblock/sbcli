@@ -5315,12 +5315,15 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
         self.max_namespace_per_subsys = 10
         self._namespace_sc_ready = False
         # FIO is only restarted at a checkpoint, so its runtime has to cover
-        # every outage in the window. A 2+2 cluster spends roughly 300-500s per
-        # iteration (two nodes recovered in sequence, each with a 120s settle
-        # inside restart_nodes_after_failover), so budget generously: if FIO
-        # expires early, the remaining outages in that window run against an
-        # idle cluster and the test quietly stops proving anything.
-        self.EXPECTED_ITERATION_SEC = 700
+        # every outage in the window; if it expires early the remaining outages
+        # run against an idle cluster and the test quietly stops proving
+        # anything.
+        #
+        # The equivalent docker run measured 877s per dual iteration, dominated
+        # by restart-and-wait recovery. K8s recovers its two nodes in sequence
+        # with a 120s settle per attempt inside restart_nodes_after_failover, so
+        # it is not faster. Matching 900s until a real run gives a number.
+        self.EXPECTED_ITERATION_SEC = 900
 
     def _compute_fio_size(self, extra_jobs: int = 0) -> str:
         """Size FIO as the parent does, then stretch its runtime to the window.
