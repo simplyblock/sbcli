@@ -1981,14 +1981,17 @@ class SshUtils:
         :param snapshot_id: UUID of the snapshot
         :param timeout: Total time in seconds to wait for deletion (default 600s)
         :param interval: Time between each check (default 5s)
-        :return: Tuple (status message, last output from snapshot list)
+        :return: True if the snapshot is confirmed gone, False if it is still
+                 present after *timeout* (only reachable with skip_error=True;
+                 otherwise this raises). Callers deciding whether to defer a
+                 retry must branch on this rather than assume failure.
         """
         # Pre-check if snapshot exists
         check_cmd = f"{self.base_cmd} snapshot list | grep -i '{snapshot_id}'"
         output, error = self.exec_command(node=node, command=check_cmd)
         if not output.strip():
             self.logger.warning(f"[Pre-check] Snapshot {snapshot_id} not found.")
-            return "Snapshot not found before deletion", None
+            return True
 
         self.logger.info(f"[Delete] Deleting snapshot {snapshot_id}")
         del_cmd = f"{self.base_cmd} -d snapshot delete {snapshot_id} --force"
@@ -2003,7 +2006,7 @@ class SshUtils:
 
             if not poll_output.strip():
                 self.logger.info(f"[Check] Snapshot {snapshot_id} successfully deleted.")
-                return "Deleted", None
+                return True
 
             self.logger.debug(f"[Check] Snapshot still exists. Retrying in {interval} seconds...")
             time.sleep(interval)
@@ -2011,8 +2014,8 @@ class SshUtils:
         if not skip_error:
             self.logger.error(f"[Failure] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
             raise Exception(f"Snapshot {snapshot_id} deletion failed after {timeout} seconds.")
-        self.logger.error(f"[DEFFERED] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
-        return
+        self.logger.error(f"[DEFERRED] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
+        return False
 
     def delete_all_snapshots(self, node):
         patterns = ["snap", "ss", "snapshot"]

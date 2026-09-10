@@ -1,6 +1,7 @@
 import random
 import re
 import threading
+import time
 from utils.common_utils import sleep_n_sec
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from logger_config import setup_logger
@@ -40,6 +41,13 @@ class TestLvolHACluster(FioWorkloadTest):
         self.sn_nodes = []
         self.log_path = Path.home()
         self.dump_validation_errors = []
+        # Deletes that could not complete during an outage, reconciled later by
+        # validate_pending_deletions(). Lives here rather than on one subclass
+        # so every failover test can defer a delete the same way.
+        self.pending_deletions = {
+            "lvols": dict(),
+            "snapshots": dict()
+        }
 
     def _pick_client(self, index=0):
         """Return a client node for NVMe connect / mount / FIO.
@@ -54,6 +62,151 @@ class TestLvolHACluster(FioWorkloadTest):
         if fio:
             return fio
         return self.mgmt_nodes[0]
+
+    def record_pending_lvol_delete(self, lvol, lvol_id):
+        self.logger.warning(f"[DEFERRED] Adding lvol to pending delete: {lvol}")
+        self.pending_deletions["lvols"][lvol] = lvol_id
+
+    def record_pending_snapshot_delete(self, snapshot, snapshot_id):
+        self.logger.warning(f"[DEFERRED] Adding snapshot to pending delete: {snapshot}")
+        self.pending_deletions["snapshots"][snapshot] = snapshot_id
+
+    def _delete_stall_diag(self, lvol_id):
+        """Collect the state that explains why a delete is not completing.
+
+        A stalled delete is nearly always explained by the object's own
+        ``status``/``deletion_status`` plus the state of the nodes it lives on,
+        and all of it is already on the API record. Read it while we are waiting
+        so a converge failure reports a diagnosis instead of a bare name.
+        """
+        diag = {}
+        try:
+            details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+            record = details[0] if details else {}
+            for field in ("status", "deletion_status", "io_error", "node_id"):
+                diag[field] = record.get(field)
+            node_status = {}
+            for node_id in {record.get("node_id"), *(record.get("nodes") or [])}:
+                if not node_id:
+                    continue
+                try:
+                    node = self.sbcli_utils.get_storage_node_details(node_id)
+                    node_status[node_id[:8]] = (node[0] if node else {}).get("status")
+                except Exception as exc:
+                    node_status[node_id[:8]] = f"<unreadable: {exc}>"
+            diag["node_status"] = node_status
+        except Exception as exc:
+            diag["error"] = f"could not read lvol details: {exc}"
+        return diag
+
+    def validate_pending_deletions(self, timeout=600, interval=30):
+        if not self.pending_deletions["lvols"] and not self.pending_deletions["snapshots"]:
+            self.logger.info("No deferred deletions pending")
+            return
+
+        self.logger.info("Validating deferred deletions after recovery")
+        start = time.time()
+        retry_interval = 60  # re-issue delete every 60s if still stuck (~10 retries in 600s)
+        last_lvol_retry = {}
+        last_snap_retry = {}
+        last_lvol_diag = {}
+
+        while time.time() - start < timeout:
+            # --- Check and retry pending lvols (clones) FIRST ---
+            # Lvols/clones must be deleted before their parent snapshots,
+            # because snapshots cannot be deleted while clones still exist.
+            self.logger.info(f"Checking for deferred lvols: {self.pending_deletions['lvols']}")
+            for lvol in list(self.pending_deletions["lvols"]):
+                lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
+                if not lvol_id or lvol_id != self.pending_deletions["lvols"][lvol]:
+                    self.logger.info(f"Deferred lvol '{lvol}' no longer visible, removing from pending")
+                    del self.pending_deletions["lvols"][lvol]
+                    last_lvol_retry.pop(lvol, None)
+                    last_lvol_diag.pop(lvol, None)
+                    continue
+
+                # Record why it is still here. Logged only when it changes, so a
+                # long stall leaves one explanatory line rather than hundreds.
+                diag = self._delete_stall_diag(lvol_id)
+                if diag != last_lvol_diag.get(lvol):
+                    self.logger.info(f"Deferred lvol '{lvol}' (id={lvol_id}) state: {diag}")
+                    last_lvol_diag[lvol] = diag
+
+                # Re-issue delete if enough time has passed since last retry.
+                # Kept deliberately: a stalled delete does complete once the
+                # owning node comes back, and this loop is what lets it.
+                now = time.time()
+                if now - last_lvol_retry.get(lvol, 0) >= retry_interval:
+                    self.logger.info(f"Re-issuing delete for deferred lvol '{lvol}' (id={lvol_id})")
+                    try:
+                        self.sbcli_utils.delete_request(api_url=f"/lvol/{lvol_id}")
+                    except Exception as exc:
+                        self.logger.warning(f"Re-issue delete failed for lvol '{lvol}': {exc}")
+                    last_lvol_retry[lvol] = now
+
+            # --- Reconcile pending snapshots ---
+            # Snapshots with associated clones will fail to delete, so the
+            # *retry* waits until all pending lvol/clone deletes have cleared.
+            # The visibility check must not wait: a snapshot that went away on
+            # its own has to be noticed even while a clone is stuck, or it is
+            # carried to the end and reported as un-converged alongside it.
+            lvols_pending = list(self.pending_deletions["lvols"])
+            self.logger.info(f"Checking for deferred snapshots: {self.pending_deletions['snapshots']}")
+            for snap in list(self.pending_deletions["snapshots"]):
+                if self.k8s_test:
+                    snap_id = self.sbcli_utils.get_snapshot_id(snap)
+                else:
+                    snap_id = self.ssh_obj.get_snapshot_id_delete(self.mgmt_nodes[0], snap)
+                if not snap_id or snap_id != self.pending_deletions["snapshots"][snap]:
+                    self.logger.info(f"Deferred snapshot '{snap}' no longer visible, removing from pending")
+                    del self.pending_deletions["snapshots"][snap]
+                    last_snap_retry.pop(snap, None)
+                    continue
+
+                if lvols_pending:
+                    continue
+
+                # Re-issue delete if enough time has passed since last retry
+                now = time.time()
+                if now - last_snap_retry.get(snap, 0) >= retry_interval:
+                    self.logger.info(f"Re-issuing delete for deferred snapshot '{snap}' (id={snap_id})")
+                    try:
+                        if self.k8s_test:
+                            self.sbcli_utils.delete_snapshot(snap_id=snap_id, skip_error=True)
+                        else:
+                            self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snap_id, skip_error=True)
+                    except Exception as exc:
+                        self.logger.warning(f"Re-issue delete failed for snapshot '{snap}': {exc}")
+                    last_snap_retry[snap] = now
+
+            if lvols_pending and self.pending_deletions["snapshots"]:
+                self.logger.info(
+                    f"Not retrying snapshot deletes -- {len(lvols_pending)} lvol(s) still "
+                    f"pending (snapshots cannot be deleted while clones exist): {lvols_pending}"
+                )
+
+            if not self.pending_deletions["lvols"] and not self.pending_deletions["snapshots"]:
+                self.logger.info("All deferred deletions completed")
+                return
+
+            sleep_n_sec(interval)
+
+        observed = {
+            name: last_lvol_diag.get(name, "<never observed>")
+            for name in self.pending_deletions["lvols"]
+        }
+        blocked = bool(self.pending_deletions["lvols"]) and bool(self.pending_deletions["snapshots"])
+        raise Exception(
+            f"Deletion did not converge after {timeout}s. "
+            f"Lvols: {self.pending_deletions['lvols']}, "
+            f"Snapshots: {self.pending_deletions['snapshots']}. "
+            f"Last observed lvol state: {observed}."
+            + (
+                " Snapshots were never retried because a lvol/clone was still pending, "
+                "so they are blocked by the above rather than failing on their own."
+                if blocked else ""
+            )
+        )
 
     def _compute_fio_size(self, extra_lvols: int = 0) -> str:
         """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.

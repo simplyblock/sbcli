@@ -1346,6 +1346,11 @@ class SbcliUtils:
         If *wait* is True (default), polls until the snapshot disappears.
         If *wait* is False, issues the DELETE and returns immediately
         (fire-and-forget mode for bulk deletion).
+
+        Returns True only when the snapshot is confirmed gone, False otherwise
+        -- including fire-and-forget mode, where nothing has been confirmed.
+        Callers deciding whether to defer a retry must branch on this rather
+        than assume the call failed.
         """
         if not snap_id:
             if not snap_name:
@@ -1355,14 +1360,14 @@ class SbcliUtils:
         if not snap_id:
             if skip_error:
                 self.logger.info(f"Snapshot not found (skip_error=True). snap_name={snap_name}")
-                return
+                return True
             raise Exception(f"Snapshot not found. snap_name={snap_name}")
 
         resp = self.delete_request(api_url=f"/snapshot/{snap_id}", treat_404_as_success=True)
         self.logger.info(f"Delete snapshot resp: {resp}")
 
         if not wait:
-            return
+            return False
 
         # wait for removal
         attempt = 0
@@ -1371,16 +1376,16 @@ class SbcliUtils:
             # if deleting by name, use name check; else id check
             if snap_name:
                 if snap_name not in cur:
-                    return
+                    return True
             else:
                 if snap_id not in cur.values():
-                    return
+                    return True
 
             attempt += 1
             sleep_n_sec(5)
 
         if skip_error:
-            return
+            return False
         raise Exception(f"Snapshot did not get deleted in time. snap_name={snap_name}, snap_id={snap_id}")
 
     def delete_all_snapshots(self, max_workers=10):
