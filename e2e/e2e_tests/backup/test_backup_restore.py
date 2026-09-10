@@ -1108,11 +1108,13 @@ class BackupTestBase(TestClusterBase):
         d = details[0] if isinstance(details, list) else details
         assert isinstance(d, dict), (
             f"{label}: expected dict for lvol details but got {type(d).__name__}: {d!r}")
-        crypto_val = d.get("crypto_bdev") or d.get("crypto") or d.get("encryption")
-        self.logger.info(f"{label}: lvol {mgmt_id} crypto_bdev={crypto_val}")
+        crypto_val = ("crypto" in d.get("lvol_type", "").split(",")
+                      or bool(d.get("crypto_bdev")))
+        self.logger.info(f"{label}: lvol {mgmt_id} crypto={crypto_val}")
         assert crypto_val, (
-            f"{label}: restored lvol {mgmt_id} expected crypto_bdev to be set, "
-            f"got {crypto_val!r}. Full details: {d}")
+            f"{label}: restored lvol {mgmt_id} expected crypto=True, but "
+            f"lvol_type={d.get('lvol_type')!r} and "
+            f"crypto_bdev={d.get('crypto_bdev')!r}. Full details: {d}")
         return d
 
     def _verify_lvol_dhchap(self, lvol_id: str, label: str = ""):
