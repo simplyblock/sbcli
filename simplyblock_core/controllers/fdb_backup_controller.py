@@ -10,6 +10,7 @@ import docker
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import fdb_backup_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.backup import DBBackup
 from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = lg.getLogger()
@@ -40,12 +41,15 @@ def create_backup(cluster_id):
         cont = res.output.decode("utf-8")
         logger.info(cont)
         # backup created
-        fdb_backup_events.fdb_backup_created(cluster_id)
+        backup_obj = DBBackup()
+        backup_obj.backup_name = backup_path
+        backup_obj.cluster_id = cluster_id
+        fdb_backup_events.fdb_backup_created(backup_obj)
 
         return True
     return False
 
-def list_backups(cluster_id):
+def list_backups(cluster_id, is_json=False):
     container = __get_fdb_cont()
     data = []
     if container:
@@ -90,7 +94,8 @@ def list_backups(cluster_id):
                 "Restorable": restorable,
                 "Date": date,
             })
-
+        if is_json:
+            return data
         return utils.print_table(data)
 
     return True
@@ -106,6 +111,16 @@ def backup_status():
         return True
 
 
+def backup_delete(backup_path):
+    container = __get_fdb_cont()
+    if container:
+        res = container.exec_run(cmd=f"fdbbackup delete -d {backup_path}")
+        cont = res.output.decode("utf-8")
+        logger.info({cont.strip()})
+        return True
+    return False
+
+
 def backup_restore(backup_name, cluster_id):
     container = __get_fdb_cont()
     if container:
@@ -118,7 +133,10 @@ def backup_restore(backup_name, cluster_id):
         cont = res.output.decode("utf-8")
         logger.info(cont.strip())
         # backup restored
-        fdb_backup_events.fdb_backup_restored(cluster_id, backup_name)
+        backup_obj = DBBackup()
+        backup_obj.backup_name = backup_name
+        backup_obj.cluster_id = cluster_id
+        fdb_backup_events.fdb_backup_restored(backup_obj)
 
         return True
 
