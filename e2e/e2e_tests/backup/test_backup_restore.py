@@ -16,7 +16,7 @@ Backup CRUD:
   sbcli backup list [--cluster-id]
   sbcli backup delete <lvol_id>               # deletes ALL backups for that lvol
   sbcli backup restore <backup_id> [--lvol NAME] [--pool POOL]
-  sbcli backup import <metadata.json>
+  sbcli backup import (--from-file <metadata.json> | --bucket NAME) [--cluster-id]
 
 Policy management:
   sbcli backup policy-add <cluster_id> <name> [--versions N] [--age 1d] [--schedule ...]
@@ -2120,8 +2120,8 @@ class TestBackupNegative(BackupTestBase):
       - policy-attach invalid target_type → CLI error
       - policy-remove non-existent policy_id → error
       - backup list after all lvols deleted → empty or graceful
-      - backup import with valid metadata file
-      - backup import with malformed JSON → error
+      - backup import --from-file with a valid (empty) export document
+      - backup import --from-file with malformed JSON → error
       - Duplicate snapshot backup → handled (no crash, idempotent or error)
     """
 
@@ -2186,7 +2186,7 @@ class TestBackupNegative(BackupTestBase):
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
                 f"echo '{{not valid json}}' > {bad_json}")
-            out, err = self._sbcli(f"backup import {bad_json}")
+            out, err = self._sbcli(f"backup import --from-file {bad_json}")
             assert err or "error" in out.lower(), \
                 "TC-BCK-035: expected error for malformed JSON import"
             self.logger.info("TC-BCK-035: got expected error ✓")
@@ -2195,11 +2195,16 @@ class TestBackupNegative(BackupTestBase):
             good_json = "/tmp/good_backup.json"
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
-                f"echo '[]' > {good_json}")
-            out, err = self._sbcli(f"backup import {good_json}")
-            # Empty list → 0 imported; should not error
+                f"""echo '{{"schema_version": 1, "groups": []}}' > {good_json}""")
+            out, err = self._sbcli(f"backup import --from-file {good_json}")
+            # exec_command synthesises err from a non-zero exit when stderr is
+            # empty, so this rejects a refused command line too, not just a
+            # reported failure.
+            assert not err, \
+                f"TC-BCK-036: empty export import failed: {err}"
+            # Empty export → 0 imported; should not error
             assert "error" not in out.lower() or "0" in out, \
-                f"TC-BCK-036: unexpected error for empty-list import: {err}"
+                f"TC-BCK-036: unexpected error for empty export import: {out}"
             self.logger.info("TC-BCK-036: import handled ✓")
         else:
             self.logger.info("TC-BCK-035/036: skipped (backup import is CLI-only)")
@@ -3012,7 +3017,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     --------
     1. On Cluster-1: create lvol → write data → snapshot + S3 backup → wait for done.
     2. Export backup metadata from Cluster-1 via `backup list` → JSON file.
-    3. On Cluster-2: `backup import <metadata.json>` to register the chain.
+    3. On Cluster-2: `backup import --from-file <metadata.json>` to register the chain.
     4. On Cluster-2: `backup restore <backup_id>` to restore from Cluster-1's S3.
        (Backups self-describe their S3 bucket — no source-switch needed.)
     5. Verify checksums match the data written on Cluster-1.
@@ -3802,7 +3807,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         # TC-BCK-073: import metadata on Cluster-2
         self.logger.info(f"TC-BCK-073: Cluster-2 — backup import {meta_file}")
         out, err = self._sbcli_c2(
-            f"backup import {meta_file} --cluster-id {self._cluster2_id}")
+            f"backup import --from-file {meta_file} --cluster-id {self._cluster2_id}")
         assert not (err and "error" in err.lower()), \
             f"TC-BCK-073: backup import on Cluster-2 failed: {err}"
         self.logger.info(f"TC-BCK-073: import result: {out.strip()}")
