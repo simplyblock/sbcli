@@ -1057,11 +1057,13 @@ class BackupTestBase(TestClusterBase):
         details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
         assert details, f"{label}: get_lvol_details returned empty for {lvol_id}"
         d = details[0] if isinstance(details, list) else details
-        crypto_val = d.get("crypto") or d.get("encryption") or d.get("Crypto")
+        crypto_val = ("crypto" in d.get("lvol_type", "").split(",")
+                      or bool(d.get("crypto_bdev")))
         self.logger.info(f"{label}: lvol {lvol_id} crypto={crypto_val}")
         assert crypto_val, (
-            f"{label}: restored lvol {lvol_id} expected crypto=True, "
-            f"got {crypto_val!r}. Full details: {d}")
+            f"{label}: restored lvol {lvol_id} expected crypto=True, but "
+            f"lvol_type={d.get('lvol_type')!r} and "
+            f"crypto_bdev={d.get('crypto_bdev')!r}. Full details: {d}")
         return d
 
     # ── lvol / mount helpers ──────────────────────────────────────────────────
