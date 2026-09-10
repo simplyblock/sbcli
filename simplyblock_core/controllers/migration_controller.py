@@ -936,7 +936,8 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
 def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                          host_nqn=None,
-                         batch=False):
+                         batch=False,
+                         solo_from_shared=False):
     """
     Pre-create the target NVMe-oF infrastructure for a future migration of
     *lvol_id* to *target_node_id*.
@@ -950,6 +951,21 @@ def create_migration(lvol_id, target_node_id,
          SPDK auto-assign — see the nvmf_subsystem_add_ns call below for why.
       4. Create an LVolMigration record in PHASE_PRE_CREATED so that
          cancel_migration can tear everything down on request.
+
+    ``solo_from_shared`` (EXPERIMENTAL): bypasses the shared-subsystem guard
+    below to migrate exactly ONE member of a shared-namespace subsystem,
+    leaving its siblings untouched on the source. Relies on subsystem/
+    namespace state being tracked per physical node rather than cluster-wide
+    (already true — see _handle_lvol_migrate's overlap-node namespace swap):
+    the target node ends up with its own local instance of the SAME NQN,
+    carrying only this lvol's namespace (pinned to its existing nsid, step 3
+    above); siblings are simply never registered there. Cutover then runs the
+    ordinary single-lvol ANA-flip path unchanged — it already only touches
+    this lvol's own ANA group (anagrpid=lvol.ns_id), never the subsystem as a
+    whole. Not yet validated against the SPDK-side final-transfer RPC's
+    behavior when siblings remain live on the same source lvstore during the
+    freeze — treat as experimental until that's confirmed on a real cluster.
+    Mutually exclusive with ``batch`` (which moves every member together).
 
     Returns (migration_id, connect_strings) on success.
     Raises ValueError on any validation or setup failure.
@@ -973,12 +989,16 @@ def create_migration(lvol_id, target_node_id,
     # _get_shared_subsystem_members includes lvol itself, so a subsystem that
     # merely *can* hold multiple namespaces (max_namespace_per_subsys > 1) but
     # currently has no other lvol in it must not be treated as shared.
+    if batch and solo_from_shared:
+        raise ValueError("batch and solo_from_shared are mutually exclusive")
+
     shared_members = _get_shared_subsystem_members(lvol, tgt_node.cluster_id)
-    if len(shared_members) > 1 and not batch:
+    if len(shared_members) > 1 and not batch and not solo_from_shared:
         raise ValueError(
             f"LVol {lvol_id} belongs to a shared NVMe-oF subsystem with "
             f"{len(shared_members)} member(s) (NQN={lvol.nqn}). "
-            f"Use --batch to migrate the whole subsystem together."
+            f"Use --batch to migrate the whole subsystem together, or "
+            f"--solo (experimental) to migrate just this member."
         )
 
     existing_migration = get_active_migration_for_lvol(lvol_id, tgt_node.cluster_id)

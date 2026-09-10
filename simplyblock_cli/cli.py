@@ -924,6 +924,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--ctrl-loss-tmo', help='NVMe ctrl-loss-tmo in seconds. Default: `3600`.', type=int, default=3600, dest='ctrl_loss_tmo')
         subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts).', type=str, dest='host_nqn')
         subcommand.add_argument('--batch', help='Migrate all lvols sharing the same NVMe-oF subsystem as a coordinated group.', dest='batch', action='store_true')
+        subcommand.add_argument('--solo', help='EXPERIMENTAL: migrate one member of a shared-namespace subsystem on its own, without moving its siblings. Precreates a same-NQN, single-namespace subsystem instance on the target node instead of requiring --batch.', dest='solo_from_shared', action='store_true')
 
     def init_volume__migrate_continue(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-continue', 'Advance a pre-created migration to the snapshot-copy phase and launch the task runner.')

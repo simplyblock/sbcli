@@ -2404,6 +2404,11 @@ commands:
             dest: batch
             type: bool
             action: store_true
+          - name: "--solo"
+            help: "EXPERIMENTAL: migrate one member of a shared-namespace subsystem on its own, without moving its siblings. Precreates a same-NQN, single-namespace subsystem instance on the target node instead of requiring --batch."
+            dest: solo_from_shared
+            type: bool
+            action: store_true
       - name: migrate-continue
         help: "Advance a pre-created migration to the snapshot-copy phase and launch the task runner."
         arguments:

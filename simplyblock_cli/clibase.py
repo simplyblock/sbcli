@@ -985,6 +985,7 @@ class CLIWrapperBase:
                 args.target_node_id,
                 ctrl_loss_tmo=args.ctrl_loss_tmo,
                 host_nqn=getattr(args, 'host_nqn', None),
+                solo_from_shared=getattr(args, 'solo_from_shared', False),
             )
         except (MigrationConflictError, PreconditionError, ValueError) as e:
             print(f"Error: {e}")
