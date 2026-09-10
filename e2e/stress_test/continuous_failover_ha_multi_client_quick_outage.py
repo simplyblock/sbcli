@@ -60,6 +60,11 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self.node_vs_lvol = {}
         self.snapshot_names = []
         self.snap_vs_node = {}
+        # Lvols that share an NVMe subsystem (namespaced parents and children).
+        # Empty for V1; V2 fills it. Seeding snapshots/clones skips these because
+        # the clone connect path assumes one subsystem per lvol and its error
+        # branch disconnects the whole subsystem.
+        self._namespaced_lvols = set()
         self.current_outage_node = None
         self.outage_start_time = None
         self.outage_end_time = None
@@ -308,17 +313,39 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
             self.clone_mount_details[clone_name]["Command"] = connect_ls
 
+            # A clone inherits its parent's NQN. If some other client already
+            # holds that subsystem we MUST connect from that same client --
+            # two hosts on one subsystem corrupts data.
+            clone_nqn = self._nqn_from_connect_cmds(connect_ls)
+            if clone_nqn:
+                for _lname, _ldet in self.lvol_mount_details.items():
+                    _cmds = _ldet.get("Command") or []
+                    if any(clone_nqn in str(c) for c in _cmds):
+                        _owner = _ldet.get("Client")
+                        if _owner and _owner != client:
+                            self.logger.info(
+                                f"[clone_connect] {clone_nqn[-24:]} already held on "
+                                f"{_owner} (via {_lname}); moving clone {clone_name} "
+                                f"from {client} to {_owner}"
+                            )
+                            client = _owner
+                            self.clone_mount_details[clone_name]["Client"] = client
+                        break
+
             initial = self.ssh_obj.get_devices(node=client)
+            clone_already_connected = False
             for c in connect_ls:
                 _, err = self.ssh_obj.exec_command(node=client, command=c)
-                if err:
-                    nqn = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[clone_name]["ID"])[0]["nqn"]
-                    self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
-                    self.logger.info("[LFNG] connect clone error → cleanup")
-                    self.sbcli_utils.delete_lvol(lvol_name=clone_name, max_attempt=120, skip_error=True)
-                    sleep_n_sec(3)
-                    del self.clone_mount_details[clone_name]
-                    continue
+                if not self.nvme_connect_ok(err):
+                    # Defer rather than delete: the volume is usually healthy and
+                    # only the connect flaked. Deleting it here, and disconnecting
+                    # the NQN, would also drop every sibling in a shared subsystem.
+                    self.logger.warning(
+                        f"[clone_connect] connect failed for {clone_name}: {err}")
+                    self.record_failed_nvme_connect(
+                        clone_name, c, client=client, error=err)
+                elif err:
+                    clone_already_connected = True
 
             final = self.ssh_obj.get_devices(node=client)
             new_dev = None
@@ -326,6 +353,38 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                 if d not in initial:
                     new_dev = f"/dev/{d.strip()}"
                     break
+            if not new_dev and clone_already_connected and clone_nqn:
+                # The subsystem was already connected, so nothing new appears in
+                # the diff. Resolve by NQN *and* ns_id: one namespace per lvol
+                # means the NQN alone can return a sibling's device.
+                clone_ns = None
+                try:
+                    _cd = self.sbcli_utils.get_lvol_details(
+                        lvol_id=self.clone_mount_details[clone_name]["ID"])
+                    clone_ns = _cd[0].get("ns_id") if _cd else None
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[clone_connect] could not read ns_id for {clone_name}: {exc}")
+                if isinstance(clone_ns, int) and clone_ns >= 1:
+                    self.ssh_obj.rescan_live_nvme_controllers(client)
+                    sleep_n_sec(3)
+                    _dev = self.ssh_obj.get_nvme_device_for_nqn(
+                        client, clone_nqn, ns_id=clone_ns)
+                    claimed = {d.get("Device") for d in self.lvol_mount_details.values()}
+                    claimed |= {d.get("Device") for d in self.clone_mount_details.values()}
+                    if _dev and _dev not in claimed:
+                        new_dev = _dev
+                        self.logger.info(
+                            f"[clone_connect] {clone_name} shares a subsystem; "
+                            f"resolved nsid={clone_ns} to {new_dev}")
+                    elif _dev:
+                        self.logger.warning(
+                            f"[clone_connect] resolved {_dev} for {clone_name} but it "
+                            f"is already in use; refusing it")
+                else:
+                    self.logger.warning(
+                        f"[clone_connect] {clone_name} reports ns_id={clone_ns!r}; "
+                        f"refusing to resolve without a valid NSID")
             if not new_dev:
                 raise LvolNotConnectException("Clone did not connect")
 
@@ -614,6 +673,16 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         self._churn_groups = []           # [{lvol, snap, clone}]
         self._churn_ns_parent = None      # namespaced-subsystem parent lvol name
         self.max_namespace_per_subsys = 10
+        # Namespaced volumes are part of the standing set, not just churn. Churn
+        # only runs at a checkpoint, so on a run that fails early (as
+        # longfio_nochurn_rapid_outages_v2-20260910-135445 did, in iteration 2)
+        # nothing namespaced ever got created and every lvol had
+        # max_namespace_per_subsys=1. These are created at bootstrap instead, so
+        # shared-subsystem volumes are present from the first outage onward.
+        self.NAMESPACED_PARENTS = 3
+        self.CHILDREN_PER_PARENT = 2
+        self.parent_to_children = {}      # parent lvol name -> [child names]
+        self._nqn_to_parent = {}          # subsystem nqn -> parent lvol name
         # FIO is kicked once per checkpoint, so one wave has to outlast every
         # outage in the window, and the wait timeout has to exceed the runtime
         # or the checkpoint join gives up on FIO that is still legitimately
@@ -778,6 +847,12 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 f"{self.log_path}/local-{lvol_name}_fio*",
                 f"{self.log_path}/{lvol_name}_fio_iolog*",
             ])
+
+        # Namespaced parents and children join the standing set here, while we
+        # are still inside _bootstrap_cluster's create step -- so the snapshot,
+        # clone and FIO stages that follow treat them like any other member.
+        self._create_namespaced_lvols()
+        self._assert_subsystem_sharing()
 
     # ── Override 2: outage — ft-aware node selection + K8s ───────────────────
 
@@ -967,6 +1042,175 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
 
         # small cool-down before next outage
         sleep_n_sec(10)
+
+    # ── namespaced (shared-subsystem) volumes in the standing set ────────────
+
+    def _create_namespaced_lvols(self):
+        """Create namespaced parent/child lvols and mount every namespace.
+
+        A child created with ``namespace=True`` is auto-grouped into an existing
+        parent subsystem, so it does NOT get its own controller and must not be
+        `nvme connect`-ed again. Only the parent is connected; the children are
+        surfaced with a namespace rescan and then resolved by (NQN, NSID) via
+        get_nvme_device_for_nqn -- the before/after device diff the plain path
+        uses cannot tell which new block device belongs to which child.
+        """
+        client_node = random.choice(self.fio_node)
+        self.logger.info(f"[namespace] all namespaced volumes pinned to client {client_node}")
+        for _ in range(self.NAMESPACED_PARENTS):
+            parent = f"nsp{_rand_id(8, first_alpha=False)}"
+            fs_type = random.choice(["ext4", "xfs"])
+
+            self._wait_cluster_active()
+            try:
+                self.sbcli_utils.add_lvol(
+                    lvol_name=parent,
+                    pool_name=self.pool_name,
+                    size=self.lvol_size,
+                    max_namespace_per_subsys=self.max_namespace_per_subsys,
+                )
+                parent_id = self.sbcli_utils.get_lvol_id(parent)
+            except Exception as exc:
+                self.logger.warning(f"[namespace] parent create failed ({parent}): {exc}")
+                continue
+            if not parent_id:
+                self.logger.warning(f"[namespace] parent {parent} created but no id resolved")
+                continue
+
+            parent_nqn = self.sbcli_utils.get_lvol_details(lvol_id=parent_id)[0]["nqn"]
+            self.logger.info(
+                f"[namespace] parent {parent} ({parent_id}) nqn={parent_nqn} "
+                f"max_namespace_per_subsys={self.max_namespace_per_subsys}"
+            )
+
+            if not self._connect_and_mount(parent, parent_id, client_node, fs_type):
+                continue
+            self._namespaced_lvols.add(parent)
+            self.parent_to_children[parent] = []
+            self._nqn_to_parent[parent_nqn] = parent
+
+            # children join the parent's subsystem, each taking its own NSID
+            for _c in range(self.CHILDREN_PER_PARENT):
+                child = f"nsc{_rand_id(8, first_alpha=False)}"
+                self._wait_cluster_active()
+                try:
+                    self.sbcli_utils.add_lvol(
+                        lvol_name=child,
+                        pool_name=self.pool_name,
+                        size=self.lvol_size,
+                        namespace=True,
+                    )
+                    child_id = self.sbcli_utils.get_lvol_id(child)
+                except Exception as exc:
+                    self.logger.warning(f"[namespace] child create failed ({child}): {exc}")
+                    continue
+                if not child_id:
+                    continue
+
+                details = self.sbcli_utils.get_lvol_details(lvol_id=child_id)[0]
+                child_nqn, child_ns = details.get("nqn"), details.get("ns_id")
+                if child_nqn != parent_nqn:
+                    # The backend auto-groups into any subsystem with room, so a
+                    # child can join an earlier parent. Record it against the
+                    # subsystem it actually joined rather than the one we asked
+                    # for, or parent_to_children reports the wrong topology.
+                    self.logger.warning(
+                        f"[namespace] child {child} joined {child_nqn}, not the parent "
+                        f"subsystem {parent_nqn} we just created"
+                    )
+                # Resolving without a usable NSID would hand back "any head on
+                # this NQN" -- in a shared subsystem that is very likely the
+                # parent's namespace, and we would then mkfs the parent. Refuse
+                # rather than risk it.
+                if not isinstance(child_ns, int) or child_ns < 1:
+                    self.logger.warning(
+                        f"[namespace] child {child} reported ns_id={child_ns!r}; "
+                        f"refusing to resolve its device without a valid NSID"
+                    )
+                    continue
+
+                self.ssh_obj.rescan_live_nvme_controllers(client_node)
+                sleep_n_sec(3)
+                device = self.ssh_obj.get_nvme_device_for_nqn(
+                    client_node, child_nqn, ns_id=child_ns)
+                if not device:
+                    self.logger.warning(
+                        f"[namespace] no device surfaced for child {child} "
+                        f"(nqn={child_nqn} nsid={child_ns}); skipping"
+                    )
+                    continue
+
+                # Belt and braces: never format a device another volume already
+                # owns, whatever the NSID bookkeeping said.
+                claimed = {d.get("Device") for d in self.lvol_mount_details.values()}
+                claimed |= {d.get("Device") for d in self.clone_mount_details.values()}
+                if device in claimed:
+                    self.logger.warning(
+                        f"[namespace] resolved {device} for child {child}, but that "
+                        f"device is already in use; skipping to avoid reformatting it"
+                    )
+                    continue
+
+                self.logger.info(
+                    f"[namespace] child {child} nsid={child_ns} -> {device} "
+                    f"(sharing {parent}'s subsystem)")
+                self._register_and_mount_device(child, child_id, client_node, fs_type, device)
+                self._namespaced_lvols.add(child)
+                owner = self._nqn_to_parent.get(child_nqn, parent)
+                self.parent_to_children.setdefault(owner, []).append(child)
+
+        total_children = sum(len(c) for c in self.parent_to_children.values())
+        self.logger.info(
+            f"[namespace] {len(self.parent_to_children)} parent(s) with "
+            f"{total_children} child namespace(s): {self.parent_to_children}"
+        )
+
+    def _connect_and_mount(self, lvol_name, lvol_id, client_node, fs_type):
+        """Connect a brand-new subsystem, then format and mount its namespace."""
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        initial = self.ssh_obj.get_devices(node=client_node)
+        for c in connect_ls:
+            _, err = self.ssh_obj.exec_command(node=client_node, command=c)
+            if err:
+                self.logger.warning(f"[namespace] connect failed for {lvol_name}: {err}")
+                return False
+        final = self.ssh_obj.get_devices(node=client_node)
+        new_dev = next((f"/dev/{d.strip()}" for d in final if d not in initial), None)
+        if not new_dev:
+            self.logger.warning(f"[namespace] {lvol_name} did not surface a device")
+            return False
+        self._register_and_mount_device(lvol_name, lvol_id, client_node, fs_type, new_dev)
+        self.lvol_mount_details[lvol_name]["Command"] = connect_ls
+        return True
+
+    def _register_and_mount_device(self, lvol_name, lvol_id, client_node, fs_type, device):
+        """Record an lvol in lvol_mount_details and mount *device* for it.
+
+        Registering here is what gets these volumes picked up by
+        _seed_snapshots_and_clones, _kick_fio_for_all and the FIO validation --
+        they are ordinary members of the standing set, just namespaced.
+        """
+        self.lvol_mount_details[lvol_name] = {
+            "ID": lvol_id,
+            "Command": None,
+            "Mount": None,
+            "Device": device,
+            "MD5": None,
+            "FS": fs_type,
+            "Log": f"{self.log_path}/{lvol_name}.log",
+            "snapshots": [],
+            "iolog_base_path": f"{self.log_path}/{lvol_name}_fio_iolog",
+            "Client": client_node,
+        }
+        self.ssh_obj.format_disk(node=client_node, device=device, fs_type=fs_type)
+        mnt = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.mount_path(node=client_node, device=device, mount_path=mnt)
+        self.lvol_mount_details[lvol_name]["Mount"] = mnt
+        self.ssh_obj.delete_files(client_node, [
+            f"{mnt}/*fio*",
+            f"{self.log_path}/local-{lvol_name}_fio*",
+            f"{self.log_path}/{lvol_name}_fio_iolog*",
+        ])
 
     # ── churn: exercise create/delete while migration is still in flight ─────
 

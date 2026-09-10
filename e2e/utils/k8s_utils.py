@@ -4766,13 +4766,22 @@ class K8sSbcliUtils:
             f"Proceeding to health-check anyway."
         )
 
-    def wait_for_health_status(self, node_id, status, timeout=60, device_id=None):
+    def wait_for_health_status(self, node_id, status, timeout=60, device_id=None,
+                               wait_for_balancing=True):
         """
         K8s equivalent of SbcliUtils.wait_for_health_status.
 
         Before checking the node's ``health_check`` field this method first
         waits for all ``balancing_on_restart`` subtasks to complete (up to
         10 minutes), then polls the node health flag until it matches *status*.
+
+        Pass ``wait_for_balancing=False`` to skip that first step and poll the
+        health flag straight away. ``balancing_on_restart`` *is* data migration,
+        so a test whose purpose is to fire the next outage while migration is
+        still in flight must not call this with the wait enabled -- doing so
+        drains migration on every iteration and quietly defeats the test. The
+        docker equivalent (SbcliUtils.wait_for_health_status) has no such step,
+        which is why this only bites on k8s.
 
         The ``device_id`` branch is not supported in K8s mode (no REST API);
         a warning is logged and the method returns None if device_id is given.
@@ -4785,7 +4794,13 @@ class K8sSbcliUtils:
             return None
 
         # Step 1: wait for balancing_on_restart subtasks to finish
-        self._wait_for_balancing_subtasks(node_id, timeout=600)
+        if wait_for_balancing:
+            self._wait_for_balancing_subtasks(node_id, timeout=600)
+        else:
+            self.logger.info(
+                f"[health_check] node={node_id}: skipping the balancing_on_restart "
+                f"wait at the caller's request"
+            )
 
         # Step 2: poll node health_check flag
         actual_status = None

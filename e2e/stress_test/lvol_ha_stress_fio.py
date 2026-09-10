@@ -63,6 +63,39 @@ class TestLvolHACluster(FioWorkloadTest):
             return fio
         return self.mgmt_nodes[0]
 
+    def _is_namespaced_lvol(self, lvol_name):
+        """True when this lvol shares its subsystem with another volume."""
+        det = self.lvol_mount_details.get(lvol_name) or {}
+        return bool(det.get("is_parent") or det.get("parent"))
+
+    def _assert_subsystem_sharing(self):
+        """Fail if no two volumes ended up sharing a subsystem.
+
+        Without this the test passes identically whether namespacing worked or
+        every lvol quietly got its own subsystem. Nothing else in the suite
+        checks it.
+        """
+        groups = {}
+        for name, det in self.lvol_mount_details.items():
+            try:
+                nqn = self.sbcli_utils.get_lvol_details(lvol_id=det["ID"])[0].get("nqn")
+            except Exception:
+                continue
+            if nqn:
+                groups.setdefault(nqn, []).append(name)
+        shared = {n: v for n, v in groups.items() if len(v) > 1}
+        for nqn, vols in shared.items():
+            self.logger.info(f"[namespace] {nqn[-28:]} -> {sorted(vols)}")
+        if not shared:
+            raise AssertionError(
+                f"No subsystem is shared by more than one volume: {len(groups)} "
+                f"distinct NQNs across {sum(len(v) for v in groups.values())} lvols. "
+                f"Namespaced children were requested but each got its own subsystem."
+            )
+        self.logger.info(
+            f"[namespace] sharing confirmed: {len(shared)} shared subsystem(s), "
+            f"largest holds {max(len(v) for v in shared.values())} volumes")
+
     def record_pending_lvol_delete(self, lvol, lvol_id):
         self.logger.warning(f"[DEFERRED] Adding lvol to pending delete: {lvol}")
         self.pending_deletions["lvols"][lvol] = lvol_id

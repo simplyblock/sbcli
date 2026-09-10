@@ -65,6 +65,10 @@ class K8sNativeFailoverTest(TestClusterBase):
     FIO runs as K8s Jobs with ConfigMaps.
     """
 
+    # Collect diagnostics before every outage. Subclasses that pace outages
+    # deliberately (see K8sNativeRapidFailoverNoGapTest) set this False.
+    COLLECT_PRE_OUTAGE_DIAGNOSTICS = True
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
@@ -2396,7 +2400,11 @@ class K8sNativeFailoverTest(TestClusterBase):
         else:
             outage_nodes = self._pick_outage_nodes(candidates, self.npcs)
         self.logger.info(f"Selected outage nodes: {outage_nodes} (FTT={self.max_fault_tolerance})")
-        self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
+        # Subclasses that keep a tight outage cadence turn this off: on k8s a
+        # collection is ~60-80s of kubectl exec per iteration, and it sits
+        # directly between recovery and the next outage.
+        if self.COLLECT_PRE_OUTAGE_DIAGNOSTICS:
+            self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
 
         node_plans = []
         for i, node in enumerate(outage_nodes):
@@ -4061,6 +4069,15 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         self.test_name = "k8s_native_resilient_failover"
 
         # Permanent resources per node
+        # Namespaced (shared-subsystem) volumes. Under CSI, namespacing is a
+        # StorageClass property rather than a per-PVC one, and a subsystem is
+        # per storage node -- so a group of PVCs only shares one subsystem when
+        # the whole group is pinned to the same node.
+        self.NAMESPACE_SC_NAME = "simplyblock-csi-sc-ns"
+        self.max_namespace_per_subsys = 10
+        self._namespace_sc_ready = False
+        self.NAMESPACED_NODE_COUNT = 2      # how many nodes get a namespaced group
+        self.NAMESPACED_PVCS_PER_NODE = 2   # PVCs per group, sharing one subsystem
         self.PERMANENT_PVCS_PER_NODE = 2
 
         # Cap on total lvols (PVCs + clones) to avoid resource exhaustion
@@ -4315,6 +4332,111 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         self.k8s_utils.log_fio_pvc_mapping(
             self.pvc_details, self.clone_details,
             snapshot_details=self.snapshot_details,
+        )
+
+    def _ensure_namespace_storage_class(self):
+        """Create the namespaced StorageClass once, on first use."""
+        if self._namespace_sc_ready:
+            return
+        try:
+            self.k8s_utils.create_storage_class(
+                name=self.NAMESPACE_SC_NAME,
+                cluster_id=self.cluster_id or "",
+                pool_name=self.pool_name,
+                ndcs=self.ndcs,
+                npcs=self.npcs,
+                max_namespace_per_subsys=self.max_namespace_per_subsys,
+            )
+            self._namespace_sc_ready = True
+            self.logger.info(
+                f"[churn] Namespaced StorageClass {self.NAMESPACE_SC_NAME} ready "
+                f"(max_namespace_per_subsys={self.max_namespace_per_subsys})"
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"[churn] Could not create namespaced StorageClass: {exc}; "
+                f"falling back to the default class for namespaced churn"
+            )
+
+    def _create_namespaced_permanent_pvcs(self):
+        """Create a pinned group of namespaced PVCs on each of a few nodes.
+
+        Under CSI, namespacing is a StorageClass property, and PVCs only share
+        an NVMe subsystem when they land on the same storage node -- so a group
+        has to be pinned to one node, which is what k8s_native_namespace_failover
+        does. These join permanent_pvcs so they are never pruned and age across
+        the whole run.
+        """
+        self._ensure_namespace_storage_class()
+        if not self._namespace_sc_ready:
+            self.logger.warning(
+                "[namespace] namespaced StorageClass unavailable; standing set will "
+                "have no shared-subsystem PVCs"
+            )
+            return
+
+        group = min(self.NAMESPACED_PVCS_PER_NODE, self.max_namespace_per_subsys)
+        before = set(self.pvc_details)
+        for node_id in self.sn_nodes[:self.NAMESPACED_NODE_COUNT]:
+            self.logger.info(
+                f"[namespace] creating {group} namespaced PVC(s) pinned to node {node_id}"
+            )
+            try:
+                self.create_pvcs_with_fio(
+                    group, node_ids=[node_id] * group,
+                    storage_class=self.NAMESPACE_SC_NAME,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[namespace] namespaced PVC creation failed on {node_id}: {exc}"
+                )
+        added = set(self.pvc_details) - before
+        self.permanent_pvcs |= added
+        self.logger.info(
+            f"[namespace] {len(added)} namespaced PVC(s) added to the permanent set, "
+            f"in groups of {group}: {sorted(added)}"
+        )
+
+    def _pvc_nqn(self, pvc_name):
+        """The NQN of the subsystem a PVC's lvol lives in, or None."""
+        try:
+            handle = self.k8s_utils.get_pvc_volume_handle(pvc_name)
+            if not handle:
+                return None
+            lvol_id = handle.split(":")[-1] if ":" in handle else handle
+            details = self.sbcli_utils.get_lvol_details(lvol_id)
+            return details[0].get("nqn") if details else None
+        except Exception as exc:
+            self.logger.warning(f"[namespace] could not read NQN for PVC {pvc_name}: {exc}")
+            return None
+
+    def _assert_subsystem_sharing(self):
+        """Fail if no two volumes ended up sharing an NVMe subsystem.
+
+        Without this the test passes identically whether namespacing worked or
+        every PVC quietly got its own subsystem -- which is what happens if the
+        namespaced StorageClass is missing or the group was not pinned to one
+        node. Nothing else in the suite checks this today.
+        """
+        groups = {}
+        for pvc in self.pvc_details:
+            nqn = self._pvc_nqn(pvc)
+            if nqn:
+                groups.setdefault(nqn, []).append(pvc)
+        for nqn, pvcs in groups.items():
+            self.logger.info(f"[namespace] {nqn[-28:]} -> {sorted(pvcs)}")
+        shared = {n: p for n, p in groups.items() if len(p) > 1}
+        if not shared:
+            raise AssertionError(
+                f"No subsystem is shared by more than one volume: "
+                f"{len(groups)} distinct NQNs across {sum(len(p) for p in groups.values())} "
+                f"PVCs. Namespaced volumes were requested but every PVC got its own "
+                f"subsystem -- check that StorageClass {self.NAMESPACE_SC_NAME} exists with "
+                f"max_namespace_per_subsys>1 and that the group was pinned to one node."
+            )
+        self.logger.info(
+            f"[namespace] subsystem sharing confirmed: {len(shared)} shared subsystem(s), "
+            f"largest holds {max(len(p) for p in shared.values())} volumes"
         )
 
     def _create_permanent_snapshots_and_clones(self):
@@ -5065,6 +5187,12 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         sleep_n_sec(30)
         self._ensure_per_node_coverage()
 
+        # ── Phase 1b: namespaced (shared-subsystem) PVCs ──
+        # Created before the snapshot phase so they are ordinary members of the
+        # permanent set and get snapshots like everything else.
+        self._create_namespaced_permanent_pvcs()
+        self._assert_subsystem_sharing()
+
         # ── Phase 2: Create permanent snapshots (clones disabled) ──
         self.logger.info(
             "[permanent] Creating 1 snapshot per node (clones skipped)"
@@ -5302,6 +5430,9 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
     # the gap budget, so they are off; cluster state is captured at checkpoints.
     COLLECT_DUMP_LVSTORE_K8S = False
     COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S = False
+    # perform_n_plus_k_outages collects diagnostics before each outage, which on
+    # k8s is ~60-80s of kubectl exec sitting in the middle of the gap budget.
+    COLLECT_PRE_OUTAGE_DIAGNOSTICS = False
 
     def __init__(self, **kwargs):
         kwargs["k8s_run"] = True
@@ -5309,11 +5440,8 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
         self.test_name = "k8s_native_rapid_failover_no_gap"
         self.validate_every = 5
         self._iter = 0
-        # Under CSI, namespacing is a StorageClass property rather than a
-        # per-PVC one, so a share of churn PVCs is routed to a dedicated SC.
-        self.NAMESPACE_SC_NAME = "simplyblock-csi-sc-ns"
-        self.max_namespace_per_subsys = 10
-        self._namespace_sc_ready = False
+        # Namespaced-volume config and helpers are inherited from
+        # K8sNativeResilientFailoverTest.
         # FIO is only restarted at a checkpoint, so its runtime has to cover
         # every outage in the window; if it expires early the remaining outages
         # run against an idle cluster and the test quietly stops proving
@@ -5343,30 +5471,6 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
         return result
 
     # ── churn ────────────────────────────────────────────────────────────────
-
-    def _ensure_namespace_storage_class(self):
-        """Create the namespaced StorageClass once, on first use."""
-        if self._namespace_sc_ready:
-            return
-        try:
-            self.k8s_utils.create_storage_class(
-                name=self.NAMESPACE_SC_NAME,
-                cluster_id=self.cluster_id or "",
-                pool_name=self.pool_name,
-                ndcs=self.ndcs,
-                npcs=self.npcs,
-                max_namespace_per_subsys=self.max_namespace_per_subsys,
-            )
-            self._namespace_sc_ready = True
-            self.logger.info(
-                f"[churn] Namespaced StorageClass {self.NAMESPACE_SC_NAME} ready "
-                f"(max_namespace_per_subsys={self.max_namespace_per_subsys})"
-            )
-        except Exception as exc:
-            self.logger.warning(
-                f"[churn] Could not create namespaced StorageClass: {exc}; "
-                f"falling back to the default class for namespaced churn"
-            )
 
     def _run_checkpoint_churn(self, iteration):
         """Delete some dynamic PVCs, create more, and reconcile past deletes.
@@ -5464,7 +5568,16 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
 
                 for node, _, _ in outage_events:
                     try:
-                        self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
+                        # wait_for_balancing=False is the whole point of this test.
+                        # The k8s health check otherwise waits up to 600s per node
+                        # for balancing_on_restart -- data migration -- to drain
+                        # before it even looks at the health flag. At two nodes per
+                        # iteration that measured ~20 minutes of gap on
+                        # k8s_native_rapid_failover_no_gap-20260910-192856, so
+                        # migration had always finished before the next outage.
+                        self.sbcli_utils.wait_for_health_status(
+                            node, True, timeout=300, wait_for_balancing=False
+                        )
                     except Exception as exc:
                         self.logger.warning(
                             f"Health check did not pass for {node}: {exc}"
@@ -5489,6 +5602,17 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
                         f"[checkpoint] {self._iter} outages -- validating"
                     )
                     self.collect_outage_diagnostics(f"checkpoint_{self._iter}")
+
+                    # The balancing-aware health check runs here rather than in the
+                    # hot path, so migration is still verified to drain -- once per
+                    # window instead of after every outage.
+                    for node, _, _ in outage_events:
+                        try:
+                            self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[checkpoint] Health check did not pass for {node}: {exc}"
+                            )
 
                     # Only nodes actually outaged since the last checkpoint can
                     # have dropped a core; a network outage aborts the node.

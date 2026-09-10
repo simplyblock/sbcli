@@ -370,10 +370,46 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
     # Override create_lvols_with_fio: cycle plain / crypto / dhchap
     # ------------------------------------------------------------------
     def create_lvols_with_fio(self, count):
-        """Create *count* lvols cycling through plain, crypto, dhchap types."""
+        """Create *count* lvols cycling through plain, crypto, dhchap types.
+
+        Afterwards a share of them gain namespaced children, so part of the
+        standing set shares NVMe subsystems. Every lvol here is created with
+        max_namespace_per_subsys=30, so the parents already have free slots and
+        no extra parent volumes are needed.
+        """
+        created = []
         for i in range(count):
             sec_type = next(self._sec_cycle)
-            self._create_one_lvol(i, sec_type)
+            name = self._create_one_lvol(i, sec_type)
+            if name:
+                created.append(name)
+
+        # Seed namespaced children once, at bootstrap. create_lvols_with_fio is
+        # also called mid-run to replenish deleted lvols
+        # (continuous_failover_ha_multi_outage.py:1345 asks for 5), and doing
+        # this on every call would grow the namespaced set without bound and
+        # re-run the sharing assertion -- one get_lvol_details per lvol -- in
+        # the middle of an outage cycle.
+        if self._namespaced_seeded:
+            return
+
+        # DHCHAP parents cannot take children: create_sec_lvol has no
+        # --namespaced flag, so only the plain/crypto lvols are candidates.
+        candidates = [
+            n for n in created
+            if (self.lvol_mount_details.get(n) or {}).get("sec_type") != "dhchap"
+            and (self.lvol_mount_details.get(n) or {}).get("Mount")
+        ]
+        parents = candidates[:self.NAMESPACED_PARENTS]
+        if not parents:
+            self.logger.warning(
+                "[namespace] no eligible parent lvols; standing set will not share "
+                "any subsystem"
+            )
+            return
+        self._create_namespaced_children(parents, self.CHILDREN_PER_PARENT)
+        self._namespaced_seeded = True
+        self._assert_subsystem_sharing()
 
     def _create_one_lvol(self, index, sec_type):
         """Create a single lvol of given security type and start FIO."""
@@ -425,7 +461,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                 )
                 if err and "error" in err.lower():
                     self.logger.warning(f"CLI lvol creation error for {lvol_name}: {err}")
-                    return
+                    return None
             else:
                 self.sbcli_utils.add_lvol(
                     lvol_name=lvol_name,
@@ -454,13 +490,13 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                     )
             except Exception as exc2:
                 self.logger.warning(f"Retry lvol creation also failed: {exc2}")
-                return
+                return None
 
         sleep_n_sec(3)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
         if not lvol_id:
             self.logger.warning(f"Could not find lvol ID for {lvol_name}, skipping")
-            return
+            return None
 
         # Track node placement
         try:
@@ -480,12 +516,12 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                 if err or not connect_ls:
                     self.logger.warning(f"No connect string for dhchap lvol {lvol_name}: {err}")
                     self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
-                    return
+                    return None
             else:
                 connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
         except Exception as exc:
             self.logger.warning(f"get_connect_str failed for {lvol_name}: {exc}")
-            return
+            return None
 
         if not self.k8s_test:
             self.ssh_obj.exec_command(
@@ -500,22 +536,29 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             "Client": client_node, "iolog_base_path": iolog_base,
         }
 
-        # Connect NVMe
+        # Connect NVMe.
+        #
+        # These lvols carry max_namespace_per_subsys=30, so a subsystem here can
+        # hold sibling volumes. Two consequences:
+        #
+        #  * "already connected" is a routine reply, not a failure -- with
+        #    --ctrl-loss-tmo=-1 the kernel has usually restored the path before
+        #    we retry. nvme_connect_ok() classifies it.
+        #  * disconnecting the NQN on a stderr would tear down every sibling
+        #    namespace and the FIO running on them. safe_disconnect_nvme fails
+        #    closed when the namespace count is >1 or unknown, and a genuine
+        #    failure is deferred to retry_failed_nvme_connects rather than
+        #    deleting a volume that may be perfectly healthy.
         initial_devices = self.ssh_obj.get_devices(node=client_node)
+        already_connected = False
         for cmd in connect_ls:
             _, err = self.ssh_obj.exec_command(node=client_node, command=cmd)
-            if err:
+            if not self.nvme_connect_ok(err):
                 self.logger.warning(f"nvme connect error for {lvol_name}: {err}")
-                try:
-                    nqn = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)[0]["nqn"]
-                    self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
-                except Exception:
-                    pass
-                self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
-                del self.lvol_mount_details[lvol_name]
-                if lvol_node_id and lvol_name in self.node_vs_lvol.get(lvol_node_id, []):
-                    self.node_vs_lvol[lvol_node_id].remove(lvol_name)
-                return
+                self.record_failed_nvme_connect(
+                    lvol_name, cmd, client=client_node, error=err)
+            elif err:
+                already_connected = True
 
         sleep_n_sec(3)
         final_devices = self.ssh_obj.get_devices(node=client_node)
@@ -523,6 +566,21 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             (f"/dev/{d.strip()}" for d in final_devices if d not in initial_devices),
             None,
         )
+        if not lvol_device and already_connected:
+            # The subsystem was already held on this client, so no new device
+            # shows up in the diff. Resolve by NQN *and* ns_id -- a shared
+            # subsystem holds one namespace per lvol, so the NQN alone can
+            # return a sibling volume's device.
+            lvol_device, _found_on = self._resolve_device_by_ns(
+                client_node, lvol_id, lvol_name)
+            if lvol_device and _found_on and _found_on != client_node:
+                # The subsystem is held on another client; that is where this
+                # volume's namespace lives, so FIO has to run from there.
+                self.logger.info(
+                    f"{lvol_name} surfaced on {_found_on}, not {client_node}; "
+                    f"moving it")
+                client_node = _found_on
+                self.lvol_mount_details[lvol_name]["Client"] = client_node
         if not lvol_device:
             raise LvolNotConnectException(
                 f"LVOL {lvol_name} ({sec_type}) did not connect")
@@ -542,7 +600,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                 f"Skipping FIO for this lvol."
             )
             self.lvol_mount_details[lvol_name]["Mount"] = None
-            return
+            return None
 
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 
@@ -572,6 +630,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         fio_thread.start()
         self.fio_threads.append(fio_thread)
         sleep_n_sec(10)
+        return lvol_name
 
     # ------------------------------------------------------------------
     # Override run() to set up DHCHAP pool + fault tolerance check
