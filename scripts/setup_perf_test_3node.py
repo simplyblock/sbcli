@@ -22,7 +22,7 @@ KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ = "us-east-1a"
 SG_NAME = "default"
 BRANCH = "main"
-MAX_LVOL = "100"
+MAX_LVOL = "75"  # capped by constants.MAX_SUBSYSTEMS_PER_NODE (75): above it, values were silently clamped at placement time, so a node reserved huge pages for subsystems it could never serve. cluster create rejects it since 8bcedce79.
 # --- Manual Network Config ---
 SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
@@ -45,7 +45,7 @@ ec2 = boto3.resource('ec2', region_name='us-east-1')
 USER = "ec2-user"
 AZ = "us-east-1a"
 IFACE = "eth0"
-MAX_LVOL = "100"
+MAX_LVOL = "75"
 
 
 # --- Helper: Management Node with 30GB Root ---

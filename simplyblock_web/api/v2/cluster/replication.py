@@ -1,4 +1,6 @@
 from typing import Annotated, List, Optional
+
+from simplyblock_core.models.replication import ConsistencyGroup
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -35,6 +37,20 @@ class PolicyParams(BaseModel):
     interval_min: util.Unsigned = 1
     mode: Optional[ReplicationMode] = None
     keep_replicated: Optional[Annotated[int, Field(ge=2)]] = None
+    #: Group the policy's volumes into ONE crash-consistent unit: snapshots are
+    #: taken as atomically frozen generations and the members fail over
+    #: together. Decided at creation only — the group record is created with
+    #: the policy and members pin placement from the first attach.
+    consistency_group: bool = False
+
+
+def _group_for(policy: ReplicationPolicy) -> Optional[ConsistencyGroup]:
+    """The policy's consistency group, or None for an ordinary policy —
+    resolved here so the DTO can report the pinned placement without the
+    model layer knowing about DTOs."""
+    if not getattr(policy, 'consistency_group', False):
+        return None
+    return db.get_consistency_group_for_policy(policy.get_id())
 
 
 def _config_error(e: ReplicationConfigError):
@@ -125,7 +141,7 @@ policies_api = APIRouter()
 @policies_api.get('/', name='clusters:replication:policies:list')
 def list_policies(cluster: Cluster) -> List[ReplicationPolicyDTO]:
     return [
-        ReplicationPolicyDTO.from_model(policy)
+        ReplicationPolicyDTO.from_model(policy, group=_group_for(policy))
         for policy in replication_policy_controller.list_policies(cluster.get_id())
     ]
 
@@ -138,7 +154,8 @@ def create_policy(request: Request, cluster: Cluster, parameters: PolicyParams,
         policy_id = replication_policy_controller.add_policy(
             cluster.get_id(), parameters.policy_name, str(parameters.target_id),
             interval_min=parameters.interval_min, mode=parameters.mode,
-            keep_replicated=parameters.keep_replicated)
+            keep_replicated=parameters.keep_replicated,
+            consistency_group=parameters.consistency_group)
     except ReplicationConfigError as e:
         raise _config_error(e)
     except KeyError as e:
@@ -150,7 +167,7 @@ def create_policy(request: Request, cluster: Cluster, parameters: PolicyParams,
         entity_id=UUID(policy.uuid),
         route_name='clusters:replication:policies:detail',
         route_kwargs={'cluster_id': UUID(cluster.get_id()), 'policy_id': UUID(policy.uuid)},
-        get_full=lambda _: ReplicationPolicyDTO.from_model(policy),
+        get_full=lambda _: ReplicationPolicyDTO.from_model(policy, group=_group_for(policy)),
     )
 
 
@@ -159,7 +176,7 @@ policy_instance_api = APIRouter(prefix='/{policy_id}')
 
 @policy_instance_api.get('/', name='clusters:replication:policies:detail')
 def get_policy(cluster: Cluster, policy: ReplicationPolicy) -> ReplicationPolicyDTO:
-    return ReplicationPolicyDTO.from_model(policy)
+    return ReplicationPolicyDTO.from_model(policy, group=_group_for(policy))
 
 
 @policy_instance_api.delete('/', name='clusters:replication:policies:delete',

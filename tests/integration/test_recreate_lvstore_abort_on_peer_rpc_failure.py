@@ -291,10 +291,11 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
     # ----------------------------------------------------------------------
     # Non-leader port-block fails AFTER leader was blocked → leader unblocked
     # ----------------------------------------------------------------------
-    def test_non_leader_port_block_fw_failure_aborts_and_unblocks_leader(self):
-        """If the non-leader port-block fails after the leader was blocked,
-        abort must unwind by unblocking the leader (so client IO isn't
-        stranded)."""
+    def test_non_leader_port_block_fw_failure_aborts_before_blocking_leader(self):
+        """Non-leader ports are blocked BEFORE the leader. So if a non-leader
+        port-block fails, the restart aborts BEFORE the leader is ever blocked:
+        the leader keeps serving client IO (nothing to strand), and the abort
+        unwinds any non-leader that was already blocked."""
         from simplyblock_core import storage_node_ops
 
         patches = self._patches()
@@ -324,13 +325,22 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         # SPDK on snode killed
         self.assertGreaterEqual(snode_api.spdk_process_kill.call_count, 1)
 
-        # The leader (which was successfully blocked first) must have an "allow"
-        # call on the same port — that's _abort_restart_and_unblock unwinding it.
+        # Non-leaders are blocked FIRST, so a non-leader failure aborts before
+        # the leader block is reached: the leader must NEVER be blocked (and so
+        # keeps serving — there is nothing to strand or unwind on it).
         leader_actions = [c for c in fw_calls if c[0] == "951ffc7a"]
-        self.assertTrue(any(c[2] == "block" for c in leader_actions),
-                        f"Leader was never blocked: {leader_actions}")
-        self.assertTrue(any(c[2] == "allow" for c in leader_actions),
-                        f"Leader was blocked but never unblocked on abort: {leader_actions}")
+        self.assertFalse(any(c[2] == "block" for c in leader_actions),
+                         f"Leader must not be blocked when a non-leader block "
+                         f"fails first: {leader_actions}")
+
+        # Any non-leader that WAS successfully blocked before the failing one
+        # must be unblocked by the abort (no stranded peer).
+        blocked_nl = {c[0] for c in fw_calls
+                      if c[2] == "block" and c[0] not in ("951ffc7a", "ea5eb8ef")}
+        allowed_nl = {c[0] for c in fw_calls if c[2] == "allow"}
+        self.assertTrue(blocked_nl <= allowed_nl,
+                        f"Blocked non-leaders not unwound on abort: "
+                        f"blocked={blocked_nl} allowed={allowed_nl}")
 
         # snode NOT promoted
         promote_calls = [

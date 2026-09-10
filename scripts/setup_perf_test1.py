@@ -5,6 +5,18 @@ import re
 import select
 import time
 from concurrent.futures import ThreadPoolExecutor
+import sys
+
+# Streamed remote stderr is arbitrary UTF-8 -- systemctl alone prints
+# "Created symlink ... -> ..." with U+2192. On Windows a redirected stdout
+# defaults to cp1252, so the first such byte killed a 6-node deployment at
+# phase 2a with UnicodeEncodeError (2026-08-26). Never let log formatting
+# abort a deployment.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import boto3  # noqa: E402  (must follow the stdout reconfigure above)
 import paramiko  # noqa: E402  (must follow the stdout reconfigure above)
@@ -20,12 +32,18 @@ KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ = "us-east-1a"
 SG_NAME = "default"
 BRANCH = "main"
-MAX_LVOL = "100"
+MAX_LVOL = "75"  # capped by constants.MAX_SUBSYSTEMS_PER_NODE (75): above it, values were silently clamped at placement time, so a node reserved huge pages for subsystems it could never serve. cluster create rejects it since 8bcedce79.
 # --- Manual Network Config ---
 # Replace this with your actual Subnet ID (e.g., "subnet-0593459d6b931ee4c")
 SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 SN_TYPE = "i3en.2xlarge"
+#: Pin the SPDK/ultra image so a run is reproducible and comparable against
+#: another run. Without it, sn add-node takes the control-plane default, which
+#: drifts as main is rebuilt -- useless when the whole point of a run is to
+#: hold the build constant. Empty string = control-plane default.
+SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:main-d91ff03a-amd64"
+
 SN_COUNT = 6
 MGMT_TYPE = "m6i.2xlarge"
 # --- Selectable Client Specification ---
@@ -37,7 +55,7 @@ ec2 = boto3.resource('ec2', region_name='us-east-1')
 USER = "ec2-user"
 AZ = "us-east-1a"
 IFACE = "eth0"
-MAX_LVOL = "100"
+MAX_LVOL = "75"
 
 VOLUME_PLAN = [
     {"idx": 0, "node_idx": 0, "qty": 5, "size": "100G", "client": "client1", "io_queues": 12},
@@ -372,6 +390,63 @@ class PersistentSSH:
 
 
 
+#: Soak wiring. The deployment is only useful if the soak actually starts, and
+#: getting the mgmt node ready by hand is where runs get lost: the soak runs ON
+#: mgmt (--run-on-mgmt) and SSHes to the nodes and client, so it needs the key,
+#: the metadata this script writes, and its own source there.
+SOAK_SCRIPT = "aws_dual_node_outage_soak_multipath.py"
+SOAK_LAUNCHER = "start_soak_base.sh"
+SOAK_EXTRA_FILES = ("collect_logs.py",)
+METADATA_FILE = "cluster_metadata_base.json"
+
+
+def stage_soak(mgmt_ip):
+    """Put the soak, its launcher, the ssh key and the metadata on mgmt."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    payload = [os.path.join(here, f) for f in
+               (SOAK_SCRIPT, SOAK_LAUNCHER) + SOAK_EXTRA_FILES]
+    payload.append(os.path.abspath(METADATA_FILE))
+    missing = [f for f in payload if not os.path.isfile(f)]
+    if missing:
+        raise RuntimeError(f"cannot stage soak, missing files: {missing}")
+
+    print(f"\n--- Phase 7: Stage soak on mgmt {mgmt_ip} ---")
+    ssh_exec(mgmt_ip, ["mkdir -p ~/.ssh"], check=True)
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(mgmt_ip, username="ec2-user", key_filename=KEY_PATH,
+                allow_agent=False, look_for_keys=False)
+    try:
+        sftp = ssh.open_sftp()
+        try:
+            for src in payload:
+                dst = "/home/ec2-user/" + os.path.basename(src)
+                sftp.put(src, dst)
+                print(f"  staged {os.path.basename(src)}")
+            # The soak reaches the storage nodes and the client from mgmt, so
+            # the private key has to travel with it.
+            sftp.put(KEY_PATH, "/home/ec2-user/.ssh/mtes01.pem")
+            print("  staged ssh key")
+        finally:
+            sftp.close()
+    finally:
+        ssh.close()
+    # The launcher is written with LF endings on purpose; a CRLF shell script
+    # fails on the node with a bare-CR "set" option error.
+    ssh_exec(mgmt_ip, [
+        "chmod 600 ~/.ssh/mtes01.pem",
+        f"chmod +x ~/{SOAK_LAUNCHER}",
+        f"sed -i 's/\r$//' ~/{SOAK_LAUNCHER}",
+    ], check=True)
+
+
+def start_soak(mgmt_ip, env_prefix=""):
+    print(f"\n--- Phase 8: Start soak on mgmt {mgmt_ip} ---")
+    out = ssh_exec(mgmt_ip, [f"{env_prefix}bash ~/{SOAK_LAUNCHER}"],
+                   get_output=True, check=True)[0]
+    print(out)
+    return out
+
 def main():
 
 
@@ -486,7 +561,8 @@ def main():
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
+                    f"sudo /usr/local/bin/sbctl -d --dev sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
+                    + (f" --spdk-image {SPDK_IMAGE}" if SPDK_IMAGE else "")
                 ], check=True)
                 return
             except RuntimeError:
@@ -591,6 +667,34 @@ def main():
 
     print("\n--- Setup Complete ---")
     print(f"Cluster {cluster_uuid} is active. Metadata saved.")
+
+    # A deployment that stops here needs a second, hand-assembled step before
+    # it produces any data, and that is where runs get lost. Stage the soak and
+    # start it, unless explicitly told not to.
+    if "--no-soak" in sys.argv:
+        stage_soak(mgmt_ip)
+        print("--no-soak: files staged, soak NOT started. Start it with:")
+        print(f"  ssh -i {KEY_PATH} ec2-user@{mgmt_ip} "
+              f"\"PLACEMENT_DUMPS=1 bash ~/{SOAK_LAUNCHER}\"")
+        return
+
+    stage_soak(mgmt_ip)
+    env = "PLACEMENT_DUMPS=1 "
+    for flag, var in (("--iterations", "ITERATIONS"),
+                      ("--runtime", "RUNTIME"),
+                      ("--restart-timeout", "RESTART_TIMEOUT"),
+                      ("--start-iteration", "START_ITERATION")):
+        if flag in sys.argv:
+            env += f"{var}={sys.argv[sys.argv.index(flag) + 1]} "
+    start_soak(mgmt_ip, env_prefix=env)
+    print()
+    print("Soak running on mgmt. Follow it with:")
+    print(f"  ssh -i {KEY_PATH} ec2-user@{mgmt_ip} "
+          "\"tail -f ~/soak_base_$(cat ~/soak_ts).out\"")
+    print("Check verdicts / faults with:")
+    print(f"  ssh -i {KEY_PATH} ec2-user@{mgmt_ip} "
+          "\"grep -E '####|PASS|FAIL|ERROR|verify:' "
+          "~/soak_base_$(cat ~/soak_ts).out | tail -20\"")
 
 
 

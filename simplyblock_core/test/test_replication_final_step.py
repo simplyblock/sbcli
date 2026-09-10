@@ -19,10 +19,11 @@ class _Hub:
 
 
 class _RPC:
-    def __init__(self, node_id, events, final_step_ret=True):
+    def __init__(self, node_id, events, final_step_ret=True, final_step_state="Done"):
         self.node_id = node_id
         self.events = events
         self._final_step_ret = final_step_ret
+        self._final_step_state = final_step_state
         self.final_step_gateways = []
         self.ana_groups = []
 
@@ -42,7 +43,9 @@ class _RPC:
         # which is how the controller-name-instead-of-bdev bug went unnoticed.
         self.events.append(("final_step", operation, lvol_name, snapshot_name, batch))
         self.final_step_gateways.append(gateway)
-        return ["ok"] if self._final_step_ret else None
+        if not self._final_step_ret:
+            return None
+        return {"transfer_state": self._final_step_state, "offset": 0}
 
     def bdev_lvol_add_clone(self, lvol_name, parent):
         self.events.append(("add_clone", self.node_id, lvol_name, parent))
@@ -60,7 +63,7 @@ class _RPC:
 
 class _Node:
     def __init__(self, uuid, events, ip, lvstore, status=StorageNode.STATUS_ONLINE,
-                 secondary="", tertiary="", final_step_ret=True):
+                 secondary="", tertiary="", final_step_ret=True, final_step_state="Done"):
         self.uuid = uuid
         self._events = events
         self._ip = ip
@@ -72,7 +75,7 @@ class _Node:
         self.data_nics = [_Nic(ip)]
         self.mgmt_ip = ip
         self.transfer_hublvol = _Hub()
-        self._rpc = _RPC(uuid, events, final_step_ret)
+        self._rpc = _RPC(uuid, events, final_step_ret, final_step_state)
 
     def get_id(self):
         return self.uuid
@@ -94,6 +97,11 @@ class _Lvol:
     # A subsystem can hold several namespaces; ANA flips are confined to this
     # volume's ANA group (group id == namespace id).
     ns_id = 2
+
+    def get_id(self):
+        # Real LVol has this; the cutover's phase timing labels every line
+        # with it.
+        return self.uuid
 
 
 def _install_nodes(monkeypatch, nodes_by_id):
@@ -217,6 +225,31 @@ def test_run_cutover_final_step_failure_no_ana(monkeypatch):
     assert not [e for e in events if e[0] == "ana" and e[1].startswith("T")
                 and e[2] in ("optimized", "non_optimized")]
     assert not [e for e in events if e[0] == "add_clone"]
+
+
+def test_run_cutover_final_step_failed_state_treated_as_failure(monkeypatch):
+    """Regression: bdev_lvol_transfer_final_step returning {"transfer_state": "Failed"}
+    (a truthy non-None dict) must be treated as a failure, not silently as success.
+    Observed 2026-08-31, lvol=1fc7911f: SPDK returned 'Failed' but [IO-RESUME]
+    fired unconditionally because the old code only checked `if ret is None`."""
+    events: list = []
+    tgt = _Node("T1", events, "t1", "lvs_tgt")
+    src = _Node("S1", events, "s1", "lvs_src",
+                final_step_ret=True, final_step_state="Failed")
+    _install_nodes(monkeypatch, {"T1": tgt, "S1": src})
+
+    ok, err = rfs.run_cutover(
+        src, tgt, _Lvol(), "lvs_tgt/LVOL_1", 42, "lvs_tgt/SNAP1")
+
+    assert ok is False
+    assert "Failed" in err
+    # target must never be enabled when the transfer didn't complete
+    assert not [e for e in events if e[0] == "ana" and e[1].startswith("T")
+                and e[2] in ("optimized", "non_optimized")]
+    assert not [e for e in events if e[0] == "add_clone"]
+    # source must be restored so the client can resume IO on the unfailed side
+    ana = [(e[1], e[2]) for e in events if e[0] == "ana"]
+    assert ana[-1] == ("S1", "optimized"), "source must be unfenced after failed freeze"
 
 
 def test_final_step_failure_unfences_the_source(monkeypatch):

@@ -1751,6 +1751,15 @@ commands:
             help: "Replicated internal snapshots to retain on each side. Minimum (and default): `2`."
             dest: keep_replicated
             type: int
+          - name: "--retention-schedule"
+            help: "Tiered retention, e.g. `15m:2h,1h:11h,1d:7d` - one snapshot every 15 minutes for the last 2 hours, then hourly for 11 hours, then daily for 7 days. Snapshots older than the total span are pruned. Empty (default) keeps the flat --keep behaviour."
+            dest: retention_schedule
+            type: str
+          - name: "--consistency-group"
+            help: "All volumes attached to this policy form ONE consistency group: they must share an LVS (creation pins them to it), cadence snapshots are taken as one frozen group, and fail-over generations resolve group-wide."
+            dest: consistency_group
+            type: bool
+            action: store_true
       - name: replication-policy-list
         help: Lists the replication policies of a cluster
         arguments:
@@ -1783,6 +1792,13 @@ commands:
             dest: json
             type: bool
             action: store_true
+      - name: replication-policy-snapshot
+        help: "Takes ONE crash-consistent snapshot of every volume in the policy's consistency group, as a new group generation"
+        arguments:
+          - name: "policy_id"
+            help: "Replication policy id (must be a consistency-group policy)"
+            dest: policy_id
+            type: str
   - name: "volume"
     help: "Logical Volume Commands"
     aliases:

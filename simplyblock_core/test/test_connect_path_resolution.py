@@ -120,3 +120,81 @@ def test_resolution_never_consults_cluster_status():
     db = _FakeDB([src, tgt], [_rep(src, tgt, LVolReplication.STATE_FAILED_OVER)])
     assert not hasattr(db, "get_cluster_by_id")
     assert _ids(lvol_controller._connect_path_volumes(db, src)) == ["LV_TGT"]
+
+
+# ---- device-lookup identity (entry.target_lvol_id) ------------------------ #
+#
+# A clone's wire NSUUID may be borrowed from another volume (the kernel merges
+# multipath paths only on matching NSUUIDs), so the client's /dev/disk/by-id
+# links can carry an id that is not the record's own. The record's ns_uuid
+# persists that wire identity; connect reports it whenever it differs from the
+# requested id. Records predating ns_uuid fall back to the relationship's
+# other end (the only fail-back shape that existed then inherited the DR
+# source's NSUUID).
+
+
+class _FakeEntry:
+    target_lvol_id = None
+
+
+def _connect(monkeypatch, db, requested_id):
+    """Run connect_lvol against the fake DB with the entry builder stubbed."""
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+    monkeypatch.setattr(lvol_controller.HostConnectAuth, "resolve",
+                        classmethod(lambda cls, lvol, host_nqn, db_controller: None))
+    monkeypatch.setattr(lvol_controller, "_connect_entries_for_volume",
+                        lambda *a, **kw: [_FakeEntry()])
+    entries, err = lvol_controller.connect_lvol(requested_id)
+    assert err is None
+    return entries
+
+
+def test_legacy_failback_record_falls_back_to_the_relationship(monkeypatch):
+    """cutover_done with the requested volume on the TARGET end and no ns_uuid
+    persisted (records from before the field existed): those clones inherited
+    the DR SOURCE's NSUUID, so connect must hand that id out."""
+    dr, back = _lvol("LV_DR"), _lvol("LV_BACK")
+    db = _FakeDB([dr, back], [_rep(dr, back, LVolReplication.STATE_CUTOVER_DONE)])
+    entries = _connect(monkeypatch, db, "LV_BACK")
+    assert [e.target_lvol_id for e in entries] == ["LV_DR"]
+
+
+def test_wire_identity_equal_to_own_id_needs_no_override(monkeypatch):
+    """A volume whose persisted wire identity equals its own id needs no
+    redirect: the CSI's own-id lookup already matches the device, and any
+    emission would point it elsewhere."""
+    dr, back = _lvol("LV_DR"), _lvol("LV_BACK")
+    back.ns_uuid = "LV_BACK"
+    db = _FakeDB([dr, back], [_rep(dr, back, LVolReplication.STATE_CUTOVER_DONE)])
+    entries = _connect(monkeypatch, db, "LV_BACK")
+    assert [e.target_lvol_id for e in entries] == [None]
+
+
+def test_failback_reports_the_persisted_wire_identity(monkeypatch):
+    """After a fail-back the UUID swap gives the record its original id while
+    the namespace keeps advertising the DR source's wire identity (that is
+    what kept the client's multipath head alive through the cutover). Connect
+    must report the persisted ns_uuid — no relationship walk needed."""
+    back = _lvol("LV_BACK")
+    back.ns_uuid = "LV_DR"
+    db = _FakeDB([back])
+    entries = _connect(monkeypatch, db, "LV_BACK")
+    assert [e.target_lvol_id for e in entries] == ["LV_DR"]
+
+
+def test_forward_migration_keeps_the_target_id_for_device_lookup(monkeypatch):
+    """Requested volume on the SOURCE end: the redirect loop already reports the
+    target id; the fail-back emission must not overwrite it."""
+    src, tgt = _lvol("LV_SRC"), _lvol("LV_TGT")
+    db = _FakeDB([src, tgt], [_rep(src, tgt, LVolReplication.STATE_CUTOVER_DONE)])
+    entries = _connect(monkeypatch, db, "LV_SRC")
+    assert [e.target_lvol_id for e in entries] == ["LV_TGT"]
+
+
+def test_failed_over_target_end_reports_no_device_lookup_id(monkeypatch):
+    """A fail-over clone's NSUUID is its own uuid — connecting it by its own id
+    needs no redirect, so nothing must be emitted."""
+    src, tgt = _lvol("LV_SRC"), _lvol("LV_TGT")
+    db = _FakeDB([src, tgt], [_rep(src, tgt, LVolReplication.STATE_FAILED_OVER)])
+    entries = _connect(monkeypatch, db, "LV_TGT")
+    assert [e.target_lvol_id for e in entries] == [None]

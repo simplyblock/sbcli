@@ -1101,6 +1101,40 @@ def _search_for_partitions(rpc_client, nvme_device):
     return partitioned_devices
 
 
+def apply_jc_dual_node(cluster_id):
+    """Keep every node's JC dual-node flag in step with the cluster size.
+
+    The journal component ABORTS its whole SPDK application when reachable
+    journal members drop below jc_ha_nmin_jms(), which is 2 normally and 1
+    when the dual-node flag is set. A 2-node cluster that loses its peer is
+    left with 1 of 2 JMs, so without the flag the SURVIVING node aborts
+    itself the instant its partner stops: one graceful `sn shutdown` takes
+    the entire cluster down, every client path disappears at once and
+    filesystems shut down (soak case 6, 2026-08-24 -- "JC detected a network
+    outage nd=1 njms=2", "JC aborts the node due to network outage", core
+    dumped). The fork implements the tolerance and exposes jc_set_dual_node;
+    nothing in the control plane ever called it.
+
+    Keyed on MEMBERSHIP, not on how many nodes are online: a 3-node cluster
+    with one node down must keep requiring 2 journals. Only a cluster whose
+    whole membership is 2 is a dual-node cluster.
+    """
+    db_controller = DBController()
+    members = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+               if n.status != StorageNode.STATUS_REMOVED]
+    enable = len(members) == 2
+    for node in members:
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            node.rpc_client().jc_set_dual_node(enable)
+            logger.info("JC dual-node=%s applied on %s (cluster membership %d)",
+                        enable, node.get_id(), len(members))
+        except Exception as e:                  # noqa: BLE001 - best effort
+            logger.warning("Could not set JC dual-node=%s on %s: %s",
+                           enable, node.get_id(), e)
+
+
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
@@ -1537,6 +1571,11 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
 
         snode.jm_device = jm_device
 
+    # Applied cluster-wide, not just to this node: a cluster growing 2 -> 3
+    # must also CLEAR the flag on the two nodes that already have it, and one
+    # shrinking 3 -> 2 must set it on the survivors.
+    apply_jc_dual_node(snode.cluster_id)
+
     snode.nvme_devices = new_devices
     return True
 
@@ -1715,6 +1754,10 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
         jm_device.status = JMDevice.STATUS_ONLINE
         snode.jm_device = jm_device
         snode.write_to_db()
+
+    # A restarted node comes up with the JC default (dual-node off), so the
+    # flag has to be re-applied on every bring-up, not only at node-add.
+    apply_jc_dual_node(snode.cluster_id)
 
     return True
 
@@ -10745,8 +10788,43 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # leader flap: tertiary's LVOL listener stays open and serves writes
             # whose hublvol redirect target is mid-transition, producing
             # writer_conflict events on the journal. Non-leader peers are blocked
-            # once, after the leader's replication is confirmed suspended. Each peer
-            # stays blocked until its connect_to_hublvol succeeds in ### 8b.
+            # each peer stays blocked until its connect_to_hublvol succeeds in ### 8b.
+            #
+            # ORDER MATTERS. Block the non-leader peers FIRST, then the leader,
+            # and only then start the leader's demote (replication suspend +
+            # leadership drop below). A non-leader (e.g. the tertiary) left
+            # serving while the leader is mid-demote keeps its LVOL listener
+            # open, accepts client IO, and redirects it through the hublvol to a
+            # leader whose leadership is in transition -> writer_conflict on the
+            # journal. Blocking the leader first (as this used to) left exactly
+            # that window open between the leader's replication-disable and the
+            # non-leader block.
+            for sec_node in sec_nodes:
+                if sec_node is current_leader:
+                    continue
+                if sec_node.get_id() in disconnected_peers:
+                    continue
+                if sec_node in blocked_peers:
+                    continue
+                try:
+                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
+                    _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
+                    blocked_peers.append(sec_node)
+                    _block_started[sec_node.get_id()] = time.monotonic()
+                    rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
+                                          constants.FENCE_RPC_RETRY)
+                except Exception as e:
+                    # Cannot safely decide "peer gone" vs "peer slow" before
+                    # snode has reconnected to peer hublvols. A non-leader peer
+                    # left serving on snode_lvs_port during the leader flap can
+                    # accept client IO whose hublvol redirect is mid-transition,
+                    # producing a writer conflict.
+                    _abort_restart_and_unblock(
+                        f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
+
+            # Now block the leader and suspend its replication. Every non-leader
+            # port is already shut, so the demote below starts only once ALL
+            # ports are blocked.
             if current_leader and current_leader.get_id() not in disconnected_peers:
                 _REPL_SUSPEND_MAX_ATTEMPTS = 10
                 replication_suspended = False
@@ -10868,33 +10946,6 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     _abort_restart_and_unblock(
                         f"Could not suspend journal replication on leader "
                         f"{current_leader.get_id()} after {_REPL_SUSPEND_MAX_ATTEMPTS} attempts")
-
-            # Also block non-leader peers (tertiary). The leader's demote+drain
-            # below is leader-specific; non-leaders just need the port shut so
-            # IO can't leak to them during the flap.
-            for sec_node in sec_nodes:
-                if sec_node is current_leader:
-                    continue
-                if sec_node.get_id() in disconnected_peers:
-                    continue
-                if sec_node in blocked_peers:
-                    continue
-                try:
-                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=0.5, retry=1)
-                    _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
-                    blocked_peers.append(sec_node)
-                    _block_started[sec_node.get_id()] = time.monotonic()
-                    rpc_budget.set_budget(constants.FENCE_RPC_TIMEOUT_SEC,
-                                          constants.FENCE_RPC_RETRY)
-                except Exception as e:
-                    # Same rationale as the leader port-block: cannot safely
-                    # decide "peer gone" vs "peer slow" before snode has
-                    # reconnected to peer hublvols. A non-leader peer left
-                    # serving on snode_lvs_port during the leader flap can
-                    # accept client IO whose hublvol redirect is mid-transition,
-                    # producing a writer conflict.
-                    _abort_restart_and_unblock(
-                        f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
 
             if current_leader and current_leader in blocked_peers:
                 # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
@@ -11387,14 +11438,18 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
             return False, msg
 
     # Add NS to subsystem (idempotent: skip if already bound with matching NSID).
+    # Probe and register by the WIRE identity (get_ns_uuid), never the record
+    # uuid: after a fail-back the two differ, and re-adding under the record
+    # uuid presents an identity the client's multipath head rejects ("IDs
+    # don't match for shared namespace N"), severing its paths.
     if _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                             bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                             bdev_name=lvol.top_bdev, uuid=lvol.get_ns_uuid()):
         logger.info("Namespace nsid=%s already on subsystem %s, skipping add_ns",
                     lvol.ns_id, lvol.nqn)
     else:
         logger.info("Add BDev to subsystem " + f"{lvol.vuid:016X}")
         if not rpc_client.nvmf_subsystem_add_ns(
-                lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id):
+                lvol.nqn, lvol.top_bdev, lvol.get_ns_uuid(), lvol.guid, nsid=lvol.ns_id):
             # An add_ns error is not by itself a reason to abandon the whole
             # registration. What matters for the client is whether the
             # namespace is on the subsystem now — it may already have been,
@@ -11410,7 +11465,8 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
             # Re-read the subsystem and only give up if the namespace is
             # genuinely absent.
             if _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                                          bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                                          bdev_name=lvol.top_bdev,
+                                          uuid=lvol.get_ns_uuid()):
                 logger.warning(
                     "add_ns for nsid=%s (%s) on %s reported failure but the "
                     "namespace is present; continuing to listener setup",
@@ -11440,9 +11496,10 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
     # path loss the control plane never flagged, re-refused by the lvol-monitor
     # repair loop on every cycle.
     if not _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
-                                      bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                                      bdev_name=lvol.top_bdev,
+                                      uuid=lvol.get_ns_uuid()):
         msg = (f"Subsystem {lvol.nqn} on {snode.get_id()} has no namespace "
-               f"nsid={lvol.ns_id} ({lvol.top_bdev}, uuid={lvol.uuid}) after "
+               f"nsid={lvol.ns_id} ({lvol.top_bdev}, uuid={lvol.get_ns_uuid()}) after "
                f"registration; refusing to add a listener for an empty subsystem")
         logger.error(msg)
         return False, msg
@@ -11555,6 +11612,12 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
     if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
         return False, (f"LVol {lvol.get_id()} status is {lvol.status}, "
                        f"not repairing registration")
+    if not getattr(lvol, "from_source", True):
+        # Retired fail-over source: its namespace was removed deliberately
+        # (_retire_source_data_path). Registering it back republishes the
+        # superseded data path the fail-over just fenced.
+        return False, (f"LVol {lvol.get_id()} is the retired source of a "
+                       f"fail-over, not re-registering its namespace")
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
     if rpc_client.subsystem_get(lvol.nqn) is None:
