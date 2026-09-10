@@ -71,7 +71,7 @@ from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailo
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest, K8sNativeScaleBreakTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest, K8sNativeScaleBreakTest, K8sNativeRapidFailoverNoGapTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2WithMigration,
@@ -428,6 +428,7 @@ ALL_TESTS = [
     K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
     K8sNativeResilientFailoverTest,
+    K8sNativeRapidFailoverNoGapTest,
     K8sNativeQuickFailoverTest,
     K8sNativeNamespacedFailoverTest,
     K8sNativeRapidLifecycleTest,
@@ -711,6 +712,7 @@ def get_stress_tests():
         K8sNativeFailoverTest,
         K8sNativeBasicFailoverTest,
         K8sNativeResilientFailoverTest,
+        K8sNativeRapidFailoverNoGapTest,
         K8sNativeQuickFailoverTest,
         K8sNativeNamespacedFailoverTest,
         K8sNativeRapidLifecycleTest,
