@@ -67,18 +67,7 @@ Cluster ID:     <CLUSTER_UUID>
 Cluster Secret: <CLUSTER_SECRET>
 ```
 
-### 1.3 Label Worker Nodes for Storage Plane
-
-The R25 spdk-csi chart uses the `io.simplyblock.node-type` label to discover which
-worker nodes should run storage node pods. Label all workers before installing the chart:
-
-```bash
-for NODE in <worker-node-1> <worker-node-2> <worker-node-3>; do
-    kubectl label node "$NODE" io.simplyblock.node-type=simplyblock-storage-plane --overwrite
-done
-```
-
-### 1.4 Install the `spdk-csi` Helm Chart (Includes Storage Node Creation)
+### 1.3 Install the `spdk-csi` Helm Chart (Includes Storage Node Creation)
 
 This deploys the CSI driver and creates storage nodes via `storagenode.create=true`.
 Use the cluster UUID, secret, and pool name from step 1.2.
@@ -116,7 +105,7 @@ sbcli-dev sn list
 
 **Expected**: All storage nodes show `online` status.
 
-### 1.5 Verify R25.x Cluster
+### 1.4 Verify R25.x Cluster
 
 ```bash
 # Cluster should be active

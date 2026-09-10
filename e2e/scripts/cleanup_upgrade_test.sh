@@ -399,7 +399,6 @@ echo "=== Phase 10: Remove stale node labels ==="
 
 for NODE in "${NODES[@]}"; do
   kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
-  kubectl label node "$NODE" io.simplyblock.node-type- 2>/dev/null || true
   echo "  Removed labels from $NODE"
 done
 

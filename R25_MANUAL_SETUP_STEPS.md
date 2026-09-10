@@ -157,15 +157,10 @@ fi
 
 ---
 
-## Phase 4: Label workers + Install R25 spdk-csi chart
+## Phase 4: Install R25 spdk-csi chart
 
 ```bash
 NAMESPACE=simplyblock
-
-# Label workers
-for NODE in worker-0.ocp.simplyblock.ai worker-1.ocp.simplyblock.ai worker-2.ocp.simplyblock.ai worker-3.ocp.simplyblock.ai worker-4.ocp.simplyblock.ai worker-5.ocp.simplyblock.ai; do
-  kubectl label node "$NODE" io.simplyblock.node-type=simplyblock-storage-plane --overwrite
-done
 
 # Clone simplyblock-operator (R25 CSI chart branch)
 git clone --branch v0.2.4 https://github.com/simplyblock/simplyblock-operator.git simplyblock-operator-r25
