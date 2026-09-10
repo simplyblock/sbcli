@@ -520,6 +520,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             cg_group = _cgc.ensure_group(_cg_pool.cluster_id, consistency_group)
         except _cgc.ConsistencyGroupError as e:
             return False, str(e)
+        # Reject before creating the lvol so a full group does not leave an
+        # orphan volume behind (the authoritative check is add_member_to_group).
+        _open_members = sum(1 for m in (cg_group.members or {}).values()
+                            if m.get("removed_seq", 0) == 0)
+        if _open_members >= constants.MAX_CONSISTENCY_GROUP_MEMBERS:
+            return False, (
+                f"consistency group {consistency_group} already has the maximum "
+                f"{constants.MAX_CONSISTENCY_GROUP_MEMBERS} members")
         pinned = _cgc.pinned_node_for_group(cg_group)
         if pinned:
             if host_id_or_name and host_id_or_name != pinned:

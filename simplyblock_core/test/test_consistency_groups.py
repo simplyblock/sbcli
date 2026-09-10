@@ -313,6 +313,34 @@ def test_add_member_to_group_rejects_off_store(standalone):
     assert "v2" not in g.members
 
 
+def test_add_member_to_group_rejects_over_cap(standalone):
+    from simplyblock_core import constants
+    cap = constants.MAX_CONSISTENCY_GROUP_MEMBERS
+    g = cgc.ensure_group("CL", "big-group")
+    for i in range(cap):
+        cgc.add_member_to_group(g, _StandaloneLvol(f"v{i}"))
+    assert sum(1 for m in g.members.values() if m["removed_seq"] == 0) == cap
+    with pytest.raises(cgc.ConsistencyGroupError):
+        cgc.add_member_to_group(g, _StandaloneLvol("one-too-many"))
+    assert "one-too-many" not in g.members
+
+
+def test_detached_member_frees_a_cap_slot(standalone):
+    from simplyblock_core import constants
+    cap = constants.MAX_CONSISTENCY_GROUP_MEMBERS
+    g = cgc.ensure_group("CL", "big-group")
+    for i in range(cap):
+        cgc.add_member_to_group(g, _StandaloneLvol(f"v{i}"))
+    # A generation has been taken, so a detach actually closes the epoch and
+    # frees the slot (before the first snapshot removed_seq collapses to 0).
+    g.last_group_seq = 1
+    cgc.remove_member_from_group(g, "v0")
+    assert g.members["v0"]["removed_seq"] != 0
+    cgc.add_member_to_group(g, _StandaloneLvol("replacement"))
+    assert "replacement" in g.members
+    assert sum(1 for m in g.members.values() if m["removed_seq"] == 0) == cap
+
+
 def test_precheck_names_offline_and_off_store_members(standalone):
     g = cgc.ensure_group("CL", "db-group")
     g.node_id, g.lvs_name = "NODE_A", "LVS_1"

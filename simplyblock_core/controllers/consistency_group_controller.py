@@ -28,6 +28,7 @@ import time
 import uuid as uuid_module
 from datetime import datetime
 
+from simplyblock_core import constants
 from simplyblock_core import db_controller as db_mod
 from simplyblock_core import utils
 from simplyblock_core.controllers import snapshot_events, tasks_controller
@@ -106,7 +107,21 @@ def add_member_to_group(group, lvol):
     recorded under the closed epoch semantics (the entry is replaced, and the
     generation math treats the gap correctly because the new joined_seq
     excludes the detached window).
+
+    A group is capped at ``MAX_CONSISTENCY_GROUP_MEMBERS`` open-epoch members
+    (design §4.1): the whole set is frozen for one ``bdev_lvol_snapshot_group``
+    call, so an unbounded group would freeze I/O across arbitrarily many volumes.
     """
+    members = dict(group.members or {})
+    entry = members.get(lvol.get_id())
+    already_member = entry is not None and entry.get("removed_seq", 0) == 0
+    open_count = sum(1 for m in members.values() if m.get("removed_seq", 0) == 0)
+    if not already_member and open_count >= constants.MAX_CONSISTENCY_GROUP_MEMBERS:
+        raise ConsistencyGroupError(
+            f"consistency group {group.uuid[:8]} already has the maximum "
+            f"{constants.MAX_CONSISTENCY_GROUP_MEMBERS} members; "
+            f"volume {lvol.get_id()} cannot join")
+
     if group.lvs_name and (lvol.lvs_name != group.lvs_name
                            or lvol.node_id != group.node_id):
         raise ConsistencyGroupError(
@@ -122,7 +137,6 @@ def add_member_to_group(group, lvol):
                     "member %s", group.uuid[:8], lvol.node_id[:8],
                     lvol.lvs_name, lvol.get_id())
 
-    members = dict(group.members or {})
     members[lvol.get_id()] = {"joined_seq": group.last_group_seq + 1,
                               "removed_seq": 0}
     group.members = members
