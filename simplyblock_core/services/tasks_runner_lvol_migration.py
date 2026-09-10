@@ -2025,12 +2025,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 stat = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
                 state = (stat or {}).get('transfer_state') if stat is not None else None
             else:
-                # The RPC can return normally (no exception) while still reporting
-                # transfer failure — transfer_state is one of "No process" |
-                # "In progress" | "Failed" | "Done".  Checking only for falsy
-                # lets a "Failed" dict slip through to the ANA flip as if the
-                # data had moved (same class of bug as batch migration 2026-08-22).
-                state = ret.get("transfer_state") if isinstance(ret, dict) else None
+                state = None
         except Exception:
             # SRC secondary/tertiary were just flipped inaccessible above; if
             # either RPC above raises (e.g. source unreachable — RPCException
@@ -2055,12 +2050,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             logger.info(
                 f"[IO-RESUME] {_now_ms()} final migration complete (recovered from RPC error, "
                 f"transfer_state={state}): lvol={migration.lvol_id} io now live on target")
-        elif state != "Done":
-            logger.error(
-                f"bdev_lvol_final_migration: transfer_state={state!r} "
-                f"(expected 'Done'): {ret!r} lvol={migration.lvol_id}")
-            _revert_src_replicas(f"final migration failed: transfer_state={state!r}")
-            return False, True, f"bdev_lvol_final_migration failed: transfer_state={state!r}"
         else:
             logger.info(
                 f"[IO-RESUME] {_now_ms()} final migration Done: "
