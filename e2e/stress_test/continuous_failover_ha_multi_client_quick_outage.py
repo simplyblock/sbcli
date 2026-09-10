@@ -695,8 +695,14 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         # when a concurrent restart is rejected. An earlier 400s estimate would
         # have left FIO covering barely two of the five outages in a window.
         self.EXPECTED_ITERATION_SEC = 900
-        self._per_wave_fio_runtime = self.validate_every * self.EXPECTED_ITERATION_SEC
-        self._fio_wait_timeout = self._per_wave_fio_runtime + 1200
+        # 5 x 900 = 4500s would cover the window exactly; 4000 is deliberately a
+        # little under, which is fine while iterations come in around 800s and
+        # loses IO only on the tail of the last outage if they run to 900s.
+        # The wait has to stay above the runtime or the checkpoint join gives up
+        # on FIO that is still legitimately running.
+        self.FIO_WAVE_RUNTIME_SEC = 4000
+        self._per_wave_fio_runtime = self.FIO_WAVE_RUNTIME_SEC
+        self._fio_wait_timeout = 5000
 
     # ── helper: ft-aware single-node selection ───────────────────────────────
 

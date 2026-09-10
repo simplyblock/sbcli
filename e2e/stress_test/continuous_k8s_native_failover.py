@@ -5464,6 +5464,9 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
         # with a 120s settle per attempt inside restart_nodes_after_failover, so
         # it is not faster. Matching 900s until a real run gives a number.
         self.EXPECTED_ITERATION_SEC = 900
+        # Matches the docker wave: a shade under validate_every x 900 so IO
+        # spans the checkpoint window without over-running it.
+        self.FIO_WAVE_RUNTIME_SEC = 4000
 
     def _compute_fio_size(self, extra_jobs: int = 0) -> str:
         """Size FIO as the parent does, then stretch its runtime to the window.
@@ -5473,7 +5476,7 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
         `validate_every` outages, so the runtime floor has to be the window.
         """
         result = super()._compute_fio_size(extra_jobs)
-        window = self.validate_every * self.EXPECTED_ITERATION_SEC
+        window = self.FIO_WAVE_RUNTIME_SEC
         if self.FIO_RUNTIME < window:
             self.logger.info(
                 f"[fio] Raising FIO_RUNTIME {self.FIO_RUNTIME}s -> {window}s so IO "
