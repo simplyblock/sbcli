@@ -50,7 +50,15 @@ class LVol(BaseModel):
     node_id: str = ""
     nodes: list[str] = default_factory(list)
     nqn: str = ""
-    ns_id: int = 1
+    # 0 = "not assigned yet": the PRIMARY namespace add auto-assigns the real
+    # nsid and persists it here; every replica add reuses it verbatim (see
+    # add_lvol_on_node — divergent per-node nsid maps make the client kernel
+    # reject shared namespaces, mass-create incident 2026-07-06). The default
+    # must never be a legitimate nsid: a construction site that forgets to set
+    # this field would then request that nsid as if it were dictated, which
+    # hard-fails on any shared subsystem whose slot is taken (clone incident
+    # 2026-09-10).
+    ns_id: int = 0
     # The UUID the NVMe namespace advertises on the wire when it differs from
     # the record's uuid (migration/fail-back clones inherit another volume's
     # identity so the client's multipath head keeps its paths). Empty means

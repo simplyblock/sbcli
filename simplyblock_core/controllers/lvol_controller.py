@@ -707,15 +707,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
-    # ns_id semantics in the create flow: 0 = "not assigned yet". The model
-    # default is 1 (a legitimate nsid), so it must be reset here — the
-    # primary's namespace add assigns the real value and every replica add
-    # is REQUIRED to reuse it (see add_lvol_on_node). Never let a replica
-    # add run with an auto-assigned nsid: namespace IDs must be identical
-    # on every path of a shared subsystem, or the client kernel rejects
-    # the namespaces ("duplicate IDs in subsystem" / "IDs don't match for
-    # shared namespace", mass-create incident 2026-07-06).
-    lvol.ns_id = 0
     lvol.lvol_name = name
     lvol.pvc_name = pvc_name or ""
     lvol.size = int(size)
@@ -1762,11 +1753,11 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
     # Recreate must present the SAME nsid as every other path of the shared
-    # subsystem — pass the persisted primary-assigned value. Legacy records
-    # created before ns_id persistence carry the model default; for those
-    # (and dedicated one-namespace subsystems) the stored value is the
-    # correct nsid as well. Only a record with ns_id unset falls back to
-    # auto-assignment.
+    # subsystem — pass the persisted primary-assigned value. A record with
+    # ns_id unset falls back to auto-assignment: that covers legacy records
+    # from before ns_id persistence, which are dedicated one-namespace
+    # subsystems where auto-assignment on the freshly recreated (empty)
+    # subsystem lands on the same nsid the record always had.
     ret = rpc_client.nvmf_subsystem_add_ns(
         lvol.nqn, lvol.top_bdev, lvol.get_ns_uuid(), lvol.guid,
         nsid=lvol.ns_id if lvol.ns_id else None)
