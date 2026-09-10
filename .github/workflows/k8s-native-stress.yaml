@@ -1,5 +1,5 @@
 name: K8s Native Stress Tests
-run-name: "K8s Native Stress Tests | ${{ inputs.testname || 'K8sNativeFailoverTest' }} | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
+run-name: "K8s Native Stress Tests | ${{ inputs.testname || 'K8sNativeFailoverTest' }} | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,vcpu_count=0' }}"
 
 on:
   workflow_dispatch:
@@ -74,9 +74,9 @@ on:
         default: true
         type: boolean
       cluster_params:
-        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
+        description: 'Cluster config. vcpu_count=0 derives vcpuCount from the node CPU count; any other value is used as-is'
         required: false
-        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
+        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,vcpu_count=0'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
@@ -291,7 +291,7 @@ jobs:
 
       - name: Set parameters
         run: |
-          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,vcpu_count=0' }}"
           # Parse key=value pairs from cluster_params
           for pair in $(echo "$PARAMS" | tr ',' ' '); do
             key=$(echo "$pair" | cut -d= -f1)
@@ -303,6 +303,7 @@ jobs:
               chunk_bs)   echo "CHUNK_BS=$val" >> $GITHUB_ENV ;;
               partitions) echo "PARTITIONS=$val" >> $GITHUB_ENV ;;
               jm_count)   echo "JM_COUNT=$val" >> $GITHUB_ENV ;;
+              vcpu_count) echo "VCPU_COUNT_PARAM=$val" >> $GITHUB_ENV ;;
             esac
           done
 
@@ -873,6 +874,9 @@ jobs:
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
           PARTITIONS="${PARTITIONS:-0}"
           JM_COUNT="${JM_COUNT:-3}"
+          # 0 (the default) means derive vcpuCount from the node's CPU count below;
+          # any other value in cluster_params is used verbatim.
+          VCPU_COUNT_PARAM=$(echo "${VCPU_COUNT_PARAM:-0}" | tr -d '[:space:]')
           OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'aws-openshift' && '50' || github.event.inputs.cluster_environment == 'openshift-local' && '50' || github.event.inputs.cluster_environment == 'openshift-baremetal' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
           SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
@@ -891,23 +895,29 @@ jobs:
             ENABLE_JOURNAL_DEVICE="false"
           fi
 
-          # Calculate vcpuCount from CORE_PERCENTAGE by querying actual CPU count on a worker node
-          FIRST_WORKER="${{ github.event.inputs.worker_nodes }}"
-          FIRST_WORKER="${FIRST_WORKER%%,*}"
-          if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
-            TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
+          # vcpuCount: an explicit vcpu_count in cluster_params wins; 0 means calculate it
+          # from CORE_PERCENTAGE by querying the actual CPU count on a worker node.
+          if [ "${VCPU_COUNT_PARAM}" -gt 0 ] 2>/dev/null; then
+            VCPU_COUNT="${VCPU_COUNT_PARAM}"
+            echo "Using vcpuCount=${VCPU_COUNT} from cluster_params (skipping CPU-count query)"
           else
-            TOTAL_CPUS=$(kubectl get node "${FIRST_WORKER}" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null || echo "0")
+            FIRST_WORKER="${{ github.event.inputs.worker_nodes }}"
+            FIRST_WORKER="${FIRST_WORKER%%,*}"
+            if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
+              TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
+            else
+              TOTAL_CPUS=$(kubectl get node "${FIRST_WORKER}" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null || echo "0")
+            fi
+            TOTAL_CPUS=$(echo "${TOTAL_CPUS}" | tr -d '[:space:]')
+            if [ "${TOTAL_CPUS}" -gt 0 ] 2>/dev/null; then
+              VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
+              [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
+            else
+              echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
+              VCPU_COUNT=4
+            fi
+            echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
           fi
-          TOTAL_CPUS=$(echo "${TOTAL_CPUS}" | tr -d '[:space:]')
-          if [ "${TOTAL_CPUS}" -gt 0 ] 2>/dev/null; then
-            VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
-            [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
-          else
-            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
-            VCPU_COUNT=4
-          fi
-          echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
 
           RESERVED_CPU_YAML=""
           if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
