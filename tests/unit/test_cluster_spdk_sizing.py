@@ -359,5 +359,122 @@ class TestApplyClusterHugepages(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestHugepageMemoryFactor(unittest.TestCase):
+    """The huge-page figure is the computed pool + EXTRA_HUGE_PAGE_MEMORY total,
+    with no safety multiplier. The old 2.0x factor reserved ~twice what SPDK
+    needs -- on a two-instances-per-socket host that was the difference between
+    fitting a node and starving it."""
+
+    def test_is_the_undoubled_computed_figure(self):
+        small, large, lvol, cpu = 192160, 3945, 45, 12
+        pool_consumption = (small * 8 + large * 128) / 1024
+        expected = int((4 * cpu + 1.1 * pool_consumption + 22 * lvol) * (1024 * 1024)
+                       + constants.EXTRA_HUGE_PAGE_MEMORY)
+        self.assertEqual(
+            utils.calculate_minimum_hp_memory(small, large, lvol, 0, cpu), expected)
+
+    def test_not_doubled(self):
+        """Guard against the 2.0x regression: the result is the pool figure plus
+        one EXTRA_HUGE_PAGE_MEMORY, so it sits between 1x and 2x that constant."""
+        small, large, lvol, cpu = 100000, 1000, 10, 8
+        result = utils.calculate_minimum_hp_memory(small, large, lvol, 0, cpu)
+        self.assertGreater(result, constants.EXTRA_HUGE_PAGE_MEMORY)
+        self.assertLess(result, 2 * constants.EXTRA_HUGE_PAGE_MEMORY,
+                        "result must not carry the old 2x multiplier")
+
+
+class TestReserveClusterHugepages(unittest.TestCase):
+    """add_node must size huge_page_memory to the cluster's real max_subsys and
+    reserve the kernel pages AFTER that recompute, not against sn configure's
+    product-ceiling config. set_hugepages() reads the config, so the config must
+    already be recomputed when it runs -- the ordering is the whole fix."""
+
+    @staticmethod
+    def _node_config(max_lvol, isolated_len=8, ssd="0000:00:01.0"):
+        small, large = utils.calculate_pool_count(
+            4, 2 * 2, isolated_len, isolated_len, max_lvol)
+        return {
+            "max_lvol": max_lvol,
+            "number_of_alcemls": 4,
+            "number_of_distribs": 2,
+            "distribution": {"poller_cpu_cores": list(range(isolated_len))},
+            "socket": 0,
+            "isolated": list(range(isolated_len)),
+            "ssd_pcis": [ssd],
+            "small_pool_count": small,
+            "large_pool_count": large,
+            "huge_page_memory": utils.calculate_minimum_hp_memory(
+                small, large, max_lvol, 0, isolated_len),
+        }
+
+    @staticmethod
+    def _cluster(max_subsys=0, hugepages_mem=0):
+        cluster = MagicMock()
+        cluster.max_subsys = max_subsys
+        cluster.hugepages_mem = hugepages_mem
+        return cluster
+
+    def test_reserves_after_recomputing_to_the_cluster_max_subsys(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        node = self._node_config(max_lvol=constants.MAX_SUBSYSTEMS_PER_NODE)
+        configured = node["huge_page_memory"]
+
+        ok = storage_node_ops.reserve_cluster_hugepages(
+            snode_api, [node], self._cluster(max_subsys=10))
+
+        self.assertTrue(ok)
+        self.assertEqual(node["max_lvol"], 10)
+        self.assertLess(node["huge_page_memory"], configured,
+                        "must be recomputed down to the cluster's real max_subsys")
+        # the kernel reservation must be the LAST snode call, after persist
+        call_names = [c[0] for c in snode_api.mock_calls]
+        self.assertEqual(call_names[-1], "set_hugepages")
+        self.assertIn("persist_node_config", call_names)
+        self.assertLess(call_names.index("persist_node_config"),
+                        call_names.index("set_hugepages"),
+                        "must recompute+persist before reserving, not after")
+
+    def test_reserve_is_called_once_after_all_entries(self):
+        """Two instances on one socket: both entries are recomputed before the
+        single set_hugepages(), so it sums the real total, not a mix that
+        includes an un-shrunk worst-case entry."""
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        nodes = [self._node_config(constants.MAX_SUBSYSTEMS_PER_NODE, ssd="0000:00:01.0"),
+                 self._node_config(constants.MAX_SUBSYSTEMS_PER_NODE, ssd="0000:00:02.0")]
+
+        ok = storage_node_ops.reserve_cluster_hugepages(
+            snode_api, nodes, self._cluster(max_subsys=10))
+
+        self.assertTrue(ok)
+        snode_api.set_hugepages.assert_called_once()
+        for n in nodes:
+            self.assertEqual(n["max_lvol"], 10)
+        call_names = [c[0] for c in snode_api.mock_calls]
+        self.assertEqual(call_names[-1], "set_hugepages")
+
+    def test_a_failed_persist_aborts_before_reserving(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (False, "disk full")
+        node = self._node_config(max_lvol=constants.MAX_SUBSYSTEMS_PER_NODE)
+
+        ok = storage_node_ops.reserve_cluster_hugepages(
+            snode_api, [node], self._cluster(max_subsys=10))
+
+        self.assertFalse(ok)
+        snode_api.set_hugepages.assert_not_called()
+
+    def test_negative_hugepage_floor_is_refused(self):
+        snode_api = MagicMock()
+        node = self._node_config(max_lvol=10)
+
+        ok = storage_node_ops.reserve_cluster_hugepages(
+            snode_api, [node], self._cluster(hugepages_mem=-1))
+
+        self.assertFalse(ok)
+        snode_api.set_hugepages.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
