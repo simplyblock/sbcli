@@ -24,7 +24,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-
+from simplyblock_core.controllers import consistency_group_controller as _cgc
 
 logger = utils.get_logger(__name__)
 
@@ -486,7 +486,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # creation). An explicit conflicting --host is an error, not a
         # preference fight.
         from simplyblock_core.controllers import replication_policy_controller as _rpc
-        from simplyblock_core.controllers import consistency_group_controller as _cgc
         try:
             _policy = _rpc._resolve_policy(replication_policy)
         except KeyError:
@@ -508,7 +507,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # so every member shares one store. The first labeled volume pins the
         # group; later ones are forced onto the pin. A conflicting explicit
         # --host is an error, not a preference fight.
-        from simplyblock_core.controllers import consistency_group_controller as _cgc
         _cg_pool = None
         for _p in db_controller.get_pools():
             if pool_id_or_name in (_p.get_id(), _p.pool_name):
@@ -1130,7 +1128,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # Atomic-join (design §4.1, P0-3): the volume joined its group in the
         # same operation that created it. Placement was already pinned above, so
         # this only opens the member's epoch.
-        from simplyblock_core.controllers import consistency_group_controller as _cgc
         try:
             _cgc.add_member_to_group(cg_group, lvol)
             lvol.group_id = cg_group.get_id()
@@ -2333,7 +2330,6 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
     # cloned FROM, never snapshots taken OF it, so the group's generations stay
     # restorable; this just closes the epoch.
     if lvol.group_id:
-        from simplyblock_core.controllers import consistency_group_controller as _cgc
         try:
             _cg = db_controller.get_consistency_group_by_id(lvol.group_id)
             _cgc.remove_member_from_group(_cg, lvol.get_id())

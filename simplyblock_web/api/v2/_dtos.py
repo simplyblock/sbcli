@@ -719,7 +719,7 @@ class ConsistencyGroupDTO(BaseModel):
         return ConsistencyGroupDTO(
             id=UUID(model.uuid),
             cluster_id=UUID(model.cluster_id),
-            name=model.name,
+            name=model.group_name,
             node_id=UUID(model.node_id) if model.node_id else None,
             lvs_name=model.lvs_name,
             member_count=current,

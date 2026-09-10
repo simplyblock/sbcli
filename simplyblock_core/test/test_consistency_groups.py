@@ -259,7 +259,7 @@ class _StandaloneDB:
 
     def get_consistency_group_by_name(self, cluster_id, name):
         for g in self.groups.values():
-            if g.cluster_id == cluster_id and g.name == name:
+            if g.cluster_id == cluster_id and g.group_name == name:
                 return g
         return None
 
@@ -292,7 +292,7 @@ def test_ensure_group_is_idempotent_by_name(standalone):
     b = cgc.ensure_group("CL", "db-group")
     assert a.uuid == b.uuid
     assert len(standalone.get_consistency_groups("CL")) == 1
-    assert a.name == "db-group"
+    assert a.group_name == "db-group"
 
 
 def test_concurrent_first_volumes_converge_on_one_group(standalone):

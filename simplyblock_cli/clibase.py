@@ -1192,7 +1192,7 @@ class CLIWrapperBase:
             return db.get_consistency_group_by_id(group_id)
         except KeyError:
             for g in db.get_consistency_groups():
-                if g.name == group_id:
+                if g.group_name == group_id:
                     return g
             raise
 
@@ -1200,7 +1200,7 @@ class CLIWrapperBase:
         db = db_controller.DBController()
         data = [{
             "ID": g.get_id(),
-            "Name": g.name or "-",
+            "Name": g.group_name or "-",
             "Node": g.node_id[:8] if g.node_id else "-",
             "LVS": g.lvs_name or "-",
             "Members": sum(1 for m in (g.members or {}).values()

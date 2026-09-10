@@ -87,7 +87,7 @@ def ensure_group(cluster_id, name):
     group = ConsistencyGroup()
     group.uuid = str(uuid_module.uuid4())
     group.cluster_id = cluster_id
-    group.name = name
+    group.group_name = name
     group.members = {}
     group.write_to_db(db.kv_store)
     logger.info("Created standalone consistency group %s (%s) in cluster %s",
@@ -601,7 +601,7 @@ def clone_generation(group, seq, into_name=None):
     for s in targets:
         src_lvol_id = s.lvol.get_id() if s.lvol else ""
         clone_name = (f"{into_name}_{src_lvol_id[:8]}" if into_name
-                      else f"clone_{group.name or group.uuid[:8]}_{seq}_{src_lvol_id[:8]}")
+                      else f"clone_{group.group_name or group.uuid[:8]}_{seq}_{src_lvol_id[:8]}")
         new_id, err = snapshot_controller.clone(s.get_id(), clone_name)
         if not new_id:
             return None, f"failed to clone member snapshot {s.get_id()}: {err}"

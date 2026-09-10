@@ -96,8 +96,11 @@ class ConsistencyGroup(BaseModel):
     """A group of volumes that snapshot as one crash-consistent generation.
 
     A group is born from its first labeled member volume and identified by a
-    ``name`` unique within its cluster (a PVC's
+    ``group_name`` unique within its cluster (a PVC's
     ``storage.simplyblock.io/consistency-group`` label on the Kubernetes path).
+    The field is deliberately NOT called ``name``: BaseModel.name is the class
+    name and the middle segment of every FDB key, so shadowing it moves the
+    record out of the class keyspace (see tests/unit/models/test_reserved_fields.py).
     ``members`` maps lvol id to its membership EPOCH:
 
         {"joined_seq": N, "removed_seq": M}
@@ -115,7 +118,7 @@ class ConsistencyGroup(BaseModel):
 
     cluster_id: str = ""
     #: group name, unique per cluster; the identity a labeled volume joins by.
-    name: str = ""
+    group_name: str = ""
     policy_id: str = ""           # ReplicationPolicy.get_id(), optional
     #: pinned placement: every member volume lives on this node / LVS. Set by
     #: the first member and enforced for all others.

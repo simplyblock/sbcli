@@ -686,7 +686,7 @@ class DBController(metaclass=Singleton):
 
     def _try_acquire_cluster_create_lock_tx(self, tr, name, owner, now):
         lock = ClusterCreateLock()
-        lock.name = name
+        lock.lock_name = name
         key = lock.get_db_id().encode()
         raw = tr.get(key).wait()
         if raw.present():
@@ -715,7 +715,7 @@ class DBController(metaclass=Singleton):
 
     def _release_cluster_create_lock_tx(self, tr, name, owner):
         lock = ClusterCreateLock()
-        lock.name = name
+        lock.lock_name = name
         key = lock.get_db_id().encode()
         raw = tr.get(key).wait()
         if not raw.present():
@@ -1505,7 +1505,7 @@ class DBController(metaclass=Singleton):
         if not name:
             return None
         return single_or_none(
-            g for g in self.get_consistency_groups(cluster_id) if g.name == name)
+            g for g in self.get_consistency_groups(cluster_id) if g.group_name == name)
 
     def get_consistency_group_for_policy(self, policy_id: str) -> ConsistencyGroup | None:
         wanted = policy_id.split('/')[-1] if policy_id else ""

@@ -47,7 +47,7 @@ def list(cluster: Cluster, name: str | None = None) -> builtins.list[Consistency
     """
     groups = db.get_consistency_groups(cluster.get_id())
     if name is not None:
-        groups = [g for g in groups if g.name == name]
+        groups = [g for g in groups if g.group_name == name]
     return [ConsistencyGroupDTO.from_model(g) for g in groups]
 
 
