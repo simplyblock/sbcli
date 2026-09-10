@@ -194,6 +194,7 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--iobuf_large_bufsize', help='Bdev_set_options param. Default: `0`.', type=int, default=0, dest='large_bufsize')
         subcommand.add_argument('--force', help='Force restart.', dest='force', action='store_true')
         subcommand.add_argument('--ssd-pcie', help='New Nvme PCIe address to add to the storage node. Can be more than one.', type=str, default='', dest='ssd_pcie', required=False, nargs='+')
+        subcommand.add_argument('--data-nics', help='Replace the storage node\'s data network interface(s) on restart. Provide the new interface name(s); they replace the existing data NIC set. Can be more than one.', type=str, default='', dest='data_nics', required=False, nargs='+')
         subcommand.add_argument('--force-lvol-recreate', help='Force logical volume recreation on node restart even if the logical volume bdev was not recovered. Default: `False`.', default=False, dest='force_lvol_recreate', action='store_true')
         if self.developer_mode:
             subcommand.add_argument('--spdk-proxy-image', help='The SPDK proxy image URI.', type=str, dest='spdk_proxy_image')
