@@ -5,7 +5,6 @@ from simplyblock_core.controllers.replication_policy_controller import Replicati
 from simplyblock_core.utils.nvme import NvmeConnectEntry
 
 from tests.unit.web.api.v2._factories import (
-    STORAGE_NODE_ID,
     CLUSTER_ID,
     REPLICATION_POLICY_ID,
     REPLICATION_TARGET_ID,
@@ -184,38 +183,7 @@ class TestListPolicies:
         assert body['policy_name'] == 'nightly'
         assert body['target_id'] == REPLICATION_TARGET_ID
         assert body['mode'] == 'failover'
-        assert body['consistency_group'] is False
-        assert body['group_node_id'] is None
         replication_policy_controller.list_policies.assert_called_once_with(CLUSTER_ID)
-
-    def test_consistency_group_policy_reports_the_pinned_placement(
-            self, client, db, cluster, replication_policy,
-            replication_policy_controller):
-        """The pinned node/LVS is what the operator needs to place new member
-        volumes; without it in the DTO the placement rule is discoverable only
-        through failed attaches."""
-        from simplyblock_core.models.replication import ConsistencyGroup
-        replication_policy.consistency_group = True
-        group = ConsistencyGroup()
-        group.uuid = '77777777-7777-7777-7777-777777777777'
-        group.cluster_id = CLUSTER_ID
-        group.policy_id = replication_policy.get_id()
-        group.node_id = STORAGE_NODE_ID
-        group.lvs_name = 'LVS_1'
-        group.last_group_seq = 7
-        db.get_consistency_group_for_policy.return_value = group
-        replication_policy_controller.list_policies.return_value = [replication_policy]
-
-        response = client.get(POLICIES_URL)
-
-        assert response.status_code == 200
-        (body,) = response.json()
-        assert body['consistency_group'] is True
-        assert body['group_node_id'] == STORAGE_NODE_ID
-        assert body['group_lvs_name'] == 'LVS_1'
-        assert body['group_last_seq'] == 7
-        db.get_consistency_group_for_policy.assert_called_once_with(
-            replication_policy.get_id())
 
 
 class TestCreatePolicy:
@@ -239,27 +207,7 @@ class TestCreatePolicy:
             f'/clusters/{CLUSTER_ID}/replication/policies/{REPLICATION_POLICY_ID}/')
         args, kwargs = replication_policy_controller.add_policy.call_args
         assert args == (CLUSTER_ID, 'nightly', REPLICATION_TARGET_ID)
-        assert kwargs == {'interval_min': 5, 'mode': 'failover', 'keep_replicated': 3,
-                          'consistency_group': False}
-
-    def test_consistency_group_flag_reaches_the_controller(
-            self, client, db, cluster, replication_policy,
-            replication_policy_controller):
-        """The operator (and any API client) opts a policy into a consistency
-        group at creation; the flag must reach add_policy, which creates the
-        group record — it cannot be added after the fact."""
-        replication_policy_controller.add_policy.return_value = \
-            f'{CLUSTER_ID}/{REPLICATION_POLICY_ID}'
-
-        response = client.post(POLICIES_URL, json={
-            'policy_name': 'nightly',
-            'target_id': REPLICATION_TARGET_ID,
-            'consistency_group': True,
-        })
-
-        assert response.status_code == 201
-        _args, kwargs = replication_policy_controller.add_policy.call_args
-        assert kwargs['consistency_group'] is True
+        assert kwargs == {'interval_min': 5, 'mode': 'failover', 'keep_replicated': 3}
 
     def test_unknown_mode_rejected(self, client, db, cluster, replication_policy_controller):
         response = client.post(POLICIES_URL, json={
