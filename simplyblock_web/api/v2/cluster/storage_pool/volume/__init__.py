@@ -65,6 +65,10 @@ class _CreateParams(BaseModel):
     # Optional replication policy (id or name): assigning it at create time
     # configures replication for the volume.
     replication_policy: str | None = None
+    # Optional consistency group (name): the volume joins the group at creation,
+    # pinned to the group's node/LVS (design §4.1, §10). The CSI provisioner
+    # passes the PVC's storage.simplyblock.io/consistency-group label here.
+    consistency_group: str | None = None
     encrypt: bool = False
 
 
@@ -116,6 +120,7 @@ def add(
             do_replicate=data.do_replicate,
             replication_cluster_id=data.replication_cluster_id,
             replication_policy=data.replication_policy,
+            consistency_group=data.consistency_group,
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(

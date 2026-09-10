@@ -118,6 +118,10 @@ class LVol(BaseModel):
     # replication service keeps reading exactly what it reads today; attaching a
     # policy derives them from policy + target.
     replication_policy_id: str = ""
+    #: consistency group this volume was created into, "" for a non-member.
+    #: Denormalized pointer set at join and cleared on detach; the group's
+    #: members map remains the authoritative generation-membership record.
+    group_id: str = ""
 
     def watch_scope(self):
         return (self.pool_uuid,)

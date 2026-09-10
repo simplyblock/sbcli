@@ -72,34 +72,46 @@ def delete_group_for_policy(policy_id):
                     group.get_id(), policy_id)
 
 
-def add_member(policy, lvol):
-    """Enforce requirement 1 and record the member's epoch.
+def ensure_group(cluster_id, name):
+    """Resolve the standalone group named ``name`` in ``cluster_id``, or create
+    it. Idempotent by (cluster_id, name): concurrent first volumes that carry
+    the same label converge on one group rather than racing two into being
+    (design §4.1). The group is unpinned until its first member joins.
+    """
+    if not name:
+        raise ConsistencyGroupError("a consistency group needs a name")
+    group = db.get_consistency_group_by_name(cluster_id, name)
+    if group is not None:
+        return group
+    group = ConsistencyGroup()
+    group.uuid = str(uuid_module.uuid4())
+    group.cluster_id = cluster_id
+    group.name = name
+    group.members = {}
+    group.write_to_db(db.kv_store)
+    logger.info("Created standalone consistency group %s (%s) in cluster %s",
+                group.uuid[:8], name, cluster_id)
+    return group
+
+
+def add_member_to_group(group, lvol):
+    """Pin placement and record the member's epoch (design §4.1, §4.2).
 
     The FIRST member pins the group to its node/LVS. Every later member must
-    already live there — the attachment FAILS otherwise; membership becomes
-    effective at the NEXT group snapshot (``joined_seq = last_group_seq + 1``),
-    because no earlier group snapshot contains this volume.
+    already live there — the join FAILS otherwise; membership becomes effective
+    at the NEXT group snapshot (``joined_seq = last_group_seq + 1``), because no
+    earlier group snapshot contains this volume.
 
     A re-attaching volume gets a fresh epoch: its old history window stays
-    recorded under the closed epoch semantics (removed_seq of the old entry
-    is preserved only implicitly by the new joined_seq being later — the
-    entry is replaced, and the generation math treats the gap correctly
-    because the new joined_seq excludes the detached window).
+    recorded under the closed epoch semantics (the entry is replaced, and the
+    generation math treats the gap correctly because the new joined_seq
+    excludes the detached window).
     """
-    group = db.get_consistency_group_for_policy(policy.get_id())
-    if group is None:
-        # Policies created before the flag existed, or records lost: fail
-        # loudly rather than silently degrading to per-volume snapshots.
-        raise ConsistencyGroupError(
-            f"Policy {policy.policy_name} declares a consistency group but "
-            f"has no group record")
-
     if group.lvs_name and (lvol.lvs_name != group.lvs_name
                            or lvol.node_id != group.node_id):
         raise ConsistencyGroupError(
             f"Volume {lvol.get_id()} lives on {lvol.node_id[:8]}/{lvol.lvs_name} "
-            f"but consistency group {group.uuid[:8]} of policy "
-            f"{policy.policy_name} is pinned to "
+            f"but consistency group {group.uuid[:8]} is pinned to "
             f"{group.node_id[:8]}/{group.lvs_name}; all members of a "
             f"consistency group must share one LVS")
 
@@ -121,9 +133,24 @@ def add_member(policy, lvol):
     return group
 
 
-def remove_member(policy_id, lvol_id):
-    """Close the member's epoch at the current generation."""
-    group = db.get_consistency_group_for_policy(policy_id)
+def add_member(policy, lvol):
+    """Policy path: resolve the policy's group, then join ``lvol`` to it."""
+    group = db.get_consistency_group_for_policy(policy.get_id())
+    if group is None:
+        # Policies created before the flag existed, or records lost: fail
+        # loudly rather than silently degrading to per-volume snapshots.
+        raise ConsistencyGroupError(
+            f"Policy {policy.policy_name} declares a consistency group but "
+            f"has no group record")
+    return add_member_to_group(group, lvol)
+
+
+def remove_member_from_group(group, lvol_id):
+    """Close the member's epoch at the current generation (detach semantics).
+
+    History-preserving: the member's snapshots in prior generations are
+    untouched (design §8.2), only the epoch's ``removed_seq`` is set.
+    """
     if group is None:
         return
     members = dict(group.members or {})
@@ -138,12 +165,37 @@ def remove_member(policy_id, lvol_id):
                     "generation %d)", lvol_id, group.uuid[:8], entry["removed_seq"])
 
 
-def pinned_node_for_policy(policy):
-    """The node a NEW volume under this policy must be created on, or None."""
-    group = db.get_consistency_group_for_policy(policy.get_id())
+def remove_member(policy_id, lvol_id):
+    """Policy path: resolve the policy's group, then close ``lvol_id``'s epoch."""
+    remove_member_from_group(
+        db.get_consistency_group_for_policy(policy_id), lvol_id)
+
+
+def group_for_lvol(lvol_id):
+    """The consistency group this lvol is an open-epoch member of, or None.
+
+    Membership lives in the group's ``members`` map rather than on the lvol, so
+    this scans the cluster's groups. Used by the volume delete and read paths
+    (design §8.2, §9.5).
+    """
+    for g in db.get_consistency_groups():
+        entry = (g.members or {}).get(lvol_id)
+        if entry and entry.get("removed_seq", 0) == 0:
+            return g
+    return None
+
+
+def pinned_node_for_group(group):
+    """The node a NEW member of ``group`` must be created on, or None."""
     if group is not None and group.node_id:
         return group.node_id
     return None
+
+
+def pinned_node_for_policy(policy):
+    """The node a NEW volume under this policy must be created on, or None."""
+    return pinned_node_for_group(
+        db.get_consistency_group_for_policy(policy.get_id()))
 
 
 # --------------------------------------------------------------------------- #
@@ -203,27 +255,55 @@ def warnings_for_snapshot(lvol, snapshot):
 # The group snapshot tick
 # --------------------------------------------------------------------------- #
 
-def _current_members(group):
-    """Live member volumes: attached to the policy, epoch open, usable."""
+def _precheck_members(group):
+    """Health precheck before the freeze (design §5.1).
+
+    Returns (members, None) when every current member is online and on the
+    pinned store, or (None, error) naming the members at fault. Prechecking
+    beats leaning on the all-or-nothing rollback: it avoids freezing I/O across
+    the healthy members for a snapshot one unhealthy member had already doomed,
+    and it produces a precise error rather than a mid-sequence RPC failure.
+    """
     members = []
+    offline = []
+    off_store = []
     for lvol_id, m in (group.members or {}).items():
         if m.get("removed_seq", 0) != 0:
             continue
         try:
             lvol = db.get_lvol_by_id(lvol_id)
         except KeyError:
+            offline.append(f"{lvol_id[:8]} (no record)")
             continue
         if lvol.status != LVol.STATUS_ONLINE:
-            logger.warning("Consistency group %s: member %s is %s; the group "
-                           "snapshot is skipped this tick (a group snapshot "
-                           "missing a member is not a group snapshot)",
-                           group.uuid[:8], lvol_id, lvol.status)
-            return None
+            offline.append(f"{lvol_id[:8]} ({lvol.status})")
+            continue
+        if lvol.lvs_name != group.lvs_name or lvol.node_id != group.node_id:
+            off_store.append(f"{lvol_id[:8]} on {lvol.node_id[:8]}/{lvol.lvs_name}")
+            continue
         members.append(lvol)
-    return members
+    if offline or off_store:
+        parts = []
+        if offline:
+            parts.append("unhealthy member(s): " + ", ".join(sorted(offline)))
+        if off_store:
+            parts.append(
+                f"member(s) off the pinned store {group.node_id[:8]}/"
+                f"{group.lvs_name}: " + ", ".join(sorted(off_store)))
+        return None, ("consistency group snapshot refused — " + "; ".join(parts))
+    return members, None
 
 
 def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True):
+    """Policy path: resolve the policy's group and snapshot it as one generation."""
+    policy = db.get_replication_policy_by_id(policy_id)
+    group = db.get_consistency_group_for_policy(policy.get_id())
+    if group is None:
+        return None, f"Policy {policy_id} has no consistency group"
+    return create_group_snapshot_for_group(group, snap_type=snap_type, lock=lock)
+
+
+def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, lock=True):
     """Take ONE crash-consistent snapshot of every group member.
 
     Returns (list_of_snapshot_ids, None) or (None, error). All-or-nothing:
@@ -231,23 +311,11 @@ def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True
     already GC'd if the failure was inside the RPC; registration/record
     failures are rolled back here) and the generation counter does not move.
     """
-    policy = db.get_replication_policy_by_id(policy_id)
-    group = db.get_consistency_group_for_policy(policy.get_id())
-    if group is None:
-        return None, f"Policy {policy_id} has no consistency group"
-
-    members = _current_members(group)
-    if members is None:
-        return None, "consistency group member not online"
+    members, precheck_err = _precheck_members(group)
+    if precheck_err is not None:
+        return None, precheck_err
     if not members:
         return None, "consistency group has no members"
-
-    # Placement invariant (defense in depth: attach enforces it already).
-    for lvol in members:
-        if lvol.lvs_name != group.lvs_name or lvol.node_id != group.node_id:
-            return None, (f"member {lvol.get_id()} is on "
-                          f"{lvol.node_id[:8]}/{lvol.lvs_name}, group is pinned "
-                          f"to {group.node_id[:8]}/{group.lvs_name}")
 
     host_node = db.get_storage_node_by_id(group.node_id)
     pool = db.get_pool_by_id(members[0].pool_uuid)
@@ -411,3 +479,122 @@ def create_group_snapshot(policy_id, snap_type=SnapShot.TYPE_INTERNAL, lock=True
     logger.info("Consistency group %s: generation %d complete (%d snapshots)",
                 group.uuid[:8], group_seq, len(created_ids))
     return created_ids, None
+
+
+# --------------------------------------------------------------------------- #
+# Group-scoped listings, generation delete, and headless clone (design §6, §7)
+# --------------------------------------------------------------------------- #
+
+def _group_snapshots(group):
+    """Every member snapshot that belongs to this group, any generation."""
+    return [s for s in db.get_snapshots(group.cluster_id)
+            if s.group_id == group.get_id() and s.group_seq]
+
+
+def list_members(group):
+    """Current members with epoch, placement, and online status (design §10).
+
+    The live-membership counterpart of :func:`list_generations`: the volumes a
+    NEW group snapshot would contain, versus which members a past one does.
+    """
+    rows = []
+    for lvol_id, m in (group.members or {}).items():
+        if m.get("removed_seq", 0) != 0:
+            continue
+        try:
+            lvol = db.get_lvol_by_id(lvol_id)
+            online, node_id, lvs_name = (
+                lvol.status == LVol.STATUS_ONLINE, lvol.node_id, lvol.lvs_name)
+        except KeyError:
+            online, node_id, lvs_name = False, "", ""
+        rows.append({
+            "lvol_id": lvol_id,
+            "joined_seq": m.get("joined_seq", 0),
+            "removed_seq": m.get("removed_seq", 0),
+            "node_id": node_id or group.node_id,
+            "lvs_name": lvs_name or group.lvs_name,
+            "online": online,
+        })
+    return rows
+
+
+def list_generations(group):
+    """Historical per-generation view (design §6.3): one row per ``group_seq``.
+
+    ``expected`` is computed from the membership epochs (``included_in_seq``
+    over the membership at that generation), ``present`` from the member
+    snapshots that still exist online. A generation whose present count is below
+    expected is incomplete (a member snapshot was pruned or hard-deleted, §8)
+    and is reported as such rather than discovered at restore time.
+    """
+    by_seq: dict = {}
+    for s in _group_snapshots(group):
+        by_seq.setdefault(s.group_seq, []).append(s)
+    rows = []
+    for seq in sorted(by_seq):
+        member_snaps = by_seq[seq]
+        expected = sum(1 for lvol_id in (group.members or {})
+                       if group.included_in_seq(lvol_id, seq))
+        present = sum(1 for s in member_snaps
+                      if s.status == SnapShot.STATUS_ONLINE)
+        rows.append({
+            "group_seq": seq,
+            "created_at": min((s.created_at for s in member_snaps), default=0),
+            "expected": expected,
+            "present": present,
+            "complete": expected > 0 and present >= expected,
+            "members": [{
+                "lvol_id": s.lvol.get_id() if s.lvol else "",
+                "snapshot_id": s.get_id(),
+                "ready": s.status == SnapShot.STATUS_ONLINE,
+            } for s in member_snaps],
+        })
+    return rows
+
+
+def delete_generation(group, seq):
+    """Delete every member snapshot of generation ``seq`` atomically; never the
+    group itself (design §10). Returns (deleted_ids, None) or (None, error).
+    """
+    from simplyblock_core.controllers import snapshot_controller
+    targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
+    if not targets:
+        return None, f"generation {seq} of group {group.uuid[:8]} not found"
+    deleted: list = []
+    for s in targets:
+        if not snapshot_controller.delete(s.get_id()):
+            return None, (f"failed to delete member snapshot {s.get_id()} of "
+                          f"generation {seq}; {len(deleted)} already removed")
+        deleted.append(s.get_id())
+    logger.info("Consistency group %s: deleted generation %d (%d snapshots)",
+                group.uuid[:8], seq, len(deleted))
+    return deleted, None
+
+
+def clone_generation(group, seq, into_name=None):
+    """Headless group clone (design §7.3): clone every member snapshot of a
+    generation into a new volume, optionally forming a new group from the
+    clones. A group-forming clone must place every clone on one node/LVS
+    (design §7.2), so an off-store clone fails loudly through
+    :func:`add_member_to_group`. Returns (new_lvol_ids, None) or (None, error).
+    """
+    from simplyblock_core.controllers import snapshot_controller
+    targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
+    if not targets:
+        return None, f"generation {seq} of group {group.uuid[:8]} not found"
+    new_group = ensure_group(group.cluster_id, into_name) if into_name else None
+    created: list = []
+    for s in targets:
+        src_lvol_id = s.lvol.get_id() if s.lvol else ""
+        clone_name = (f"{into_name}_{src_lvol_id[:8]}" if into_name
+                      else f"clone_{group.name or group.uuid[:8]}_{seq}_{src_lvol_id[:8]}")
+        new_id, err = snapshot_controller.clone(s.get_id(), clone_name)
+        if not new_id:
+            return None, f"failed to clone member snapshot {s.get_id()}: {err}"
+        created.append(new_id)
+        if new_group is not None:
+            add_member_to_group(new_group, db.get_lvol_by_id(new_id))
+    logger.info("Consistency group %s: cloned generation %d into %d volume(s)%s",
+                group.uuid[:8], seq, len(created),
+                f" (new group {into_name})" if into_name else "")
+    return created, None

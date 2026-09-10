@@ -955,7 +955,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     return snap.uuid, False
 
 
-def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False):
+def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False,
+                   consistency_group=None):
     all_snaps = db_controller.get_snapshots()
     if lvol_id:
         try:
@@ -987,7 +988,17 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
     else:
         snaps = all_snaps
 
+    if consistency_group:
+        # Filter to one group's snapshots without client-side name matching
+        # (design §6.2). Accept either the full "cluster/uuid" id or the uuid.
+        want = consistency_group.split('/')[-1]
+        snaps = [sn for sn in snaps if sn.group_id and sn.group_id.split('/')[-1] == want]
+
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
+
+    # A group column is shown only when the listing actually contains a group
+    # snapshot; the machine-readable group_id / group_seq are always present.
+    any_group = any(sn.group_id for sn in snaps)
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
     migrating_lvols = []
@@ -1019,7 +1030,12 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
             "Status": snap.status,
+            "group_id": snap.group_id,
+            "group_seq": snap.group_seq,
         }
+        if any_group:
+            d["Group"] = snap.group_id.split('/')[-1][:8] if snap.group_id else ""
+            d["Gen"] = snap.group_seq or ""
         if with_details:
             instances = []
             if snap.instances:

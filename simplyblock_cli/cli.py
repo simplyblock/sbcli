@@ -28,6 +28,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
+        self.init_consistency_group()
         self.init_backup()
         self.init_qos()
         self.init_db_backup()
@@ -781,6 +782,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `0`.', type=int, default=0, dest='ndcs')
         subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `0`.', type=int, default=0, dest='npcs')
         subcommand.add_argument('--replication-policy', help='Replication policy (id or name) to assign at create time. Configures replication for this volume.', type=str, dest='replication_policy')
+        subcommand.add_argument('--consistency-group', help='Consistency group name to join at create time. The volume is pinned to the group\'s node/LVS; the first labeled volume pins the group.', type=str, dest='consistency_group')
         subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
 
     def init_volume__qos_set(self, subparser):
@@ -1086,6 +1088,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--node-id', '-n', help='List snapshots for a specific node uuid', type=str, dest='node_id', required=False)
         subcommand.add_argument('--pool', '-p', help='List snapshots in particular pool id or name.', type=str, dest='pool')
         subcommand.add_argument('--cluster-id', '-c', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
+        subcommand.add_argument('--consistency-group', '-g', help='Filter snapshots to one consistency group (id or uuid).', type=str, dest='consistency_group', required=False)
         subcommand.add_argument('--with-details', '-w', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
         subcommand.add_argument('--json', '-j', help='List snapshots in JSON format', dest='json', action='store_true')
 
@@ -1126,6 +1129,47 @@ class CLIWrapper(CLIWrapperBase):
     def init_snapshot__backup(self, subparser):
         subcommand = self.add_sub_command(subparser, 'backup', 'Create an S3 backup of an existing snapshot.')
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
+
+
+    def init_consistency_group(self):
+        subparser = self.add_command('consistency-group', 'Consistency Group Commands', aliases=['cg',])
+        self.init_consistency_group__list(subparser)
+        self.init_consistency_group__members(subparser)
+        self.init_consistency_group__snapshot_take(subparser)
+        self.init_consistency_group__snapshot_list(subparser)
+        self.init_consistency_group__snapshot_delete(subparser)
+        self.init_consistency_group__clone(subparser)
+
+
+    def init_consistency_group__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'List the cluster\'s consistency groups.')
+        subcommand.add_argument('cluster_id', help='Cluster UUID.', type=str)
+        subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_consistency_group__members(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'members', 'List the current members of a consistency group.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_consistency_group__snapshot_take(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'snapshot-take', 'Take ONE crash-consistent snapshot generation across every current member.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+
+    def init_consistency_group__snapshot_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'snapshot-list', 'List a consistency group\'s snapshot generations with expected-versus-present member counts.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_consistency_group__snapshot_delete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'snapshot-delete', 'Delete one generation and all its member snapshots; never the group.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('seq', help='The generation number (group_seq) to delete.', type=int)
+
+    def init_consistency_group__clone(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clone', 'Clone every member snapshot of a generation into a new volume, optionally forming a new group.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('seq', help='The generation number (group_seq) to clone.', type=int)
+        subcommand.add_argument('--into', help='Name of the new consistency group to form from the clones. When omitted, the clones are independent volumes.', type=str, dest='into', required=False)
 
 
     def init_backup(self):
@@ -1701,6 +1745,23 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.snapshot__set(sub_command, args)
                 elif sub_command in ['backup']:
                     ret = self.snapshot__backup(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['consistency-group', 'cg']:
+                sub_command = args_dict['consistency-group']
+                if sub_command in ['list']:
+                    ret = self.consistency_group__list(sub_command, args)
+                elif sub_command in ['members']:
+                    ret = self.consistency_group__members(sub_command, args)
+                elif sub_command in ['snapshot-take']:
+                    ret = self.consistency_group__snapshot_take(sub_command, args)
+                elif sub_command in ['snapshot-list']:
+                    ret = self.consistency_group__snapshot_list(sub_command, args)
+                elif sub_command in ['snapshot-delete']:
+                    ret = self.consistency_group__snapshot_delete(sub_command, args)
+                elif sub_command in ['clone']:
+                    ret = self.consistency_group__clone(sub_command, args)
                 else:
                     self.parser.print_help()
 

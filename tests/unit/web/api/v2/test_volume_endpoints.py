@@ -62,6 +62,7 @@ class TestCreateVolume:
             do_replicate=False,
             replication_cluster_id=None,
             replication_policy=None,
+            consistency_group=None,
         )
         assert response.headers['Location'].endswith(f'/volumes/{VOLUME_ID}/')
 

@@ -466,7 +466,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
                 allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None,
-                replication_policy=None, internal=False):
+                replication_policy=None, consistency_group=None, internal=False):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     if max_namespace_per_subsys is None:
@@ -500,6 +500,33 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                         f"replication policy {_policy.policy_name} is a "
                         f"consistency group pinned to that node's LVS")
                 host_id_or_name = pinned
+
+    cg_group = None
+    if consistency_group:
+        # Standalone consistency group (design §4.1): ensure the group by name,
+        # then pin this volume onto the group's node/LVS BEFORE placement runs,
+        # so every member shares one store. The first labeled volume pins the
+        # group; later ones are forced onto the pin. A conflicting explicit
+        # --host is an error, not a preference fight.
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        _cg_pool = None
+        for _p in db_controller.get_pools():
+            if pool_id_or_name in (_p.get_id(), _p.pool_name):
+                _cg_pool = _p
+                break
+        if not _cg_pool:
+            return False, f"Pool not found: {pool_id_or_name}"
+        try:
+            cg_group = _cgc.ensure_group(_cg_pool.cluster_id, consistency_group)
+        except _cgc.ConsistencyGroupError as e:
+            return False, str(e)
+        pinned = _cgc.pinned_node_for_group(cg_group)
+        if pinned:
+            if host_id_or_name and host_id_or_name != pinned:
+                return False, (
+                    f"Volume must be created on node {pinned} — consistency "
+                    f"group {consistency_group} is pinned to that node's LVS")
+            host_id_or_name = pinned
 
     host_node = None
     if host_id_or_name:
@@ -1090,6 +1117,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             logger.error("Volume %s created but replication policy %s could not be "
                          "attached: %s", lvol.get_id(), replication_policy, e)
             return lvol.uuid, f"Volume created but replication policy could not be attached: {e}"
+
+    if cg_group is not None:
+        # Atomic-join (design §4.1, P0-3): the volume joined its group in the
+        # same operation that created it. Placement was already pinned above, so
+        # this only opens the member's epoch.
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cgc.add_member_to_group(cg_group, lvol)
+            lvol.group_id = cg_group.get_id()
+            lvol.write_to_db(db_controller.kv_store)
+        except _cgc.ConsistencyGroupError as e:
+            logger.error("Volume %s created but could not join consistency group "
+                         "%s: %s", lvol.get_id(), consistency_group, e)
+            return lvol.uuid, f"Volume created but could not join consistency group: {e}"
 
     return lvol.uuid, None
 
@@ -2277,6 +2318,19 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
             return
+
+    # Consistency-group detach on delete (design §8.2): close the member's
+    # epoch so future generations exclude it, but PRESERVE its snapshots in
+    # prior generations. delete_lvol only removes a snapshot the volume was
+    # cloned FROM, never snapshots taken OF it, so the group's generations stay
+    # restorable; this just closes the epoch.
+    if lvol.group_id:
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cg = db_controller.get_consistency_group_by_id(lvol.group_id)
+            _cgc.remove_member_from_group(_cg, lvol.get_id())
+        except KeyError:
+            pass
 
     logger.debug(lvol)
     if snode is None:
