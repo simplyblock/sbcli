@@ -27,6 +27,41 @@ cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
+
+def _cfg_hash(name):
+    """Content hash of a `rendered-<pool>-<hash>` MachineConfig name.
+
+    Comparing hashes rather than full names lets a node sitting under an older
+    pool (e.g. a previous cluster id) with byte-identical config pass without a
+    needless pool migration/reboot.
+    """
+    return name.rsplit("-", 1)[-1] if name else None
+
+
+def _mcp_target_config(mcp):
+    """The rendered config an MCP wants its nodes to carry.
+
+    Must come from `spec.configuration.name`, which the render controller sets
+    to the target as soon as it renders. `status.configuration.name` only
+    advances once the WHOLE pool has finished rolling, so for the entire
+    duration of a rollout it still names the PREVIOUS config — gating a single
+    node on it makes the first node to converge wait for every other node in
+    the pool, and time out on pools big enough to outlast the retry budget.
+    """
+    return ((mcp.get("spec") or {}).get("configuration") or {}).get("name")
+
+
+def _node_carries_config(node_obj, target):
+    """Whether `node_obj` has finished its MCO transition onto `target`."""
+    ann = node_obj.metadata.annotations or {}
+    cur = _cfg_hash(ann.get("machineconfiguration.openshift.io/currentConfig"))
+    state = ann.get("machineconfiguration.openshift.io/state")
+    return bool(
+        target and cur and state == "Done"
+        and not node_obj.spec.unschedulable
+        and cur == _cfg_hash(target)
+    )
+
 def set_namespace(namespace):
     if not os.path.exists(namespace_id_file):
         try:
@@ -501,9 +536,6 @@ def spdk_process_start(body: SPDKParams):
             # no false wait, no needless pool migration/reboot.
             mcp_name = f"storage-{first_six_cluster_id}"
 
-            def _cfg_hash(name):
-                return name.rsplit("-", 1)[-1] if name else None
-
             co = core_utils.get_k8s_custom_objects_client()
             for attempt in range(240):  # ~40 min: reboots queue under MCP maxUnavailable
                 try:
@@ -523,13 +555,12 @@ def spdk_process_start(body: SPDKParams):
                         time.sleep(10)
                         continue
                     raise
-                target = (mcp.get("status", {}).get("configuration", {}) or {}).get("name")
+                target = _mcp_target_config(mcp)
                 node_obj = k8s_core_v1.read_node(node_name)
                 ann = node_obj.metadata.annotations or {}
                 cur = ann.get("machineconfiguration.openshift.io/currentConfig")
                 state = ann.get("machineconfiguration.openshift.io/state")
-                if (target and state == "Done" and not node_obj.spec.unschedulable
-                        and _cfg_hash(cur) and _cfg_hash(cur) == _cfg_hash(target)):
+                if _node_carries_config(node_obj, target):
                     logger.info(f"Node '{node_name}' carries MCP '{mcp_name}' config "
                                 f"(hash {_cfg_hash(cur)}), reboot done — starting SPDK")
                     break
