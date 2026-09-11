@@ -4548,6 +4548,48 @@ def node_removal_orchestrate(node_id, force_remove=False):
             replica_peer_ids = tuple(
                 pid for pid in (snode.secondary_node_id, snode.tertiary_node_id) if pid)
 
+            # Phase 0 — prove phase 3b has a valid layout BEFORE phase 3a
+            # destroys anything.
+            #
+            # 3a is irreversible: it tears down this node's own replicas and
+            # clears the pointers naming them. 3b, which places the replicas
+            # this node hosts for OTHER primaries, only discovers whether a
+            # layout exists when it runs -- after 3a. A 3b failure therefore
+            # returns False into a task runner that retries the whole
+            # sequence, and every retry re-enters a 3a with nothing left to
+            # tear down and reaches the same 3b in the same state. Retry
+            # cannot help, but it is what happens: observed 2026-09-09, a
+            # removal retried 68 times over 11 minutes with the node stuck in
+            # in_removal and one lvstore left on a single member the whole
+            # time, until the task was cancelled by hand.
+            #
+            # Asking the planner here costs one matching computation and
+            # turns that unrecoverable state into a clean refusal: nothing is
+            # destroyed, the node stays ONLINE, and the removal can simply be
+            # retried later once the cluster can host the layout.
+            #
+            # This repeats the admission-time check in remove_storage_node on
+            # purpose. That one runs when the task is QUEUED, which can be
+            # minutes before it is executed, and the cluster can change in
+            # between (a peer going unreachable, another removal finishing).
+            # The check that matters is the one immediately before the
+            # destruction.
+            #
+            # The layout is validated, not persisted: plan_diverse_layout is
+            # a deterministic min-cost matching over the survivors' forward
+            # pointers, and 3a/2 change only THIS node's forward pointers and
+            # the peers' back-references -- neither of which it reads -- so
+            # 3b recomputes the same answer. Persisting it would add a stale
+            # plan to apply against a cluster that has since moved.
+            feasible, reason = _check_replica_relocation_feasible(snode, db_controller)
+            if not feasible:
+                logger.error(
+                    f"[REMOVAL] {node_id}: refusing before phase 3a — no valid layout "
+                    f"for the replicas this node hosts: {reason}. Nothing has been torn "
+                    f"down; the node is still usable and the removal can be retried "
+                    f"once the cluster can host the relocation.")
+                return False
+
             logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
             if not _teardown_replicas_of_primary(snode):
                 return False

@@ -3714,3 +3714,86 @@ class TestRelocationPlannerWithoutFailureDomains(unittest.TestCase):
         removed = _node("z", lvstore="L3", failure_domain=1, mgmt_ip="10.0.0.9")
         db = FakeDB(cl, [a, b, removed])
         self.assertIsNone(storage_node_ops._relocation_planner_inputs(removed, db))
+
+
+# ---------------------------------------------------------------------------
+# node_removal_orchestrate — prove phase 3b is planable before phase 3a runs
+#
+# 3a is irreversible and 3b only discovers whether a layout exists when it
+# runs, after 3a. A 3b failure returns False into a runner that retries the
+# whole sequence, and the retry re-enters a 3a with nothing to tear down and
+# hits the same 3b in the same state. Live on 2026-09-09: 68 retries over 11
+# minutes, node stuck in in_removal, one lvstore left on a single member the
+# whole time.
+# ---------------------------------------------------------------------------
+
+class TestOrchestrateChecksRelocationBeforeTeardown(unittest.TestCase):
+
+    def _patch_all(self):
+        return patch.multiple(
+            storage_node_ops,
+            DBController=DEFAULT,
+            cluster_ops=DEFAULT,
+            shutdown_storage_node=DEFAULT,
+            _check_replica_relocation_feasible=DEFAULT,
+            _decommission_node_jm=DEFAULT,
+            _teardown_replicas_of_primary=DEFAULT,
+            _relocate_replicas_hosted_on=DEFAULT,
+            _verify_replica_stacks=DEFAULT,
+            _finalize_node_removal=DEFAULT,
+            set_node_status=DEFAULT,
+            _decommission_node_devices=DEFAULT,
+        )
+
+    def _db(self):
+        cl = _cluster()
+        node = _node("n1", status=StorageNode.STATUS_IN_REMOVAL,
+                     secondary_id="p1", tertiary_id="p2")
+        return FakeDB(cl, [node, _node("p1"), _node("p2")]), node
+
+    def test_refuses_before_teardown_when_no_layout_exists(self):
+        db, _node_obj = self._db()
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["shutdown_storage_node"].return_value = True
+            mocks["_check_replica_relocation_feasible"].return_value = (False, "no host")
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertFalse(ret)
+        # nothing destructive may have run
+        mocks["_teardown_replicas_of_primary"].assert_not_called()
+        mocks["_decommission_node_jm"].assert_not_called()
+        mocks["_relocate_replicas_hosted_on"].assert_not_called()
+        mocks["_finalize_node_removal"].assert_not_called()
+
+    def test_proceeds_through_teardown_when_a_layout_exists(self):
+        db, _node_obj = self._db()
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["shutdown_storage_node"].return_value = True
+            mocks["_check_replica_relocation_feasible"].return_value = (True, "")
+            mocks["_teardown_replicas_of_primary"].return_value = True
+            mocks["_relocate_replicas_hosted_on"].return_value = True
+            mocks["_decommission_node_devices"].return_value = True
+            storage_node_ops.node_removal_orchestrate("n1")
+
+        mocks["_teardown_replicas_of_primary"].assert_called_once()
+        mocks["_relocate_replicas_hosted_on"].assert_called_once()
+
+    def test_the_check_runs_before_the_teardown_not_after(self):
+        """Ordering is the whole point: a check that runs after 3a is useless."""
+        order = []
+        db, _node_obj = self._db()
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["shutdown_storage_node"].return_value = True
+            mocks["_check_replica_relocation_feasible"].side_effect = \
+                lambda *a, **k: (order.append("check"), (True, ""))[1]
+            mocks["_teardown_replicas_of_primary"].side_effect = \
+                lambda *a, **k: (order.append("teardown"), True)[1]
+            mocks["_relocate_replicas_hosted_on"].return_value = True
+            mocks["_decommission_node_devices"].return_value = True
+            storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertEqual(order[:2], ["check", "teardown"],
+                         "the relocation check must precede the irreversible teardown")
