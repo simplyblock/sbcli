@@ -1542,12 +1542,29 @@ class TestRelocationPlannerApplicability(unittest.TestCase):
         # the layout is read raw, still naming the node being removed
         self.assertIn("d0n0", [pl.secondary for pl in current_layout.values()])
 
-    def test_declines_when_failure_domains_are_off(self):
+    def test_applies_when_failure_domains_are_off(self):
+        """FD off no longer declines: the planner solves host-disjointness
+        with one pseudo-domain per host. Previously this returned None and
+        the greedy path could refuse a feasible removal."""
         cl = _cluster(npcs=2, ft=2, enable_failure_domain=False)
         nodes = _fd_cluster_nodes()
         db = FakeDB(cl, list(nodes.values()))
+        inputs = storage_node_ops._relocation_planner_inputs(
+            nodes["d0n0"], db, allow_without_fd=True)
+        self.assertIsNotNone(inputs)
+        _ids, fd_by_node, host_by_node, _lbl, _layout, _ftt = inputs
+        self.assertEqual(len(set(fd_by_node.values())), len(set(host_by_node.values())))
+
+    def test_declines_when_survivors_do_not_exceed_ftt(self):
+        """Too few nodes for the permutation model: leave it to the greedy
+        path rather than refuse a trivially-safe removal."""
+        cl = _cluster(ft=2, enable_failure_domain=False)
+        a = _node("a", lvstore="L1", mgmt_ip="10.0.0.1")
+        b = _node("b", lvstore="L2", mgmt_ip="10.0.0.2")
+        removed = _node("z", lvstore="L3", mgmt_ip="10.0.0.9")
+        db = FakeDB(cl, [a, b, removed])
         self.assertIsNone(
-            storage_node_ops._relocation_planner_inputs(nodes["d0n0"], db))
+            storage_node_ops._relocation_planner_inputs(removed, db))
 
     def test_declines_on_a_node_without_a_domain(self):
         cl, db, nodes = self._db()
@@ -1694,8 +1711,12 @@ class TestPlanDrivenRelocation(unittest.TestCase):
         self.assertGreaterEqual(len(moved), 2, moved)
 
     def test_falls_back_to_the_greedy_path_when_the_planner_declines(self):
+        # FD off no longer declines, so force a decline the planner still
+        # honours: a cluster with dedicated secondary nodes.
         cl = _cluster(npcs=2, ft=2, enable_failure_domain=False)
         nodes = _fd_cluster_nodes()
+        for n in nodes.values():
+            n.is_secondary_node = True
         db = FakeDB(cl, list(nodes.values()))
         victim = nodes["d0n0"]
         with patch.object(storage_node_ops, "DBController", return_value=db), \
@@ -3606,3 +3627,90 @@ class TestCheckPeerDisconnectedMgmtStatus(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRelocationPlannerWithoutFailureDomains(unittest.TestCase):
+    """The global planner must also drive removals on clusters with failure
+    domains OFF.
+
+    Regression for a live refusal (2026-09-08, 6-node 2x2 cluster, FD
+    disabled): with every survivor already at capacity the greedy per-role
+    fallback consumed the one free slot the second stranded replica needed
+    and refused the removal, even though a valid host-disjoint layout
+    existed. The planner solves both placements together, so it does not.
+    """
+
+    def _dense_nofd_cluster(self):
+        """5 nodes, ftt=2, FD off, every node hosting primary+secondary+tertiary.
+
+        Layout mirrors the cluster that hit the refusal:
+            LVS_1 (a):  sec=b  ter=d
+            LVS_4 (b):  sec=c  ter=e
+            LVS_7 (d):  sec=e  ter=c
+            LVS_10(c):  sec=a  ter=b
+            LVS_13(e):  sec=d  ter=a
+        Removing ``e`` strands LVS_4's tertiary and LVS_7's secondary.
+        """
+        cl = _cluster(ft=2, enable_failure_domain=False)
+        a = _node("a", lvstore="LVS_1", secondary_id="b", tertiary_id="d", mgmt_ip="10.0.0.1")
+        b = _node("b", lvstore="LVS_4", secondary_id="c", tertiary_id="e", mgmt_ip="10.0.0.2")
+        c = _node("c", lvstore="LVS_10", secondary_id="a", tertiary_id="b", mgmt_ip="10.0.0.3")
+        d = _node("d", lvstore="LVS_7", secondary_id="e", tertiary_id="c", mgmt_ip="10.0.0.4")
+        # Back-references: e is LVS_7's secondary and LVS_4's tertiary. These
+        # are what the greedy fallback keys off, so they must be set for the
+        # fallback path to engage at all.
+        e = _node("e", lvstore="LVS_13", secondary_id="d", tertiary_id="a",
+                  stack_secondary="d", stack_tertiary="b", mgmt_ip="10.0.0.5")
+        return cl, [a, b, c, d, e], e
+
+    def test_planner_applies_when_failure_domains_are_off(self):
+        cl, nodes, removed = self._dense_nofd_cluster()
+        db = FakeDB(cl, nodes)
+        inputs = storage_node_ops._relocation_planner_inputs(
+            removed, db, allow_without_fd=True)
+        self.assertIsNotNone(
+            inputs, "planner must accept an FD-off cluster when asked for a second opinion")
+        surviving_ids, fd_by_node, host_by_node, _label, _layout, ftt = inputs
+        self.assertEqual(sorted(surviving_ids), ["a", "b", "c", "d"])
+        self.assertEqual(ftt, 2)
+        # one pseudo-domain per distinct host
+        self.assertEqual(len(set(fd_by_node.values())), len(set(host_by_node.values())))
+
+    def test_pseudo_domains_are_per_host_not_per_node(self):
+        """Two storage nodes on one host share a pseudo-domain, so the planner
+        will not place two roles of one LVS on that single host."""
+        cl = _cluster(ft=2, enable_failure_domain=False)
+        # a1 and a2 share a host; b, c, d are distinct hosts
+        a1 = _node("a1", lvstore="L1", secondary_id="b", tertiary_id="c", mgmt_ip="10.0.0.1")
+        a2 = _node("a2", lvstore="L2", secondary_id="c", tertiary_id="d", mgmt_ip="10.0.0.1")
+        b = _node("b", lvstore="L3", secondary_id="d", tertiary_id="a1", mgmt_ip="10.0.0.2")
+        c = _node("c", lvstore="L4", secondary_id="a1", tertiary_id="a2", mgmt_ip="10.0.0.3")
+        d = _node("d", lvstore="L5", secondary_id="a2", tertiary_id="b", mgmt_ip="10.0.0.4")
+        db = FakeDB(cl, [a1, a2, b, c, d])
+        inputs = storage_node_ops._relocation_planner_inputs(d, db, allow_without_fd=True)
+        self.assertIsNotNone(inputs)
+        _ids, fd_by_node, _host, _label, _layout, _ftt = inputs
+        self.assertEqual(fd_by_node["a1"], fd_by_node["a2"])
+        self.assertNotEqual(fd_by_node["a1"], fd_by_node["b"])
+
+    def test_dense_nofd_removal_is_admitted(self):
+        """The refusal this regresses: a valid layout exists, so admission
+        must not reject the removal."""
+        cl, nodes, removed = self._dense_nofd_cluster()
+        db = FakeDB(cl, nodes)
+        # get_secondary_nodes() builds its own DBController, so the greedy
+        # probe needs it patched to see this fixture.
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            feasible, reason = storage_node_ops._check_replica_relocation_feasible(
+                removed, db)
+        self.assertTrue(feasible, f"removal wrongly refused: {reason}")
+        self.assertEqual(reason, "")
+
+    def test_still_declines_when_domains_on_but_unset(self):
+        """FD enabled with a partial domain map is still not plannable."""
+        cl = _cluster(ft=1, enable_failure_domain=True)
+        a = _node("a", lvstore="L1", secondary_id="b", failure_domain=0, mgmt_ip="10.0.0.1")
+        b = _node("b", lvstore="L2", secondary_id="a", failure_domain=-1, mgmt_ip="10.0.0.2")
+        removed = _node("z", lvstore="L3", failure_domain=1, mgmt_ip="10.0.0.9")
+        db = FakeDB(cl, [a, b, removed])
+        self.assertIsNone(storage_node_ops._relocation_planner_inputs(removed, db))
