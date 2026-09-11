@@ -4123,7 +4123,7 @@ def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller)
     the fallback for clusters the planner declines."""
     from simplyblock_core.controllers import replica_placement
 
-    inputs = _relocation_planner_inputs(removed_node, db_controller)
+    inputs = _relocation_planner_inputs(removed_node, db_controller, allow_without_fd=True)
     if inputs is not None:
         surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt = inputs
         try:
@@ -4894,7 +4894,8 @@ def _relocate_replicas_hosted_on(removed_node: StorageNode):
     return True
 
 
-def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
+def _relocation_planner_inputs(removed_node: StorageNode, db_controller,
+                               *, allow_without_fd: bool = False):
     """Gather the pure inputs the global placement planner needs, or ``None``
     when this cluster is not a case the planner handles.
 
@@ -4906,13 +4907,30 @@ def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
     ``removed_node`` as the move's origin so the existing mover can tear the
     old copy down and clear its back-reference exactly as before.
 
+    With ``allow_without_fd`` the planner is also offered clusters that have
+    failure domains OFF: every host becomes its own pseudo-domain, so the
+    "domains pairwise distinct" constraint degenerates to exactly the
+    host-disjointness the planner already enforces. This exists because the
+    greedy per-role path places one stranded replica at a time and never
+    backtracks, so on a dense cluster (every survivor already at capacity) it
+    can consume the one slot another stranded replica needed and then refuse
+    a removal for which a valid host-disjoint layout demonstrably exists.
+
+    BOTH callers -- the admission check and phase 3b -- must pass the same
+    value. They are the same decision asked at two moments; if admission
+    consults the planner and execution does not, an admitted removal reaches
+    phase 3b, fails there, and retries forever with the node stranded in
+    ``in_removal`` (observed 2026-09-08, task retried 68 times before being
+    cancelled by hand).
+
     Declines (returns ``None``) when:
 
-    * failure domains are off -- there is no diversity invariant to solve
-      for, and the long-standing greedy path already handles host-disjoint
-      re-homing;
-    * any surviving node has no failure domain set -- a partial domain map
-      cannot be reasoned about, only guessed at;
+    * failure domains are off and ``allow_without_fd`` was not passed;
+    * failure domains are off and there are ``ftt`` or fewer survivors --
+      no layout exists, and refusing would change long-standing behaviour
+      for deliberate shrink-to-tiny removals;
+    * failure domains are ON but any surviving node has no failure domain
+      set -- a partial domain map cannot be reasoned about, only guessed at;
     * the cluster has dedicated secondary nodes (``is_secondary_node``),
       which may host more than one replica each and so break the
       one-slot-per-node permutation model the planner is built on;
@@ -4922,10 +4940,11 @@ def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
     from simplyblock_core.controllers import replica_placement
 
     cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
-    if not getattr(cluster, "enable_failure_domain", False):
+    fd_enabled = bool(getattr(cluster, "enable_failure_domain", False))
+    if not fd_enabled and not allow_without_fd:
         return None
-
     ftt = cluster.max_fault_tolerance if cluster.max_fault_tolerance in (1, 2) else 1
+
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
     survivors = [
         n for n in all_nodes
@@ -4933,15 +4952,34 @@ def _relocation_planner_inputs(removed_node: StorageNode, db_controller):
     ]
     if not survivors:
         return None
+    if not fd_enabled and len(survivors) <= ftt:
+        # Too small for the permutation model to have any answer: with ftt or
+        # fewer survivors no layout exists by construction. Under domains that
+        # is a real refusal (the caller wants to know), but with domains off
+        # it would newly reject shrink-to-tiny removals the greedy path has
+        # always allowed -- e.g. a 2-node cluster dropping to 1. Leave those
+        # exactly as they were.
+        return None
     if any(n.is_secondary_node for n in survivors):
         return None
     if any(n.status != StorageNode.STATUS_ONLINE for n in survivors):
         return None
-    if any(n.failure_domain < 0 for n in survivors):
+    if fd_enabled and any(n.failure_domain < 0 for n in survivors):
         return None
 
     surviving_ids = [n.get_id() for n in survivors]
-    fd_by_node = {n.get_id(): n.failure_domain for n in survivors}
+    if fd_enabled:
+        fd_by_node = {n.get_id(): n.failure_domain for n in survivors}
+    else:
+        # One pseudo-domain per HOST (not per node): a host may legitimately
+        # run several storage nodes, and two replicas on one host do not
+        # survive that host's loss. Keying on the host makes the planner's
+        # domain constraint and its host-disjointness constraint agree.
+        _fd_of_host: dict = {}
+        fd_by_node = {
+            n.get_id(): _fd_of_host.setdefault(n.mgmt_ip, len(_fd_of_host))
+            for n in survivors
+        }
     host_by_node = {n.get_id(): n.mgmt_ip for n in survivors}
     label_by_node = {n.get_id(): n.physical_label for n in survivors}
     current_layout = {
@@ -4984,7 +5022,7 @@ def _plan_driven_relocation(removed_node: StorageNode, db_controller):
     """
     from simplyblock_core.controllers import replica_placement
 
-    inputs = _relocation_planner_inputs(removed_node, db_controller)
+    inputs = _relocation_planner_inputs(removed_node, db_controller, allow_without_fd=True)
     if inputs is None:
         return None
     surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt = inputs
