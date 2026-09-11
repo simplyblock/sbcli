@@ -9950,6 +9950,57 @@ def _handle_rpc_failure_on_peer(snode: StorageNode, peer_node, lvs_jm_vuid, lvs_
         return "abort"
 
 
+def _lvstore_port_entry(node):
+    """The per-lvstore port pair other nodes must use to reach ``node``'s
+    lvstore. Keyed by lvstore name by every caller."""
+    return {
+        "lvol_subsys_port": node.lvol_subsys_port,
+        "hublvol_port": node.hublvol.nvmf_port if node.hublvol else 0,
+    }
+
+
+def _derive_lvstore_ports(snode, primary_node, db_controller):
+    """Every lvstore whose lvols ``snode`` serves -> that lvstore's own ports.
+
+    Registration of an lvol on a non-leader looks its ``lvs_name`` up in this
+    map and REFUSES to add a listener when the entry is missing, rather than
+    fall back to snode's own leader port and guess (see the comment above the
+    lvstore_ports check in _register_lvol_on_non_leader -- guessing left two
+    secondaries listening on the wrong port indefinitely on 2026-08-18). So
+    the map has to be complete BEFORE registration runs, not merely
+    eventually consistent with it.
+
+    Deriving it from ``snode``'s own lvstore plus its two back-reference
+    slots alone is not complete in the one case that matters most: a call
+    that is ESTABLISHING a new hosting relationship. A node-removal
+    relocation (_relocate_replica_between) commits
+    lvstore_stack_secondary/_tertiary only AFTER the build returns, so during
+    the build the slot still reads empty and primary_node's lvstore was
+    absent from the map. Every relocation therefore registered its lvols with
+    no port entry, logged "INCOMPLETE LVOL REGISTRATION ... running below
+    configured redundancy until repaired", and served nothing from that
+    replica until the next lvol_monitor repair cycle picked it up ~2 minutes
+    later (all four relocations of the 2026-09-11 no-FD 2+2 run; the replicas
+    did heal, but the redundancy gap was real and the error was logged at
+    ERROR on a run that was otherwise clean).
+
+    ``primary_node`` is included directly because it is the one lvstore this
+    call is definitionally hosting -- it is the stack being built. Where the
+    slots already cover it the entry is identical (same node, same ports), so
+    adding it last is idempotent rather than an override.
+    """
+    ports = {}
+    if snode.lvstore:
+        ports[snode.lvstore] = _lvstore_port_entry(snode)
+    for slot_id in (snode.lvstore_stack_secondary, snode.lvstore_stack_tertiary):
+        if slot_id:
+            nd = db_controller.get_storage_node_by_id(slot_id)
+            ports[nd.lvstore] = _lvstore_port_entry(nd)
+    if primary_node is not None and primary_node.lvstore:
+        ports[primary_node.lvstore] = _lvstore_port_entry(primary_node)
+    return ports
+
+
 def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False, force=False):
     """Per-LVS-locked wrapper: serialize recreate of ``primary_node.lvstore``
     only against a concurrent recreate of the SAME LVS. Activation-mode
@@ -10252,26 +10303,9 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         logger.warning("Soft reconnect of remote JMs failed on %s: %s",
                        snode.get_id(), e)
 
-    # Ensure snode has per-lvstore ports from primary
-    lvstore_ports = {}
-    if snode.lvstore:
-        lvstore_ports[snode.lvstore] = {
-            "lvol_subsys_port": snode.lvol_subsys_port,
-            "hublvol_port": snode.hublvol.nvmf_port if snode.hublvol else 0,
-        }
-    if snode.lvstore_stack_secondary:
-        nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
-        lvstore_ports[nd.lvstore] = {
-            "lvol_subsys_port": nd.lvol_subsys_port,
-            "hublvol_port": nd.hublvol.nvmf_port if nd.hublvol else 0,
-        }
-    if snode.lvstore_stack_tertiary:
-        nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_tertiary)
-        lvstore_ports[nd.lvstore] = {
-            "lvol_subsys_port": nd.lvol_subsys_port,
-            "hublvol_port": nd.hublvol.nvmf_port if nd.hublvol else 0,
-        }
-    snode.lvstore_ports = lvstore_ports
+    # Ensure snode has per-lvstore ports for every lvstore it serves,
+    # including the one this call is building.
+    snode.lvstore_ports = _derive_lvstore_ports(snode, primary_node, db_controller)
     snode.write_to_db()
 
     lvol_list = []
