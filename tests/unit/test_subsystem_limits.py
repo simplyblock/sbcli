@@ -35,9 +35,17 @@ def _node(max_lvol):
     return n
 
 
-def _ns_lvol(nqn, uuid, node_id="n1", status=LVol.STATUS_ONLINE, subsys_max=NS_CAP):
+POOL = "pool-1"
+
+
+def _ns_lvol(nqn, uuid, node_id="n1", status=LVol.STATUS_ONLINE, subsys_max=NS_CAP,
+             pool=POOL):
     return SimpleNamespace(node_id=node_id, status=status, nqn=nqn, uuid=uuid,
-                           max_namespace_per_subsys=subsys_max)
+                           max_namespace_per_subsys=subsys_max, pool_uuid=pool)
+
+
+def _pick(node_id, lvols, pool=POOL, **kw):
+    return get_next_available_subsystem_on_node(node_id, lvols, pool_id=pool, **kw)
 
 
 class TestMaxSubsystemsForNode(unittest.TestCase):
@@ -68,19 +76,97 @@ class TestNamespaceJoinCeiling(unittest.TestCase):
 
     def test_join_allowed_below_hard_cap(self):
         lvols = self._subsystem(NS_CAP - 1, subsys_max=NS_CAP)
-        self.assertIsNotNone(get_next_available_subsystem_on_node("n1", lvols))
+        self.assertIsNotNone(_pick("n1", lvols))
 
     def test_join_refused_at_hard_cap_even_with_larger_recorded_max(self):
         # Legacy subsystem recorded with max 64: at 50 active namespaces no
         # further joins are offered.
         lvols = self._subsystem(NS_CAP, subsys_max=64)
-        self.assertIsNone(get_next_available_subsystem_on_node("n1", lvols))
+        self.assertIsNone(_pick("n1", lvols))
 
     def test_smaller_recorded_max_still_respected(self):
         lvols = self._subsystem(32, subsys_max=32)
-        self.assertIsNone(get_next_available_subsystem_on_node("n1", lvols))
+        self.assertIsNone(_pick("n1", lvols))
         lvols = self._subsystem(31, subsys_max=32)
-        self.assertIsNotNone(get_next_available_subsystem_on_node("n1", lvols))
+        self.assertIsNotNone(_pick("n1", lvols))
+
+
+class TestSubsystemPoolAlignment(unittest.TestCase):
+    """A shared subsystem belongs to exactly one pool: namespaced lvols only
+    join subsystems made up solely of their own pool, fill the most-occupied
+    one first, and open a new subsystem only when every subsystem of the
+    pool on the node is full."""
+
+    @staticmethod
+    def _subsystem(nqn, count, pool=POOL, subsys_max=NS_CAP, **kw):
+        return [_ns_lvol(nqn, f"{nqn}-lv{i}", subsys_max=subsys_max, pool=pool, **kw)
+                for i in range(count)]
+
+    def test_never_joins_another_pools_subsystem(self):
+        lvols = self._subsystem("nqn-A", 1, pool="pool-other")
+        self.assertIsNone(_pick("n1", lvols, pool=POOL))
+        # ... while the owning pool still can
+        self.assertIsNotNone(_pick("n1", lvols, pool="pool-other"))
+
+    def test_only_own_pool_subsystem_is_offered(self):
+        lvols = (self._subsystem("nqn-other", 1, pool="pool-other")
+                 + self._subsystem("nqn-mine", 1, pool=POOL))
+        pick = _pick("n1", lvols, pool=POOL)
+        self.assertEqual(pick.nqn, "nqn-mine")
+
+    def test_new_pool_opens_new_subsystem_even_when_others_have_room(self):
+        lvols = self._subsystem("nqn-A", 1, pool="pool-a") + self._subsystem("nqn-B", 1, pool="pool-b")
+        self.assertIsNone(_pick("n1", lvols, pool="pool-c"))
+
+    def test_legacy_mixed_pool_subsystem_is_frozen(self):
+        # Created before alignment was enforced: members from two pools.
+        # Neither pool may keep growing it.
+        lvols = (self._subsystem("nqn-mixed", 1, pool="pool-a")
+                 + [_ns_lvol("nqn-mixed", "b-lv", pool="pool-b")])
+        self.assertIsNone(_pick("n1", lvols, pool="pool-a"))
+        self.assertIsNone(_pick("n1", lvols, pool="pool-b"))
+
+    def test_in_creation_member_of_another_pool_blocks_join(self):
+        # A committed in_creation record is a slot claim AND a pool claim.
+        lvols = (self._subsystem("nqn-A", 1, pool=POOL)
+                 + [_ns_lvol("nqn-A", "x", pool="pool-other",
+                             status=LVol.STATUS_IN_CREATION)])
+        self.assertIsNone(_pick("n1", lvols, pool=POOL))
+
+    def test_deleted_member_of_another_pool_does_not_block_join(self):
+        lvols = (self._subsystem("nqn-A", 1, pool=POOL)
+                 + [_ns_lvol("nqn-A", "x", pool="pool-other",
+                             status=LVol.STATUS_IN_DELETION)])
+        self.assertEqual(_pick("n1", lvols, pool=POOL).nqn, "nqn-A")
+
+    def test_fills_most_occupied_subsystem_first(self):
+        lvols = (self._subsystem("nqn-A", 3) + self._subsystem("nqn-B", 10)
+                 + self._subsystem("nqn-C", 7))
+        self.assertEqual(_pick("n1", lvols).nqn, "nqn-B")
+        # B full -> next fullest (C), never the emptiest while others have room
+        lvols = (self._subsystem("nqn-A", 3) + self._subsystem("nqn-B", NS_CAP)
+                 + self._subsystem("nqn-C", 7))
+        self.assertEqual(_pick("n1", lvols).nqn, "nqn-C")
+
+    def test_new_subsystem_only_when_all_of_pool_are_full(self):
+        lvols = (self._subsystem("nqn-A", NS_CAP) + self._subsystem("nqn-B", NS_CAP)
+                 + self._subsystem("nqn-other", 1, pool="pool-other"))
+        self.assertIsNone(_pick("n1", lvols))
+        lvols[-1 - NS_CAP] = _ns_lvol("nqn-B", "gone", status=LVol.STATUS_DELETED)
+        self.assertEqual(_pick("n1", lvols).nqn, "nqn-B")
+
+    def test_pick_is_deterministic(self):
+        lvols = self._subsystem("nqn-A", 5) + self._subsystem("nqn-B", 5)
+        picks = {_pick("n1", lvols).nqn for _ in range(20)}
+        self.assertEqual(picks, {"nqn-A"})  # tie -> NQN order
+
+    def test_exclude_nqns_moves_to_next_of_same_pool(self):
+        lvols = self._subsystem("nqn-A", 5) + self._subsystem("nqn-B", 4)
+        self.assertEqual(_pick("n1", lvols, exclude_nqns={"nqn-A"}).nqn, "nqn-B")
+
+    def test_pool_id_is_required(self):
+        with self.assertRaises(TypeError):
+            get_next_available_subsystem_on_node("n1", [])  # type: ignore[call-arg]
 
 
 class TestEnforcementSites(unittest.TestCase):
@@ -109,6 +195,8 @@ class TestEnforcementSites(unittest.TestCase):
         tx = self._function_source(src, "_claim_lvol_ns_slot_tx", indent="    ")
         self.assertIn("max_subsystems_for_node", tx)
         self.assertIn("MAX_NAMESPACES_PER_SUBSYSTEM", tx)
+        # subsystem/pool alignment is decided inside the transaction too
+        self.assertIn("pool_id=lvol.pool_uuid", tx)
 
     def test_placement_and_prechecks_use_effective_max(self):
         src = self._src("simplyblock_core/controllers/lvol_controller.py")

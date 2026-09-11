@@ -1416,7 +1416,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     # ADVISORY early capacity check only — the authoritative namespace-slot
     # pick happens transactionally in claim_lvol_ns_slot at record-write time
     # (two concurrent clones/creates otherwise race for the same last slot).
-    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
+    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(
+        snode.get_id(), all_lvols=all_lvols, pool_id=pool.get_id()) if namespaced else None
 
     if not _available_subsys:
         subsys_count = lvol_controller.count_lvol_subsystems(snode, all_lvols)
