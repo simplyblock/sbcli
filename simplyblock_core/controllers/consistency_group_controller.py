@@ -185,8 +185,22 @@ def remove_member_from_group(group, lvol_id):
     members = dict(group.members or {})
     entry = members.get(lvol_id)
     if entry and entry.get("removed_seq", 0) == 0:
+        if group.last_group_seq < entry.get("joined_seq", 1):
+            # No generation ever contained this member, so there is no history
+            # to preserve, and a closed-empty window is unrepresentable:
+            # removed_seq == 0 is the open-epoch sentinel, so stamping
+            # joined_seq - 1 for a first-generation member would read as still
+            # open and the member would count as one forever (2026-09-11: a
+            # restored group at generation 0 kept every deleted member).
+            del members[lvol_id]
+            group.members = members
+            group.write_to_db(db.kv_store)
+            logger.info("Volume %s left consistency group %s before any "
+                        "generation contained it; membership entry dropped",
+                        lvol_id, group.uuid[:8])
+            return
         entry = dict(entry)
-        entry["removed_seq"] = max(group.last_group_seq, entry.get("joined_seq", 1) - 1)
+        entry["removed_seq"] = group.last_group_seq
         members[lvol_id] = entry
         group.members = members
         group.write_to_db(db.kv_store)

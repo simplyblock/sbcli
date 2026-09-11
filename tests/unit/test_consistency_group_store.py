@@ -122,6 +122,26 @@ def test_join_new_volume_enforces_the_placement_pin(db):
     assert not stray.group_id
 
 
+def test_detach_before_first_generation_frees_the_member(db):
+    """Regression (2026-09-11): removing a member from a group whose generation
+    counter never advanced left the member counted as open forever. The close
+    computed removed_seq = max(last_group_seq=0, joined_seq-1=0) = 0, which is
+    the open-epoch sentinel, so the detach wrote a value indistinguishable from
+    membership and ``Members`` stayed at its old count."""
+    group = cgc.join_new_volume(CLUSTER, _volume("lv-1"), "restored-group")
+    cgc.join_new_volume(CLUSTER, _volume("lv-2"), "restored-group")
+
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    cgc.remove_member_from_group(fresh, "lv-1")
+
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    open_members = [m for m, e in (fresh.members or {}).items()
+                    if e.get("removed_seq", 0) == 0]
+    assert open_members == ["lv-2"], (
+        f"detached member still counts as open: {fresh.members}")
+    assert not fresh.included_in_seq("lv-1", 1)
+
+
 def test_group_name_is_persisted(db):
     """The group's own name survives the round trip — it is the identity a
     labeled volume joins by — without displacing the record's keyspace."""
