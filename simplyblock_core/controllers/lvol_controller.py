@@ -461,15 +461,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     ops_gate.assert_object_ops_allowed("volume create", cluster_id=pool.cluster_id)
 
-    # Hard product limit on provisioned size (and on the thin max_size
-    # ceiling, which resize can never exceed anyway).
+    # Hard product limit on the provisioned size. Deliberately NOT applied to
+    # max_size: that is the thin-provisioning growth ceiling and the CLI/CSI
+    # pass a large default (1000T) when the user gives none -- capping it
+    # rejected every `sbctl volume add` (AWS soak 2026-09-11). Growth is
+    # bounded where it happens: resize_lvol enforces MAX_LVOL_SIZE on new_size.
     size_error = object_limits.check_lvol_size(size)
     if size_error:
         return False, size_error
-    if max_size > 0:
-        max_size_error = object_limits.check_lvol_size(max_size, what="Volume max size")
-        if max_size_error:
-            return False, max_size_error
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
 

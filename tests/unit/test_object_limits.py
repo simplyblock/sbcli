@@ -181,7 +181,9 @@ class TestWiring(unittest.TestCase):
         self.assertIn("object_limits.check_lvol_size(size)", _code(lvol_controller.validate_add_lvol_func))
         src = _code(lvol_controller.add_lvol_ha)
         self.assertIn("object_limits.check_lvol_size(size)", src)
-        self.assertIn('check_lvol_size(max_size, what="Volume max size")', src)
+        # max_size (thin ceiling) is deliberately NOT capped: the CLI/CSI pass a
+        # large default; growth is capped in resize_lvol instead.
+        self.assertNotIn('check_lvol_size(max_size', src)
 
     def test_resize_checks_size_before_any_state_change(self):
         src = _code(lvol_controller.resize_lvol)

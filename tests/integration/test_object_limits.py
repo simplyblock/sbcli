@@ -261,10 +261,14 @@ class TestVolumeSizeEndToEnd(unittest.TestCase):
         self.assertIn("Volume size", err)
         self.assertIn("exceeds the maximum", err)
 
-    def test_add_lvol_ha_rejects_max_size_over_50tib(self):
-        ok, err = self._add_lvol_ha(1 * TIB, max_size=60 * TIB)
-        self.assertFalse(ok)
-        self.assertIn("Volume max size", err)
+    def test_add_lvol_ha_does_not_cap_the_thin_max_size_default(self):
+        """The CLI/CSI pass a large default max_size (1000T) when the user gives
+        none; capping it rejected every `sbctl volume add`. Growth is capped in
+        resize_lvol instead, so a huge ceiling must pass the size check."""
+        with patch.object(lvol_controller.object_limits, "check_lvol_size",
+                          side_effect=_passing(object_limits.check_lvol_size)):
+            with self.assertRaises(_Passed):
+                self._add_lvol_ha(1 * TIB, max_size=1000 * 1000 ** 4)
 
     def test_add_lvol_ha_passes_size_check_at_50tib(self):
         with patch.object(lvol_controller.object_limits, "check_lvol_size",
