@@ -19,6 +19,7 @@ import uuid
 
 import docker
 from docker.types import LogConfig
+from kubernetes.client import ApiException
 from pydantic import SecretStr
 from tenacity import RetryError, Retrying, before_sleep_log, retry_if_exception_type, stop_after_attempt, wait_fixed
 
@@ -2950,7 +2951,83 @@ def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
     return huge_page_memory
 
 
-def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason):
+class _SpdkPodStillPresent(Exception):
+    """The SPDK pod has not disappeared from the API server yet."""
+
+
+def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
+    """Delete the SPDK pod (and its fluentd companion) straight from the
+    Kubernetes API, without routing the request through the node agent.
+
+    ``snode_api.spdk_process_kill`` already does exactly this work -- see
+    ``spdk_process_kill`` in
+    simplyblock_web/api/internal/storage_node/kubernetes.py, which is a plain
+    ``delete_namespaced_pod``. Nothing about it is node-local. The catch is
+    WHERE it runs: on the agent hosted by the very node being torn down. In
+    the most common abort case the add failed BECAUSE that host went away --
+    an agent crash, or the one-off CPU-topology reboot -- so the request
+    cannot be delivered at all and the pod survives with nothing referencing
+    it (2026-09-11, worker gddnr, rpc_port 4436: the abort handler fired
+    correctly and then got "Connection refused" from the agent while the node
+    rebooted). Talking to the API server directly takes the dead host out of
+    the path.
+
+    Returns ``(ok, err)``. ``ok`` is True only once the pod is confirmed gone,
+    since a pod still Terminating is still holding the host's hugepages.
+    """
+    six = utils.first_six_chars(cluster_id)
+    pod_name = f"snode-spdk-pod-{rpc_port}-{six}"
+    fluent_pod_name = f"simplyblock-fluentd-{rpc_port}-{six}"
+    namespace = constants.K8S_NAMESPACE
+
+    try:
+        k8s_core = utils.get_k8s_core_client()
+    except Exception as e:
+        return False, f"no Kubernetes API client available: {e}"
+
+    try:
+        k8s_core.delete_namespaced_pod(pod_name, namespace)
+        logger.info(f"Deleted SPDK pod {pod_name} directly via the Kubernetes API")
+    except ApiException as e:
+        if e.status != 404:
+            return False, f"failed to delete pod {pod_name}: {e.body}"
+        logger.info(f"SPDK pod {pod_name} was already gone")
+    except Exception as e:
+        return False, f"failed to delete pod {pod_name}: {e}"
+
+    # Companion log shipper: best effort, never fails the teardown. It holds
+    # no hugepages, so leaving it behind does not block a later add.
+    try:
+        k8s_core.delete_namespaced_pod(fluent_pod_name, namespace)
+        logger.info(f"Deleted fluentd pod {fluent_pod_name}")
+    except ApiException as e:
+        if e.status != 404:
+            logger.warning(f"Failed to delete fluentd pod {fluent_pod_name}: {e.body}")
+    except Exception as e:
+        logger.warning(f"Failed to delete fluentd pod {fluent_pod_name}: {e}")
+
+    # Confirm it is really gone. Same budget as the agent-side implementation.
+    try:
+        for attempt in Retrying(
+            stop=stop_after_attempt(10),
+            wait=wait_fixed(3),
+            retry=retry_if_exception_type(_SpdkPodStillPresent),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        ):
+            with attempt:
+                pods = k8s_core.list_namespaced_pod(namespace)
+                if any(p.metadata.name.startswith(pod_name) for p in pods.items):
+                    raise _SpdkPodStillPresent(pod_name)
+    except _SpdkPodStillPresent:
+        return False, f"pod {pod_name} still present 30s after delete"
+    except Exception as e:
+        return False, f"could not confirm pod {pod_name} is gone: {e}"
+
+    return True, ""
+
+
+def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=None):
     """Tear down the SPDK pod add_node just started, before bailing out.
 
     Between ``spdk_process_start`` and the point the StorageNode record is
@@ -2963,12 +3040,31 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason):
     (observed on fresh 12-node deploys 2026-09-08 and 2026-09-11; recovery
     was a manual delete of the unowned pod).
 
+    In kubernetes mode the teardown goes straight to the API server
+    (``_delete_spdk_pod_via_k8s``) rather than through the node agent,
+    because the agent runs ON the host we are abandoning and is routinely
+    unreachable in exactly this situation. The agent call remains the
+    fallback, and the only path in docker mode, where the control plane has
+    no way to reach the container itself.
+
     The rpc_port reservation is deliberately NOT released: it has no release
     API and ages out by TTL (see reserve_cluster_nvmf_port), and dropping it
     here would hand the port to a concurrent add while this pod is still
     shutting down.
     """
     logger.error(f"add_node aborting after SPDK start: {reason}")
+
+    if cluster_mode == "kubernetes":
+        ok, err = _delete_spdk_pod_via_k8s(rpc_port, cluster_id)
+        if ok:
+            logger.info(
+                f"Cleaned up SPDK pod on port {rpc_port} after failed add_node "
+                f"(direct Kubernetes delete)")
+            return
+        logger.warning(
+            f"Direct Kubernetes teardown of the SPDK pod on port {rpc_port} failed "
+            f"({err}); falling back to the node agent")
+
     try:
         ok, err = snode_api.spdk_process_kill(rpc_port, cluster_id)
         if ok:
@@ -3458,12 +3554,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         except Exception as e:
             # spdk_process_start may have created the pod before raising.
-            _abort_started_spdk(snode_api, rpc_port, cluster_id, str(e))
+            _abort_started_spdk(snode_api, rpc_port, cluster_id, str(e),
+                                cluster_mode=cluster.mode)
             return False
 
         if not results:
             _abort_started_spdk(snode_api, rpc_port, cluster_id,
-                                f"Failed to start spdk: {err}")
+                                f"Failed to start spdk: {err}",
+                                cluster_mode=cluster.mode)
             return False
         number_of_alceml_devices = node_config.get("number_of_alcemls")
         # Increase number of alcemls by one for the JM
@@ -3542,7 +3640,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         if not active_tcp and not active_rdma:
             _abort_started_spdk(snode_api, rpc_port, cluster_id,
-                                "No usable storage network interface found.")
+                                "No usable storage network interface found.",
+                                cluster_mode=cluster.mode)
             return False
 
         hostname = node_info['hostname'] + f"_{rpc_port}"
