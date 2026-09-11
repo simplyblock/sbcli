@@ -895,8 +895,12 @@ class DBController(metaclass=Singleton):
 
         target = None
         if namespaced:
+            # Subsystem/pool alignment: only a subsystem made up solely of
+            # this lvol's pool is joinable, most-occupied first -- the pool
+            # fills one subsystem completely before a new one is opened.
             target = lvol_controller.get_next_available_subsystem_on_node(
-                host_node.get_id(), minis, exclude_nqns=exclude_nqns)
+                host_node.get_id(), minis, exclude_nqns=exclude_nqns,
+                pool_id=lvol.pool_uuid)
         if target is not None:
             lvol.nqn = target.nqn
             lvol.namespace = target.uuid
@@ -943,6 +947,11 @@ class DBController(metaclass=Singleton):
         pick-dependent lvol field (nqn / namespace / max_namespace_per_subsys
         / allowed_hosts) is (re)assigned inside the transaction so a conflict
         retry is deterministic.
+
+        A namespaced lvol only ever joins a subsystem whose members all belong
+        to its own pool (``lvol.pool_uuid`` must be set before the claim); a
+        new subsystem is opened only once every subsystem of that pool on the
+        node is full.
 
         Returns True when the lvol joined an existing namespaced subsystem,
         False when it owns a new standalone subsystem. Raises

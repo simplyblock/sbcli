@@ -2012,7 +2012,7 @@ commands:
             type: int
             default: 0
           - name: "--namespaced"
-            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            help: "Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`."
             dest: namespaced
             type: bool
             default: false
@@ -2185,7 +2185,7 @@ commands:
             type: size
             default: "0"
           - name: "--namespaced"
-            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `true`."
+            help: "Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `true`."
             dest: namespaced
             type: bool
             default: true
@@ -2810,7 +2810,7 @@ commands:
             type: size
             default: "0"
           - name: "--namespaced"
-            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            help: "Adds this LVol as a namespace on an existing subsystem of the same pool on the node (a subsystem is only ever shared by LVols of one pool and is filled up before the next one is opened); if none has a free namespace slot, a new subsystem is created. Default: `false`."
             dest: namespaced
             type: bool
             default: true
