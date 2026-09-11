@@ -79,6 +79,10 @@ class _CloneParams(BaseModel):
     pvc_name: str | None = None
     pvc_namespace: str | None = None
     delete_snap_on_lvol_delete: bool = False
+    # Optional consistency group (name): the clone joins the group at creation,
+    # forming it from the first clone (design §7.2). The CSI restore path
+    # forwards the restore PVC's storage.simplyblock.io/consistency-group label.
+    consistency_group: str | None = None
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
@@ -130,6 +134,7 @@ def add(
             pvc_name=data.pvc_name,
             pvc_namespace=data.pvc_namespace,
             delete_snap_on_lvol_delete=data.delete_snap_on_lvol_delete,
+            consistency_group=data.consistency_group,
         )
     else:
         raise AssertionError('unreachable')

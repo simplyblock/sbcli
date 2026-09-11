@@ -147,6 +147,21 @@ def add_member_to_group(group, lvol):
     return group
 
 
+def join_new_volume(cluster_id, lvol, name):
+    """Join a freshly created volume to the standalone group ``name``, creating
+    the group when it does not exist (design §4.1, §7.2). The create and clone
+    paths both funnel through here after the volume is usable: the placement
+    pin and the member cap are enforced by :func:`add_member_to_group`, and a
+    refused join raises :class:`ConsistencyGroupError` while leaving the volume
+    itself intact for the caller to report.
+    """
+    group = ensure_group(cluster_id, name)
+    add_member_to_group(group, lvol)
+    lvol.group_id = group.get_id()
+    lvol.write_to_db(db.kv_store)
+    return group
+
+
 def add_member(policy, lvol):
     """Policy path: resolve the policy's group, then join ``lvol`` to it."""
     group = db.get_consistency_group_for_policy(policy.get_id())

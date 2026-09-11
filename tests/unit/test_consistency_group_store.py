@@ -32,6 +32,11 @@ class _FakeKV:
     def clear(self, key):
         self._data.pop(key, None)
 
+    def add(self, key, value):
+        """Watched-model writes bump their watch counter atomically; the tests
+        only need the write itself, so the bump lands as an opaque value."""
+        self._data[key] = value
+
     def get_range_startswith(self, prefix, limit=0, reverse=False):
         rows = sorted((k, v) for k, v in self._data.items()
                       if k.startswith(prefix))
@@ -80,6 +85,41 @@ def test_named_group_is_listed_in_its_cluster(db):
     assert [g.uuid for g in listed] == [group.uuid]
     by_name = db.get_consistency_group_by_name(CLUSTER, "vgs-group")
     assert by_name is not None and by_name.uuid == group.uuid
+
+
+def _volume(uuid, node="node-a", lvs="LVS_1"):
+    from simplyblock_core.models.lvol_model import LVol
+    lvol = LVol()
+    lvol.uuid = uuid
+    lvol.node_id = node
+    lvol.lvs_name = lvs
+    return lvol
+
+
+def test_join_new_volume_forms_and_joins_the_group(db):
+    """The clone path's group join (design §7.2): the first clone births the
+    group and pins it, a second clone on the same store joins it, and both
+    carry the group id on their records."""
+    first = _volume("lv-1")
+    group = cgc.join_new_volume(CLUSTER, first, "restored-group")
+    assert first.group_id == group.get_id()
+
+    second = _volume("lv-2")
+    same = cgc.join_new_volume(CLUSTER, second, "restored-group")
+    assert same.uuid == group.uuid
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    open_members = [m for m, e in fresh.members.items() if e.get("removed_seq", 0) == 0]
+    assert sorted(open_members) == ["lv-1", "lv-2"]
+
+
+def test_join_new_volume_enforces_the_placement_pin(db):
+    """A clone off the group's pinned store must fail the join loudly rather
+    than joining unpinned (design §4.2)."""
+    cgc.join_new_volume(CLUSTER, _volume("lv-1"), "restored-group")
+    stray = _volume("lv-3", node="node-b", lvs="LVS_9")
+    with pytest.raises(cgc.ConsistencyGroupError):
+        cgc.join_new_volume(CLUSTER, stray, "restored-group")
+    assert not stray.group_id
 
 
 def test_group_name_is_persisted(db):

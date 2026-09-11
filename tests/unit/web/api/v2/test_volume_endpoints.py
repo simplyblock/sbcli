@@ -76,8 +76,23 @@ class TestCreateVolume:
         snapshot_controller.clone.assert_called_once_with(
             SNAPSHOT_ID, 'clone-1', 0,
             pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False,
+            consistency_group=None,
         )
         lvol_controller.add_lvol_ha.assert_not_called()
+
+    def test_clone_forwards_consistency_group(self, client, db, pool, lvol_controller, snapshot_controller):
+        """A group-forming restore (design §7.2): the clone body's
+        consistency_group reaches snapshot_controller.clone unchanged."""
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        snapshot_controller.clone.return_value = (VOLUME_ID, None)
+
+        response = client.post(f'{BASE}/', json={
+            'name': 'clone-1', 'snapshot_id': SNAPSHOT_ID,
+            'consistency_group': 'db-restored',
+        })
+
+        assert response.status_code == 201
+        assert snapshot_controller.clone.call_args.kwargs['consistency_group'] == 'db-restored'
 
     def test_existing_name_returns_409(self, client, db, pool, volume, lvol_controller):
         db.get_lvol_by_name.return_value = volume

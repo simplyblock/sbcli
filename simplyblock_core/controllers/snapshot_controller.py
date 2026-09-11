@@ -1301,7 +1301,7 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
 
 def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False,
-          lock=True, namespaced=True, all_snaps=None, all_lvols=None):
+          lock=True, namespaced=True, all_snaps=None, all_lvols=None, consistency_group=None):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError:
@@ -1688,6 +1688,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             db_controller.atomic_update(ref_snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
     else:
         db_controller.atomic_update(snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
+
+    if consistency_group:
+        # Group-forming restore (design §7.2): the clone joins the named group,
+        # birthing it when this is the first clone. Placement is already fixed
+        # by the snapshot's store, so the join only pins or verifies the pin.
+        # Imported here: consistency_group_controller from-imports this module
+        # at top level (see tests/unit/test_controller_import_order.py).
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cgc.join_new_volume(pool.cluster_id, lvol, consistency_group)
+        except _cgc.ConsistencyGroupError as e:
+            logger.error("Clone %s created but could not join consistency group "
+                         "%s: %s", lvol.get_id(), consistency_group, e)
+            return lvol.uuid, f"Clone created but could not join consistency group: {e}"
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
