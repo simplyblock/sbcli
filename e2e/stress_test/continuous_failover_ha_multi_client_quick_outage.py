@@ -653,6 +653,26 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         • logging restarts use runner_k8s_log.restart_logging()
     """
 
+    # docker keeps the per-outage collectors off (see COLLECT_DUMP_LVSTORE_DOCKER
+    # for why), but without any placement map this test cannot be diagnosed. In
+    # longfio_nochurn_rapid_outages_v2-20260911-044533 one network outage aborted
+    # the other three SPDK nodes with "DISTRIBD Unable to read stripe vuid=13"
+    # and "vuid=34", and the only maps in the run were from bootstrap and from
+    # the post-failure sweep two hours later. See
+    # docker_rapid_fio_hang_rca_20260911.md.
+    #
+    # This path is safe where the synchronous collector was not: it runs on one
+    # background thread, serially across nodes, placement dumps for every node
+    # before any lvstore walk, dispatched into the 50-90s pacing sleep so the
+    # loop never waits on it, and joined at the checkpoint before FIO restarts.
+    #
+    # Residual risk, accepted deliberately: unlike the checkpoint-only version
+    # this does run while FIO is active, which is the load condition the docker
+    # collector was disabled for. Serial + placement-first keeps one node's app
+    # thread busy at a time instead of four. If SPDK trouble shows up right
+    # after an "[node_dumps_bg]" line, this is the first suspect.
+    BACKGROUND_NODE_DUMPS = True
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "longfio_nochurn_rapid_outages_v2"
@@ -1718,7 +1738,10 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             # at the moment things broke.
             self.logger.exception("[V2] Outage loop failed; collecting diagnostics")
             try:
-                self.collect_outage_diagnostics("failure")
+                self.wait_for_node_dumps()
+                self.collect_outage_diagnostics(
+                    "failure", force_node_dumps=True, serial=True
+                )
                 self.check_core_dump(nodes=self._outaged_since_checkpoint)
             except Exception:
                 self.logger.exception("[V2] Failure diagnostics collection failed")
@@ -1750,6 +1773,12 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 outage_type = self._perform_outage()
                 self.restart_nodes_after_failover(outage_type)
 
+            # Nodes are back online here, and the next cycle opens with
+            # _pace_next_outage()'s 50-90s sleep, so this collection runs inside
+            # time the loop was going to spend waiting. It is one background
+            # thread walking the nodes serially, placement first.
+            self.collect_node_dumps_async(f"after_outage_{self._iter + 1}")
+
             self._iter += 1
             if self._iter % self.validate_every == 0:
                 self.logger.info(f"[V2] {self._iter} outages → wait & validate all FIO")
@@ -1761,7 +1790,6 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                     self.fio_node, [], timeout=self._fio_wait_timeout
                 )
 
-                self.collect_outage_diagnostics("validation_checkpoint")
                 self._log_block_sizes("checkpoint")
 
                 # Only the nodes actually outaged since the last checkpoint can
@@ -1778,6 +1806,13 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
 
                 self.logger.info("[V2] FIO validated; pausing briefly for migration window")
                 sleep_n_sec(10)
+
+                # FIO has drained above, so the cluster is idle for this whole
+                # block. Let any in-flight dump finish here rather than have it
+                # straddle the FIO restart: an lvstore walk with queued alceml IO
+                # underneath it is the combination the docker collector was
+                # disabled for.
+                self.wait_for_node_dumps()
 
                 self._compute_fio_size()
                 self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)

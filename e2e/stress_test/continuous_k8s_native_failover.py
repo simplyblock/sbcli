@@ -491,9 +491,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.logger.info(f"Teardown cleanup error: {e}")
                 self.logger.info(traceback.format_exc())
 
-    def collect_outage_diagnostics(self, label):
+    def collect_outage_diagnostics(self, label, force_node_dumps=False, serial=False):
         """Override base to also collect dmesg/journalctl snapshots."""
-        super().collect_outage_diagnostics(label)
+        super().collect_outage_diagnostics(
+            label, force_node_dumps=force_node_dumps, serial=serial
+        )
         try:
             self._collect_dmesg_snapshots(label)
         except Exception as exc:
@@ -5439,9 +5441,17 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
 
     # Per-node lvstore and distrib dumps make every collect_outage_diagnostics
     # spawn a thread per node joined with a 180s timeout. That alone would blow
-    # the gap budget, so they are off; cluster state is captured at checkpoints.
+    # the gap budget, so they stay off in the hot path.
     COLLECT_DUMP_LVSTORE_K8S = False
     COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S = False
+    # ...but they are collected after EVERY outage on a background thread,
+    # serially across nodes, placement for all nodes before any lvstore walk,
+    # dispatched into the pacing sleep so the gap is unaffected. Without this the
+    # run cannot be diagnosed: in k8s_native_rapid_failover_no_gap-20260911-032536
+    # two uninvolved nodes aborted in `lvs_update_on_failover_cpl` and the only
+    # placement maps in the whole run were from the post-failure sweep, an hour
+    # after the event.
+    BACKGROUND_NODE_DUMPS = True
     # perform_n_plus_k_outages collects diagnostics before each outage, which on
     # k8s is ~60-80s of kubectl exec sitting in the middle of the gap budget.
     COLLECT_PRE_OUTAGE_DIAGNOSTICS = False
@@ -5613,12 +5623,22 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
 
                 self._mark_nodes_online()
 
+                # Nodes are online here and the next cycle opens with
+                # _pace_next_outage()'s 50-90s sleep, so this runs inside time
+                # the loop was going to spend waiting. One background thread,
+                # nodes walked serially, placement dumps before lvstore walks.
+                self.collect_node_dumps_async(f"after_outage_{self._iter + 1}")
+
                 # ── Checkpoint ──
                 self._iter += 1
                 if self._iter % self.validate_every == 0:
                     self.logger.info(
                         f"[checkpoint] {self._iter} outages -- validating"
                     )
+                    # Per-outage dumps are dispatched above; the checkpoint is
+                    # not gap-sensitive, so let an in-flight one finish here
+                    # rather than run it through FIO validation and churn.
+                    self.wait_for_node_dumps()
                     self.collect_outage_diagnostics(f"checkpoint_{self._iter}")
 
                     # The balancing-aware health check runs here rather than in the
@@ -5671,12 +5691,21 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
             # Per-iteration diagnostics were dropped to hold the gap budget, so
             # this is the only place left that captures state at the break.
             try:
-                self.collect_outage_diagnostics("failure")
+                # Keep whatever the last checkpoint was still collecting, then
+                # take a full synchronous set -- the run is over, so the gap
+                # budget no longer applies.
+                self.wait_for_node_dumps()
+                self.collect_outage_diagnostics(
+                    "failure", force_node_dumps=True, serial=True
+                )
                 self.check_core_dump(nodes=self._outaged_since_checkpoint)
             except Exception:
                 self.logger.exception("Failure diagnostics collection failed")
             raise
         finally:
+            # A checkpoint dump is a daemon thread, so anything still running
+            # here would be dropped at exit and the collection lost.
+            self.wait_for_node_dumps()
             if test_failed:
                 summary = "; ".join(failure_reasons) if failure_reasons else "unknown error"
                 self.logger.error(f"[cleanup] Test FAILED -- reasons: {summary}")

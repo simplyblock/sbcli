@@ -80,6 +80,41 @@ class TestClusterBase:
     COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S = True
     COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER = False
 
+    # Opt-in for tests that keep the synchronous per-outage collectors off but
+    # still need the dumps after every outage. Set it on the test class, then
+    # call `collect_node_dumps_async()` once the nodes are back online.
+    #
+    # This exists because the rapid tests turned both collectors off to hold
+    # their gap budget and then hit exactly the failure the dumps were re-enabled
+    # for: `DISTRIBD Unable to read stripe vuid=13` aborted three uninstrumented
+    # nodes in longfio_nochurn_rapid_outages_v2-20260911-044533, and the only
+    # placement maps in that run were from bootstrap and from the post-failure
+    # sweep. See docker_rapid_fio_hang_rca_20260911.md.
+    #
+    # Three properties make it affordable where the synchronous collector was not:
+    #   * it runs on ONE background thread, so the outage loop never blocks. It
+    #     is dispatched as soon as the nodes report online, which puts it inside
+    #     the 50-90s `_pace_next_outage` window, i.e. time the loop was going to
+    #     spend sleeping anyway.
+    #   * that thread walks the nodes SERIALLY. The parallel fan-out is the part
+    #     that carries the risk (see the note above), so this path deliberately
+    #     does not use it.
+    #   * it runs ALL the placement dumps first, then all the lvstore dumps.
+    #     Placement is the cheap half and the half that answers "was this a
+    #     placement violation", so if a run dies mid-collection, or the next
+    #     outage cuts it short, the half worth having is already on disk. The
+    #     lvstore walk is the part that holds the SPDK app thread, so it goes
+    #     last and never delays a placement dump on another node.
+    # The cost is that a dump can still be in flight when the next outage fires.
+    # That is acceptable for placement and lvstore state, which is what these
+    # answer, and `wait_for_node_dumps()` joins the thread at failure and
+    # teardown so nothing is lost.
+    BACKGROUND_NODE_DUMPS = False
+
+    # Guard so two background dumps never overlap, and a handle to join on.
+    _node_dump_thread = None
+    _node_dump_lock = None
+
     @property
     def COLLECT_DUMP_LVSTORE(self):
         """Whether to run the lvstore walk on this platform."""
@@ -1384,12 +1419,19 @@ class TestClusterBase:
                     all_ok = False
         assert all_ok, "Placement dump validation failed on one or more storage nodes"
 
-    def collect_outage_diagnostics(self, label):
+    def collect_outage_diagnostics(self, label, force_node_dumps=False, serial=False):
         """Collect management details + lvstore dumps + distrib placement dumps
         for ALL storage nodes, right before an outage or right after recovery.
 
         Args:
             label: e.g. "pre_outage", "post_recovery", "pre_outage_node_<id>"
+            force_node_dumps: collect the lvstore/placement dumps even when the
+                per-platform collectors are off. Passed explicitly rather than
+                held as instance state so that a checkpoint dump running in the
+                background can never switch on a concurrent hot-path call.
+            serial: walk the nodes one at a time instead of fanning out a thread
+                per node. Always use this off the hot path; the fan-out is the
+                expensive part.
         """
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         tag = f"_{label}_{timestamp}"
@@ -1404,9 +1446,11 @@ class TestClusterBase:
         # 2. Collect dump_lvstore + distrib placement for ALL nodes in parallel.
         #    Skipped entirely when both collectors are off, so we do not fan out
         #    threads and create empty node_dumps dirs for nothing.
-        if self.COLLECT_DUMP_LVSTORE or self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
+        if force_node_dumps or self.COLLECT_DUMP_LVSTORE or self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
             try:
-                self._collect_all_node_dumps_parallel(tag)
+                self._collect_all_node_dumps_parallel(
+                    tag, force=force_node_dumps, serial=serial
+                )
             except Exception as e:
                 self.logger.warning(f"[diagnostics] _collect_all_node_dumps_parallel failed: {e}")
         else:
@@ -1426,15 +1470,91 @@ class TestClusterBase:
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
 
-    def _collect_all_node_dumps_parallel(self, tag):
-        """Collect dump_lvstore + fetch_distrib_logs for ALL storage nodes in parallel.
+    def collect_node_dumps_async(self, label, timeout=900):
+        """Checkpoint-time diagnostics that do not cost the outage gap.
 
-        Handles both k8s and non-k8s environments. Each node's dumps are collected
-        in a separate thread for speed. The dumps are stored in a tagged subdirectory
-        so pre-outage and post-recovery dumps are clearly separated.
+        For tests with `BACKGROUND_NODE_DUMPS` set, this runs the full
+        management + lvstore + placement collection on ONE background thread,
+        walking the storage nodes serially, and returns immediately. For every
+        other test it is just `collect_outage_diagnostics`, so it is safe to use
+        at any checkpoint.
+
+        Only one of these runs at a time. If the previous one has not finished by
+        the next checkpoint the new one is skipped rather than stacked, because
+        two concurrent lvstore walks is the thing we are trying not to do.
+
+        Args:
+            label: diagnostics label, e.g. "checkpoint_5"
+            timeout: guard for the join in `wait_for_node_dumps`.
+        """
+        if not self.BACKGROUND_NODE_DUMPS:
+            self.collect_outage_diagnostics(label)
+            return
+
+        if self._node_dump_lock is None:
+            self._node_dump_lock = threading.Lock()
+
+        prev = self._node_dump_thread
+        if prev is not None and prev.is_alive():
+            self.logger.warning(
+                f"[node_dumps_bg] previous dump still running; SKIPPING '{label}'. "
+                "If this repeats, the dump is slower than the checkpoint window."
+            )
+            return
+
+        def _run():
+            with self._node_dump_lock:
+                started = time.time()
+                self.logger.info(f"[node_dumps_bg] background collection started: {label}")
+                try:
+                    self.collect_outage_diagnostics(
+                        label, force_node_dumps=True, serial=True
+                    )
+                except Exception:
+                    self.logger.exception(f"[node_dumps_bg] collection failed for {label}")
+                finally:
+                    self.logger.info(
+                        f"[node_dumps_bg] background collection finished: {label} "
+                        f"in {time.time() - started:.0f}s"
+                    )
+
+        t = threading.Thread(target=_run, name=f"node-dumps-{label}", daemon=True)
+        self._node_dump_thread = t
+        self._timeout_node_dumps = timeout
+        t.start()
+        self.logger.info(
+            f"[node_dumps_bg] '{label}' dispatched to background; outage loop continues"
+        )
+
+    def wait_for_node_dumps(self, timeout=None):
+        """Join an in-flight checkpoint dump. Call at failure and at teardown so
+        a run that ends mid-collection still keeps the dumps it was taking."""
+        t = self._node_dump_thread
+        if t is None or not t.is_alive():
+            return
+        timeout = timeout or getattr(self, "_timeout_node_dumps", 900)
+        self.logger.info(f"[node_dumps_bg] waiting up to {timeout}s for in-flight dump")
+        t.join(timeout=timeout)
+        if t.is_alive():
+            self.logger.warning(
+                "[node_dumps_bg] dump still running after the join timeout; "
+                "it is a daemon thread and will be dropped at exit"
+            )
+
+    def _collect_all_node_dumps_parallel(self, tag, force=False, serial=False):
+        """Collect dump_lvstore + fetch_distrib_logs for ALL storage nodes.
+
+        Handles both k8s and non-k8s environments. The dumps are stored in a
+        tagged subdirectory so pre-outage and post-recovery dumps are clearly
+        separated.
 
         Args:
             tag: suffix for directory naming, e.g. "_pre_outage_20240408_143000"
+            force: collect regardless of the per-platform collector flags.
+            serial: walk nodes one at a time. The default fan-out is a thread per
+                node, which is the part that carries the risk documented on
+                `COLLECT_DUMP_LVSTORE_DOCKER`; anything off the hot path should
+                pass serial=True and accept the longer wall time.
         """
         try:
             storage_nodes = self.sbcli_utils.get_storage_nodes()
@@ -1450,6 +1570,30 @@ class TestClusterBase:
         dump_dir = os.path.join(self.docker_logs_path, f"node_dumps{tag}")
         os.makedirs(dump_dir, exist_ok=True)
 
+        if serial:
+            # Two passes on purpose. Placement is cheap and is the half that
+            # answers "was this a placement violation", so every node gets its
+            # map before any node pays for the lvstore walk. If the collection
+            # is cut short -- the run dies, the next outage lands -- the half
+            # worth having is already complete.
+            started = time.time()
+            for phase in ("placement", "lvstore"):
+                phase_started = time.time()
+                for node_info in nodes:
+                    self._collect_single_node_dump(
+                        node_info["uuid"], node_info.get("mgmt_ip", ""), dump_dir,
+                        force=force, phase=phase,
+                    )
+                self.logger.info(
+                    f"[node_dumps] SERIAL {phase} pass done for {len(nodes)} nodes "
+                    f"in {time.time() - phase_started:.0f}s"
+                )
+            self.logger.info(
+                f"[node_dumps] Completed SERIAL dumps for {len(nodes)} nodes "
+                f"in {time.time() - started:.0f}s → {dump_dir}"
+            )
+            return
+
         threads = []
         for node_info in nodes:
             node_id = node_info["uuid"]
@@ -1457,6 +1601,7 @@ class TestClusterBase:
             t = threading.Thread(
                 target=self._collect_single_node_dump,
                 args=(node_id, node_ip, dump_dir),
+                kwargs={"force": force},
                 daemon=True,
             )
             threads.append(t)
@@ -1467,15 +1612,26 @@ class TestClusterBase:
 
         self.logger.info(f"[node_dumps] Completed parallel dumps for {len(nodes)} nodes → {dump_dir}")
 
-    def _collect_single_node_dump(self, node_id, node_ip, dump_dir):
+    def _collect_single_node_dump(self, node_id, node_ip, dump_dir, force=False,
+                                  phase="both"):
         """Collect dump_lvstore and distrib placement dump for a single node.
 
         Args:
             node_id: Storage node UUID
             node_ip: Storage node management IP
             dump_dir: Directory to store dump files
+            force: collect regardless of the per-platform collector flags.
+            phase: "placement", "lvstore", or "both". The serial collector drives
+                the two halves as separate passes over all nodes; the parallel
+                path still does both together.
         """
-        self.logger.info(f"[node_dump] Starting dump for node {node_id} ({node_ip})")
+        want_lvstore = (force or self.COLLECT_DUMP_LVSTORE) and phase in ("lvstore", "both")
+        want_placement = (force or self.COLLECT_DISTRIB_PLACEMENT_DUMPS) and phase in ("placement", "both")
+        if not (want_lvstore or want_placement):
+            return
+        self.logger.info(
+            f"[node_dump] Starting {phase} dump for node {node_id} ({node_ip})"
+        )
         try:
             if self.k8s_test:
                 k8s_obj = getattr(self, 'k8s_utils', None) or getattr(
@@ -1488,7 +1644,7 @@ class TestClusterBase:
                     getattr(self, 'sbcli_utils', None), 'sbcli_cmd',
                     os.environ.get("SBCLI_CMD", "sbcli-dev")
                 )
-                if self.COLLECT_DUMP_LVSTORE:
+                if want_lvstore:
                     try:
                         k8s_obj.dump_lvstore_k8s(
                             storage_node_id=node_id,
@@ -1498,13 +1654,13 @@ class TestClusterBase:
                         )
                     except Exception as e:
                         self.logger.warning(f"[node_dump] dump_lvstore_k8s failed for {node_id}: {e}")
-                else:
+                elif phase == "both":
                     self.logger.info(
                         f"[node_dump] dump_lvstore_k8s SKIPPED for {node_id} "
                         f"(COLLECT_DUMP_LVSTORE_K8S="
                         f"{self.COLLECT_DUMP_LVSTORE_K8S})"
                     )
-                if self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
+                if want_placement:
                     try:
                         k8s_obj.fetch_distrib_logs_k8s(
                             storage_node_id=node_id,
@@ -1513,14 +1669,14 @@ class TestClusterBase:
                         )
                     except Exception as e:
                         self.logger.warning(f"[node_dump] fetch_distrib_logs_k8s failed for {node_id}: {e}")
-                else:
+                elif phase == "both":
                     self.logger.info(
                         f"[node_dump] fetch_distrib_logs_k8s SKIPPED for {node_id} "
                         f"(COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S="
                         f"{self.COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S})"
                     )
             else:
-                if self.COLLECT_DUMP_LVSTORE:
+                if want_lvstore:
                     try:
                         self.ssh_obj.dump_lvstore(
                             node_ip=self.mgmt_nodes[0],
@@ -1528,13 +1684,13 @@ class TestClusterBase:
                         )
                     except Exception as e:
                         self.logger.warning(f"[node_dump] dump_lvstore failed for {node_id}: {e}")
-                else:
+                elif phase == "both":
                     self.logger.info(
                         f"[node_dump] dump_lvstore SKIPPED for {node_id} "
                         f"(COLLECT_DUMP_LVSTORE_DOCKER="
                         f"{self.COLLECT_DUMP_LVSTORE_DOCKER})"
                     )
-                if self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
+                if want_placement:
                     try:
                         self.ssh_obj.fetch_distrib_logs(
                             storage_node_ip=node_ip,
@@ -1543,7 +1699,7 @@ class TestClusterBase:
                         )
                     except Exception as e:
                         self.logger.warning(f"[node_dump] fetch_distrib_logs failed for {node_id}: {e}")
-                else:
+                elif phase == "both":
                     self.logger.info(
                         f"[node_dump] fetch_distrib_logs SKIPPED for {node_id} "
                         f"(COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER="
@@ -1551,7 +1707,9 @@ class TestClusterBase:
                     )
         except Exception as e:
             self.logger.warning(f"[node_dump] Failed for node {node_id} ({node_ip}): {e}")
-        self.logger.info(f"[node_dump] Completed dump for node {node_id} ({node_ip})")
+        self.logger.info(
+            f"[node_dump] Completed {phase} dump for node {node_id} ({node_ip})"
+        )
 
     def _collect_management_details_k8s(self, suffix: str):
         """Collect management details via kubectl exec (k8s mode)."""
