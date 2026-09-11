@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime
 
-from simplyblock_core.controllers import ops_gate
+from simplyblock_core.controllers import object_limits, ops_gate
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
 
@@ -689,6 +689,16 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(limit_error)
         return False, limit_error
 
+    # Hard per-volume snapshot cap (active = not deleted). Internal snapshots
+    # (replication / migration) are exempt so a volume at the cap can still be
+    # replicated and migrated; they are transient and cleaned up by their owner.
+    if snap_type == SnapShot.TYPE_USER:
+        snap_limit_error = object_limits.check_snapshot_limit(
+            lvol_id, cached_mini_snapshots(db_controller))
+        if snap_limit_error:
+            logger.error(snap_limit_error)
+            return False, snap_limit_error
+
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
@@ -1352,6 +1362,19 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if limit_error:
         logger.error(limit_error)
         return False, limit_error
+
+    # Hard per-snapshot clone cap (active = not deleted) and the volume size cap
+    # on a clone-with-resize.
+    clone_limit_error = object_limits.check_clone_limit(
+        snapshot_id, cached_mini_lvols(db_controller))
+    if clone_limit_error:
+        logger.error(clone_limit_error)
+        return False, clone_limit_error
+    if new_size:
+        size_error = object_limits.check_lvol_size(new_size, what="Clone size")
+        if size_error:
+            logger.error(size_error)
+            return False, size_error
 
     # Clone-name uniqueness / reuse via the per-pool lvol name index (O(1) point
     # read) instead of scanning every lvol in the DB.
