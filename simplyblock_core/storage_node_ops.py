@@ -2916,6 +2916,41 @@ def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
     return huge_page_memory
 
 
+def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason):
+    """Tear down the SPDK pod add_node just started, before bailing out.
+
+    Between ``spdk_process_start`` and the point the StorageNode record is
+    written there is no DB row pointing at the pod, so nothing else can ever
+    find it: it has no owner reference for Kubernetes to reap and no node
+    record for the control plane to reconcile. Left behind it keeps holding
+    the host's hugepages, and every later add-node attempt on that host gets
+    "Insufficient hugepages-2Mi" and stays Pending -- which stalls the
+    operator's serialised node-add queue and wedges the whole deployment
+    (observed on fresh 12-node deploys 2026-09-08 and 2026-09-11; recovery
+    was a manual delete of the unowned pod).
+
+    The rpc_port reservation is deliberately NOT released: it has no release
+    API and ages out by TTL (see reserve_cluster_nvmf_port), and dropping it
+    here would hand the port to a concurrent add while this pod is still
+    shutting down.
+    """
+    logger.error(f"add_node aborting after SPDK start: {reason}")
+    try:
+        ok, err = snode_api.spdk_process_kill(rpc_port, cluster_id)
+        if ok:
+            logger.info(f"Cleaned up SPDK pod on port {rpc_port} after failed add_node")
+        else:
+            logger.error(
+                f"Could not clean up SPDK pod on port {rpc_port} after failed add_node: "
+                f"{err}. It holds this host's hugepages and will block further "
+                f"add-node attempts until deleted by hand.")
+    except Exception as e:
+        logger.error(
+            f"Could not clean up SPDK pod on port {rpc_port} after failed add_node: {e}. "
+            f"It holds this host's hugepages and will block further add-node attempts "
+            f"until deleted by hand.")
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -3388,11 +3423,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             time.sleep(5)
 
         except Exception as e:
-            logger.error(e)
+            # spdk_process_start may have created the pod before raising.
+            _abort_started_spdk(snode_api, rpc_port, cluster_id, str(e))
             return False
 
         if not results:
-            logger.error(f"Failed to start spdk: {err}")
+            _abort_started_spdk(snode_api, rpc_port, cluster_id,
+                                f"Failed to start spdk: {err}")
             return False
         number_of_alceml_devices = node_config.get("number_of_alcemls")
         # Increase number of alcemls by one for the JM
@@ -3470,7 +3507,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 active_tcp = True
 
         if not active_tcp and not active_rdma:
-            logger.error("No usable storage network interface found.")
+            _abort_started_spdk(snode_api, rpc_port, cluster_id,
+                                "No usable storage network interface found.")
             return False
 
         hostname = node_info['hostname'] + f"_{rpc_port}"
