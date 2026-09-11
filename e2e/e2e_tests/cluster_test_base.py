@@ -155,7 +155,11 @@ class TestClusterBase:
         self.logger = setup_logger(__name__)
         self.k8s_test = kwargs.get("k8s_run", False)
         # Outage-gap accounting; only the rapid-failover tests act on these.
-        self.MAX_OUTAGE_GAP_SEC = 60
+        # Gap window between "nodes online" and the next outage. The lower bound
+        # exists so NVMe paths can re-establish before we cut another node; see
+        # _pace_next_outage.
+        self.MIN_OUTAGE_GAP_SEC = 50
+        self.MAX_OUTAGE_GAP_SEC = 90
         self._node_online_ts = None
         # Storage-node IPs outaged since the last checkpoint. A network outage
         # aborts the node, so these are the only ones worth scanning for cores.
@@ -4047,31 +4051,62 @@ class TestClusterBase:
             f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds."
         )
     
-    # ── outage-gap accounting ────────────────────────────────────────────────
-    # Used by the rapid-failover tests, whose whole purpose is to land the next
-    # outage while migration from the previous one is still in flight. The time
-    # between "node online" and "next outage" is therefore a correctness
-    # property of those tests, not a performance detail, so it is measured and
-    # warned on rather than assumed.
+    # ── outage pacing ────────────────────────────────────────────────────────
+    # The rapid-failover tests exist to land the next outage while migration
+    # from the previous one is still in flight, so the gap between "nodes
+    # online" and "next outage" is a correctness property, not a performance
+    # detail. It is bounded at BOTH ends:
+    #
+    # Lower bound, MIN_OUTAGE_GAP_SEC. The NVMe client is connected with
+    # ctrl_loss_tmo=60 on k8s (`nvme connect ... -l 60`), so a controller that
+    # cannot reconnect is REMOVED after 60s and any IO requeued behind it is
+    # failed with EIO. Firing the next outage while the last one's controllers
+    # are still reconnecting can therefore leave a namespace with no usable path
+    # for longer than that budget, and the client gives up -- which is what
+    # failed k8s_native_rapid_failover_no_gap-20260910-223420 (11 of 22 volumes,
+    # err=5, see k8s_rapid_fio_eio_rca_20260910.md). Holding off until paths
+    # have had time to re-establish removes that self-inflicted failure.
+    #
+    # Upper bound, MAX_OUTAGE_GAP_SEC. Wait too long and migration drains and
+    # the test stops testing what it claims. 90s is far short of the minutes
+    # balancing takes (the 20260910 docker run was still at 10/12 subtasks after
+    # 18 minutes), so the window is comfortably inside migration.
 
     def _mark_nodes_online(self):
         """Start the clock on the gap before the next outage."""
         self._node_online_ts = time.monotonic()
 
-    def _check_outage_gap(self):
-        """Log the idle time since recovery, and warn when it blows the budget."""
+    def _pace_next_outage(self):
+        """Hold the next outage inside the [MIN, MAX] gap window.
+
+        Sleeps until at least MIN_OUTAGE_GAP_SEC has passed since the nodes came
+        back, aiming for a random point in the window so consecutive iterations
+        do not all hit the same phase of recovery. Warns if we were already past
+        MAX before getting here, since that means migration may have drained.
+        """
         if getattr(self, "_node_online_ts", None) is None:
             return
-        gap = time.monotonic() - self._node_online_ts
+        elapsed = time.monotonic() - self._node_online_ts
+        target = random.uniform(self.MIN_OUTAGE_GAP_SEC, self.MAX_OUTAGE_GAP_SEC)
+        if elapsed < target:
+            self.logger.info(
+                f"[gap] {elapsed:.1f}s since nodes came online; letting paths settle "
+                f"for {target - elapsed:.1f}s more (target {target:.1f}s)"
+            )
+            sleep_n_sec(int(round(target - elapsed)))
+            elapsed = time.monotonic() - self._node_online_ts
         self._node_online_ts = None
-        if gap > self.MAX_OUTAGE_GAP_SEC:
+        if elapsed > self.MAX_OUTAGE_GAP_SEC:
             self.logger.warning(
-                f"[gap] {gap:.1f}s since nodes came online, over the "
-                f"{self.MAX_OUTAGE_GAP_SEC}s budget -- migration may have drained "
+                f"[gap] firing next outage {elapsed:.1f}s after nodes came online, over "
+                f"the {self.MAX_OUTAGE_GAP_SEC}s ceiling -- migration may have drained "
                 f"before this outage, weakening the test"
             )
         else:
-            self.logger.info(f"[gap] {gap:.1f}s since nodes came online")
+            self.logger.info(
+                f"[gap] firing next outage {elapsed:.1f}s after nodes came online "
+                f"(window {self.MIN_OUTAGE_GAP_SEC}-{self.MAX_OUTAGE_GAP_SEC}s)"
+            )
 
     def check_core_dump(self, nodes=None):
         """Look for SPDK core dumps and, on docker, produce backtraces for them.

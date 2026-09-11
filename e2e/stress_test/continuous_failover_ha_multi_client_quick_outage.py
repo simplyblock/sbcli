@@ -660,7 +660,7 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         self.max_fault_tolerance = 1       # overwritten in run()
         self._last_outage_node = None      # for non-related node selection
         self.k8s_utils = None              # initialised in run() when k8s_test=True
-        # Gap accounting (MAX_OUTAGE_GAP_SEC, _node_online_ts,
+        # Gap pacing (MIN/MAX_OUTAGE_GAP_SEC, _node_online_ts,
         # _outaged_since_checkpoint) comes from TestClusterBase.
         # Bootstrap objects are pinned: mounted, running FIO, never deleted, so
         # they age across the whole run and we see how long-lived volumes
@@ -880,7 +880,7 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         # Diagnostics deliberately NOT collected here. On docker this is ~40
         # sequential SSH commands and was the single biggest contributor to the
         # gap before the next outage; it now runs once per checkpoint instead.
-        self._check_outage_gap()
+        self._pace_next_outage()
 
         self.outage_start_time = int(datetime.now().timestamp())
         self._log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -1588,7 +1588,7 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             self.first_outage_ts = int(datetime.now().timestamp())
 
         # Diagnostics moved to the checkpoint; see _perform_outage.
-        self._check_outage_gap()
+        self._pace_next_outage()
 
         self.outage_start_time = int(datetime.now().timestamp())
 

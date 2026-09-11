@@ -5565,7 +5565,7 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
                 # ── Outage phase ──
                 # No diagnostics here: on k8s that is a per-node dump fan-out
                 # and it is what lets migration drain before the next outage.
-                self._check_outage_gap()
+                self._pace_next_outage()
                 outage_events = self.perform_n_plus_k_outages()
                 for node, _, _ in outage_events:
                     try:
