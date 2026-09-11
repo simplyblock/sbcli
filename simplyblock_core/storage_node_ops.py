@@ -10723,6 +10723,50 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                             "(in-window attach will retry): %s",
                             _peer.get_id(), lvs_name, _pa_e)
 
+            # Precondition, paid BEFORE the window gate and before any peer
+            # port is fenced: wait out in-flight JM replication on the leader
+            # here, where waiting is free.
+            #
+            # This wait used to live at step (a) inside the loop below. Once
+            # the non-leader block was reordered ahead of the leader's suspend
+            # (see ORDER MATTERS below), step (a) began running with peer ports
+            # already fenced -- and wait_for_jm_rep_tasks_to_finish defaults to
+            # retry=10/delay=20, a 200s budget whose *single* sleep is 20s,
+            # against a FENCE_DEADLINE_SEC of 7.5s. The ambient fence RPC
+            # budget (rpc_budget, set at each block below) clamps the helper's
+            # RPCs but cannot clamp its time.sleep().
+            #
+            # 2026-09-10 14:32:20, LVS_13: a91b9596 was fenced, the leader
+            # 588fdb5b then reported active replication and this wait slept
+            # 20s. The next fence check (the inflight drain, ~350 lines down)
+            # aborted at 20.087s. SPDK converts a port block to reject at
+            # ack_timeout * 4 = 8s, quiescing every qpair on the port, so
+            # a91b9596's clients lost the path rather than waiting for it.
+            # With replication active on the leader that abort was certain,
+            # not a flake.
+            #
+            # A False return is NOT fatal and deliberately does not abort:
+            # jc_disable_replication in (c) below is the authority on whether
+            # replication is actually suspended, and it retries.
+            if current_leader and current_leader.get_id() not in disconnected_peers:
+                try:
+                    _jm_clear = current_leader.wait_for_jm_rep_tasks_to_finish(
+                        lvs_jm_vuid)
+                except Exception as e:
+                    # Same contract as step (a) below, which this wait was
+                    # moved out of: a RAISING replication-wait aborts the
+                    # restart, and the message must still name it. Failing
+                    # here is strictly cheaper -- no port is fenced yet.
+                    raise Exception(
+                        f"Abort restart: replication-wait on leader "
+                        f"{current_leader.get_id()} failed: {e}")
+                if not _jm_clear:
+                    logger.warning(
+                        "JM replication still active on leader %s (jm_vuid %s) "
+                        "after the pre-fence wait; entering the window anyway "
+                        "-- jc_disable_replication decides",
+                        current_leader.get_id(), lvs_jm_vuid)
+
             # Serialize the client-port outage span across all concurrent
             # recreates. Acquired AFTER the hublvol advisory locks (fixed lock
             # order: per-LVS recreate lock -> hublvol locks -> window gate).
@@ -10731,8 +10775,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # then suspend the leader's journal replication before the flap.
             #
             # Per attempt against the current leader:
-            #   a. wait for any in-flight JM replication task to finish (loops
-            #      internally) so we don't block mid-replication;
+            #   a. confirm no in-flight JM replication with ONE unpaced poll
+            #      (the patient wait is paid before the gate above, where it
+            #      costs no client IO);
             #   b. mark the leader in_creation and block its LVS port;
             #   c. jc_disable_replication(jm_vuid):
             #        True  -> no active replication; it is now suspended (~12s) ->
@@ -10786,9 +10831,18 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 _REPL_SUSPEND_MAX_ATTEMPTS = 10
                 replication_suspended = False
                 for _attempt in range(_REPL_SUSPEND_MAX_ATTEMPTS):
-                    # a. ensure no active replication on the leader (loops internally)
+                    # a. confirm no active replication on the leader.
+                    #
+                    # retry=1/delay=0 is ONE poll and no sleep: the helper's
+                    # RPCs inherit the ambient fence budget, so this costs
+                    # ~0.5s worst case. It only catches a leader that resumed
+                    # replicating between the pre-fence wait and here; (c)
+                    # below is the authority. Do NOT restore the default
+                    # 10 x 20s budget at this call site -- one of those sleeps
+                    # alone is 2.7x the whole fence deadline.
                     try:
-                        ret = current_leader.wait_for_jm_rep_tasks_to_finish(lvs_jm_vuid)
+                        ret = current_leader.wait_for_jm_rep_tasks_to_finish(
+                            lvs_jm_vuid, retry=1, delay=0)
                         if not ret:
                             msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
                             logger.error(msg)
@@ -10796,6 +10850,13 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     except Exception as e:
                         raise Exception(
                             f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
+
+                    # The fence clock is otherwise unchecked from the
+                    # non-leader block above until the inflight drain ~350
+                    # lines below. Check it here -- outside the try, so the
+                    # abort is not re-wrapped by the except -- so any overrun
+                    # aborts while still under the 8s reject threshold.
+                    _check_fence_deadline("jm replication confirm")
 
                     # b. block the leader's LVS port
                     try:
