@@ -210,9 +210,17 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
     silently left zombies behind. We now retry the kill until SPDK is
     confirmed down. Bounded total wall-clock = max_attempts *
     poll_per_attempt_sec so a wedged docker daemon cannot trap the caller.
-    Returns True if SPDK died, False if all attempts exhausted (caller is
-    responsible for whatever comes next; the node should still be marked
-    OFFLINE so it stops being treated as in_restart).
+    Returns True ONLY on a positive observation that SPDK is down -- a
+    liveness probe that answered and said "not up". A probe that could not be
+    made at all (node API unreachable) is UNKNOWN and never counts as death:
+    callers use the return value to decide whether it is safe to drop the
+    StorageNode record, and dropping it while the pod is still alive leaves a
+    pod that nothing references and nothing can reap.
+
+    False means "not confirmed dead" -- either SPDK was still up after every
+    attempt, or the probe never answered. The caller is responsible for
+    whatever comes next; the node should still be marked OFFLINE so it stops
+    being treated as in_restart.
     """
     snode_api = snode.client(timeout=5, retry=5)
     # Each attempt is bounded BOTH ways, and needs both. The wall-clock deadline
@@ -223,6 +231,7 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
     # no-op, which turns a bare deadline loop into a hot spin burning the whole
     # poll_per_attempt_sec of CPU per attempt.
     rounds_per_attempt = max(1, int(poll_per_attempt_sec / poll_interval))
+    last_probe_error = None
     for attempt in range(1, max_attempts + 1):
         try:
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
@@ -242,9 +251,24 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
                 # kill loop would never observe SPDK as down (it would burn all
                 # attempts and log a false "did NOT die" even after a clean kill).
                 up, _ = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
-            except Exception:
-                up = False
-            if not up:
+                probed = True
+            except Exception as probe_err:
+                # UNKNOWN, not down. snode_client raises SNodeClientException
+                # whenever the node's API cannot be reached at all, which is
+                # the normal state in the very situation this function is
+                # called for -- the add failed BECAUSE that host stopped
+                # answering. Reporting "confirmed down" here makes the caller
+                # drop the StorageNode record while the pod is still running,
+                # and a pod with no record and no ownerReference is
+                # unreachable by every cleanup path there is: it keeps the
+                # host's hugepages and every later add-node attempt on it
+                # stays Pending (observed 2026-09-11, worker tqmtr, rpc_port
+                # 4426 -- the deploy wedged at 11/12 until the pod was deleted
+                # by hand).
+                last_probe_error = probe_err
+                probed = False
+                up = True
+            if probed and not up:
                 logger.info(
                     "SPDK on %s confirmed down (kill attempt %d/%d)",
                     snode.get_id(), attempt, max_attempts,
@@ -257,12 +281,22 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
             snode.get_id(), poll_per_attempt_sec, attempt, max_attempts,
         )
 
-    logger.error(
-        "SPDK on %s did NOT die after %d kill attempts (%ds total) — "
-        "investigate snode_api / docker daemon health on %s",
-        snode.get_id(), max_attempts,
-        max_attempts * poll_per_attempt_sec, snode.mgmt_ip,
-    )
+    if last_probe_error is not None:
+        logger.error(
+            "Could not confirm SPDK on %s is down after %d kill attempts (%ds total): "
+            "the liveness probe never answered (%s). Returning failure so the caller "
+            "keeps the node record — dropping it now would leave the pod running with "
+            "nothing referencing it. Investigate snode_api health on %s",
+            snode.get_id(), max_attempts,
+            max_attempts * poll_per_attempt_sec, last_probe_error, snode.mgmt_ip,
+        )
+    else:
+        logger.error(
+            "SPDK on %s did NOT die after %d kill attempts (%ds total) — "
+            "investigate snode_api / docker daemon health on %s",
+            snode.get_id(), max_attempts,
+            max_attempts * poll_per_attempt_sec, snode.mgmt_ip,
+        )
     return False
 
 
