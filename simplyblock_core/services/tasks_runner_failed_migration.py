@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import tasks_controller, device_controller
@@ -48,7 +48,21 @@ def task_runner(task):
             for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
                 if node.online_since:
                     try:
-                        diff = datetime.now() - datetime.fromisoformat(node.online_since)
+                        # online_since is stamped timezone-aware
+                        # (storage_node_ops.py:8823). A naive datetime.now()
+                        # here raises TypeError on EVERY call, the except below
+                        # swallows it, and the >>whole guard<< silently never
+                        # fires -- failed-device migrations start immediately
+                        # against a node that just came back online, which is
+                        # exactly what this wait exists to prevent. The three
+                        # sibling call sites (tasks_runner_migration.py:128,
+                        # tasks_runner_new_dev_migration.py:73,
+                        # storage_node_monitor.py:566) already pass
+                        # timezone.utc; this one was missed. Observed 246
+                        # occurrences of "can't subtract offset-naive and
+                        # offset-aware datetimes" across two node removals on
+                        # 2026-09-11.
+                        diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
                         if diff.total_seconds() < 60:
                             task.function_result = "node is online < 1 min, retrying"
                             task.status = JobSchedule.STATUS_SUSPENDED
