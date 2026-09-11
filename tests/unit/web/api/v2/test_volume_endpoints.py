@@ -94,6 +94,21 @@ class TestCreateVolume:
         assert response.status_code == 201
         assert snapshot_controller.clone.call_args.kwargs['consistency_group'] == 'db-restored'
 
+    def test_controller_refusal_surfaces_as_422_with_the_reason(
+            self, client, db, pool, lvol_controller, snapshot_controller):
+        """Regression (2026-09-11): a controller refusal (here the 21st
+        consistency-group member) surfaced as an opaque 500 through the CSI
+        provisioner. The refusal reason is the user's only actionable message,
+        so it must ride a 422 detail."""
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.return_value = (
+            False, 'consistency group vgs-group already has the maximum 20 members')
+
+        response = client.post(f'{BASE}/', json={'name': 'vol-21', 'size': '2G'})
+
+        assert response.status_code == 422
+        assert 'maximum 20 members' in response.json()['detail']
+
     def test_existing_name_returns_409(self, client, db, pool, volume, lvol_controller):
         db.get_lvol_by_name.return_value = volume
 

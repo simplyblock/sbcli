@@ -140,7 +140,11 @@ def add(
         raise AssertionError('unreachable')
 
     if volume_id_or_false == False:  # noqa
-        raise ValueError(error)
+        # The controller's refusal reason (a full consistency group, a placement
+        # conflict) is the user's only actionable message: a bare ValueError
+        # surfaces as an opaque 500 through the CSI provisioner, and the PVC
+        # event reads "Internal Server Error" (2026-09-11, the 21st member).
+        raise HTTPException(422, error)
 
     return util.creation_response(
         request, response_format,
