@@ -129,5 +129,58 @@ class TestJmRepWaitBounds(unittest.TestCase):
         self.assertEqual(sleep.call_count, 2)
 
 
+class TestJmRepWaitInsideAPortFence(unittest.TestCase):
+    """The in-fence call site needs a wait that cannot sleep at all.
+
+    Regression: 2026-09-10 14:32:20, LVS_13. recreate_lvstore fenced a peer's
+    client port and then ran this wait with its defaults. One sleep is 20s
+    against a FENCE_DEADLINE_SEC of 7.5s, so the fence ran to 20.087s -- past
+    the 8s (ack_timeout * 4) point where SPDK converts a port block to reject
+    and quiesces the qpairs, losing the client its path.
+
+    storage_node_ops now passes retry=1/delay=0 there. These pin what that
+    means, so a later change to the loop cannot quietly make it sleep again.
+    """
+
+    def test_single_unpaced_poll_never_sleeps(self):
+        rpc = MagicMock()
+        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
+        rpc.jc_get_jm_status.return_value = {"jm_a": False}   # busy
+        node = _node(rpc=rpc)
+        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+            self.assertFalse(
+                node.wait_for_jm_rep_tasks_to_finish(10, retry=1, delay=0))
+        sleep.assert_not_called()
+        self.assertEqual(rpc.jc_get_jm_status.call_count, 1)
+
+    def test_single_unpaced_poll_still_reports_a_clean_leader(self):
+        rpc = MagicMock()
+        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
+        rpc.jc_get_jm_status.return_value = {"jm_a": True}    # free
+        node = _node(rpc=rpc)
+        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+            self.assertTrue(
+                node.wait_for_jm_rep_tasks_to_finish(10, retry=1, delay=0))
+        sleep.assert_not_called()
+        self.assertEqual(rpc.jc_get_jm_status.call_count, 1)
+
+    def test_the_default_budget_would_blow_the_fence_deadline(self):
+        """Why the in-fence call site must override the defaults.
+
+        If this ever stops being true, the override is no longer load-bearing
+        and the comment at that call site should be revisited.
+        """
+        import inspect
+
+        from simplyblock_core import constants
+
+        sig = inspect.signature(StorageNode.wait_for_jm_rep_tasks_to_finish)
+        delay = sig.parameters["delay"].default
+        self.assertGreater(
+            delay, constants.FENCE_DEADLINE_SEC,
+            "a single default-paced sleep must still be shown to exceed the "
+            "whole fence budget")
+
+
 if __name__ == "__main__":
     unittest.main()

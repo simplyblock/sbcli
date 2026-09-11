@@ -1508,9 +1508,10 @@ class TestRecreateLvstoreReplicationSuspend(unittest.TestCase):
         result, fw_calls, rpc, _api, nodes = self._run(jc_disable_side=[False, True])
         self.assertIs(result, True)
         self.assertEqual(rpc.jc_disable_replication.call_count, 2)
-        # replication wait re-ran on the retry (once per attempt)
+        # One patient wait before the window gate (paid where no port is
+        # fenced), plus one bounded confirmation per attempt.
         self.assertEqual(
-            nodes["node-2"].wait_for_jm_rep_tasks_to_finish.call_count, 2)
+            nodes["node-2"].wait_for_jm_rep_tasks_to_finish.call_count, 3)
         # blocked twice (one per attempt); allowed twice (retry unblock + final 8c)
         self.assertEqual(len(self._leader(fw_calls, "block")), 2)
         self.assertEqual(len(self._leader(fw_calls, "allow")), 2)
