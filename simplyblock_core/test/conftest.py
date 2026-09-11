@@ -20,5 +20,10 @@ def _stub(name, **attrs):
 if 'fdb' not in sys.modules:
     class _FDBError(Exception):
         pass
-    _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError)
+    # ``transactional`` mirrors the real decorator's calling convention, as in
+    # tests/unit/conftest.py: whichever of the two stubs installs first serves
+    # the whole session, so they must stay equivalent or a combined run breaks
+    # on watched-model writes.
+    _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError,
+          transactional=lambda f: f)
     _stub('fdb.tuple')

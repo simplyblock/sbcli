@@ -331,11 +331,26 @@ def test_detached_member_frees_a_cap_slot(standalone):
     g = cgc.ensure_group("CL", "big-group")
     for i in range(cap):
         cgc.add_member_to_group(g, _StandaloneLvol(f"v{i}"))
-    # A generation has been taken, so a detach actually closes the epoch and
-    # frees the slot (before the first snapshot removed_seq collapses to 0).
+    # A generation has been taken, so the detach closes the epoch (rather than
+    # dropping the entry) and frees the slot.
     g.last_group_seq = 1
     cgc.remove_member_from_group(g, "v0")
     assert g.members["v0"]["removed_seq"] != 0
+    cgc.add_member_to_group(g, _StandaloneLvol("replacement"))
+    assert "replacement" in g.members
+    assert sum(1 for m in g.members.values() if m["removed_seq"] == 0) == cap
+
+
+def test_detach_before_first_generation_frees_a_cap_slot(standalone):
+    """The generation-0 counterpart: no generation ever contained the member,
+    so the detach drops the entry entirely, and the slot is free again."""
+    from simplyblock_core import constants
+    cap = constants.MAX_CONSISTENCY_GROUP_MEMBERS
+    g = cgc.ensure_group("CL", "big-group")
+    for i in range(cap):
+        cgc.add_member_to_group(g, _StandaloneLvol(f"v{i}"))
+    cgc.remove_member_from_group(g, "v0")
+    assert "v0" not in g.members
     cgc.add_member_to_group(g, _StandaloneLvol("replacement"))
     assert "replacement" in g.members
     assert sum(1 for m in g.members.values() if m["removed_seq"] == 0) == cap
