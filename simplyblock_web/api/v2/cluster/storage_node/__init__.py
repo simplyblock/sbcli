@@ -254,6 +254,7 @@ class _RestartParams(BaseModel):
     reattach_volume: bool = False
     node_address: Optional[str] = None
     new_ssd_pcie: List[str] = []
+    new_data_nics: List[str] = []
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
@@ -267,6 +268,7 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
             "node_address": parameters.node_address,
             "reattach_volume": parameters.reattach_volume,
             "new_ssd_pcie": parameters.new_ssd_pcie,
+            "new_data_nics": parameters.new_data_nics,
         }
     ).start()
 
