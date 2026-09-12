@@ -1956,19 +1956,59 @@ class SshUtils:
         return output.strip()
 
 
+    # A refusal from the CLI is conclusive: the object was not created, so
+    # polling for it is pure waste. In
+    # n_plus_k_failover_multi_client_ha_all_nodes-20260912-084155 `snapshot add`
+    # answered "Cannot create snapshot: node LVStore restart in progress" on
+    # both stdout and stderr, the caller ignored it, polled for ten minutes,
+    # then issued `snapshot clone <empty> <name>` five times and failed the run
+    # 24 minutes later with a message about the clone.
+    # Deliberately narrow. These commands run with -d, so the output carries
+    # unrelated debug lines that can contain "error" or "in progress"; matching
+    # those would make a successful create look refused. Only phrases that mean
+    # "the CLI did not perform the operation" belong here.
+    CLI_REFUSAL_MARKERS = ("cannot create snapshot", "cannot create clone",
+                           "cannot create lvol", "cannot delete snapshot",
+                           "usage: sbctl", "usage: sbcli")
+
+    @classmethod
+    def _cli_refused(cls, output, error):
+        """True when the CLI conclusively rejected the request."""
+        blob = (str(output or "") + " " + str(error or "")).lower()
+        return any(m in blob for m in cls.CLI_REFUSAL_MARKERS)
+
     def add_snapshot(self, node, lvol_id, snapshot_name):
         cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
         output, error = self.exec_command(node=node, command=cmd)
+
+        # Refused outright, e.g. an LVStore restart is in progress. Do not spend
+        # ten minutes waiting for something that was never created; hand the
+        # message back so the caller can skip or retry deliberately.
+        if self._cli_refused(output, error):
+            if hasattr(self, "logger"):
+                self.logger.warning(
+                    f"[snapshot] '{snapshot_name}' REFUSED by the CLI, not "
+                    f"polling: {(output or error or '').strip()[:200]}"
+                )
+            return output, error
 
         snapshot_id = self.get_snapshot_id(node=node, snapshot_name=snapshot_name)
 
         if not snapshot_id:
             if hasattr(self, "logger"):
                 self.logger.error(f"Timed out waiting for snapshot '{snapshot_name}' to appear within 10 minutes.")
-        
+
         return output, error
- 
+
     def add_clone(self, node, snapshot_id, clone_name):
+        # Without this, an empty id produces `snapshot clone  <name>`, which the
+        # CLI answers with its usage text. That is what the caller then retried
+        # five times in 20260912-084155.
+        if not (snapshot_id or "").strip():
+            raise ValueError(
+                f"[clone] refusing to clone '{clone_name}' with an empty "
+                f"snapshot id; the snapshot was never created"
+            )
         cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
         output, error = self.exec_command(node=node, command=cmd)
         return output, error
