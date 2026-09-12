@@ -1971,25 +1971,76 @@ class SshUtils:
                            "cannot create lvol", "cannot delete snapshot",
                            "usage: sbctl", "usage: sbcli")
 
+    # Of the refusals, these clear on their own: the cluster is mid-restart or
+    # mid-migration and the same request will succeed once it settles. Worth
+    # retrying. Anything else (a malformed command, a duplicate name) will fail
+    # identically forever, so retrying only wastes the run's time.
+    CLI_TRANSIENT_MARKERS = ("restart in progress", "is restarting",
+                             "in_restart", "in_shutdown", "not ready",
+                             "try again", "temporarily unavailable")
+
     @classmethod
     def _cli_refused(cls, output, error):
         """True when the CLI conclusively rejected the request."""
         blob = (str(output or "") + " " + str(error or "")).lower()
         return any(m in blob for m in cls.CLI_REFUSAL_MARKERS)
 
+    @classmethod
+    def _cli_refusal_is_transient(cls, output, error):
+        """True when the refusal is one that clears on its own."""
+        blob = (str(output or "") + " " + str(error or "")).lower()
+        return any(m in blob for m in cls.CLI_TRANSIENT_MARKERS)
+
+    def _run_with_transient_retry(self, node, cmd, what,
+                                  retries=6, delay=20):
+        """Run a create command, retrying only while the CLI refuses for a
+        reason that clears on its own.
+
+        Returns (output, error, refused). `refused` is True when the command was
+        still being declined after the last attempt, which lets the caller skip
+        the object instead of proceeding as though it exists. During a
+        deliberate outage that is the correct outcome: the run should not fail
+        because the cluster was legitimately busy, it should move on.
+        """
+        output = error = ""
+        for attempt in range(1, retries + 1):
+            output, error = self.exec_command(node=node, command=cmd)
+            if not self._cli_refused(output, error):
+                return output, error, False
+
+            msg = (str(output or "") or str(error or "")).strip()[:180]
+            if not self._cli_refusal_is_transient(output, error):
+                if hasattr(self, "logger"):
+                    self.logger.warning(
+                        f"[{what}] refused permanently, not retrying: {msg}"
+                    )
+                return output, error, True
+
+            if attempt == retries:
+                if hasattr(self, "logger"):
+                    self.logger.warning(
+                        f"[{what}] still refused after {retries} attempts over "
+                        f"~{retries * delay}s: {msg}"
+                    )
+                return output, error, True
+
+            if hasattr(self, "logger"):
+                self.logger.info(
+                    f"[{what}] transient refusal ({attempt}/{retries}), "
+                    f"retrying in {delay}s: {msg}"
+                )
+            time.sleep(delay)
+        return output, error, True
+
     def add_snapshot(self, node, lvol_id, snapshot_name):
         cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
-        output, error = self.exec_command(node=node, command=cmd)
+        output, error, refused = self._run_with_transient_retry(
+            node, cmd, f"snapshot {snapshot_name}")
 
-        # Refused outright, e.g. an LVStore restart is in progress. Do not spend
-        # ten minutes waiting for something that was never created; hand the
-        # message back so the caller can skip or retry deliberately.
-        if self._cli_refused(output, error):
-            if hasattr(self, "logger"):
-                self.logger.warning(
-                    f"[snapshot] '{snapshot_name}' REFUSED by the CLI, not "
-                    f"polling: {(output or error or '').strip()[:200]}"
-                )
+        # Still refused, e.g. the LVStore restart outlasted our retries. Do not
+        # spend ten more minutes polling for something that was never created;
+        # hand the message back so the caller can skip it.
+        if refused:
             return output, error
 
         snapshot_id = self.get_snapshot_id(node=node, snapshot_name=snapshot_name)
@@ -2010,7 +2061,8 @@ class SshUtils:
                 f"snapshot id; the snapshot was never created"
             )
         cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
-        output, error = self.exec_command(node=node, command=cmd)
+        output, error, _refused = self._run_with_transient_retry(
+            node, cmd, f"clone {clone_name}")
         return output, error
 
     def delete_snapshot(self, node, snapshot_id, timeout=600, interval=30, skip_error=False):

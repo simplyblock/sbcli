@@ -849,6 +849,21 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                         raise Exception(output)
                     if "(False," in error:
                         raise Exception(error)
+                    # The CLI declines snapshot creation while a node is
+                    # restarting, and says so plainly. add_snapshot already
+                    # retried the transient case; if it is still refused the
+                    # cluster is busy for longer than we are willing to wait.
+                    # Skip this cycle rather than register a snapshot that does
+                    # not exist and then clone from an empty id -- which is what
+                    # burned 24 minutes and failed the run in
+                    # n_plus_k_failover_multi_client_ha_all_nodes-20260912-084155.
+                    if self.ssh_obj._cli_refused(output, error):
+                        self.logger.warning(
+                            f"[create_snapshots] {snapshot_name} refused by the "
+                            f"CLI; skipping this snapshot/clone cycle: "
+                            f"{(output or error).strip()[:160]}"
+                        )
+                        continue
             except Exception as e:
                 self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
                 try:
@@ -873,6 +888,17 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 snapshot_id = self.sbcli_utils.get_snapshot_id(snapshot_name)
             else:
                 snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
+
+            # No id means the snapshot never materialised. Cloning from it emits
+            # `snapshot clone  <name>`, which the CLI can only answer with its
+            # usage text, and the retry loop below would repeat that five times
+            # before failing the run for the wrong reason.
+            if not (snapshot_id or "").strip():
+                self.logger.warning(
+                    f"[create_snapshots] {snapshot_name} has no id after "
+                    f"creation; skipping its clone this cycle"
+                )
+                continue
 
             clone_name = f"clone_{generate_random_sequence(15)}"
             if clone_name in list(self.clone_mount_details):
