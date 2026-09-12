@@ -93,7 +93,13 @@ RUN set -eux; \
         "${base_url}/nvme-cli-2.16-2.el10.${rpm_arch}.rpm"; \
     dnf clean all
 
-RUN dnf upgrade -y && dnf clean all
+# vim-minimal/vim-data ship preinstalled in the UBI base image and nothing in
+# this image requires them (nano covers interactive editing); Red Hat issues
+# vim CVEs often enough that leaving them in trips the weekly Grype scan
+# between cache-key rotations, so they come out rather than being upgraded.
+RUN dnf upgrade -y && \
+    dnf remove -y vim-minimal vim-data && \
+    dnf clean all
 
 # The unprivileged runtime user, plus the one line that makes the venv usable
 # under sudo.
