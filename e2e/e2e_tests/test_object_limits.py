@@ -2,7 +2,7 @@
 no performance degradation on SPDK at the limits.
 
 Limits under test (simplyblock_core/constants.py):
-  * MAX_LVOL_SIZE            = 50 TiB   volume create / resize / clone --resize
+  * MAX_LVOL_SIZE            = 70 TiB   volume create / resize / clone --resize
   * MAX_SNAPSHOTS_PER_LVOL   = 100      active snapshots of one volume (one chain)
   * MAX_CLONES_PER_SNAPSHOT  = 500      active clones of one snapshot
 
@@ -16,8 +16,12 @@ Flow
   4. create MAX_CLONES_PER_SNAPSHOT clones from the newest snapshot; the next
      one must be rejected with "Clone limit reached". fio on one clone (reads
      resolve through the snapshot) and once more on the source volume.
-  5. size cap: create at 51 TiB and resize to 51 TiB must both be rejected
-     with "exceeds the maximum".
+  5. size cap: a create and a resize one TiB ABOVE the limit must both be
+     rejected with "exceeds the maximum". The oversize value is derived from
+     constants.MAX_LVOL_SIZE rather than written out: it was hardcoded to
+     51TiB against a 50 TiB limit, and when the limit moved to 70 TiB that
+     turned the whole step into an assertion that a perfectly legal volume
+     is refused -- a test that fails on correct behaviour.
 
 Tolerance: after-vs-baseline IOPS >= (1 - perf_tolerance) * baseline and mean
 completion latency <= (1 + perf_tolerance) * baseline, default 30%. The
@@ -29,6 +33,8 @@ import time
 
 import requests
 
+from simplyblock_core import constants
+
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 
@@ -37,7 +43,7 @@ FIO_JSON_DIR = "/tmp/fio_object_limits"
 
 
 class TestObjectLimits(TestClusterBase):
-    """Enforce 50 TiB / 100 snapshots / 500 clones and prove SPDK holds up at them."""
+    """Enforce the size / snapshot / clone limits and prove SPDK holds up at them."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -46,7 +52,10 @@ class TestObjectLimits(TestClusterBase):
         self.snapshot_count = int(kwargs.get("snapshot_count", 100))
         self.clone_count = int(kwargs.get("clone_count", 500))
         self.perf_tolerance = float(kwargs.get("perf_tolerance", 0.30))
-        self.oversize = kwargs.get("oversize", "51TiB")   # parse_size is SI/IEC: 51T (SI) < 50 TiB
+        # One TiB past whatever the product limit currently is. Derived, not
+        # written out: see the module docstring.
+        self.oversize = kwargs.get(
+            "oversize", f"{constants.MAX_LVOL_SIZE // (1024 ** 4) + 1}TiB")
         self.created_clones = []
         self.created_snapshots = []
 
