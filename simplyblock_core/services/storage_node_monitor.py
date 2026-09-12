@@ -1414,44 +1414,65 @@ def node_port_check_fun(snode):
     if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
         port_lvs_owner: dict = {}
+        #: Ports that are checked and fed to the leak remediation but that
+        #: must NOT contribute to this node's health verdict — see below.
+        advisory_ports: set = set()
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status != "ready":
                     continue
-                # Skip port check during failback: if the primary or the
-                # OTHER follower (sec_1 / tertiary) for this lvstore is
+                # Advisory during failback: if the primary or the OTHER
+                # follower (sec_1 / tertiary) for this lvstore is
                 # online/restarting, the port on this node may be
                 # intentionally blocked (recreate_lvstore and the port-allow
                 # failback both block follower ports for the re-wiring
-                # window). Both follower directions must be covered: a
+                # window), so a False here is not evidence that THIS node is
+                # unhealthy. Both follower directions must be covered: a
                 # restarting tertiary blocks the acting-leader secondary's
                 # port just like a restarting secondary blocks the
                 # tertiary's — checking only secondary_node_id flipped the
                 # healthy secondary DOWN during a tertiary restart.
-                skip = False
+                #
+                # The port is still CHECKED. It used to be dropped from the
+                # list altogether, which silently disabled leak detection on
+                # exactly the ports most likely to leak: k8s 2026-09-11
+                # 13:46, worker-5 held a fence on 4442 (worker-3's LVS_16)
+                # from 13:46:14. worker-3 flipped to in_restart at 13:47:05,
+                # 4442 dropped out of the list, and worker-5 "recovered" to
+                # online at 13:47:08 — not because the fence had lifted (it
+                # ran to 13:47:28) but because nobody was looking any more.
+                # The gate belongs on the verdict, not on the observation.
+                advisory = False
                 if n.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                    skip = True
+                    advisory = True
                 elif n.secondary_node_id and n.secondary_node_id != snode.get_id():
                     sec1 = db.get_storage_node_by_id(n.secondary_node_id)
                     if sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                        skip = True
-                if not skip and n.tertiary_node_id and n.tertiary_node_id != snode.get_id():
+                        advisory = True
+                if not advisory and n.tertiary_node_id and n.tertiary_node_id != snode.get_id():
                     tert = db.get_storage_node_by_id(n.tertiary_node_id)
                     if tert and tert.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                        skip = True
-                if not skip:
-                    _p = n.get_lvol_subsys_port(n.lvstore)
-                    ports.append(_p)
-                    port_lvs_owner[_p] = n.get_id()
+                        advisory = True
+                _p = n.get_lvol_subsys_port(n.lvstore)
+                ports.append(_p)
+                port_lvs_owner[_p] = n.get_id()
+                if advisory:
+                    advisory_ports.add(_p)
         if not snode.is_secondary_node:
             _p = snode.get_lvol_subsys_port(snode.lvstore)
             ports.append(_p)
             port_lvs_owner[_p] = snode.get_id()
 
-        # Batched: one nvmf_get_blocked_ports fetch answers every port.
+        # Batched: one nvmf_get_blocked_ports fetch answers every port, so
+        # carrying the advisory ports costs no extra RPC.
         try:
             port_results = health_controller.check_ports_on_node(snode, ports)
             for port, ret in port_results.items():
+                if port in advisory_ports:
+                    logger.info(
+                        f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
+                        f"(advisory: peer owns this LVS and may be fencing it)")
+                    continue
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
             _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner)
@@ -1570,7 +1591,15 @@ _blocked_port_since: dict = {}
 #: fence is expected to be resolved by the control plane) is never touched,
 #: far short of the client's ctrl_loss_tmo (30 x 2s = 60s) after which the
 #: kernel deletes the controller and the namespace starts failing IO.
-STALE_PORT_BLOCK_SEC = 25.0
+#:
+#: 25s was too close to that 60s budget to survive a missed observation: the
+#: monitor polls at ~6s, so detection at 25s plus one unblock RPC left about
+#: five ticks of margin in theory and ONE in practice, because the node has
+#: to be seen ONLINE on the same tick that crosses the threshold. 12s keeps
+#: a whole missed poll cycle inside the budget and is still ~20x longer than
+#: any legitimate fence the restart flow holds. The restart-owns-LVS gate,
+#: not this timeout, is what keeps the remediation off deliberate fences.
+STALE_PORT_BLOCK_SEC = 12.0
 
 
 def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
@@ -1627,7 +1656,7 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
         except Exception:
             continue
 
-        if health_controller._restart_owns_lvs(owner):
+        if health_controller._restart_owns_lvs(owner, db):
             logger.info(
                 "Port %s on %s blocked %.0fs but a restart owns %s; leaving it",
                 port, snode.get_id(), held, owner.lvstore)

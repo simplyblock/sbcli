@@ -89,15 +89,23 @@ def get_blocked_ports_set(node, timeout=5, retry=5):
 def is_port_blocked(node, port_id, timeout=5, retry=5):
     """Return True if ``port_id`` is currently blocked on ``node``.
 
-    Tries SPDK ``nvmf_get_blocked_ports`` first; on method-not-found
-    falls back to parsing iptables output via ``FirewallClient``.
+    Delegates the parse to :func:`get_blocked_ports_set`; on method-not-found
+    (legacy SPDK) falls back to parsing iptables output via
+    ``FirewallClient``.
+
+    This USED to do ``port_id in rpc.nvmf_get_blocked_ports()``. That RPC
+    returns ``{"blocked_ports": [{"port": N, ...}, ...]}``, so the ``in``
+    tested the dict's KEYS and the function returned False for every port,
+    always -- a blocked port read as open. Only the batched
+    ``get_blocked_ports_set`` parsed the payload, which is why the monitor's
+    batched path saw the fences and this one never did. It is the fallback
+    for nodes whose SPDK lacks the batch RPC and for
+    ``check_port_on_node``, so the miss was silent rather than harmless.
     """
-    try:
-        return port_id in node.rpc_client(timeout=timeout, retry=retry).nvmf_get_blocked_ports()
-    except RPCRemoteError as exc:
-        if exc.code != RPCErrorCode.method_not_found:
-            raise
-        return  _is_port_blocked_iptables(node, port_id, timeout, retry)
+    blocked = get_blocked_ports_set(node, timeout=timeout, retry=retry)
+    if blocked is None:
+        return _is_port_blocked_iptables(node, port_id, timeout, retry)
+    return int(port_id) in blocked
 
 
 def _is_port_blocked_iptables(node, port_id, timeout, retry):
