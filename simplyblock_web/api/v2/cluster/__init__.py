@@ -16,6 +16,7 @@ from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 
 from .._dependencies import Cluster
 from .backup import api as backup_api
+from .consistency_group import api as consistency_group_api
 from .replication import api as replication_api
 from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
@@ -296,4 +297,5 @@ instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
+instance_api.include_router(consistency_group_api, prefix='/consistency-groups')
 api.include_router(instance_api)

@@ -2045,6 +2045,10 @@ commands:
             help: "Replication policy (id or name) to assign at create time. Configures replication for this volume."
             dest: replication_policy
             type: str
+          - name: "--consistency-group"
+            help: "Consistency group name to join at create time. The volume is pinned to the group's node/LVS; the first labeled volume pins the group."
+            dest: consistency_group
+            type: str
           - name: "--replicate"
             help: "Replicate LVol snapshot"
             dest: replicate
@@ -2760,6 +2764,13 @@ commands:
             dest: cluster_id
             type: str
             required: false
+          - name: "--consistency-group"
+            aliases:
+              - "-g"
+            help: "Filter snapshots to one consistency group (id or uuid)."
+            dest: consistency_group
+            type: str
+            required: false
           - name: "--with-details"
             aliases:
               - "-w"
@@ -2858,6 +2869,88 @@ commands:
             help: "The snapshot id."
             dest: snapshot_id
             type: str
+  - name: "consistency-group"
+    help: "Consistency Group Commands"
+    aliases:
+      - cg
+    weight: 620
+    subcommands:
+      - name: list
+        help: "List the cluster's consistency groups."
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID."
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: members
+        help: "List the current members of a consistency group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: snapshot-take
+        help: "Take ONE crash-consistent snapshot generation across every current member."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+      - name: snapshot-list
+        help: "List a consistency group's snapshot generations with expected-versus-present member counts."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: snapshot-delete
+        help: "Delete one generation and all its member snapshots; never the group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "seq"
+            help: "The generation number (group_seq) to delete."
+            dest: seq
+            type: int
+      - name: clone
+        help: "Clone every member snapshot of a generation into a new volume, optionally forming a new group."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "seq"
+            help: "The generation number (group_seq) to clone."
+            dest: seq
+            type: int
+          - name: "--into"
+            help: "Name of the new consistency group to form from the clones. When omitted, the clones are independent volumes."
+            dest: into
+            type: str
+            required: false
   - name: "backup"
     help: "Backup Commands"
     weight: 650

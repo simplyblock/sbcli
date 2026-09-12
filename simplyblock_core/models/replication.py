@@ -93,10 +93,15 @@ class ReplicationPolicy(BaseModel):
 
 
 class ConsistencyGroup(BaseModel):
-    """Auto-managed group record behind a consistency-group policy.
+    """A group of volumes that snapshot as one crash-consistent generation.
 
-    Created with the policy and removed with it. ``members`` maps lvol id to
-    its membership EPOCH:
+    A group is born from its first labeled member volume and identified by a
+    ``group_name`` unique within its cluster (a PVC's
+    ``storage.simplyblock.io/consistency-group`` label on the Kubernetes path).
+    The field is deliberately NOT called ``name``: BaseModel.name is the class
+    name and the middle segment of every FDB key, so shadowing it moves the
+    record out of the class keyspace (see tests/unit/models/test_reserved_fields.py).
+    ``members`` maps lvol id to its membership EPOCH:
 
         {"joined_seq": N, "removed_seq": M}
 
@@ -105,10 +110,16 @@ class ConsistencyGroup(BaseModel):
     Late joiners deliberately do NOT inherit history: they join at
     ``last_group_seq + 1``, i.e. the first group snapshot taken AFTER the
     attach, because earlier group snapshots simply do not contain them.
+
+    ``policy_id`` is optional: it is set for the legacy path where a
+    replication policy owns the group, and empty for a standalone group. The
+    membership and generation model is identical either way.
     """
 
     cluster_id: str = ""
-    policy_id: str = ""           # ReplicationPolicy.get_id()
+    #: group name, unique per cluster; the identity a labeled volume joins by.
+    group_name: str = ""
+    policy_id: str = ""           # ReplicationPolicy.get_id(), optional
     #: pinned placement: every member volume lives on this node / LVS. Set by
     #: the first member and enforced for all others.
     node_id: str = ""

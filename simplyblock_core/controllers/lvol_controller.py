@@ -25,7 +25,6 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
-
 logger = utils.get_logger(__name__)
 
 
@@ -466,7 +465,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
                 allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None,
-                replication_policy=None, internal=False):
+                replication_policy=None, consistency_group=None, internal=False):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     if max_namespace_per_subsys is None:
@@ -486,6 +485,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # creation). An explicit conflicting --host is an error, not a
         # preference fight.
         from simplyblock_core.controllers import replication_policy_controller as _rpc
+        # Local import: consistency_group_controller from-imports
+        # snapshot_controller internals, and snapshot_controller imports this
+        # module — a top-level import here breaks any process that loads
+        # snapshot_controller first (every tasks-runner service; see
+        # tests/unit/test_controller_import_order.py).
         from simplyblock_core.controllers import consistency_group_controller as _cgc
         try:
             _policy = _rpc._resolve_policy(replication_policy)
@@ -500,6 +504,41 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                         f"replication policy {_policy.policy_name} is a "
                         f"consistency group pinned to that node's LVS")
                 host_id_or_name = pinned
+
+    cg_group = None
+    if consistency_group:
+        # Standalone consistency group (design §4.1): ensure the group by name,
+        # then pin this volume onto the group's node/LVS BEFORE placement runs,
+        # so every member shares one store. The first labeled volume pins the
+        # group; later ones are forced onto the pin. A conflicting explicit
+        # --host is an error, not a preference fight.
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        _cg_pool = None
+        for _p in db_controller.get_pools():
+            if pool_id_or_name in (_p.get_id(), _p.pool_name):
+                _cg_pool = _p
+                break
+        if not _cg_pool:
+            return False, f"Pool not found: {pool_id_or_name}"
+        try:
+            cg_group = _cgc.ensure_group(_cg_pool.cluster_id, consistency_group)
+        except _cgc.ConsistencyGroupError as e:
+            return False, str(e)
+        # Reject before creating the lvol so a full group does not leave an
+        # orphan volume behind (the authoritative check is add_member_to_group).
+        _open_members = sum(1 for m in (cg_group.members or {}).values()
+                            if m.get("removed_seq", 0) == 0)
+        if _open_members >= constants.MAX_CONSISTENCY_GROUP_MEMBERS:
+            return False, (
+                f"consistency group {consistency_group} already has the maximum "
+                f"{constants.MAX_CONSISTENCY_GROUP_MEMBERS} members")
+        pinned = _cgc.pinned_node_for_group(cg_group)
+        if pinned:
+            if host_id_or_name and host_id_or_name != pinned:
+                return False, (
+                    f"Volume must be created on node {pinned} — consistency "
+                    f"group {consistency_group} is pinned to that node's LVS")
+            host_id_or_name = pinned
 
     host_node = None
     if host_id_or_name:
@@ -668,15 +707,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
-    # ns_id semantics in the create flow: 0 = "not assigned yet". The model
-    # default is 1 (a legitimate nsid), so it must be reset here — the
-    # primary's namespace add assigns the real value and every replica add
-    # is REQUIRED to reuse it (see add_lvol_on_node). Never let a replica
-    # add run with an auto-assigned nsid: namespace IDs must be identical
-    # on every path of a shared subsystem, or the client kernel rejects
-    # the namespaces ("duplicate IDs in subsystem" / "IDs don't match for
-    # shared namespace", mass-create incident 2026-07-06).
-    lvol.ns_id = 0
     lvol.lvol_name = name
     lvol.pvc_name = pvc_name or ""
     lvol.size = int(size)
@@ -1090,6 +1120,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             logger.error("Volume %s created but replication policy %s could not be "
                          "attached: %s", lvol.get_id(), replication_policy, e)
             return lvol.uuid, f"Volume created but replication policy could not be attached: {e}"
+
+    if cg_group is not None:
+        # Atomic-join (design §4.1, P0-3): the volume joined its group in the
+        # same operation that created it. Placement was already pinned above, so
+        # this only opens the member's epoch.
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cgc.add_member_to_group(cg_group, lvol)
+            lvol.group_id = cg_group.get_id()
+            lvol.write_to_db(db_controller.kv_store)
+        except _cgc.ConsistencyGroupError as e:
+            logger.error("Volume %s created but could not join consistency group "
+                         "%s: %s", lvol.get_id(), consistency_group, e)
+            return lvol.uuid, f"Volume created but could not join consistency group: {e}"
 
     return lvol.uuid, None
 
@@ -1709,11 +1753,11 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
     # Recreate must present the SAME nsid as every other path of the shared
-    # subsystem — pass the persisted primary-assigned value. Legacy records
-    # created before ns_id persistence carry the model default; for those
-    # (and dedicated one-namespace subsystems) the stored value is the
-    # correct nsid as well. Only a record with ns_id unset falls back to
-    # auto-assignment.
+    # subsystem — pass the persisted primary-assigned value. A record with
+    # ns_id unset falls back to auto-assignment: that covers legacy records
+    # from before ns_id persistence, which are dedicated one-namespace
+    # subsystems where auto-assignment on the freshly recreated (empty)
+    # subsystem lands on the same nsid the record always had.
     ret = rpc_client.nvmf_subsystem_add_ns(
         lvol.nqn, lvol.top_bdev, lvol.get_ns_uuid(), lvol.guid,
         nsid=lvol.ns_id if lvol.ns_id else None)
@@ -2277,6 +2321,19 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
             return
+
+    # Consistency-group detach on delete (design §8.2): close the member's
+    # epoch so future generations exclude it, but PRESERVE its snapshots in
+    # prior generations. delete_lvol only removes a snapshot the volume was
+    # cloned FROM, never snapshots taken OF it, so the group's generations stay
+    # restorable; this just closes the epoch.
+    if lvol.group_id:
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cg = db_controller.get_consistency_group_by_id(lvol.group_id)
+            _cgc.remove_member_from_group(_cg, lvol.get_id())
+        except KeyError:
+            pass
 
     logger.debug(lvol)
     if snode is None:

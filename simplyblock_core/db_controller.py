@@ -686,7 +686,7 @@ class DBController(metaclass=Singleton):
 
     def _try_acquire_cluster_create_lock_tx(self, tr, name, owner, now):
         lock = ClusterCreateLock()
-        lock.name = name
+        lock.lock_name = name
         key = lock.get_db_id().encode()
         raw = tr.get(key).wait()
         if raw.present():
@@ -715,7 +715,7 @@ class DBController(metaclass=Singleton):
 
     def _release_cluster_create_lock_tx(self, tr, name, owner):
         lock = ClusterCreateLock()
-        lock.name = name
+        lock.lock_name = name
         key = lock.get_db_id().encode()
         raw = tr.get(key).wait()
         if not raw.present():
@@ -1499,6 +1499,13 @@ class DBController(metaclass=Singleton):
         if group is None:
             raise KeyError(f'ConsistencyGroup {group_id} not found')
         return group
+
+    def get_consistency_group_by_name(self, cluster_id: str, name: str) -> ConsistencyGroup | None:
+        """Resolve a standalone group by its cluster-unique name, or None."""
+        if not name:
+            return None
+        return single_or_none(
+            g for g in self.get_consistency_groups(cluster_id) if g.group_name == name)
 
     def get_consistency_group_for_policy(self, policy_id: str) -> ConsistencyGroup | None:
         wanted = policy_id.split('/')[-1] if policy_id else ""

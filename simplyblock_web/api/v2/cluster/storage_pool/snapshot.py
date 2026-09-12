@@ -25,15 +25,23 @@ def _make_snapshot_dto(request: Request, cluster_id: str, pool_id: str) -> Calla
 
 
 @api.get('/', name='clusters:storage-pools:snapshots:list', response_model=builtins.list[SnapshotDTO], responses=WATCH_RESPONSES)
-def list(request: Request, cluster: Cluster, pool: StoragePool, watch: WatchParam = False) -> Union[builtins.list[SnapshotDTO], EventSourceResponse]:
+def list(request: Request, cluster: Cluster, pool: StoragePool, watch: WatchParam = False,
+         consistency_group: str | None = None) -> Union[builtins.list[SnapshotDTO], EventSourceResponse]:
     if watch:
         return sse_response(
             snapshot_controller.watch_snapshots(cluster.get_id(), pool.get_id()),
             _make_snapshot_dto(request, cluster.get_id(), pool.get_id()),
         )
+    snapshots = db.get_snapshots_by_pool_id(pool.get_id())
+    if consistency_group is not None:
+        # Filter to one group's snapshots (design §6.2), accepting the full
+        # "cluster/uuid" id or the bare uuid.
+        want = consistency_group.split('/')[-1]
+        snapshots = [s for s in snapshots
+                     if s.group_id and s.group_id.split('/')[-1] == want]
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
-        for snapshot in db.get_snapshots_by_pool_id(pool.get_id())
+        for snapshot in snapshots
     ]
 
 

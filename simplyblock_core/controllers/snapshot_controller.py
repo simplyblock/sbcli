@@ -955,7 +955,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     return snap.uuid, False
 
 
-def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False):
+def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False,
+                   consistency_group=None):
     all_snaps = db_controller.get_snapshots()
     if lvol_id:
         try:
@@ -987,7 +988,17 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
     else:
         snaps = all_snaps
 
+    if consistency_group:
+        # Filter to one group's snapshots without client-side name matching
+        # (design §6.2). Accept either the full "cluster/uuid" id or the uuid.
+        want = consistency_group.split('/')[-1]
+        snaps = [sn for sn in snaps if sn.group_id and sn.group_id.split('/')[-1] == want]
+
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
+
+    # A group column is shown only when the listing actually contains a group
+    # snapshot; the machine-readable group_id / group_seq are always present.
+    any_group = any(sn.group_id for sn in snaps)
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
     migrating_lvols = []
@@ -1018,7 +1029,12 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
             "Status": snap.status,
+            "group_id": snap.group_id,
+            "group_seq": snap.group_seq,
         }
+        if any_group:
+            d["Group"] = snap.group_id.split('/')[-1][:8] if snap.group_id else ""
+            d["Gen"] = snap.group_seq or ""
         if with_details:
             instances = []
             if snap.instances:
@@ -1284,7 +1300,7 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
 
 def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False,
-          lock=True, namespaced=True, all_snaps=None, all_lvols=None):
+          lock=True, namespaced=True, all_snaps=None, all_lvols=None, consistency_group=None):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError:
@@ -1671,6 +1687,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             db_controller.atomic_update(ref_snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
     else:
         db_controller.atomic_update(snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
+
+    if consistency_group:
+        # Group-forming restore (design §7.2): the clone joins the named group,
+        # birthing it when this is the first clone. Placement is already fixed
+        # by the snapshot's store, so the join only pins or verifies the pin.
+        # Imported here: consistency_group_controller from-imports this module
+        # at top level (see tests/unit/test_controller_import_order.py).
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cgc.join_new_volume(pool.cluster_id, lvol, consistency_group)
+        except _cgc.ConsistencyGroupError as e:
+            logger.error("Clone %s created but could not join consistency group "
+                         "%s: %s", lvol.get_id(), consistency_group, e)
+            return lvol.uuid, f"Clone created but could not join consistency group: {e}"
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)

@@ -15,6 +15,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool as PoolModel
 from simplyblock_core.models.replication import (
+    ConsistencyGroup as ConsistencyGroupModel,
     ReplicationPolicy as ReplicationPolicyModel,
     ReplicationTarget as ReplicationTargetModel,
 )
@@ -171,6 +172,19 @@ def _lookup_replication_policy(policy_id: UUID, cluster: Cluster) -> Replication
 
 
 ReplicationPolicy = Annotated[ReplicationPolicyModel, Depends(_lookup_replication_policy)]
+
+
+def _lookup_consistency_group(group_id: UUID, cluster: Cluster) -> ConsistencyGroupModel:
+    try:
+        group = _db.get_consistency_group_by_id(str(group_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if group.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'ConsistencyGroup {group_id} not found')
+    return group
+
+
+ConsistencyGroupResource = Annotated[ConsistencyGroupModel, Depends(_lookup_consistency_group)]
 
 
 def _lookup_subsystem(nqn: str, cluster: Cluster) -> str:

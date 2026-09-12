@@ -818,7 +818,8 @@ class CLIWrapperBase:
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
             allowed_hosts=allowed_hosts,
             do_replicate=args.replicate,
-            replication_policy=args.replication_policy)
+            replication_policy=args.replication_policy,
+            consistency_group=getattr(args, 'consistency_group', None))
         if results:
             return results
         else:
@@ -1166,7 +1167,9 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return _format_result(snapshot_controller.list_snapshots(args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details), json=args.json)
+        return _format_result(snapshot_controller.list_snapshots(
+            args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details,
+            consistency_group=getattr(args, 'consistency_group', None)), json=args.json)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)
@@ -1177,6 +1180,81 @@ class CLIWrapperBase:
     def snapshot__clone(self, sub_command, args):
         clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, args.resize, args.namespaced)
         return clone_id if not error else error
+
+    # ----------------------------------------------------------------------- #
+    # Consistency groups (design §6, §7)
+    # ----------------------------------------------------------------------- #
+
+    def _cg_resolve(self, group_id):
+        """Resolve a consistency group by id/uuid, falling back to name."""
+        db = db_controller.DBController()
+        try:
+            return db.get_consistency_group_by_id(group_id)
+        except KeyError:
+            for g in db.get_consistency_groups():
+                if g.group_name == group_id:
+                    return g
+            raise
+
+    def consistency_group__list(self, sub_command, args):
+        db = db_controller.DBController()
+        data = [{
+            "ID": g.get_id(),
+            "Name": g.group_name or "-",
+            "Node": g.node_id[:8] if g.node_id else "-",
+            "LVS": g.lvs_name or "-",
+            "Members": sum(1 for m in (g.members or {}).values()
+                           if m.get("removed_seq", 0) == 0),
+            "Gen": g.last_group_seq,
+            "Policy": g.policy_id.split('/')[-1][:8] if g.policy_id else "-",
+        } for g in db.get_consistency_groups(args.cluster_id)]
+        return _format_result(data, json=args.json)
+
+    def consistency_group__members(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        data = [{
+            "LVol ID": m["lvol_id"],
+            "Joined": m["joined_seq"],
+            "Removed": m["removed_seq"] or "-",
+            "Node": m["node_id"][:8] if m["node_id"] else "-",
+            "LVS": m["lvs_name"] or "-",
+            "Online": "yes" if m["online"] else "no",
+        } for m in cgc.list_members(self._cg_resolve(args.group_id))]
+        return _format_result(data, json=args.json)
+
+    def consistency_group__snapshot_take(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        ids, err = cgc.create_group_snapshot_for_group(self._cg_resolve(args.group_id))
+        if err:
+            return f"Group snapshot failed: {err}"
+        return utils.print_table([{"Snapshot": s} for s in ids])
+
+    def consistency_group__snapshot_list(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        data = [{
+            "Gen": r["group_seq"],
+            "Created": (time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(r["created_at"]))
+                        if r["created_at"] else "-"),
+            "Expected": r["expected"],
+            "Present": r["present"],
+            "Complete": "yes" if r["complete"] else "no",
+        } for r in cgc.list_generations(self._cg_resolve(args.group_id))]
+        return _format_result(data, json=args.json)
+
+    def consistency_group__snapshot_delete(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        deleted, err = cgc.delete_generation(self._cg_resolve(args.group_id), args.seq)
+        if err:
+            return f"Delete failed: {err}"
+        return f"Deleted generation {args.seq} ({len(deleted)} snapshots)"
+
+    def consistency_group__clone(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        created, err = cgc.clone_generation(
+            self._cg_resolve(args.group_id), args.seq, into_name=getattr(args, 'into', None))
+        if err:
+            return f"Clone failed: {err}"
+        return utils.print_table([{"Volume": v} for v in created])
 
     def snapshot__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)

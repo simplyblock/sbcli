@@ -58,7 +58,6 @@ class _Base(unittest.TestCase):
         self.lvol.allowed_hosts = []
         self.lvol.namespace = "shared-ns-group"
         self.lvol.node_id = "node-1"
-        self.lvol.ns_id = 0  # create flow resets the model default (1)
 
         self._patches = [
             patch.object(lvol_controller, "_create_bdev_stack",
@@ -91,6 +90,25 @@ class TestCreatePathNsid(_Base):
                           "the primary add must let the target assign the nsid")
         self.assertEqual(self.lvol.ns_id, 7,
                          "the assigned nsid must be persisted for the replicas")
+
+    def test_fresh_record_autoassigns_nsid(self):
+        """The model default must mean "not assigned yet", not "nsid 1".
+
+        Regression (clone incident 2026-09-10): snapshot_controller.clone
+        built its LVol from scratch and never reset ns_id, so the model
+        default was shipped verbatim into nvmf_subsystem_add_ns2 as a
+        dictated nsid. On a shared subsystem whose root lvol already held
+        nsid 1 the add hard-failed ("nsid occupied and eviction did not
+        clear it") instead of auto-assigning a free slot. Any construction
+        site that never touches ns_id must yield auto-assignment.
+        """
+        self.lvol.ns_id = LVol().ns_id  # exactly what a forgotten reset ships
+        ret, err = lvol_controller.add_lvol_on_node(self.lvol, self.snode)
+        self.assertIsNone(err)
+        kwargs = self.rpc.nvmf_subsystem_add_ns2.call_args.kwargs
+        self.assertIsNone(kwargs.get("nsid"),
+                          "an untouched fresh record must auto-assign, not "
+                          "request the model default as a dictated nsid")
 
     def test_primary_honours_a_control_plane_claim(self):
         """A fail-over copy arrives with an nsid claimed across the target HA

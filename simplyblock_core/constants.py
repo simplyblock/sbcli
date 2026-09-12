@@ -402,6 +402,12 @@ MAX_NAMESPACES_PER_SUBSYSTEM = 50
 # this; internal readers of an already-stored config clamp with a warning.
 MAX_SUBSYSTEMS_PER_NODE = 75
 
+# Hard cap on open-epoch members of one consistency group. The group snapshot
+# freezes I/O across every member with one bdev_lvol_snapshot_group call, so a
+# larger group widens the frozen window and the all-or-nothing rollback surface;
+# 20 keeps the freeze bounded while covering realistic multi-volume applications.
+MAX_CONSISTENCY_GROUP_MEMBERS = 20
+
 # Cross-cluster cutover: upper bound for the iterative delta-shrink phase
 # (snapshot -> wait replicated -> snapshot -> wait) before the final freeze.
 # Two rounds normally complete within 2 replication intervals + transfer time.
