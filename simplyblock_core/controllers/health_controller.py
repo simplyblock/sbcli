@@ -62,19 +62,52 @@ def repairs_allowed(node) -> bool:
         StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN)
 
 
-def _restart_owns_lvs(primary_node) -> bool:
-    """True if the restart task currently owns ``primary_node.lvstore``.
+def _restart_owns_lvs(primary_node, db_controller=None) -> bool:
+    """True if a restart task currently owns ``primary_node.lvstore``.
 
-    While ``primary_node.restart_phases[lvs]`` is set (pre_block / blocked /
+    While ``restart_phases[lvs]`` is set (pre_block / blocked /
     post_unblock), the restart runner is the exclusive author of hublvol
-    attach/detach on that LVS. The periodic health repair must stand aside
-    so it doesn't issue a parallel bdev_nvme_attach_controller on the same
+    attach/detach AND of the port fences on that LVS. The periodic health
+    repair and the monitor's stale-port-block remediation must stand aside
+    so they don't issue a parallel bdev_nvme_attach_controller on the same
     subnqn — that was the class of race that produced
     "bdev_nvme_check_multipath: cntlid N are duplicated" and left the
-    tertiary without a hublvol to primary.
+    tertiary without a hublvol to primary — or lift a fence the restart is
+    still relying on.
+
+    The phase is stamped on the node RUNNING the restart, keyed by the
+    lvstore NAME: ``_recreate_lvstore_impl`` stamps the primary itself, but
+    ``_recreate_lvstore_on_non_leader_impl`` stamps the restarting FOLLOWER
+    for the primary's lvstore. Checking only the primary's record therefore
+    misses a follower restart — which is precisely when follower ports are
+    fenced. Pass ``db_controller`` to check the follower records too; a
+    follower that cannot be read counts as owning, because "unknown" must
+    never license lifting a fence.
     """
-    phases = getattr(primary_node, "restart_phases", None) or {}
-    return bool(phases.get(primary_node.lvstore))
+    lvs = getattr(primary_node, "lvstore", None)
+    if not lvs:
+        return False
+
+    def _owns(node):
+        phases = getattr(node, "restart_phases", None) or {}
+        return bool(phases.get(lvs))
+
+    if _owns(primary_node):
+        return True
+    if db_controller is None:
+        return False
+    for nid in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+        if not nid:
+            continue
+        try:
+            follower = db_controller.get_storage_node_by_id(nid)
+        except Exception:
+            return True  # unreadable follower -> assume a restart owns it
+        if follower is None:
+            continue
+        if _owns(follower):
+            return True
+    return False
 
 
 def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:

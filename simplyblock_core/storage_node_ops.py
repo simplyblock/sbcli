@@ -7177,26 +7177,34 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
                 "Loop 2: peer-side detach pass raised %s (continuing to kill)",
                 e)
 
-        if snode.hublvol:
-            # Disconnect hublvol from secondary
-            if snode.secondary_node_id:
-                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                if sec_node.status == StorageNode.STATUS_ONLINE:
-                    logger.info("Disconnecting hublvol from %s", sec_node.get_id())
-                    try:
-                        sec_node.rpc_client().bdev_nvme_detach_controller(snode.hublvol.bdev_name)
-                    except Exception as e:
-                        logger.warning("Disconnecting hublvol failed: %s", e)
-
-            # Disconnect hublvol from tertiary
-            if snode.tertiary_node_id:
-                ter_node = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
-                if ter_node.status == StorageNode.STATUS_ONLINE:
-                    logger.info("Disconnecting hublvol from %s", ter_node.get_id())
-                    try:
-                        ter_node.rpc_client().bdev_nvme_detach_controller(snode.hublvol.bdev_name)
-                    except Exception as e:
-                        logger.warning("Disconnecting hublvol failed: %s", e)
+        # NO hublvol detach on the peers here. This used to call
+        # bdev_nvme_detach_controller(snode.hublvol.bdev_name) on the
+        # secondary and the tertiary, the reasoning being that a clean
+        # disconnect beats letting the peers discover the TCP drop.
+        #
+        # It does the opposite. The hublvol controller is MULTIPATH: a
+        # follower holds one controller named "<LVS>/hublvol" carrying a
+        # path to the primary AND a path to the acting leader (the
+        # tertiary's two paths are tertiary->primary and
+        # tertiary->secondary). bdev_nvme_detach_controller addressed by
+        # NAME ALONE removes EVERY path on that controller -- the same
+        # property prune_duplicate_paths relies on and guards against. So
+        # detaching "the connection to the dying node" actually destroys
+        # the follower's hublvol at the lvstore level, including its path
+        # to the peer that is still alive and about to lead.
+        #
+        # k8s rapid-failover 2026-09-11 13:46:09: worker-3 (primary,
+        # LVS_16) began a graceful shutdown and told its tertiary
+        # worker-5 to detach LVS_16/hublvol. worker-5 lost both paths, so
+        # it took leadership first, the secondary took it afterwards, and
+        # the resulting leader flap fenced worker-5's 4442 for 74s.
+        #
+        # There is nothing to clean up here in any case: the peers'
+        # reconnect pollers are exactly how a follower rides out a primary
+        # restart, and a follower that genuinely stops being a replica is
+        # torn down explicitly by teardown_non_leader_lvstore /
+        # _delete_replica_on_peer, which detach the controller when the
+        # whole replica really is going away.
 
 
     # Step 5: hard-kill SPDK. Same code path as the existing --force
