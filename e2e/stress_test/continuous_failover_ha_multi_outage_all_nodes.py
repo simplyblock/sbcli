@@ -585,6 +585,23 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             raise LvolNotConnectException(
                 f"LVOL {lvol_name} ({sec_type}) did not connect")
 
+        # The device diff above takes the FIRST new device, which is only safe
+        # while this lvol's subsystem holds nothing else. Every lvol here is
+        # created with max_namespace_per_subsys=30, so a sibling can join at any
+        # time and a later connect would then surface two namespaces at once.
+        # Verify the NSID before formatting: picking a sibling here destroys a
+        # live volume, which is what happened to the clone path in
+        # n_plus_k_failover_multi_client_ha_all_nodes-20260911-162931.
+        _expected_ns = None
+        try:
+            _expected_ns = self.sbcli_utils.get_lvol_details(
+                lvol_id=lvol_id)[0].get("ns_id")
+        except Exception as exc:
+            self.logger.warning(
+                f"[device_guard] could not read ns_id for {lvol_name}: {exc}")
+        self._assert_device_unclaimed(client_node, lvol_device, lvol_name,
+                                      expected_ns_id=_expected_ns)
+
         self.lvol_mount_details[lvol_name]["Device"] = lvol_device
         self.ssh_obj.format_disk(node=client_node, device=lvol_device, fs_type=fs_type)
         mount_point = f"{self.mount_path}/{lvol_name}"

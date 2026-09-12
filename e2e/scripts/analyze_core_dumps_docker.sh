@@ -71,9 +71,52 @@ log "found $(echo "${CORES}" | wc -l) SPDK core dump(s)"
 
 # ------------------------------------------------------------ pick container
 # Same host means same SPDK image, which is what makes the symbols resolve.
-CONTAINER="$(sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^spdk_[0-9]+$' | head -1)"
-if [ -z "${CONTAINER}" ]; then
+#
+# There are normally two spdk_<port> containers per host. Taking head -1
+# unconditionally is what broke collection in
+# n_plus_k_failover_multi_client_ha_all_nodes-20260911-162931: the chosen
+# container was listed by `docker ps` but not usable, every `docker cp` failed,
+# and the run reported "zstd available neither in container nor on host", which
+# is a downstream symptom rather than the cause. So probe each candidate with a
+# real exec and a real cp before committing to it, and keep the rest as
+# fallbacks for per-core failures.
+CANDIDATES="$(sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^spdk_[0-9]+$')"
+if [ -z "${CANDIDATES}" ]; then
     log "ERROR: no running spdk_<port> container on this host; cannot symbolicate"
+    log "       cores left in place: ${CORES}"
+    exit 0
+fi
+log "candidate containers: $(echo ${CANDIDATES} | tr '
+' ' ')"
+
+# Returns 0 and echoes the name of the first container that can exec, mkdir and
+# accept a docker cp. Anything less and the run produces empty backtraces.
+pick_container() {
+    local skip="${1:-}"
+    local c probe
+    probe="$(mktemp)"; echo probe > "${probe}"
+    for c in ${CANDIDATES}; do
+        [ -n "${skip}" ] && [ "${c}" = "${skip}" ] && continue
+        sudo docker exec "${c}" true >/dev/null 2>&1 || { log "  ${c}: exec failed"; continue; }
+        sudo docker exec "${c}" mkdir -p "${WORKDIR}" >/dev/null 2>&1             || { log "  ${c}: mkdir ${WORKDIR} failed"; continue; }
+        if ! sudo docker cp "${probe}" "${c}:${WORKDIR}/.probe" >/dev/null 2>&1; then
+            log "  ${c}: docker cp probe failed"
+            continue
+        fi
+        sudo docker exec "${c}" rm -f "${WORKDIR}/.probe" >/dev/null 2>&1
+        rm -f "${probe}"
+        echo "${c}"
+        return 0
+    done
+    rm -f "${probe}"
+    return 1
+}
+
+CONTAINER="$(pick_container)"
+if [ -z "${CONTAINER}" ]; then
+    log "ERROR: none of the spdk containers on this host accept exec+cp; cannot symbolicate"
+    log "       candidates tried: $(echo ${CANDIDATES} | tr '
+' ' ')"
     log "       cores left in place: ${CORES}"
     exit 0
 fi
@@ -124,7 +167,20 @@ for CORE in ${CORES}; do
 
     # --- copy the core into the container ----------------------------------
     if ! sudo docker cp "${CORE}" "${CONTAINER}:${WORKDIR}/${SAFE}" >/dev/null 2>&1; then
-        log "ERROR: docker cp of ${BASE} into ${CONTAINER} failed"
+        log "WARN: docker cp of ${BASE} into ${CONTAINER} failed; trying another container"
+        ALT="$(pick_container "${CONTAINER}")"
+        if [ -n "${ALT}" ]; then
+            log "  switching to ${ALT}"
+            CONTAINER="${ALT}"
+            IMAGE="$(sudo docker inspect --format '{{.Config.Image}}' "${CONTAINER}" 2>/dev/null || echo unknown)"
+            HAVE_ZSTD_IN_CONTAINER=no
+            if sudo docker exec "${CONTAINER}" bash -lc 'command -v zstd' >/dev/null 2>&1; then
+                HAVE_ZSTD_IN_CONTAINER=yes
+            fi
+        fi
+    fi
+    if ! sudo docker exec "${CONTAINER}" test -s "${WORKDIR}/${SAFE}" 2>/dev/null          && ! sudo docker cp "${CORE}" "${CONTAINER}:${WORKDIR}/${SAFE}" >/dev/null 2>&1; then
+        log "ERROR: docker cp of ${BASE} failed on every spdk container on this host"
         echo "host=${HOST}
 core=${BASE}
 status=copy_in_failed" | sudo tee "${OUT}/meta.txt" >/dev/null

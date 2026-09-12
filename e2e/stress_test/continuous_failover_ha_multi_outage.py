@@ -428,6 +428,8 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     "parent": self._nqn_to_parent.get(child_nqn, parent),
                     "ctrl_dev": ctrl_dev,
                 }
+                self._assert_device_unclaimed(child_client, device, child,
+                                              expected_ns_id=cdet.get("ns_id"))
                 self.ssh_obj.format_disk(node=child_client, device=device, fs_type=fs_type)
                 mount_point = f"{self.mount_path}/{child}"
                 self.ssh_obj.mount_path(node=child_client, device=device, mount_path=mount_point)
@@ -1076,7 +1078,31 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self.ssh_obj.rescan_live_nvme_controllers(chk_client)
             sleep_n_sec(3)
 
-            for chk_client in all_clients:
+            # Step 1: device diff.
+            #
+            # ONLY trustworthy when the clone owns its subsystem. Connecting a
+            # SHARED subsystem for the first time attaches every namespace in it
+            # at once, so the diff holds one device per sibling lvol and
+            # new_devs[0] is whichever the kernel enumerated first. That is how
+            # n_plus_k_failover_multi_client_ha_all_nodes-20260911-162931
+            # corrupted data: clone_E7CWM54D1MMCB4Q (ns_id=2) resolved to
+            # /dev/nvme76n1, NSID 1, which is its parent crlvlATZOONSXI89TBVR_0
+            # already mounted and under FIO on the other client. Two hosts then
+            # ran XFS on the same namespace and fio's md5 verify caught it ten
+            # minutes later. The very next step here is mkfs + mount, so a wrong
+            # pick is destructive, not merely wrong.
+            #
+            # When the subsystem is shared we skip the diff entirely and let the
+            # (NQN, ns_id) lookup below do it, which is exact.
+            trust_device_diff = not (shares_subsystem and clone_nqn and clone_ns_id)
+            if not trust_device_diff:
+                self.logger.info(
+                    f"[clone_connect] {clone_name} is on a shared subsystem; "
+                    f"skipping the device diff and resolving by "
+                    f"(NQN, ns_id={clone_ns_id}) instead"
+                )
+
+            for chk_client in all_clients if trust_device_diff else []:
                 chk_devs = set(self.ssh_obj.get_devices(node=chk_client))
                 new_devs = list(
                     chk_devs - initial_devices_per_client[chk_client]
@@ -1124,6 +1150,15 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     f"Clone {clone_name} device not found on any client "
                     f"after rescan + NQN lookup"
                 )
+
+            # Last line of defence before mkfs. Whatever path resolved the
+            # device, refuse it if it is not the namespace we asked for, or if
+            # another volume in this run already holds it. Formatting a sibling
+            # namespace destroys live data on a volume another client is writing
+            # (see the shared-subsystem note on Step 1), and that is not
+            # recoverable, so this fails the clone rather than guessing.
+            self._assert_device_unclaimed(client, lvol_device, clone_name,
+                                          expected_ns_id=clone_ns_id)
 
             # Step 3: Verify the block device actually exists and is
             # reachable.  During failovers the kernel may register a
@@ -1420,12 +1455,24 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     # Connect failed after outage — no FIO was started; skip validation
                     self.logger.warning(f"[pending_connect] Skipping FIO validation for unconnected clone '{clone}'.")
                     continue
-                self.common_utils.validate_fio_test(clone_details["Client"], clone_details["Log"])
+                try:
+                    self.common_utils.validate_fio_test(
+                        clone_details["Client"], clone_details["Log"])
+                except RuntimeError:
+                    # Preserve the verify dumps before anything else can clear
+                    # them; they are the only record of the bytes returned.
+                    self.collect_fio_hdr_dumps("clone_validate_failure")
+                    raise
                 self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
                 self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone}_fio_iolog*"])
 
             for lvol, lvol_details in self.lvol_mount_details.items():
-                self.common_utils.validate_fio_test(lvol_details["Client"], lvol_details["Log"])
+                try:
+                    self.common_utils.validate_fio_test(
+                        lvol_details["Client"], lvol_details["Log"])
+                except RuntimeError:
+                    self.collect_fio_hdr_dumps("lvol_validate_failure")
+                    raise
                 self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
                 self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
 

@@ -254,6 +254,13 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             if not new_dev:
                 raise LvolNotConnectException("LVOL did not connect")
 
+            # The diff takes the first new device, which is only safe while
+            # this lvol's subsystem holds nothing else. These lvols are
+            # namespaced, so a sibling can join and a connect can surface two
+            # namespaces at once; picking the wrong one and formatting it
+            # destroys a live volume (see docker_allnodes_data_corruption_rca_20260911_1629).
+            self._assert_device_unclaimed(client_node, new_dev, lvol_name)
+
             self.lvol_mount_details[lvol_name]["Device"] = new_dev
             self.ssh_obj.format_disk(node=client_node, device=new_dev, fs_type=fs_type)
 
@@ -860,6 +867,13 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                     break
             if not new_dev:
                 raise LvolNotConnectException(f"[V2] LVOL {lvol_name!r} did not connect")
+
+            # The diff takes the first new device, which is only safe while
+            # this lvol's subsystem holds nothing else. These lvols are
+            # namespaced, so a sibling can join and a connect can surface two
+            # namespaces at once; picking the wrong one and formatting it
+            # destroys a live volume (see docker_allnodes_data_corruption_rca_20260911_1629).
+            self._assert_device_unclaimed(client_node, new_dev, lvol_name)
 
             self.lvol_mount_details[lvol_name]["Device"] = new_dev
             self.ssh_obj.format_disk(node=client_node, device=new_dev, fs_type=fs_type)

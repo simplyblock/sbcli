@@ -5,6 +5,7 @@ import time
 import boto3
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils, RunnerK8sLog, _compress_and_cleanup_old_dumps
+from exceptions.custom_exception import LvolNotConnectException
 from utils.k8s_utils import K8sUtils, K8sSbcliUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger, start_log_flusher
@@ -1469,6 +1470,109 @@ class TestClusterBase:
         ).start()
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
+
+    def _assert_device_unclaimed(self, client, device, obj_name,
+                                 expected_ns_id=None):
+        """Refuse a device that belongs to a different namespace or volume.
+
+        Called immediately before mkfs. Two checks:
+
+        * the device's own NSID matches what the control plane said. On a shared
+          subsystem the sibling namespaces differ only by this number, and the
+          names (nvmeXn1 vs nvmeXn2) are easy to resolve wrongly.
+        * no other lvol or clone in this run is already using it. A device that
+          is already claimed is, by definition, carrying another volume's
+          filesystem.
+        """
+        dev_short = device.rsplit("/", 1)[-1]
+
+        if expected_ns_id:
+            out, _ = self.ssh_obj.exec_command(
+                node=client, command=f"cat /sys/block/{dev_short}/nsid 2>/dev/null"
+            )
+            actual = (out or "").strip()
+            if actual and actual != str(expected_ns_id):
+                raise LvolNotConnectException(
+                    f"[clone_connect] REFUSING {device} for {obj_name}: it is "
+                    f"NSID {actual} but {obj_name} is NSID {expected_ns_id}. "
+                    f"Formatting it would destroy the sibling namespace on the "
+                    f"same shared subsystem."
+                )
+
+        for registry, kind in ((getattr(self, "lvol_mount_details", {}) or {}, "lvol"),
+                               (getattr(self, "clone_mount_details", {}) or {}, "clone")):
+            for name, det in registry.items():
+                if name == obj_name:
+                    continue
+                if det.get("Device") == device and det.get("Client") == client:
+                    raise LvolNotConnectException(
+                        f"[device_guard] REFUSING {device} for {obj_name}: "
+                        f"already held by {kind} {name} on {client}."
+                    )
+
+        # Cross-client collision. The registry check above compares device paths
+        # on one client, which is useless across clients: the same namespace is
+        # nvme42n1 on one host and nvme76n1 on another, so nothing matches even
+        # though it is the same disk. That is exactly the case that corrupted
+        # data in 20260911-162931. The NSID check above is the real defence, and
+        # this is the belt to its braces: if the device already carries a
+        # mounted filesystem, someone is using it.
+        out, _ = self.ssh_obj.exec_command(
+            node=client,
+            command=f"mount | grep -w {device} | head -1",
+            supress_logs=True,
+        )
+        if (out or "").strip():
+            raise LvolNotConnectException(
+                f"[device_guard] REFUSING {device} for {obj_name}: it is already "
+                f"mounted on {client} ({out.strip()}). Formatting it would "
+                f"destroy a live filesystem."
+            )
+
+    def collect_fio_hdr_dumps(self, label="verify"):
+        """Copy fio's *.hdr_fail verify dumps off every client into the run dir.
+
+        fio writes these to its working directory, which for these runs is
+        /root on the client, NOT the volume's mount point. They hold the bytes
+        that were actually returned when an md5 verify failed, which is the only
+        way to tell a stale read from a second writer or from misdirected IO.
+        Nothing else in the run preserves them and they accumulate on the
+        clients until someone looks.
+        """
+        clients = list(getattr(self, "fio_node", None) or [])
+        if not clients:
+            return
+        dest_root = os.path.join(self.docker_logs_path, f"fio_hdr_dumps_{label}")
+        total = 0
+        for client in clients:
+            try:
+                out, _ = self.ssh_obj.exec_command(
+                    node=client,
+                    command="ls -1 /root/*.hdr_fail 2>/dev/null | head -200",
+                    supress_logs=True,
+                )
+                files = [f.strip() for f in (out or "").splitlines() if f.strip()]
+                if not files:
+                    continue
+                dest = os.path.join(dest_root, client)
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command=f"sudo mkdir -p '{dest}' && sudo cp -f /root/*.hdr_fail '{dest}/' 2>/dev/null || true",
+                )
+                total += len(files)
+                self.logger.info(
+                    f"[fio-verify] copied {len(files)} hdr_fail dump(s) from "
+                    f"{client} -> {dest}"
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[fio-verify] could not collect hdr_fail dumps from {client}: {exc}"
+                )
+        if total:
+            self.logger.warning(
+                f"[fio-verify] {total} hdr_fail dump(s) preserved under {dest_root}. "
+                f"These are verify failures: check whether any are from THIS run."
+            )
 
     def collect_node_dumps_async(self, label, timeout=900):
         """Checkpoint-time diagnostics that do not cost the outage gap.

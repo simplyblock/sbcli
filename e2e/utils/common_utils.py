@@ -85,21 +85,64 @@ class CommonUtils:
                     if not any(pattern.search(log) for log in actual_logs):
                         raise ValueError(f"Expected pattern not found for {entity_type} step '{step}': {pattern.pattern}")
 
+    # A data-integrity miss is a different animal from an interrupted job, and
+    # the old message ("FIO Test has interuupts", no volume, no matched line)
+    # made them indistinguishable. In
+    # n_plus_k_failover_multi_client_ha_all_nodes-20260911-162931 it hid three
+    # `verify: bad magic header` lines, which is silent corruption, behind a
+    # generic string. These are reported separately and first.
+    FIO_CORRUPTION_MARKERS = ("bad magic header", "hdr_fail", "verify failed",
+                              "verify: bad", "checksum", "data mismatch")
+    FIO_INTERRUPT_MARKERS = ("error", "fail", "throughput", "interrupt", "terminate")
+
     def validate_fio_test(self, node, log_file):
-        """Validates interruptions in FIO log
+        """Validate an FIO log for corruption and for interruptions.
 
         Args:
             node (str): Node Host Name to check log file on
             log_file (str): Path to log file
 
         Raises:
-            RuntimeError: If there are interruptions
+            RuntimeError: on a verify/corruption hit, or on an interruption.
+                The message names the log, the client and the offending lines,
+                because the caller iterates many volumes and otherwise there is
+                no way to tell which one tripped.
         """
         file_data = self.ssh_utils.read_file(node, log_file)
-        fail_words = ["error", "fail", "throughput", "interrupt", "terminate"]
-        for word in fail_words:
-            if word in file_data:
-                raise RuntimeError("FIO Test has interuupts")
+        lines = file_data.splitlines()
+
+        def _hits(markers):
+            out = []
+            for ln in lines:
+                low = ln.lower()
+                for m in markers:
+                    if m in low:
+                        out.append(ln.strip())
+                        break
+            return out
+
+        corruption = _hits(self.FIO_CORRUPTION_MARKERS)
+        if corruption:
+            shown = "\n    ".join(corruption[:6])
+            self.logger.error(
+                f"[fio-verify] DATA INTEGRITY FAILURE on {log_file} ({node}): "
+                f"{len(corruption)} line(s)"
+            )
+            raise RuntimeError(
+                f"FIO DATA CORRUPTION in {log_file} on {node}: "
+                f"{len(corruption)} verify line(s):\n    {shown}\n"
+                f"  fio writes its *.hdr_fail dumps to its working directory "
+                f"(/root on these clients), NOT the mount. Preserve them before "
+                f"the next wave: they hold the bytes actually returned."
+            )
+
+        interrupts = _hits(self.FIO_INTERRUPT_MARKERS)
+        if interrupts:
+            shown = "\n    ".join(interrupts[:6])
+            raise RuntimeError(
+                f"FIO test interrupted in {log_file} on {node}: "
+                f"{len(interrupts)} matching line(s):\n    {shown}"
+            )
 
     def manage_fio_threads(self, node, threads, timeout=100):
         """Run till fio process is complete and joins the thread
