@@ -61,10 +61,14 @@ def make_node(node_id="node-1", max_lvol=10):
     return SimpleNamespace(get_id=lambda: node_id, max_lvol=max_lvol)
 
 
+POOL = "pool-1"
+
+
 def seed_lvol(fake, uuid, nqn, node_id="node-1", status=LVol.STATUS_ONLINE,
-              max_ns=2):
+              max_ns=2, pool=POOL):
     lv = LVol()
     lv.uuid = uuid
+    lv.pool_uuid = pool
     lv.lvol_name = "lv-" + uuid
     lv.node_id = node_id
     lv.nqn = nqn
@@ -74,9 +78,10 @@ def seed_lvol(fake, uuid, nqn, node_id="node-1", status=LVol.STATUS_ONLINE,
     return lv
 
 
-def new_lvol(uuid="new-1", node_id="node-1"):
+def new_lvol(uuid="new-1", node_id="node-1", pool=POOL):
     lv = LVol()
     lv.uuid = uuid
+    lv.pool_uuid = pool
     lv.lvol_name = "lv-" + uuid
     lv.node_id = node_id
     lv.status = LVol.STATUS_IN_CREATION
@@ -135,6 +140,44 @@ class TestClaim:
         assert first.nqn == "nqnA"
         assert joined is False
         assert second.nqn == "nqn.cluster:lvol:c2"
+
+    def test_claim_never_joins_another_pools_subsystem(self):
+        # Subsystem/pool alignment: nqnA has room but belongs to pool-1;
+        # a pool-2 lvol opens its own subsystem instead.
+        fake = FakeKV()
+        seed_lvol(fake, "a1", "nqnA", max_ns=2)
+        dbc = make_dbc(fake)
+        lv = new_lvol(pool="pool-2")
+
+        joined = dbc.claim_lvol_ns_slot(lv, make_node(), True, STANDALONE_NQN)
+
+        assert joined is False
+        assert lv.nqn == STANDALONE_NQN
+        # ...and the subsystem it opened is now pool-2's: a later pool-1
+        # lvol still goes to nqnA, a later pool-2 lvol joins the new one.
+        lv.status = LVol.STATUS_ONLINE
+        lv.write_to_db(fake)
+        p1 = new_lvol("p1")
+        assert dbc.claim_lvol_ns_slot(p1, make_node(), True, "nqn.cluster:lvol:p1") is True
+        assert p1.nqn == "nqnA"
+        p2 = new_lvol("p2", pool="pool-2")
+        assert dbc.claim_lvol_ns_slot(p2, make_node(), True, "nqn.cluster:lvol:p2") is True
+        assert p2.nqn == STANDALONE_NQN
+
+    def test_claim_fills_most_occupied_subsystem_of_pool_first(self):
+        fake = FakeKV()
+        seed_lvol(fake, "a1", "nqnA", max_ns=3)
+        seed_lvol(fake, "b1", "nqnB", max_ns=3)
+        seed_lvol(fake, "b2", "nqnB", max_ns=3)
+        dbc = make_dbc(fake)
+
+        lv = new_lvol()
+        assert dbc.claim_lvol_ns_slot(lv, make_node(), True, STANDALONE_NQN) is True
+        assert lv.nqn == "nqnB"  # 2/3 used beats 1/3 used
+        # nqnB is now full: the next claim moves to nqnA, not a new subsystem
+        lv2 = new_lvol("new-2")
+        assert dbc.claim_lvol_ns_slot(lv2, make_node(), True, "nqn.cluster:lvol:new-2") is True
+        assert lv2.nqn == "nqnA"
 
     def test_exclude_nqns_skips_spdk_rejected_subsystem(self):
         fake = FakeKV()
