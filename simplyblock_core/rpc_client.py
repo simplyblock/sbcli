@@ -685,12 +685,17 @@ class RPCClient:
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, ndcs=0, npcs=0, uuid=None):
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, ndcs=0, npcs=0, uuid=None,
+                    thin_provision=False):
+        # Fixed (thick) provisioning by default: the blob's clusters are
+        # allocated up front at create time rather than on first write, so the
+        # volume's full logical size is reserved immediately. Pass
+        # thin_provision=True to restore on-demand allocation.
         params = {
             "lvol_name": name,
             "size_in_mib": size_in_mib,
             "lvs_name": lvs_name,
-            "thin_provision": True,
+            "thin_provision": thin_provision,
             "clear_method": "unmap",
             "lvol_priority_class": lvol_priority_class,
         }
@@ -1665,11 +1670,16 @@ class RPCClient:
         params = {"uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs}
         return self._request("bdev_lvol_set_lvs_signal", params)
 
-    def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
+    def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0,
+                           thin_provision=False):
+        # Must match the primary's provisioning (create_lvol): a replica or a
+        # recreate registers the SAME blob, so registering it under a different
+        # provisioning than it was created with is incorrect. Fixed (thick) by
+        # default to mirror create_lvol.
         params = {
             "lvol_name": name,
             "lvs_name": lvs_name,
-            "thin_provision": True,
+            "thin_provision": thin_provision,
             "clear_method": "unmap",
             "blobid": blobid,
             "registered_uuid": registered_uuid,
