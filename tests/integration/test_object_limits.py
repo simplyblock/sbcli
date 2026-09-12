@@ -24,6 +24,8 @@ from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.storage_node import StorageNode
 
 TIB = 1024 ** 4
+#: Derived, not pinned -- see tests/unit/test_object_limits.py.
+MAX_SIZE = constants.MAX_LVOL_SIZE
 LV = "11111111-1111-4111-8111-111111111111"
 SN = "22222222-2222-4222-8222-222222222222"
 NODE = "33333333-3333-4333-8333-333333333333"
@@ -225,9 +227,9 @@ class TestCloneLimitEndToEnd(unittest.TestCase):
             with self.assertRaises(_Passed):
                 snapshot_controller.clone(SN, "clone-x")
 
-    def test_clone_with_resize_over_50tib_is_rejected(self):
+    def test_clone_with_resize_over_the_size_cap_is_rejected(self):
         with _SnapshotEnv():
-            ok, err = snapshot_controller.clone(SN, "big-clone", new_size=50 * TIB + 1)
+            ok, err = snapshot_controller.clone(SN, "big-clone", new_size=MAX_SIZE + 1)
         self.assertFalse(ok)
         self.assertIn("Clone size", err)
         self.assertIn("exceeds the maximum", err)
@@ -236,14 +238,14 @@ class TestCloneLimitEndToEnd(unittest.TestCase):
 # ------------------------------------------------------------ volume size
 
 class TestVolumeSizeEndToEnd(unittest.TestCase):
-    def test_validate_add_lvol_rejects_over_50tib(self):
-        ok, err = lvol_controller.validate_add_lvol_func("v", 50 * TIB + 1, NODE, POOL, 0, 0, 0, 0)
+    def test_validate_add_lvol_rejects_over_the_size_cap(self):
+        ok, err = lvol_controller.validate_add_lvol_func("v", MAX_SIZE + 1, NODE, POOL, 0, 0, 0, 0)
         self.assertFalse(ok)
         self.assertIn("exceeds the maximum", err)
 
-    def test_validate_add_lvol_allows_exactly_50tib_on_size(self):
-        """The size cap itself must not reject 50 TiB (other checks may)."""
-        self.assertIsNone(object_limits.check_lvol_size(50 * TIB))
+    def test_validate_add_lvol_allows_exactly_the_size_cap(self):
+        """The size cap itself must not reject the cap value (other checks may)."""
+        self.assertIsNone(object_limits.check_lvol_size(MAX_SIZE))
 
     def _add_lvol_ha(self, size, max_size=0):
         pool = _pool()
@@ -255,8 +257,8 @@ class TestVolumeSizeEndToEnd(unittest.TestCase):
              patch.object(lvol_controller, "ops_gate", MagicMock(unsafe=True)):
             return lvol_controller.add_lvol_ha("vol", size, None, "ha", POOL, max_size=max_size)
 
-    def test_add_lvol_ha_rejects_over_50tib(self):
-        ok, err = self._add_lvol_ha(50 * TIB + 1)
+    def test_add_lvol_ha_rejects_over_the_size_cap(self):
+        ok, err = self._add_lvol_ha(MAX_SIZE + 1)
         self.assertFalse(ok)
         self.assertIn("Volume size", err)
         self.assertIn("exceeds the maximum", err)
@@ -270,13 +272,13 @@ class TestVolumeSizeEndToEnd(unittest.TestCase):
             with self.assertRaises(_Passed):
                 self._add_lvol_ha(1 * TIB, max_size=1000 * 1000 ** 4)
 
-    def test_add_lvol_ha_passes_size_check_at_50tib(self):
+    def test_add_lvol_ha_passes_size_check_at_the_cap(self):
         with patch.object(lvol_controller.object_limits, "check_lvol_size",
                           side_effect=_passing(object_limits.check_lvol_size)):
             with self.assertRaises(_Passed):
-                self._add_lvol_ha(50 * TIB)
+                self._add_lvol_ha(MAX_SIZE)
 
-    def test_resize_over_50tib_raises_precondition(self):
+    def test_resize_over_the_size_cap_raises_precondition(self):
         db = MagicMock()
         db.get_lvol_by_id.return_value = _lvol()
         db.get_pool_by_id.return_value = _pool()
@@ -287,7 +289,7 @@ class TestVolumeSizeEndToEnd(unittest.TestCase):
              patch("simplyblock_core.controllers.migration_controller.get_active_migration_for_lvol",
                    return_value=None):
             with self.assertRaises(PreconditionError) as cm:
-                lvol_controller.resize_lvol(LV, 50 * TIB + 1)
+                lvol_controller.resize_lvol(LV, MAX_SIZE + 1)
         self.assertIn("New size", str(cm.exception))
         self.assertIn("exceeds the maximum", str(cm.exception))
 

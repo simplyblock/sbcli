@@ -350,7 +350,7 @@ INSTANCE_STORAGE_DATA = {
 # migration, SnapShot.TYPE_INTERNAL) are exempt from the snapshot cap so a
 # volume at the cap can still be replicated and migrated -- they are transient.
 # ---------------------------------------------------------------------------
-MAX_LVOL_SIZE = 70 * 1024 ** 4          # 50 TiB
+MAX_LVOL_SIZE = 70 * 1024 ** 4          # 70 TiB
 MAX_SNAPSHOTS_PER_LVOL = 100
 MAX_CLONES_PER_SNAPSHOT = 500
 

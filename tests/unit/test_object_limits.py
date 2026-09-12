@@ -1,4 +1,4 @@
-"""Hard object limits: volume size (50 TiB), snapshots per volume (100),
+"""Hard object limits: volume size, snapshots per volume (100),
 clones per snapshot (500).
 
 The limits are pure functions in ``controllers/object_limits.py`` fed by the
@@ -16,7 +16,7 @@ import re
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core import constants
+from simplyblock_core import constants, utils
 from simplyblock_core.controllers import lvol_controller, object_limits, pool_controller
 from simplyblock_core.controllers import snapshot_controller
 from simplyblock_core.exceptions import PreconditionError
@@ -26,6 +26,11 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 
 TIB = 1024 ** 4
+#: Derive every size assertion from the constant. The product limit is a
+#: business decision that does change (50 -> 70 TiB on 2026-09-12); pinning
+#: the number in a dozen places means the next change reds the suite instead
+#: of exercising it. TestConstants below is the ONE deliberate pin.
+MAX_SIZE = constants.MAX_LVOL_SIZE
 LV = "11111111-1111-4111-8111-111111111111"
 SN = "22222222-2222-4222-8222-222222222222"
 
@@ -65,7 +70,9 @@ def _mini_clone(snap_id, status=LVol.STATUS_ONLINE):
 
 class TestConstants(unittest.TestCase):
     def test_values(self):
-        self.assertEqual(constants.MAX_LVOL_SIZE, 50 * TIB)
+        # The one deliberate pin: bump this and the comment in constants.py
+        # together when the product limit changes. Everything else derives.
+        self.assertEqual(constants.MAX_LVOL_SIZE, 70 * TIB)
         self.assertEqual(constants.MAX_SNAPSHOTS_PER_LVOL, 100)
         self.assertEqual(constants.MAX_CLONES_PER_SNAPSHOT, 500)
 
@@ -77,20 +84,22 @@ class TestConstants(unittest.TestCase):
 
 class TestLvolSize(unittest.TestCase):
     def test_at_limit_allowed(self):
-        self.assertIsNone(object_limits.check_lvol_size(50 * TIB))
+        self.assertIsNone(object_limits.check_lvol_size(MAX_SIZE))
 
     def test_one_byte_over_rejected(self):
-        err = object_limits.check_lvol_size(50 * TIB + 1)
+        err = object_limits.check_lvol_size(MAX_SIZE + 1)
         self.assertIsNotNone(err)
         self.assertIn("exceeds the maximum", err)
-        self.assertIn("50.0 TiB", err.replace("50.0 TB", "50.0 TiB"))  # humanbytes formatting
+        # humanbytes renders the limit; TB/TiB spelling varies by helper version
+        self.assertIn(utils.humanbytes(MAX_SIZE).replace(" TB", " TiB"),
+                      err.replace(" TB", " TiB"))
 
     def test_zero_and_small_allowed(self):
         self.assertIsNone(object_limits.check_lvol_size(0))
         self.assertIsNone(object_limits.check_lvol_size(10 * 1024 ** 3))
 
     def test_what_names_the_value(self):
-        err = object_limits.check_lvol_size(60 * TIB, what="New size")
+        err = object_limits.check_lvol_size(MAX_SIZE + 1, what="New size")
         self.assertTrue(err.startswith("New size "))
 
 
@@ -240,7 +249,7 @@ class TestResizeRejectsOversize(unittest.TestCase):
             db.get_cluster_by_id.return_value = cluster
             db.get_storage_node_by_id.return_value = snode
             with self.assertRaises(PreconditionError) as cm:
-                lvol_controller.resize_lvol(LV, 50 * TIB + 1)
+                lvol_controller.resize_lvol(LV, MAX_SIZE + 1)
             self.assertIn("exceeds the maximum", str(cm.exception))
             pool_total.assert_not_called()
 
