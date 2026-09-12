@@ -69,6 +69,14 @@ DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
 #: is no discard counterpart -- jm_get_events returns every event it holds on
 #: every call -- so the collector filters what it has already logged and the
 #: poll can afford to be less frequent than the distrib one.
+#: How many of the newest event-log records the alerts endpoint scans.
+#: The event-derived alert rules only look back EVENT_WINDOW_SEC, so this
+#: only has to exceed the number of events a busy cluster can produce in
+#: that window. It exists to bound the cost: an unbounded scan of a
+#: months-old event log on every poll of a monitoring endpoint is the one
+#: thing this endpoint must not do.
+ALERT_EVENT_SCAN_LIMIT = 2000
+
 JM_EVENT_COLLECTOR_INTERVAL_SEC = 10
 #: How many recently-logged JM event keys to remember per node for that filter.
 JM_EVENT_DEDUPE_MAX = 10000

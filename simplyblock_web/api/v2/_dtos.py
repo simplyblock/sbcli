@@ -27,6 +27,18 @@ from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from . import util
 
 
+AlertSeverity = Literal[
+    "critical",
+    "warning",
+]
+
+
+AlertStatus = Literal[
+    "firing",
+    "resolved",
+]
+
+
 ClusterStatus = Literal[
     "active",
     "read_only",
@@ -767,3 +779,46 @@ class DeviceHealthInfoDTO(BaseModel):
             critical_composite_temperature_time_minutes=health_info["critical_composite_temperature_time_minutes"],
         )
 
+
+class AlertDTO(BaseModel):
+    """One condition that currently needs an operator.
+
+    Deliberately NOT an EventObj. An event is a journal entry -- it happened,
+    it is kept forever, and nothing ever retracts it. An alert is a claim
+    about the present that goes away by itself when it stops being true, so
+    it carries the object it is about and the time the condition started
+    rather than the time something was logged. ``id`` is derived from the
+    kind and the object, so it is stable across polls and a consumer can
+    dedupe on it without keeping state.
+    """
+    id: str
+    kind: str
+    severity: AlertSeverity
+    status: AlertStatus
+    message: str
+    cluster_id: UUID
+    node_id: Optional[UUID]
+    device_id: Optional[UUID]
+    since: Optional[str]
+    first_seen: Optional[str]
+    resolved_at: Optional[str]
+    details: dict
+
+    @staticmethod
+    def from_alert(alert: dict):
+        # Not from_model: alerts are computed, not stored, so there is no core
+        # model to convert -- alerts_controller yields these dicts directly.
+        return AlertDTO(
+            id=alert['id'],
+            kind=alert['kind'],
+            severity=cast(AlertSeverity, alert['severity']),
+            status=cast(AlertStatus, alert.get('status', 'firing')),
+            message=alert['message'],
+            cluster_id=UUID(alert['cluster_id']),
+            node_id=UUID(alert['node_id']) if alert.get('node_id') else None,
+            device_id=UUID(alert['device_id']) if alert.get('device_id') else None,
+            since=alert.get('since') or None,
+            first_seen=alert.get('first_seen') or None,
+            resolved_at=alert.get('resolved_at') or None,
+            details=alert.get('details') or {},
+        )
