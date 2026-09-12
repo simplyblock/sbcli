@@ -330,7 +330,32 @@ INSTANCE_STORAGE_DATA = {
         'm6id.8xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1900},
     }
 
-MAX_SNAP_COUNT = 100
+# ---------------------------------------------------------------------------
+# Hard object limits (enforced on every create / resize path, CLI and API).
+#
+# These are product limits, not capacity math: they bound the shapes that the
+# SPDK blobstore/lvol layer has been validated to serve without degradation.
+#
+# MAX_LVOL_SIZE            largest provisioned size of one volume (create,
+#                          resize, clone --resize, and the thin max_size ceiling).
+# MAX_SNAPSHOTS_PER_LVOL   active (non-deleted) snapshots of one volume. A
+#                          volume's snapshots form one blob chain; every
+#                          snapshot deepens the chain that reads of that volume
+#                          and its clones must walk.
+# MAX_CLONES_PER_SNAPSHOT  active (non-deleted) clones created from one
+#                          snapshot.
+#
+# Deleted objects never count; objects in deletion still do (they are still in
+# the chain until the delete completes). Internal snapshots (replication /
+# migration, SnapShot.TYPE_INTERNAL) are exempt from the snapshot cap so a
+# volume at the cap can still be replicated and migrated -- they are transient.
+# ---------------------------------------------------------------------------
+MAX_LVOL_SIZE = 70 * 1024 ** 4          # 70 TiB
+MAX_SNAPSHOTS_PER_LVOL = 100
+MAX_CLONES_PER_SNAPSHOT = 500
+
+# Backward-compatible alias (previously defined but never enforced).
+MAX_SNAP_COUNT = MAX_SNAPSHOTS_PER_LVOL
 
 # Hard per-lvstore object cap: an lvstore serves at most this many objects
 # (lvols + clones + snapshots), counted against the lvstore's owning node.

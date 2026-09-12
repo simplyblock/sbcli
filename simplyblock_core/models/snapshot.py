@@ -75,6 +75,7 @@ class SnapShotMini(BaseModel):
     created_at: int = 0
     used_size: int = 0
     snap_type: str = "user"
+    deleted: bool = False
 
     def from_snapshot(self, snapshot: SnapShot):
         self.uuid = snapshot.uuid
@@ -91,4 +92,5 @@ class SnapShotMini(BaseModel):
         self.created_at = snapshot.created_at
         self.used_size = snapshot.used_size
         self.snap_type = snapshot.snap_type
+        self.deleted = snapshot.deleted
         return self

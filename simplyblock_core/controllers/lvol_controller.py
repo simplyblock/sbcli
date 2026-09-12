@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple, Optional
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import ops_gate
+from simplyblock_core.controllers import object_limits, ops_gate
+from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -122,6 +123,9 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #  size validation
     if size < utils.parse_size('100MiB'):
         return False, "Size must be larger than 100M"
+    size_error = object_limits.check_lvol_size(size)
+    if size_error:
+        return False, size_error
 
     #  host validation
     # snode = db_controller.get_storage_node_by_id(host_id_or_name)
@@ -470,6 +474,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     ops_gate.assert_object_ops_allowed("volume create", cluster_id=pool.cluster_id)
 
+    # Hard product limit on the provisioned size. Deliberately NOT applied to
+    # max_size: that is the thin-provisioning growth ceiling and the CLI/CSI
+    # pass a large default (1000T) when the user gives none -- capping it
+    # rejected every `sbctl volume add` (AWS soak 2026-09-11). Growth is
+    # bounded where it happens: resize_lvol enforces MAX_LVOL_SIZE on new_size.
+    size_error = object_limits.check_lvol_size(size)
+    if size_error:
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, pool, size_error, limit_key="lvol_size")
+        return False, size_error
+
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
 
     if (fabric == "tcp" and not cl.fabric_tcp) or (fabric == "rdma" and not cl.fabric_rdma):
@@ -659,6 +674,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     limit_error = check_lvstore_object_limit(host_node, all_lvols, all_snaps)
     if limit_error:
         logger.error(limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, pool, limit_error,
+            limit_key=f"lvstore_objects:{host_node.get_id()}")
         return False, limit_error
 
     # Create a new subsystem by default unless namespaced is set and an
@@ -2813,6 +2831,16 @@ def resize_lvol(id, new_size, lock=True) -> None:
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(id)
     ops_gate.assert_object_ops_allowed("volume resize", pool_uuid=lvol.pool_uuid)
+
+    size_error = object_limits.check_lvol_size(new_size, what="New size")
+    if size_error:
+        try:
+            _snode = db_controller.get_storage_node_by_id(lvol.node_id)
+            events_controller.log_object_limit_reached(
+                _snode.cluster_id, lvol, size_error, limit_key="lvol_size")
+        except Exception as _e:
+            logger.warning("Could not log resize limit event: %s", _e)
+        raise PreconditionError(size_error)
 
     # Block during restart Phase 5
     try:

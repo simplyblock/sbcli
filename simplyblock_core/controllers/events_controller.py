@@ -1,3 +1,4 @@
+import threading
 import time
 import uuid
 
@@ -13,6 +14,7 @@ EVENT_STATUS_CHANGE = "STATUS_CHANGE"
 EVENT_OBJ_CREATED = "OBJ_CREATED"
 EVENT_OBJ_DELETED = "OBJ_DELETED"
 EVENT_CAPACITY = "CAPACITY"
+EVENT_LIMIT_REACHED = "LIMIT_REACHED"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"
@@ -155,6 +157,54 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)
     return ds.to_dict()
+
+
+#: Minimum gap between two identical object-limit warnings from one process.
+#: A limit refusal is driven by the CALLER's retry loop, not by an event in
+#: the cluster: CSI re-issues a rejected create every few seconds and would
+#: otherwise write an event per attempt for as long as the volume stays
+#: unschedulable. The operator needs to know the limit was hit, once, not a
+#: transcript of the retries.
+LIMIT_EVENT_COOLDOWN_SEC = 300
+
+#: (cluster_id, limit_key) -> monotonic time of the last warning emitted.
+_limit_event_last: dict = {}
+_limit_event_lock = threading.Lock()
+
+
+def log_object_limit_reached(cluster_id, db_object, message, limit_key,
+                             caused_by=CAUSED_BY_CLI):
+    """Warn in the cluster event log that a hard object limit refused an op.
+
+    ``limit_key`` identifies the limit AND the object it was hit on (e.g.
+    ``"snapshots:<lvol_id>"``), and is what the cooldown dedupes on: a
+    different volume hitting the same limit is a separate event, the same
+    volume hitting it sixty times in a minute is not.
+
+    Returns the event dict, or None when the cooldown swallowed it. Never
+    raises: a failure to log an event must not turn an orderly "limit
+    reached" refusal into an internal error for the caller.
+    """
+    key = (cluster_id, limit_key)
+    now = time.monotonic()
+    with _limit_event_lock:
+        last = _limit_event_last.get(key)
+        if last is not None and (now - last) < LIMIT_EVENT_COOLDOWN_SEC:
+            return None
+        _limit_event_last[key] = now
+
+    try:
+        return log_event_cluster(
+            cluster_id=cluster_id,
+            domain=DOMAIN_CLUSTER,
+            event=EVENT_LIMIT_REACHED,
+            db_object=db_object,
+            caused_by=caused_by,
+            event_level=EventObj.LEVEL_WARN,
+            message=message)
+    except Exception as e:
+        logger.error("Failed to log object-limit event (%s): %s", limit_key, e)
+        return None
 
 
 def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, event_level):
