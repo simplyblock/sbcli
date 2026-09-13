@@ -1,0 +1,7 @@
+# Per-developer repo paths. Real config is local; the .example is committed.
+repo-map.config.json
+
+# Generated indexes. Derived from someone else's repo, can be hundreds of KB,
+# and go stale on their next commit. Rebuild with scripts/repo_map.py.
+repo-maps/*.md
+repo-maps/*.tsv

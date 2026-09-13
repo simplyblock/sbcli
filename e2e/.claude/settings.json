@@ -1,0 +1,16 @@
+{
+  "_comment": "Hooks scoped to the e2e suite. Used when a session is opened with e2e/ as the project root. When the repo root is the project root, add the same SessionStart entry to the root .claude/settings.json pointing at e2e/.agents/hooks/.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.agents/hooks/check-repo-maps.py\"",
+            "statusMessage": "Checking external repo maps"
+          }
+        ]
+      }
+    ]
+  }
+}

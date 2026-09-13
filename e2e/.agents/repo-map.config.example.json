@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Copy to .agents/repo-map.config.json and adjust the paths for your machine.",
+    "The real config is gitignored because paths are per-developer, not project facts.",
+    "Then:  python3 .agents/scripts/repo_map.py",
+    "And:   /add-dir <repo path>   so the agent can read the source the map points at."
+  ],
+  "repos": {
+    "spdk": {
+      "path": "E:/spdk",
+      "languages": ["c", "cpp"],
+      "_why": "Every lvstore/blobstore abort RCA starts here. 'Forcing application shutdown via abort' -> lib/lvol/lvol.c:2945, 'Extent page crc mismmatch' -> lib/blob/blobstore.c:5990."
+    },
+    "ultra": {
+      "path": "E:/ultra",
+      "languages": ["c", "cpp", "python"],
+      "_why": "The distrib layer. 'DISTRIBD Unable to read stripe' -> DISTR_v2/src_code_app_spdk/bdev_distrib/parts/alg_io_split_parity2.cpp:226."
+    },
+    "operator": {
+      "path": "E:/simplyblock-operator",
+      "languages": ["go", "python"],
+      "_why": "Contains the CSI driver, which owns the nvme connect string: ctrl_loss_tmo, keep-alive-tmo, fast_io_fail_tmo. Several client-side findings trace back to values set here."
+    },
+    "sbcli-core": {
+      "path": "E:/sbcli/simplyblock_core",
+      "languages": ["python"],
+      "_why": "The control plane in this repo. 'port fence held {}s' -> storage_node_ops.py:10312, 'already shutting down in this cluster' -> storage_node_ops.py:6900."
+    }
+  }
+}
