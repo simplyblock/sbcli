@@ -62,7 +62,8 @@ def _persist_target_device_event(device, status, target_node):
 def send_node_status_event(node, node_status, target_node=None):
     db_controller = DBController()
     node_id = node.get_id()
-    if node_status in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_PENDING_REMOVAL]:
+    if node_status in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_REMOVAL,
+                       StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_PENDING_MIGRATION]:
         node_status = StorageNode.STATUS_UNREACHABLE
     logger.info(f"Sending event updates, node: {node_id}, status: {node_status}")
     node_status_event = {
@@ -281,7 +282,8 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
             node_w += dev_w_gib
 
         node_status = snode.status
-        if node_status in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_PENDING_REMOVAL]:
+        if node_status in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_REMOVAL,
+                           StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_PENDING_MIGRATION]:
             node_status = StorageNode.STATUS_UNREACHABLE
         map_cluster[snode.get_id()] = {
             "status": node_status,
@@ -379,7 +381,8 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
                     StorageNode.STATUS_RESTARTING,
                     StorageNode.STATUS_IN_SHUTDOWN,
                     StorageNode.STATUS_IN_REMOVAL,
-                    StorageNode.STATUS_PENDING_REMOVAL
+                    StorageNode.STATUS_PENDING_REMOVAL,
+                    StorageNode.STATUS_PENDING_MIGRATION,
                 ):
                     node_status = StorageNode.STATUS_UNREACHABLE
                 data["Desired Status"] = node_status

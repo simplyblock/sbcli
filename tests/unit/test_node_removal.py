@@ -166,13 +166,16 @@ class TestRemovePreconditions(unittest.TestCase):
         ret, _ = self._run(FakeDB(cl, nodes))
         self.assertEqual(ret, "task-uuid-1")
 
-    def test_reject_lvols_present(self):
+    def test_lvols_present_no_longer_blocks_removal(self):
+        # LVols on the node are migrated off by node_removal_orchestrate
+        # itself now (_migrate_node_lvols) -- no longer a precondition the
+        # operator must satisfy before removal can even be queued.
         cl = _cluster()
         nodes = [_node("n1"), _node("n2")]
         db = FakeDB(cl, nodes, lvols={"n1": [MagicMock()]})
         ret, tc = self._run(db)
-        self.assertFalse(ret)
-        tc.add_node_removal_task.assert_not_called()
+        self.assertEqual(ret, "task-uuid-1")
+        tc.add_node_removal_task.assert_called_once()
 
     def test_reject_snapshots_present(self):
         cl = _cluster()
@@ -1879,14 +1882,17 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["_teardown_replicas_of_primary"].assert_called_once()
         mocks["_relocate_replicas_hosted_on"].assert_called_once()
         mocks["_finalize_node_removal"].assert_called_once()
-        # Two transitions: IN_REMOVAL right after shutdown (so other code /
-        # monitors can see the node is mid-removal, not still ONLINE), then
-        # REMOVED once phase 4 finalizes.
+        # Two transitions: PENDING_MIGRATION right after shutdown (so other
+        # code / monitors can see the node is draining, not still ONLINE,
+        # and _resolve_active_source_node's from-secondary fallback keys off
+        # exactly this status), then REMOVED once phase 4 finalizes.
         self.assertEqual(mocks["set_node_status"].call_args_list, [
-            call("n1", StorageNode.STATUS_IN_REMOVAL, caused_by="remove"),
+            call("n1", StorageNode.STATUS_PENDING_MIGRATION, caused_by="remove"),
             call("n1", StorageNode.STATUS_REMOVED, caused_by="remove"),
         ])
-        mocks["_decommission_node_devices"].assert_called_once()
+        # Called twice: once as phase M1 (drain, before phase 3a), once more
+        # as the trailing phase 5 -- idempotent, a no-op repeat on this path.
+        self.assertEqual(mocks["_decommission_node_devices"].call_count, 2)
 
     def test_replica_teardown_then_jm_decommission_then_relocation(self):
         # 2026-08-25 incidents (two, found back to back):
