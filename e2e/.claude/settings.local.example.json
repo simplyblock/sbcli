@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Per-developer paths. Gitignored: these are absolute and machine-specific.",
+    "Committed template: settings.local.example.json",
+    "",
+    "Gives the agent file-tool access (Read/Grep/Glob) to the repos indexed by",
+    "repo_map.py. Without this the maps still resolve message -> file:line, but",
+    "reading the source needs Bash. Takes effect on the next session."
+  ],
+  "permissions": {
+    "additionalDirectories": [
+      "/absolute/path/to/sbcli",
+      "/absolute/path/to/spdk",
+      "/absolute/path/to/ultra",
+      "/absolute/path/to/simplyblock-operator",
+      "/absolute/path/to/documentation"
+    ]
+  }
+}

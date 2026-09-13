@@ -33,9 +33,19 @@ confirm" for two days.
 ## Use
 
     cp .agents/repo-map.config.example.json .agents/repo-map.config.json
-    # edit the paths, then
+    cp ../e2e/.claude/settings.local.example.json ../e2e/.claude/settings.local.json
+    # edit the paths in both, then
     python3 .agents/scripts/repo_map.py           # index everything
     python3 .agents/scripts/repo_map.py --check   # staleness only
+
+Both files are gitignored, because absolute paths are per-developer.
+
+`settings.local.json` grants file-tool access (Read / Grep / Glob) to the
+indexed repos via `permissions.additionalDirectories`. Without it the maps still
+resolve a message to `file:line`, but reading the source needs Bash. It also
+needs to list the repo root and the RCA archive: with `e2e/` as the project
+root, `simplyblock_core` and `sbcli-rca-archive` are both outside it. The
+setting applies from the next session, not the current one.
 
 Each repo produces three files:
 
