@@ -326,6 +326,10 @@ def main():
                         )
         try:
             test_obj.setup()
+            # After setup(), not inside it: several test classes replace
+            # setup() wholesale without calling super(), so anything wired
+            # into the base setup silently does not run for them.
+            test_obj.start_alert_collection()
             if i == 0:
                 test_obj.cleanup_logs()
                 test_obj.configure_sysctl_settings()
@@ -367,6 +371,14 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            # In finally, so the samples and summary survive a teardown that
+            # threw before reaching its own stop call.
+            try:
+                test_obj.stop_alert_collection()
+            except Exception:
+                logger.error("Error stopping alert collection")
+                logger.error(traceback.format_exc())
+
             # Print log path FIRST — before any file copies or core dump
             # checks that might break/hang.  The workflow summary parses
             # "Logs Path:" from output.log to build the per-test table.

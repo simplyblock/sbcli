@@ -2030,20 +2030,67 @@ class TestClusterBase:
             return
 
         interval = interval or int(os.getenv("ALERT_POLL_INTERVAL_SEC", "300"))
-        # cluster_api_url is the v1 wrapper's base and may already carry the
-        # /api/v1 suffix. Strip it and build the v2 prefix the same way
-        # SbcliUtilsV2 does -- posting v2 paths onto the v1 base 404s on
-        # every poll, which this sampler would otherwise report as "the
-        # build has no alerts endpoint".
-        raw = (self.sbcli_utils.cluster_api_url or "").rstrip("/")
-        if raw.endswith("/api/v1"):
-            raw = raw[: -len("/api/v1")]
-        url = f"{raw}/api/v2/clusters/{self.cluster_id}/alerts/"
-        # v2 authenticates with HTTPBearer and compares the token against the
-        # cluster secret alone. sbcli_utils.headers carries the v1 form,
-        # "Authorization: <cluster_id> <secret>", whose scheme is not Bearer
-        # -- v2 rejects that with 403 before any handler runs.
-        headers = {"Authorization": f"Bearer {self.cluster_secret}"}
+        window = interval * 2
+
+        # Two transports, because the two modes reach the control plane
+        # differently and only one of them has an HTTP base at all.
+        #
+        # Docker (SbcliUtils) talks to the API over HTTP, so poll the
+        # endpoint. cluster_api_url is the v1 wrapper's base and may already
+        # carry the /api/v1 suffix -- strip it and build the v2 prefix the
+        # same way SbcliUtilsV2 does, or every poll 404s.
+        #
+        # K8s-native (K8sSbcliUtils) has neither cluster_api_url nor headers:
+        # it runs everything as `kubectl exec` into the admin pod. The API
+        # service is not reachable from that pod (verified: empty reply on
+        # both the service and the pod IP), and sbctl does not need it --
+        # the CLI calls the core controllers in-process. So call the same
+        # controller the endpoint calls. The route is a thin severity/status
+        # filter over get_alerts(), so this exercises the alerting logic;
+        # what it does not cover is the HTTP layer itself.
+        api_url = getattr(self.sbcli_utils, "cluster_api_url", None)
+        if api_url:
+            raw = api_url.rstrip("/")
+            if raw.endswith("/api/v1"):
+                raw = raw[: -len("/api/v1")]
+            source = f"{raw}/api/v2/clusters/{self.cluster_id}/alerts/"
+            # v2 authenticates with HTTPBearer against the cluster secret
+            # alone. sbcli_utils.headers carries the v1 form,
+            # "Authorization: <cluster_id> <secret>", whose scheme is not
+            # Bearer -- v2 rejects that with 403 before any handler runs.
+            headers = {"Authorization": f"Bearer {self.cluster_secret}"}
+
+            def _fetch():
+                resp = requests.get(source, headers=headers, timeout=30,
+                                    params={"history_seconds": window})
+                if resp.status_code != 200:
+                    return resp.status_code, [], (resp.text or "")[:500]
+                body = resp.json()
+                return 200, (body if isinstance(body, list) else []), None
+        else:
+            source = "kubectl exec -> alerts_controller.get_alerts"
+            _marker = "ALERTS_JSON:"
+            _cmd = (
+                "python3 - <<'PYEOF'\n"
+                "import json\n"
+                "from simplyblock_core.controllers import alerts_controller as a\n"
+                f"print('{_marker}' + json.dumps(\n"
+                f"    a.get_alerts('{self.cluster_id}', include_history=True,\n"
+                f"                 history_seconds={window})))\n"
+                "PYEOF"
+            )
+
+            def _fetch():
+                out, err = self.sbcli_utils.k8s.exec_sbcli(
+                    _cmd, supress_logs=True)
+                # The controller logs each transition at CRITICAL, so the
+                # payload is one line in a stream of them -- hence the marker
+                # rather than "parse whatever came back".
+                for line in (out or "").splitlines():
+                    if line.startswith(_marker):
+                        body = json.loads(line[len(_marker):])
+                        return 200, (body if isinstance(body, list) else []), None
+                return None, [], (err or out or "no ALERTS_JSON line")[:500]
 
         out_dir = os.path.join(self.docker_logs_path, "alerts")
         os.makedirs(out_dir, exist_ok=True)
@@ -2054,7 +2101,7 @@ class TestClusterBase:
         self._alert_stats = {
             "polls": 0, "failures": 0, "kinds": set(),
             "max_firing": 0, "raised": 0, "resolved": 0,
-            "url": url, "interval": interval,
+            "source": source, "interval": interval,
         }
         stats = self._alert_stats
         started = time.time()
@@ -2068,7 +2115,8 @@ class TestClusterBase:
 
         def _poll_loop():
             self.logger.info(
-                f"[alerts] Sampling {url} every {interval}s -> {samples_path}"
+                f"[alerts] Sampling {source} every {interval}s "
+                f"(window {window}s) -> {samples_path}"
             )
             previous = {}
             seen_statuses = set()
@@ -2080,36 +2128,28 @@ class TestClusterBase:
                 }
                 t0 = time.time()
                 try:
-                    resp = requests.get(
-                        url, headers=headers, timeout=30,
-                        params={"history_seconds": interval * 2},
-                    )
+                    status, alerts, body = _fetch()
                     record["duration_ms"] = round((time.time() - t0) * 1000, 1)
-                    record["http_status"] = resp.status_code
-                    if resp.status_code == 200:
-                        alerts = resp.json()
-                        if not isinstance(alerts, list):
-                            alerts = []
-                        record["alerts"] = alerts
-                    else:
-                        record["alerts"] = []
-                        record["body"] = (resp.text or "")[:500]
+                    record["http_status"] = status
+                    record["alerts"] = alerts
+                    if body is not None:
+                        record["body"] = body
                         stats["failures"] += 1
                         # A misconfigured sampler fails the same way on every
                         # poll, so say it once per status rather than 200
                         # times -- but say it, because a silent stream of 403s
                         # looks exactly like a cluster with nothing wrong.
-                        if resp.status_code not in seen_statuses:
-                            seen_statuses.add(resp.status_code)
+                        if status not in seen_statuses:
+                            seen_statuses.add(status)
                             hint = {
                                 404: "this build has no alerts endpoint "
                                      "(added in R26.3)",
                                 401: "token rejected; check CLUSTER_SECRET",
                                 403: "auth scheme rejected; v2 wants "
                                      "'Bearer <cluster_secret>'",
-                            }.get(resp.status_code, "")
+                            }.get(status, body[:200])
                             self.logger.warning(
-                                f"[alerts] HTTP {resp.status_code}"
+                                f"[alerts] poll failed (status={status})"
                                 f"{' -- ' + hint if hint else ''}. "
                                 "Still recording."
                             )
@@ -2177,7 +2217,7 @@ class TestClusterBase:
         if not stats:
             return
         summary = {
-            "url": stats["url"],
+            "source": stats["source"],
             "interval_sec": stats["interval"],
             "polls": stats["polls"],
             "failed_polls": stats["failures"],
