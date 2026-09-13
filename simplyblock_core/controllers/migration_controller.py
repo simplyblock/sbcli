@@ -146,7 +146,7 @@ def start_migration(migration_id,
     # here would make the feature unusable in the scenario it exists for.
     # Ordinary (non-fallback) migrations keep the stricter ACTIVE-only gate.
     allowed_statuses = (
-        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_IN_SHRINK) if is_fallback_source
         else (Cluster.STATUS_ACTIVE,))
     if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
@@ -513,6 +513,15 @@ def _resolve_active_source_node(primary_node, target_node_id):
     online either. Raises PreconditionError if the resolved node is the
     same as target_node_id (can't migrate a replica onto itself).
 
+    The fallback branch triggers on StorageNode.STATUS_PENDING_MIGRATION
+    specifically — the status node removal sets on a node it has shut down
+    and is draining (see node_removal_orchestrate) — not on "any status that
+    isn't ONLINE/SUSPENDED". That broader catch-all would also fire for
+    unrelated transient statuses (STATUS_IN_CREATION, STATUS_RESTARTING,
+    etc.) that were never meant to imply "source from a replica instead".
+    An unplanned primary failure (raw STATUS_OFFLINE outside of node
+    removal) is therefore no longer a fallback trigger by itself.
+
     TEST-ONLY (lvol-migration-from-replica-test): SB_TEST_FORCE_SOURCE_FALLBACK
     forces the fallback branch below even when the primary is healthy, so
     tests can exercise migrate-from-secondary without any real fault
@@ -525,7 +534,7 @@ def _resolve_active_source_node(primary_node, target_node_id):
     force_fallback = (utils.get_env_var("SB_TEST_FORCE_SOURCE_FALLBACK", "") or "").lower() in ("1", "true", "yes")
     if not force_fallback and primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
         active_node = primary_node
-    else:
+    elif force_fallback or primary_node.status == StorageNode.STATUS_PENDING_MIGRATION:
         active_node = None
         for replica_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
             if not replica_id:
@@ -541,6 +550,10 @@ def _resolve_active_source_node(primary_node, target_node_id):
             raise ValueError(
                 f"Source node is not online (status={primary_node.status}) "
                 f"and no online secondary/tertiary replica is available")
+    else:
+        raise ValueError(
+            f"Source node is not online (status={primary_node.status}) and is "
+            f"not in a recognized migration-fallback state ({StorageNode.STATUS_PENDING_MIGRATION})")
 
     if active_node.get_id() == target_node_id:
         raise PreconditionError(
@@ -1092,7 +1105,7 @@ def create_migration(lvol_id, target_node_id,
     # strict ACTIVE-only gate would make the feature unusable for the
     # scenario it exists for. Non-fallback migrations keep the stricter gate.
     allowed_statuses = (
-        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_IN_SHRINK) if is_fallback_source
         else (Cluster.STATUS_ACTIVE,))
     if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
@@ -1608,7 +1621,7 @@ def start_batch_migration(group_id,
     # comment in start_migration()). Non-fallback groups keep the stricter gate.
     cluster = db.get_cluster_by_id(group.cluster_id)
     allowed_statuses = (
-        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_IN_SHRINK) if is_fallback_source
         else (Cluster.STATUS_ACTIVE,))
     if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")

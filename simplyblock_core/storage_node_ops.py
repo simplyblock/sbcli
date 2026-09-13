@@ -30,7 +30,7 @@ from simplyblock_core.utils import rpc_budget
 from simplyblock_core.utils import hublvol_reconnect
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
+    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller, migration_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
@@ -4311,22 +4311,27 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     tasks_runner_node_removal service drives the multi-step, possibly
     multi-hour orchestration (see ``node_removal_orchestrate``):
 
-        shutdown -> in_removal -> rewire LVS replicas -> remove/fail/migrate
-        devices -> removed
+        shutdown -> pending_migration (drain: failed-device migration, then
+        lvol migration) -> rewire LVS replicas -> removed
 
     Preconditions (all enforced here, before anything is queued):
       * the target node is ONLINE;
       * every other (non-removed) node in the cluster is ONLINE;
       * FTT headroom allows losing this node (``_check_ftt_allows_node_removal``);
-      * the node hosts NO LVols and NO snapshots (the operator migrates those
-        separately, at a higher level — see the design decision for this
-        feature);
+      * the node hosts NO non-deleted snapshots that aren't owned by an lvol
+        also being migrated off (an lvol's own snapshot chain travels with
+        it during its migration — see _migrate_node_lvols / the normal
+        migration_controller snapshot-chain handling);
       * any secondary/tertiary replica this node hosts for OTHER primaries has
         a valid host-disjoint relocation target.
 
+    Any LVols still on the node are migrated off by node_removal_orchestrate
+    itself (see _migrate_node_lvols) — this is no longer a precondition the
+    operator must satisfy beforehand.
+
     ``force_remove`` only bypasses the active-task guard (cancelling them).
     ``force_migrate`` is accepted for signature compatibility and ignored:
-    LVol migration is no longer part of node removal.
+    lvol migration during removal is unconditional, not opt-in.
 
     Returns the new task uuid on success, or False on a rejected precondition.
     """
@@ -4359,21 +4364,22 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove node {node_id}: {reason}")
         return False
 
-    lvols = db_controller.get_lvols_by_node_id(node_id)
-    if lvols:
-        logger.error(
-            f"Can not remove node {node_id}: {len(lvols)} LVol(s) present. "
-            f"Migrate or delete them first.")
-        return False
-
+    # LVols still on the node are no longer a precondition failure — they are
+    # migrated off by node_removal_orchestrate itself (_migrate_node_lvols),
+    # carrying each lvol's own snapshot chain with it. Only *orphaned*
+    # snapshots (no live owning lvol left on the node to carry them — e.g.
+    # the owning lvol was deleted, not migrated) still block removal, since
+    # nothing will move them.
+    lvol_ids_on_node = {lv.uuid for lv in db_controller.get_lvols_by_node_id(node_id)}
     node_snaps = [
         sn for sn in db_controller.get_snapshots()
         if sn.lvol.node_id == node_id and sn.deleted is False
+        and sn.lvol.uuid not in lvol_ids_on_node
     ]
     if node_snaps:
         logger.error(
-            f"Can not remove node {node_id}: {len(node_snaps)} snapshot(s) present. "
-            f"Remove them first.")
+            f"Can not remove node {node_id}: {len(node_snaps)} orphaned snapshot(s) present "
+            f"(no owning lvol left to carry them during migration). Remove them first.")
         return False
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
@@ -4618,16 +4624,18 @@ def node_removal_orchestrate(node_id, force_remove=False):
 
     # Phase 4 (below) flips status to REMOVED *before* phase 5 (device
     # remove/fail/migrate; also re-runs the JM patch defensively) runs --
-    # so "status == REMOVED" means phases 1/3a/2/3b/4 committed, NOT that
-    # removal is fully done. A bare `return True` here would let a
+    # so "status == REMOVED" means phases 1/M1/M2/3a/2/3b/4 committed, NOT
+    # that removal is fully done. A bare `return True` here would let a
     # transient failure inside phase 5 (e.g. an RPC error against a peer)
     # get permanently masked: the retry re-enters, hits this guard, and
     # reports "done" forever without phase 5 ever completing (2026-08-10
     # incident: a mid-phase-5 RPC error left a peer's lvstore un-rebuilt
-    # while the task reported "Node removed"). Only phases 1/3a/2/3b/4 are
-    # skipped below when already_removed; phase 5 always runs and is
-    # itself idempotent (skips devices/JM already migrated), so resuming
-    # it here is a no-op once it has genuinely finished.
+    # while the task reported "Node removed"). Only phases 1/M1/M2/3a/2/3b/4
+    # are skipped below when already_removed — by construction that's safe:
+    # phase 4 can't have run (and set REMOVED) unless M1/M2 already reported
+    # every device and lvol fully drained. Phase 5 always runs and is itself
+    # idempotent (skips devices/JM already migrated), so resuming it here is
+    # a no-op once it has genuinely finished.
     already_removed = snode.status == StorageNode.STATUS_REMOVED
 
     # Node removal is a recognised restart-phase owner: phase 3b relocates
@@ -4656,8 +4664,25 @@ def node_removal_orchestrate(node_id, force_remove=False):
                     return False
                 snode = db_controller.get_storage_node_by_id(node_id)
 
-            if snode.status != StorageNode.STATUS_IN_REMOVAL:
-                set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
+            if snode.status != StorageNode.STATUS_PENDING_MIGRATION:
+                set_node_status(node_id, StorageNode.STATUS_PENDING_MIGRATION, caused_by="remove")
+
+            # Phase M — drain: failed-device migration, then lvol migration.
+            # Both run while the node carries STATUS_PENDING_MIGRATION —
+            # _resolve_active_source_node (migration_controller.py) keys its
+            # from-secondary fallback off exactly that status, not off any
+            # incidental non-online status, so every migration created here
+            # correctly sources from a live secondary/tertiary replica rather
+            # than this (shut down) node. Must run BEFORE phase 3a: that phase
+            # tears down this node's own replica/JM bookkeeping, which must
+            # not happen while any lvol here is still mid-migration.
+            logger.info(f"[REMOVAL] {node_id}: phase M1 — failed-device migration")
+            if not _decommission_node_devices(snode):
+                return False
+
+            logger.info(f"[REMOVAL] {node_id}: phase M2 — lvol migration")
+            if not _migrate_node_lvols(snode):
+                return False
 
             # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
             # node's own primary LVS, on the peers that host them (Case A).
@@ -4704,9 +4729,10 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # storage_events.snode_status_change(
             #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
 
-        # Phase 5 — remove + fail devices, then wait for failure-migration to
-        # finish. Always attempted, even on resume after status already
-        # flipped to REMOVED -- see the already_removed comment above.
+        # Phase 5 — re-run device decommission once more. Idempotent (skips
+        # devices/JM already migrated) — genuinely load-bearing only on the
+        # already_removed resume path, which skips phase M1 above entirely;
+        # on a fresh run this is a no-op repeat of phase M1.
         logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
         if not _decommission_node_devices(snode):
             return False
@@ -4715,6 +4741,77 @@ def node_removal_orchestrate(node_id, force_remove=False):
     finally:
         cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
     return True
+
+
+def _migrate_node_lvols(removed_node: StorageNode) -> bool:
+    """Migrate every lvol still on ``removed_node`` off to another node.
+
+    Runs while the node carries STATUS_PENDING_MIGRATION — _resolve_active_source_node
+    (migration_controller.py) keys its from-secondary fallback off exactly
+    that status, so every migration started here correctly sources data from
+    a live secondary/tertiary replica rather than this (shut down) node.
+
+    Idempotent / resumable: a re-entry only sees lvols still resident (a
+    completed migration has already moved lvol.node_id off this node, so
+    get_lvols_by_node_id no longer returns it) and skips any lvol whose
+    migration — solo, or for a shared-namespace member, the whole group's
+    batch migration — is already in flight.
+
+    Returns True once the node has zero lvols left; False to mean "still
+    migrating, retry later" (mirrors _decommission_node_devices' contract).
+    """
+    db_controller = DBController()
+    node_id = removed_node.get_id()
+    cluster_id = removed_node.cluster_id
+    lvols = db_controller.get_lvols_by_node_id(node_id)
+    if not lvols:
+        return True
+
+    all_lvols = db_controller.get_mini_lvols()
+    pending = False
+
+    for lvol in lvols:
+        if migration_controller.get_active_migration_for_lvol(lvol.uuid, cluster_id):
+            pending = True
+            continue
+
+        # A shared-namespace member must move with its whole group (--batch)
+        # rather than solo — this branch has no per-member solo migration.
+        is_shared = lvol.max_namespace_per_subsys > 1 and any(
+            lv.nqn == lvol.nqn and lv.uuid != lvol.uuid for lv in all_lvols)
+        if is_shared and migration_controller.get_active_migration_for_nqn(lvol.nqn, cluster_id):
+            # A sibling member already started this group's batch migration
+            # earlier in this same pass — nothing new to do for this lvol.
+            pending = True
+            continue
+
+        candidates = lvol_controller._get_next_3_nodes(
+            cluster_id, lvol.size, all_lvols, namespaced=is_shared)
+        if not candidates:
+            logger.warning(
+                f"[REMOVAL] {node_id}: no target node available yet for lvol "
+                f"{lvol.uuid}; will retry")
+            pending = True
+            continue
+        target_node_id = candidates[0].get_id()
+
+        try:
+            if is_shared:
+                migration_id, _ = migration_controller.create_batch_migration(lvol.uuid, target_node_id)
+                migration_controller.start_batch_migration(migration_id)
+            else:
+                migration_id, _ = migration_controller.create_migration(lvol.uuid, target_node_id)
+                migration_controller.start_migration(migration_id)
+            logger.info(
+                f"[REMOVAL] {node_id}: started {'batch ' if is_shared else ''}"
+                f"migration {migration_id} for lvol {lvol.uuid} -> {target_node_id}")
+        except Exception as e:
+            logger.warning(
+                f"[REMOVAL] {node_id}: could not start migration for lvol "
+                f"{lvol.uuid} (will retry): {e}")
+        pending = True
+
+    return not pending
 
 
 def _teardown_replicas_of_primary(removed_node: StorageNode):

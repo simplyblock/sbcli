@@ -489,6 +489,12 @@ class BaseNodeObject(BaseModel):
     STATUS_DOWN = 'down'
     STATUS_IN_REMOVAL = 'in_removal'
     STATUS_PENDING_REMOVAL = 'pending_removal'
+    #: Node removal has shut the node down and is draining it: failed-device
+    #: migration, then lvol migration, run while the node carries this status.
+    #: _resolve_active_source_node (migration_controller.py) keys its
+    #: from-secondary fallback off this status specifically, not off any
+    #: incidental non-online status.
+    STATUS_PENDING_MIGRATION = 'pending_migration'
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,
@@ -503,4 +509,5 @@ class BaseNodeObject(BaseModel):
         STATUS_DOWN: 40,
         STATUS_IN_REMOVAL: 41,
         STATUS_PENDING_REMOVAL: 42,
+        STATUS_PENDING_MIGRATION: 43,
     }

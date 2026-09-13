@@ -707,11 +707,48 @@ class TestStartMigrationPreconditions(unittest.TestCase):
             with pytest.raises(PreconditionError, match="not active"):
                 ctl.start_migration("mig-uuid")
 
-    def test_allow_degraded_cluster_for_fallback_source(self):
+    def test_allow_in_shrink_cluster_for_fallback_source(self):
         # Primary is offline; active_source_node_id was pinned to the
-        # secondary at create_migration() time. The primary being down is
-        # exactly what drives the cluster to DEGRADED, so DEGRADED must be
-        # allowed here or the fallback feature could never actually run.
+        # secondary at create_migration() time. node_removal_orchestrate
+        # forces cluster.status to IN_SHRINK for the duration of a node
+        # removal -- the scenario this fallback exists for -- so IN_SHRINK
+        # must be allowed here or the feature could never actually run.
+        mig = self._pre_created()
+        mig.active_source_node_id = "node-sec"
+        lvol = _lvol("lvol-1", "node-src")
+        src = _node("node-src", status=StorageNode.STATUS_OFFLINE)
+        sec = _node("node-sec")
+        tgt = _node("node-tgt")
+
+        mock_db = MagicMock()
+        mock_db.get_migration_by_id.return_value = mig
+        mock_db.get_lvol_by_id.return_value = lvol
+        nodes_by_id = {"node-src": src, "node-sec": sec, "node-tgt": tgt}
+        mock_db.get_storage_node_by_id.side_effect = lambda nid: nodes_by_id[nid]
+        mock_db.get_snapshots_by_node_id.return_value = [
+            _snap("s1", "lvol-1", "node-src")]
+        cluster = Cluster()
+        cluster.uuid = "cluster-1"
+        cluster.status = Cluster.STATUS_IN_SHRINK
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_job_tasks.return_value = []
+        mock_db.kv_store = MagicMock()
+
+        with patch.object(ctl, 'db', mock_db), \
+             patch('simplyblock_core.controllers.migration_controller.tasks_controller') as tc, \
+             patch('simplyblock_core.controllers.migration_controller.migration_events'):
+            tc.add_lvol_mig_task.return_value = "task-uuid"
+            tc.get_active_node_mig_task.return_value = None
+            result = ctl.start_migration("mig-uuid")
+
+        assert result == "mig-uuid"
+
+    def test_reject_degraded_cluster_even_for_fallback_source(self):
+        # A real, unplanned primary failure (not a node-removal-driven
+        # fallback) still drives the cluster to DEGRADED -- that must be
+        # rejected even when this migration happens to be fallback-sourced,
+        # unlike the old behaviour where any fallback-sourced migration was
+        # allowed through a DEGRADED cluster.
         mig = self._pre_created()
         mig.active_source_node_id = "node-sec"
         lvol = _lvol("lvol-1", "node-src")
@@ -730,17 +767,10 @@ class TestStartMigrationPreconditions(unittest.TestCase):
         cluster.uuid = "cluster-1"
         cluster.status = Cluster.STATUS_DEGRADED
         mock_db.get_cluster_by_id.return_value = cluster
-        mock_db.get_job_tasks.return_value = []
-        mock_db.kv_store = MagicMock()
 
-        with patch.object(ctl, 'db', mock_db), \
-             patch('simplyblock_core.controllers.migration_controller.tasks_controller') as tc, \
-             patch('simplyblock_core.controllers.migration_controller.migration_events'):
-            tc.add_lvol_mig_task.return_value = "task-uuid"
-            tc.get_active_node_mig_task.return_value = None
-            result = ctl.start_migration("mig-uuid")
-
-        assert result == "mig-uuid"
+        with patch.object(ctl, 'db', mock_db):
+            with pytest.raises(PreconditionError, match="not active"):
+                ctl.start_migration("mig-uuid")
 
     def test_success_creates_task(self):
         mig = self._pre_created()
@@ -799,7 +829,11 @@ class TestStartBatchMigrationPreconditions(unittest.TestCase):
             with pytest.raises(PreconditionError, match="not active"):
                 ctl.start_batch_migration("group-uuid")
 
-    def test_allow_degraded_cluster_for_fallback_source(self):
+    def test_allow_in_shrink_cluster_for_fallback_source(self):
+        # See the matching test_allow_in_shrink_cluster_for_fallback_source
+        # in TestStartMigrationPreconditions: node_removal_orchestrate forces
+        # cluster.status to IN_SHRINK for the scenario this fallback exists
+        # for, so IN_SHRINK (not DEGRADED) must be allowed here.
         group = self._group(active_source_node_id="node-sec")
         sec = _node("node-sec")
         mock_db = MagicMock()
@@ -807,7 +841,7 @@ class TestStartBatchMigrationPreconditions(unittest.TestCase):
         mock_db.get_storage_node_by_id.return_value = sec
         cluster = Cluster()
         cluster.uuid = "cluster-1"
-        cluster.status = Cluster.STATUS_DEGRADED
+        cluster.status = Cluster.STATUS_IN_SHRINK
         mock_db.get_cluster_by_id.return_value = cluster
         mock_db.get_job_tasks.return_value = []
         mock_db.kv_store = MagicMock()
@@ -820,3 +854,21 @@ class TestStartBatchMigrationPreconditions(unittest.TestCase):
 
         assert result == "group-uuid"
         tc.add_batch_mig_task.assert_called_once()
+
+    def test_reject_degraded_cluster_even_for_fallback_source(self):
+        # A real, unplanned primary failure still drives the cluster to
+        # DEGRADED -- that must be rejected even for a fallback-sourced
+        # group migration, unlike the old behaviour.
+        group = self._group(active_source_node_id="node-sec")
+        sec = _node("node-sec")
+        mock_db = MagicMock()
+        mock_db.get_migration_group_by_id.return_value = group
+        mock_db.get_storage_node_by_id.return_value = sec
+        cluster = Cluster()
+        cluster.uuid = "cluster-1"
+        cluster.status = Cluster.STATUS_DEGRADED
+        mock_db.get_cluster_by_id.return_value = cluster
+
+        with patch.object(ctl, 'db', mock_db):
+            with pytest.raises(PreconditionError, match="not active"):
+                ctl.start_batch_migration("group-uuid")

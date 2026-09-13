@@ -3299,7 +3299,8 @@ def _grace_shutdown_skipped(node) -> bool:
     See the rationale in cluster_grace_shutdown's loop.
     """
     return node.status in (StorageNode.STATUS_REMOVED,
-                           StorageNode.STATUS_IN_REMOVAL)
+                           StorageNode.STATUS_IN_REMOVAL,
+                           StorageNode.STATUS_PENDING_MIGRATION)
 
 
 def cluster_grace_shutdown(cl_id) -> None:

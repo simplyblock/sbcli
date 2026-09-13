@@ -318,11 +318,11 @@ commands:
             type: bool
             action: store_true
       - name: remove
-        help: 'Removes a storage node from the cluster (inverse of cluster expansion). 
-        The node must be ONLINE and all other nodes ONLINE; it must host no logical 
-        volumes or snapshots (migrate those first). Runs as a background task: shuts 
-        the node down, rewires LVS replicas onto other nodes, then removes, fails and 
-        migrates its devices before marking the node removed.'
+        help: 'Removes a storage node from the cluster (inverse of cluster expansion).
+        The node must be ONLINE and all other nodes ONLINE. Runs as a background task:
+        shuts the node down, migrates any lvols and failed devices off it (status
+        pending_migration), rewires LVS replicas onto other nodes, then marks the node
+        removed.'
         arguments:
           - name: node_id
             help: Storage node id
