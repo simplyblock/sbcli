@@ -509,7 +509,10 @@ class TestClusterBase:
             self.start_root_monitor()
 
         self.start_nvme_iostat_monitor()
-        self.start_alert_collection()
+        try:
+            self.start_alert_collection()
+        except Exception as e:
+            self.logger.warning(f"[alerts] could not start sampler: {e}")
         self.collect_bdev_snapshot(tag="start")
 
         sleep_n_sec(120)
@@ -2585,7 +2588,10 @@ class TestClusterBase:
         self.stop_root_monitor()
         self.collect_bdev_snapshot(tag="end")
         self.stop_nvme_iostat_monitor()
-        self.stop_alert_collection()
+        try:
+            self.stop_alert_collection()
+        except Exception as e:
+            self.logger.warning(f"[alerts] could not stop sampler: {e}")
 
         if not self.k8s_test:
             retry_check = 100

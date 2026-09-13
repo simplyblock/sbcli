@@ -122,8 +122,14 @@ def main():
             test_obj.setup()
             # After setup(), not inside it: eleven test classes replace
             # setup() wholesale without calling super(), so anything wired
-            # into the base setup silently does not run for them.
-            test_obj.start_alert_collection()
+            # into the base setup silently does not run for them. Guarded
+            # because a diagnostic collector must never fail the test it
+            # is only there to observe.
+            try:
+                test_obj.start_alert_collection()
+            except Exception:
+                logger.error("Error starting alert collection")
+                logger.error(traceback.format_exc())
             if i == 0:
                 test_obj.cleanup_logs()
                 test_obj.configure_sysctl_settings()
