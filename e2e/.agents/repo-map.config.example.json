@@ -1,30 +1,34 @@
 {
   "_comment": [
-    "Copy to .agents/repo-map.config.json and adjust the paths for your machine.",
-    "The real config is gitignored because paths are per-developer, not project facts.",
+    "Copy to .agents/repo-map.config.json and adjust paths for your machine.",
+    "The real config is gitignored: paths are per-developer, not project facts.",
     "Then:  python3 .agents/scripts/repo_map.py",
-    "And:   /add-dir <repo path>   so the agent can read the source the map points at."
+    "",
+    "exclude_dirs keeps a subtree out of the index. Its main use is excluding",
+    "the directory the session is opened in, which is readable with the file",
+    "tools already and does not need indexing."
   ],
   "repos": {
     "spdk": {
       "path": "E:/spdk",
       "languages": ["c", "cpp"],
-      "_why": "Every lvstore/blobstore abort RCA starts here. 'Forcing application shutdown via abort' -> lib/lvol/lvol.c:2945, 'Extent page crc mismmatch' -> lib/blob/blobstore.c:5990."
+      "_why": "Every lvstore/blobstore abort RCA starts here. Verified: 'Forcing application shutdown via abort' -> lib/lvol/lvol.c:2945; 'Extent page crc mismmatch' -> lib/blob/blobstore.c:5990."
     },
     "ultra": {
       "path": "E:/ultra",
       "languages": ["c", "cpp", "python"],
-      "_why": "The distrib layer. 'DISTRIBD Unable to read stripe' -> DISTR_v2/src_code_app_spdk/bdev_distrib/parts/alg_io_split_parity2.cpp:226."
+      "_why": "The distrib layer. Verified: 'DISTRIBD Unable to read stripe' -> DISTR_v2/src_code_app_spdk/bdev_distrib/parts/alg_io_split_parity2.cpp:226."
     },
     "operator": {
       "path": "E:/simplyblock-operator",
       "languages": ["go", "python"],
-      "_why": "Contains the CSI driver, which owns the nvme connect string: ctrl_loss_tmo, keep-alive-tmo, fast_io_fail_tmo. Several client-side findings trace back to values set here."
+      "_why": "Contains the CSI driver, which owns the nvme connect string. Verified: ctrl_loss_tmo, keep-alive-tmo and fast_io_fail all resolve here, e.g. test/integration/controlplane/connect.go:159."
     },
-    "sbcli-core": {
-      "path": "E:/sbcli/simplyblock_core",
+    "sbcli": {
+      "path": "E:/sbcli",
       "languages": ["python"],
-      "_why": "The control plane in this repo. 'port fence held {}s' -> storage_node_ops.py:10312, 'already shutting down in this cluster' -> storage_node_ops.py:6900."
+      "exclude_dirs": ["e2e"],
+      "_why": "The product code: simplyblock_core, simplyblock_web, simplyblock_cli. Needed because a session opened with e2e/ as its root cannot reach them with the file tools. e2e is excluded because it IS that root. Verified: 'port fence held {}s' -> simplyblock_core/storage_node_ops.py:10312; 'already shutting down in this cluster' -> :6900; 'NO LONGER leader' -> :10156."
     }
   }
 }

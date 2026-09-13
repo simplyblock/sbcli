@@ -55,6 +55,20 @@ Format placeholders are normalised, so a message written as
 `f"port fence held {elapsed:.3f}s"` is indexed as `port fence held {}s`. Grep the
 stable words, not the values.
 
+## Indexed repos
+
+| name | what it gives you |
+|---|---|
+| `spdk` | the abort and blobstore paths every SPDK RCA starts from |
+| `ultra` | the distrib layer (`DISTRIBD Unable to read stripe`) |
+| `operator` | the CSI driver, which owns `ctrl_loss_tmo` / `keep-alive-tmo` / `fast_io_fail` |
+| `sbcli` | `simplyblock_core`, `simplyblock_web`, `simplyblock_cli` |
+
+`sbcli` matters specifically when the session is opened with `e2e/` as its root:
+the product code then sits outside the project and is not reachable with the
+file tools. `e2e` itself is excluded from that index via `exclude_dirs`, because
+it is the root and is already directly readable.
+
 ## Notes
 
 - The indexer is pure Python by design. `rg` on this machine is a Git Bash alias,
@@ -65,3 +79,8 @@ stable words, not the values.
   a map nobody mentions gets ignored and a stale map is worse than none.
 - The hook is silent when there is no config, so this costs nothing for anyone
   who has not set it up.
+- `max_symbols` / `max_log_strings` default to 100000. They used to default to
+  4000/3000, which silently truncated the whole-repo sbcli index at 3000 of
+  9761 messages and made `port fence held` un-findable minutes after it had
+  worked. Truncation is now reported loudly in the build output. If you ever see
+  `[TRUNCATED`, raise the limit: lookups will be missing entries.

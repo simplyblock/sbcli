@@ -169,10 +169,11 @@ def find_rg():
     return None
 
 
-def iter_source_files(root, langs):
+def iter_source_files(root, langs, excludes=None):
     """Walk the tree once, yielding (abs_path, rel_path, lang)."""
+    skip = set(DEFAULT_EXCLUDES) | set(excludes or ())
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in DEFAULT_EXCLUDES]
+        dirnames[:] = [d for d in dirnames if d not in skip]
         for fn in filenames:
             lang = EXT_LANG.get(os.path.splitext(fn)[1].lower())
             if lang and lang in langs:
@@ -181,14 +182,14 @@ def iter_source_files(root, langs):
                 yield ap, rp, lang
 
 
-def scan(root, langs, sym_res, log_res):
+def scan(root, langs, sym_res, log_res, excludes=None):
     """Single pass over the tree collecting symbols and log strings.
 
     Pure Python on purpose: no ripgrep, no ctags, nothing to install. A repo the
     size of SPDK takes tens of seconds, and this runs rarely.
     """
     syms, logs = [], []
-    for ap, rp, lang in iter_source_files(root, langs):
+    for ap, rp, lang in iter_source_files(root, langs, excludes):
         try:
             with open(ap, "r", encoding="utf-8", errors="ignore") as fh:
                 for lineno, line in enumerate(fh, 1):
@@ -212,12 +213,13 @@ def scan(root, langs, sym_res, log_res):
     return syms, logs
 
 
-def layout(root, langs):
+def layout(root, langs, excludes=None):
     """Top directories with file counts, so the reader knows where to look."""
     counts = Counter()
     exts = Counter()
+    skip = set(DEFAULT_EXCLUDES) | set(excludes or ())
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in DEFAULT_EXCLUDES]
+        dirnames[:] = [d for d in dirnames if d not in skip]
         rel = os.path.relpath(dirpath, root).replace("\\", "/")
         top = rel.split("/")[0] if rel != "." else "."
         for f in filenames:
@@ -251,12 +253,16 @@ def build_map(name, cfg, check_only=False):
                           f"repo now at {sha})")
         return None, f"{name}: map current ({sha})"
 
-    counts, exts = layout(root, langs)
+    # Per-repo excludes. The main use is keeping the agent's own project root
+    # out of its map: when a session opens with e2e/ as root, e2e is directly
+    # readable with the file tools and indexing it again is pure duplication.
+    excludes = cfg.get("exclude_dirs") or []
+    counts, exts = layout(root, langs, excludes)
 
     sym_res = {lang: tuple(re.compile(p) for p in pats)
                for lang, pats in SYMBOL_PATTERNS.items() if lang in langs}
     log_res = {lang: rx for lang, rx in STRING_RE.items() if lang in langs}
-    syms, logs = scan(root, langs, sym_res, log_res)
+    syms, logs = scan(root, langs, sym_res, log_res, excludes)
 
     # De-duplicate, keeping the first definition seen for each name.
     seen_sym = {}
@@ -270,8 +276,17 @@ def build_map(name, cfg, check_only=False):
         if key not in seen_log:
             seen_log[key] = (path, lineno)
 
-    max_syms = cfg.get("max_symbols", 4000)
-    max_logs = cfg.get("max_log_strings", 3000)
+    # Generous by default, and truncation is reported loudly below.
+    #
+    # These used to default to 4000/3000. Indexing the whole sbcli repo produced
+    # 9,761 messages, the list is sorted alphabetically, and "port fence held..."
+    # fell off the end -- so a lookup that had worked minutes earlier silently
+    # returned nothing. For a tool whose whole job is answering "where does this
+    # message come from", quietly dropping two thirds of the messages is the
+    # worst possible failure. The indexes are grepped rather than read, so size
+    # costs little; completeness is what matters.
+    max_syms = cfg.get("max_symbols", 100000)
+    max_logs = cfg.get("max_log_strings", 100000)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -341,10 +356,16 @@ def build_map(name, cfg, check_only=False):
     def _kb(f):
         return os.path.getsize(f) / 1024
 
+    warn = ""
+    if len(seen_sym) > max_syms or len(seen_log) > max_logs:
+        warn = (" [TRUNCATED: kept %d/%d symbols, %d/%d messages -- raise "
+                "max_symbols/max_log_strings, lookups WILL miss]" % (
+                    min(len(seen_sym), max_syms), len(seen_sym),
+                    min(len(seen_log), max_logs), len(seen_log)))
     return out_path, ("%s: %d symbols, %d messages -> %s (%.0f KB map, "
-                      "%.0f KB messages, %.0f KB symbols)" % (
+                      "%.0f KB messages, %.0f KB symbols)%s" % (
                           name, len(seen_sym), len(seen_log), out_path,
-                          _kb(out_path), _kb(msg_path), _kb(sym_path)))
+                          _kb(out_path), _kb(msg_path), _kb(sym_path), warn))
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,

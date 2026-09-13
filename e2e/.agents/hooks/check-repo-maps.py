@@ -28,7 +28,13 @@ import sys
 # hook that only works from one of those is a hook that silently does nothing
 # half the time.
 AGENTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REL = os.path.join("e2e", ".agents")
+
+# Print paths relative to wherever the session actually opened, so the hint is
+# copy-pasteable whether the root is the repo or e2e/.
+try:
+    REL = os.path.relpath(AGENTS, os.getcwd())
+except ValueError:          # different drive on Windows
+    REL = AGENTS
 CONFIG = os.path.join(AGENTS, "repo-map.config.json")
 MAPS = os.path.join(AGENTS, "repo-maps")
 SCRIPT = os.path.join(AGENTS, "scripts", "repo_map.py")
