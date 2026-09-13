@@ -3,6 +3,7 @@ import re
 import threading
 import time
 import boto3
+import requests
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils, RunnerK8sLog, _compress_and_cleanup_old_dumps
 from exceptions.custom_exception import LvolNotConnectException
@@ -508,6 +509,7 @@ class TestClusterBase:
             self.start_root_monitor()
 
         self.start_nvme_iostat_monitor()
+        self.start_alert_collection()
         self.collect_bdev_snapshot(tag="start")
 
         sleep_n_sec(120)
@@ -1986,6 +1988,213 @@ class TestClusterBase:
         )
         return stop_event
 
+    # ── Alerts endpoint sampler ─────────────────────────────────────────
+
+    def start_alert_collection(self, interval=None):
+        """Poll ``GET /clusters/{id}/alerts`` and record every response.
+
+        The endpoint answers "what is wrong right now", so a single reading
+        at the end of a run says nothing useful -- by then the outages have
+        healed and the answer is an empty list either way. The value is in
+        the series: an alert that fires when a node goes down and clears
+        when it comes back is alerting working; one that never fires, or
+        one that never clears, is the bug the sampler exists to catch.
+
+        Two details matter for that to hold.
+
+        *Window.* Each poll asks for ``history_seconds = 2 * interval``, so
+        the reply also carries alerts that fired **and** resolved since the
+        previous poll. Without it a 5-minute poll only ever sees conditions
+        that outlive 5 minutes, which during rapid outages is almost none of
+        them -- the sampler would report "no alerts" for a run full of them.
+
+        *Tolerance.* The poll is one request with a short timeout and no
+        retry, unlike :meth:`SbcliUtils.get_request`. A failed poll is data:
+        the API being unreachable while a node is down is exactly the sort of
+        thing being tested, and a retry loop would both hide it and stall the
+        thread through the outage it is meant to observe.
+
+        Platform-neutral -- it is an HTTP call against the cluster API, so
+        docker and k8s runs take the same path. Off via ``COLLECT_ALERTS``,
+        period via ``ALERT_POLL_INTERVAL_SEC``.
+        """
+        if os.getenv("COLLECT_ALERTS", "true").lower() in ("false", "0", "no"):
+            self.logger.info("[alerts] COLLECT_ALERTS disabled; not sampling.")
+            return
+        if getattr(self, "_alert_thread", None) and self._alert_thread.is_alive():
+            self.logger.info("[alerts] Sampler already running; skipping start.")
+            return
+        if not self.cluster_id or not self.cluster_secret:
+            self.logger.warning(
+                "[alerts] No CLUSTER_ID/CLUSTER_SECRET; not sampling.")
+            return
+
+        interval = interval or int(os.getenv("ALERT_POLL_INTERVAL_SEC", "300"))
+        # cluster_api_url is the v1 wrapper's base and may already carry the
+        # /api/v1 suffix. Strip it and build the v2 prefix the same way
+        # SbcliUtilsV2 does -- posting v2 paths onto the v1 base 404s on
+        # every poll, which this sampler would otherwise report as "the
+        # build has no alerts endpoint".
+        raw = (self.sbcli_utils.cluster_api_url or "").rstrip("/")
+        if raw.endswith("/api/v1"):
+            raw = raw[: -len("/api/v1")]
+        url = f"{raw}/api/v2/clusters/{self.cluster_id}/alerts/"
+        # v2 authenticates with HTTPBearer and compares the token against the
+        # cluster secret alone. sbcli_utils.headers carries the v1 form,
+        # "Authorization: <cluster_id> <secret>", whose scheme is not Bearer
+        # -- v2 rejects that with 403 before any handler runs.
+        headers = {"Authorization": f"Bearer {self.cluster_secret}"}
+
+        out_dir = os.path.join(self.docker_logs_path, "alerts")
+        os.makedirs(out_dir, exist_ok=True)
+        samples_path = os.path.join(out_dir, "alerts.jsonl")
+        transitions_path = os.path.join(out_dir, "alert_transitions.log")
+
+        self._alert_stop = threading.Event()
+        self._alert_stats = {
+            "polls": 0, "failures": 0, "kinds": set(),
+            "max_firing": 0, "raised": 0, "resolved": 0,
+            "url": url, "interval": interval,
+        }
+        stats = self._alert_stats
+        started = time.time()
+
+        def _write(path, line):
+            try:
+                with open(path, "a") as fh:
+                    fh.write(line + "\n")
+            except Exception as e:                      # pragma: no cover
+                self.logger.warning(f"[alerts] write {path}: {e}")
+
+        def _poll_loop():
+            self.logger.info(
+                f"[alerts] Sampling {url} every {interval}s -> {samples_path}"
+            )
+            previous = {}
+            seen_statuses = set()
+            while True:
+                ts = datetime.now(timezone.utc)
+                record = {
+                    "ts": ts.isoformat(),
+                    "elapsed_sec": round(time.time() - started, 1),
+                }
+                t0 = time.time()
+                try:
+                    resp = requests.get(
+                        url, headers=headers, timeout=30,
+                        params={"history_seconds": interval * 2},
+                    )
+                    record["duration_ms"] = round((time.time() - t0) * 1000, 1)
+                    record["http_status"] = resp.status_code
+                    if resp.status_code == 200:
+                        alerts = resp.json()
+                        if not isinstance(alerts, list):
+                            alerts = []
+                        record["alerts"] = alerts
+                    else:
+                        record["alerts"] = []
+                        record["body"] = (resp.text or "")[:500]
+                        stats["failures"] += 1
+                        # A misconfigured sampler fails the same way on every
+                        # poll, so say it once per status rather than 200
+                        # times -- but say it, because a silent stream of 403s
+                        # looks exactly like a cluster with nothing wrong.
+                        if resp.status_code not in seen_statuses:
+                            seen_statuses.add(resp.status_code)
+                            hint = {
+                                404: "this build has no alerts endpoint "
+                                     "(added in R26.3)",
+                                401: "token rejected; check CLUSTER_SECRET",
+                                403: "auth scheme rejected; v2 wants "
+                                     "'Bearer <cluster_secret>'",
+                            }.get(resp.status_code, "")
+                            self.logger.warning(
+                                f"[alerts] HTTP {resp.status_code}"
+                                f"{' -- ' + hint if hint else ''}. "
+                                "Still recording."
+                            )
+                except Exception as e:
+                    record["duration_ms"] = round((time.time() - t0) * 1000, 1)
+                    record["error"] = f"{type(e).__name__}: {e}"
+                    record["alerts"] = []
+                    stats["failures"] += 1
+
+                alerts = record["alerts"]
+                firing = {
+                    a.get("id"): a for a in alerts
+                    if a.get("status", "firing") == "firing"
+                }
+                record["firing_count"] = len(firing)
+                record["total_count"] = len(alerts)
+                stats["polls"] += 1
+                stats["max_firing"] = max(stats["max_firing"], len(firing))
+                for a in alerts:
+                    if a.get("kind"):
+                        stats["kinds"].add(a["kind"])
+
+                _write(samples_path, json.dumps(record, default=str))
+
+                # Only transitions go to the readable log, so a condition
+                # that stands for an hour is two lines rather than twelve.
+                for aid, a in firing.items():
+                    if aid not in previous:
+                        stats["raised"] += 1
+                        line = (f"{ts.isoformat()} RAISED   "
+                                f"[{a.get('severity')}] {a.get('kind')} "
+                                f"node={a.get('node_id') or '-'} "
+                                f"dev={a.get('device_id') or '-'} :: "
+                                f"{a.get('message')}")
+                        _write(transitions_path, line)
+                        self.logger.info(f"[alerts] {line}")
+                for aid, a in previous.items():
+                    if aid not in firing:
+                        stats["resolved"] += 1
+                        line = (f"{ts.isoformat()} RESOLVED "
+                                f"[{a.get('severity')}] {a.get('kind')} "
+                                f"node={a.get('node_id') or '-'} "
+                                f"dev={a.get('device_id') or '-'}")
+                        _write(transitions_path, line)
+                        self.logger.info(f"[alerts] {line}")
+                previous = firing
+
+                if self._alert_stop.wait(interval):
+                    break
+            self.logger.info("[alerts] Sampler exiting.")
+
+        t = threading.Thread(target=_poll_loop, name="AlertSampler", daemon=True)
+        t.start()
+        self._alert_thread = t
+
+    def stop_alert_collection(self):
+        """Stop the sampler and write a summary next to the samples."""
+        if not getattr(self, "_alert_stop", None):
+            return
+        self._alert_stop.set()
+        if getattr(self, "_alert_thread", None):
+            self._alert_thread.join(timeout=60)
+
+        stats = getattr(self, "_alert_stats", None)
+        if not stats:
+            return
+        summary = {
+            "url": stats["url"],
+            "interval_sec": stats["interval"],
+            "polls": stats["polls"],
+            "failed_polls": stats["failures"],
+            "alerts_raised": stats["raised"],
+            "alerts_resolved": stats["resolved"],
+            "max_concurrent_firing": stats["max_firing"],
+            "kinds_seen": sorted(stats["kinds"]),
+        }
+        try:
+            out_dir = os.path.join(self.docker_logs_path, "alerts")
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "alert_summary.json"), "w") as fh:
+                json.dump(summary, fh, indent=2)
+        except Exception as e:                          # pragma: no cover
+            self.logger.warning(f"[alerts] summary write: {e}")
+        self.logger.info(f"[alerts] Summary: {json.dumps(summary)}")
+
     def collect_management_details(self, post_teardown=False, suffix=None):
         if suffix is None:
             suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
@@ -2336,6 +2545,7 @@ class TestClusterBase:
         self.stop_root_monitor()
         self.collect_bdev_snapshot(tag="end")
         self.stop_nvme_iostat_monitor()
+        self.stop_alert_collection()
 
         if not self.k8s_test:
             retry_check = 100
