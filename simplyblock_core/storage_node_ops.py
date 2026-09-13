@@ -4722,6 +4722,19 @@ def node_removal_orchestrate(node_id, force_remove=False):
             if not _decommission_node_devices(snode):
                 return False
 
+            # Failed-device migration schedules a rebalancing task per node in
+            # each affected redundancy group -- including, spuriously, this
+            # node itself (the one whose device just failed and is now shut
+            # down for removal). That task can never succeed ("node is not
+            # online") and retries forever, which permanently blocks
+            # migration_controller._can_add_lvol_migration()'s cluster-wide
+            # rebalancing guard from ever clearing -- observed live
+            # 2026-09-13: phase M2 below retried "Cluster ... is rebalancing"
+            # for 30+ minutes straight because of exactly this task. Cancel
+            # it so M2 isn't stuck waiting on a task that was never going to
+            # complete regardless of how long we wait.
+            _cancel_stuck_rebalancing_tasks_on_node(node_id, snode.cluster_id)
+
             logger.info(f"[REMOVAL] {node_id}: phase M2 — lvol migration")
             if not _migrate_node_lvols(snode):
                 return False
@@ -4783,6 +4796,37 @@ def node_removal_orchestrate(node_id, force_remove=False):
     finally:
         cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
     return True
+
+
+def _cancel_stuck_rebalancing_tasks_on_node(node_id, cluster_id):
+    """Cancel any rebalancing-type task still targeting ``node_id`` itself.
+
+    See the call site's comment in node_removal_orchestrate for why this is
+    needed: a task scheduled against the node being removed can never
+    succeed (the node is offline) and would otherwise retry forever,
+    permanently blocking migration_controller._can_add_lvol_migration()'s
+    cluster-wide rebalancing guard. Mirrors that function's own
+    rebalancing_task_names set so "what blocks lvol migration" and "what we
+    cancel here" never drift apart. Never touches the node's own
+    FN_NODE_REMOVAL task -- that's what's calling this.
+    """
+    rebalancing_task_names = {
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+        JobSchedule.FN_FAILED_DEV_MIG,
+        JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+        JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+        JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
+    }
+    db_controller = DBController()
+    for task in db_controller.get_job_tasks(cluster_id):
+        if task.canceled or task.status == JobSchedule.STATUS_DONE:
+            continue
+        if task.node_id == node_id and task.function_name in rebalancing_task_names:
+            logger.info(
+                f"[REMOVAL] {node_id}: cancelling stuck {task.function_name} "
+                f"task {task.uuid} targeting this (offline) node")
+            tasks_controller.cancel_task(task.uuid)
 
 
 def _migrate_node_lvols(removed_node: StorageNode) -> bool:

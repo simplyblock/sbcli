@@ -94,17 +94,21 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
 
 
 class FakeDB:
-    def __init__(self, cluster, nodes, lvols=None, snaps=None):
+    def __init__(self, cluster, nodes, lvols=None, snaps=None, tasks=None):
         self.cluster = cluster
         self.nodes = {n.get_id(): n for n in nodes}
         self.lvols = lvols or {}
         self.snaps = snaps or []
+        self.tasks = tasks or []
         self.kv_store = MagicMock()
         # devices indexed by id, pulled from the nodes
         self.devices = {}
         for n in nodes:
             for d in n.nvme_devices:
                 self.devices[d.get_id()] = d
+
+    def get_job_tasks(self, cluster_id, reverse=True):
+        return self.tasks
 
     def get_cluster_by_id(self, _):
         return self.cluster
