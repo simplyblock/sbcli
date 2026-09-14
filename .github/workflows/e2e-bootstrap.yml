@@ -260,6 +260,10 @@ jobs:
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.210/grafana' }}
       SBCLI_CMD: "sbctl"
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'main' }}
+      # Not main: carries the uv-based sbctl install. The nodes ship python3.9,
+      # below sbctl's >=3.11 floor, so bootstrap-cluster.sh installs it as a uv
+      # tool against a uv-managed interpreter instead of the system one.
+      DEPLOY_BRANCH: "uv"
 
       # SSH/client env
       SSH_USER: ${{ inputs.SSH_USER || 'root' }}
@@ -615,7 +619,8 @@ jobs:
         run: |
           set -euxo pipefail
           rm -rf simplyBlockDeploy
-          git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
+          git clone --branch "${DEPLOY_BRANCH}" --single-branch \
+            https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
 
       - name: Write cluster security/backup config to mgmt node
