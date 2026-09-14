@@ -222,16 +222,24 @@ class K8sNativeFailoverTest(TestClusterBase):
         # 5. Clean up old lvols/pools via sbcli (through kubectl exec)
         #    Order: clones → snapshots → lvols → pools
         #    (SPDK refuses to delete a snapshot that still has clones)
-        try:
-            self.sbcli_utils.delete_all_clones()
-            sleep_n_sec(2)
-            self.sbcli_utils.delete_all_snapshots()
-            sleep_n_sec(2)
-            self.sbcli_utils.delete_all_lvols()
-            sleep_n_sec(2)
-            self.sbcli_utils.delete_all_storage_pools()
-        except Exception as e:
-            self.logger.warning(f"Cleanup of old resources failed: {e}")
+        # Skipped on a resumed run: these objects are the run's own, and
+        # adopting them is the entire point of --resume.
+        if not self._should_wipe_existing_objects():
+            self.logger.info(
+                "[K8s setup] resume active: keeping existing clones, "
+                "snapshots, lvols and pools for adoption"
+            )
+        else:
+            try:
+                self.sbcli_utils.delete_all_clones()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_snapshots()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_lvols()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_storage_pools()
+            except Exception as e:
+                self.logger.warning(f"Cleanup of old resources failed: {e}")
 
         # 6. Initialize K8sUtils
         # In local kubectl mode (K8S_LOCAL_KUBECTL=1), mgmt_nodes may be empty
@@ -245,7 +253,15 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={mgmt_node!r}")
 
         # 6b. Kill orphaned K8s Jobs/resources from any previous run
-        self._kill_orphaned_k8s_resources()
+        # A resumed run's Jobs are not orphans: killing them would tear
+        # down the FIO the run is about to re-adopt.
+        if self._should_wipe_existing_objects():
+            self._kill_orphaned_k8s_resources()
+        else:
+            self.logger.info(
+                "[K8s setup] resume active: leaving existing K8s "
+                "resources in place"
+            )
 
         # 7. Client-based FIO mode: set up SSH connections to external clients
         client_ip_raw = os.environ.get("CLIENT_IP", "").strip()
@@ -2235,6 +2251,62 @@ class K8sNativeFailoverTest(TestClusterBase):
                     f"Node {node} did not go offline within 5 minutes."
                 )
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
+
+    def _k8s_disconnect_data_nic(self, node_ip: str, iface: str,
+                                 duration: int = 30) -> int:
+        """Drop traffic on ONE data NIC, self-restoring after *duration*.
+
+        The multipath equivalent of _k8s_network_outage, modelled on it
+        directly: same kubectl exec into the privileged hostNetwork SPDK
+        pod, same host-level nsenter scheduling so the restore survives
+        SPDK's 60-second abort timer killing the container.
+
+        Scoped with -i/-o <iface> rather than a blanket DROP, because the
+        point of the multipath axis is losing one path while the other
+        carries the IO. A blanket rule would be a node outage wearing a
+        different name.
+
+        The restore is an iptables -D of the two specific rules, not -F: a
+        flush would also clear rules a concurrent full-network outage had
+        scheduled, and the two axes are deliberately combinable.
+
+        Returns the duration, matching _k8s_network_outage's contract.
+        """
+        self._ensure_k8s_utils()
+        flush_delay = duration + 5
+        rule_in = f"INPUT -i {iface} -j DROP"
+        rule_out = f"OUTPUT -o {iface} -j DROP"
+
+        # Step 1: schedule the targeted restore as a host-level process.
+        restore_inner = (
+            f"sleep {flush_delay} && iptables -D {rule_in}; "
+            f"iptables -D {rule_out}"
+        )
+        restore_cmd = (
+            f"sudo nsenter --target 1 --mount --net -- "
+            f"bash -c 'nohup bash -c \"{restore_inner}\" "
+            f"> /dev/null 2>&1 &'"
+        )
+        self.k8s_utils.exec_in_spdk_container(node_ip, restore_cmd)
+        self.logger.info(
+            f"[K8s] Scheduled host-level restore of {iface} in {flush_delay}s "
+            f"on {node_ip}"
+        )
+
+        # Step 2: apply the DROP rules after a short delay, so kubectl
+        # exec returns before the path goes away.
+        drop_cmd = (
+            "sudo nohup bash -c '"
+            f"sleep 5 && iptables -A {rule_in} && "
+            f"iptables -A {rule_out}"
+            "' > /tmp/k8s_nic_outage.log 2>&1 &"
+        )
+        self.k8s_utils.exec_in_spdk_container(node_ip, drop_cmd)
+        self.logger.info(
+            f"[K8s] Data NIC {iface} disconnected on {node_ip} "
+            f"(self-restoring after {duration}s)"
+        )
+        return duration
 
     def _k8s_network_outage(self, node_ip: str, duration: int) -> int:
         """Trigger self-restoring full network outage on a K8s storage node.

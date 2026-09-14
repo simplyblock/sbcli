@@ -295,6 +295,16 @@ class TestClusterBase:
             )
             time.sleep(20)
 
+    def _should_wipe_existing_objects(self):
+        """False when this run is resuming and must adopt, not destroy.
+
+        Checked at every wipe site rather than only in the base setup(),
+        because eleven classes replace setup() without calling super(): a
+        single base-class guard would be silently bypassed by most of the
+        tests that need it most.
+        """
+        return not getattr(self, "resume_requested", False)
+
     def setup(self):
         """Contains setup required to run the test case
         """
@@ -426,24 +436,37 @@ class TestClusterBase:
             self.disconnect_lvols()
             sleep_n_sec(2)
         # Order: clones → snapshots → parent lvols → pools
-        self.sbcli_utils.delete_all_clones()
-        sleep_n_sec(2)
-        if self.k8s_test:
-            self.sbcli_utils.delete_all_snapshots()
-        elif self.mgmt_nodes:
-            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-        sleep_n_sec(2)
-        self.sbcli_utils.delete_all_lvols()
-        sleep_n_sec(2)
-        if not self.k8s_test:
-            self.sbcli_utils.delete_all_storage_pools()
+        #
+        # ...unless this run is resuming. A stress run is 5 to 27 hours
+        # and leaves its objects behind on purpose (stress.py passes
+        # delete_lvols=False), so this wipe is exactly what makes a late
+        # failure cost a full re-run. The k8s branch below already skips
+        # pool deletion for a related reason; this is that precedent,
+        # widened to every object.
+        if self._should_wipe_existing_objects():
+            self.sbcli_utils.delete_all_clones()
+            sleep_n_sec(2)
+            if self.k8s_test:
+                self.sbcli_utils.delete_all_snapshots()
+            elif self.mgmt_nodes:
+                self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+            sleep_n_sec(2)
+            self.sbcli_utils.delete_all_lvols()
+            sleep_n_sec(2)
+            if not self.k8s_test:
+                self.sbcli_utils.delete_all_storage_pools()
+            else:
+                # In K8s mode, avoid deleting pools during setup — the StoragePool CRD
+                # reconciliation is async and deleting+recreating pools between
+                # tests causes long waits or failures.  Tests create pools via
+                # _add_pool_dual() which reuses existing pools.
+                self.logger.info(
+                    "[setup] K8s mode: skipping pool deletion (will reuse existing pool)"
+                )
         else:
-            # In K8s mode, avoid deleting pools during setup — the StoragePool CRD
-            # reconciliation is async and deleting+recreating pools between
-            # tests causes long waits or failures.  Tests create pools via
-            # _add_pool_dual() which reuses existing pools.
             self.logger.info(
-                "[setup] K8s mode: skipping pool deletion (will reuse existing pool)"
+                "[setup] resume active: keeping existing clones, snapshots, "
+                "lvols and pools so they can be adopted"
             )
         aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
         aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)

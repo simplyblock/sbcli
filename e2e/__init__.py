@@ -95,6 +95,10 @@ from stress_test.large_scale_lvol_stress import (
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
 )
+from stress_test.dual_outage_matrix import (
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
+)
 from stress_test.product_limits_stress import (
     ProductLimits_Docker,
     ProductLimits_K8s,
@@ -448,6 +452,8 @@ ALL_TESTS = [
     BulkLvolHotDeleteK8s,
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
     ProductLimits_Docker,
     ProductLimits_K8s,
     ProductLimits_70TiB_Docker,
@@ -736,6 +742,8 @@ def get_stress_tests():
         BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
+        DualOutageMatrixDocker,
+        DualOutageMatrixK8s,
         ProductLimits_Docker,
         ProductLimits_K8s,
         ProductLimits_70TiB_Docker,
