@@ -1278,6 +1278,49 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
         return False
 
 
+def _fail_after_ns(lvol, rpc_client, nsid, msg, is_primary=True):
+    """Rollback for a failure that happens AFTER the namespace was attached.
+
+    _fail_after_bdev alone removes the bdev stack, which used to be the whole
+    rollback because every failure it covered happened before the namespace
+    existed -- the listener was published first. Now that the namespace goes on
+    before the listener, leaving it behind would point a live namespace at a
+    bdev the rollback is about to delete, which is the resurrected-namespace
+    state the delete flow already guards against (reads on it answered INTERNAL
+    DEVICE ERROR, incident 2026-07-14).
+    """
+    if nsid:
+        # remove_ns is asynchronous inside SPDK: it can return success and
+        # defer the actual removal, which is why the delete path confirms with
+        # _confirm_namespace_removed rather than trusting the return. Deleting
+        # the bdev while the subsystem still references its namespace is the
+        # stale-namespace state this rollback exists to avoid, so an
+        # unconfirmed removal must NOT fall through to the bdev delete.
+        try:
+            removed = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, nsid))
+            confirmed = False
+            if removed:
+                confirmed, _ = _confirm_namespace_removed(rpc_client, lvol.nqn, nsid)
+        except Exception:
+            logger.exception("rollback of namespace nsid=%s on %s failed for %s",
+                             nsid, lvol.nqn, lvol.get_id())
+            removed = confirmed = False
+        if not confirmed:
+            logger.error(
+                "Namespace nsid=%s still on %s after rollback (removed=%s); leaving "
+                "the bdev in place -- deleting it under a live namespace is the "
+                "state the rollback is meant to prevent. Original failure: %s",
+                nsid, lvol.nqn, removed, msg)
+            lvol.status = LVol.STATUS_IN_DELETION
+            try:
+                lvol.write_to_db(DBController().kv_store)
+            except Exception:
+                logger.exception("failed to mark %s in_deletion", lvol.get_id())
+            return False, (f"{msg}; rollback incomplete: namespace nsid={nsid} "
+                           f"still on {lvol.nqn}")
+    return _fail_after_bdev(lvol, rpc_client, msg, is_primary=is_primary)
+
+
 def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
     already produced a bdev/blob. Without this, a post-bdev-stack failure (a
@@ -1375,7 +1418,7 @@ def _lvol_secondary_index(lvol, node):
 
 
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None, ns_uuid=None,
-                     primary_nsid=None):
+                     primary_nsid=None, defer_listeners=False):
     rpc_client = snode.rpc_client()
 
     # Refuse to attach a new namespace to a shared subsystem while any
@@ -1471,39 +1514,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                     else:
                         logger.warning("[DHCHAP-DEBUG] subsystem_add_host PLAIN — no DHCHAP keys at all")
                         rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
-
-        if is_primary or lvol.node_id == snode.get_id():
-            ana_state = "optimized"
-        else:
-            ana_state = "non_optimized"
-
-        # add listeners
-        # Use the per-lvstore port for the lvol's lvstore
-        listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
-        logger.info("adding listeners")
-        for iface in snode.data_nics:
-            if iface.ip4_address and lvol.fabric==iface.trtype.lower():
-                logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-                ret, err = rpc_client.nvmf_subsystem_add_listener(
-                    lvol.nqn, iface.trtype, iface.ip4_address, listener_port, ana_state)
-                if not ret:
-                    if err and "code" in err and err["code"] == -32602:
-                        logger.warning("listener already exists")
-                    else:
-                        return _fail_after_bdev(
-                            lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}", is_primary=is_primary)
-            elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-                logger.info("adding listener for %s on IP %s, fabric TCP port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-                ret, err = rpc_client.nvmf_subsystem_add_listener(
-                        lvol.nqn, "TCP", iface.ip4_address, listener_port, ana_state)
-                if not ret:
-                    if err and "code" in err and err["code"] == -32602:
-                        logger.warning("listener already exists")
-                    else:
-                        return _fail_after_bdev(
-                            lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}", is_primary=is_primary)
 
     logger.info("Add BDev to subsystem")
     # Cluster-consistent namespace IDs: the PRIMARY add lets the target
@@ -1619,7 +1629,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                     logger.error(str(e))
                     return _fail_after_bdev(lvol, rpc_client, str(e),
                                             is_primary=is_primary)
-                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
+                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index,
+                                        defer_listeners=defer_listeners)
 
         # A REPLICA add cannot re-claim a slot (its nsid is dictated by the
         # primary), so -32602 here ends the whole create/fail-over. Say WHY.
@@ -1629,6 +1640,45 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return _fail_after_bdev(
             lvol, rpc_client, "Failed to add bdev to subsystem" + detail,
             is_primary=is_primary)
+
+    # The namespace is attached: only now may the subsystem be reachable.
+    #
+    # This used to run inside the resolve_subsys block above, so the listener
+    # went up first and the subsystem answered on the network while this lvol's
+    # namespace did not exist yet. A client reading it in that window gets
+    # "Invalid Namespace or Format" with DNR set, and DNR means the kernel does
+    # not try another path -- it fails the I/O to the application. See
+    # tests/unit/test_listener_after_namespace.py for the incident.
+    #
+    # defer_listeners is for the caller that registers a whole node's lvols at
+    # once: on a shared subsystem the members are registered concurrently, so
+    # the first one to get here would publish a listener for a subsystem whose
+    # other members are still arriving. That caller publishes once the batch is
+    # complete instead.
+    attached_nsid = int(ret) if is_primary else requested_nsid
+    # Only the call that resolved/created the subsystem publishes its listener.
+    # An lvol JOINING an existing namespaced subsystem must not: the listener is
+    # already there from whoever created it, and re-adding it is a wasted RPC
+    # that the attach path explicitly does not pay (see
+    # tests/integration/test_clone_namespace_race.py). The gap a join leaves --
+    # this member's namespace landing after a listener someone else published --
+    # is the cross-member case, and it is closed by the batch barrier in
+    # _register_lvols_on_node rather than here.
+    if resolve_subsys and not defer_listeners:
+        # No re-read of the namespace before publishing here, deliberately.
+        # The batch path polls (_rpc_wait_subsystem_has_ns) because it reads
+        # back state other threads wrote during a recovery; this call just
+        # issued the add itself and holds the nsid the target returned. And the
+        # probe's known failure is the FALSE NEGATIVE -- soak 2026-08-11 read a
+        # present namespace as absent and left every lvol with a namespace and
+        # zero listeners, permanently (see rpc_client.namespace_matches). There
+        # that costs a listener the monitor can repair; here, with the rollback
+        # below, it would delete the namespace and the blob under a create that
+        # actually succeeded.
+        ok, err = publish_lvol_listeners(lvol, snode, rpc_client, is_primary=is_primary)
+        if not ok:
+            return _fail_after_ns(lvol, rpc_client, attached_nsid, err,
+                                  is_primary=is_primary)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
@@ -1658,6 +1708,56 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return lvol_bdev, None
     else:
         return False, "Failed to get lvol bdev"
+
+def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
+    """Publish ``lvol``'s subsystem listeners on ``snode``.
+
+    Separated from add_lvol_on_node so it can be called once a whole batch of
+    namespaces is attached: see the defer_listeners note there. Returns
+    ``(True, None)`` or ``(False, reason)``; "listener already exists" is a
+    success, since that is what a re-registration looks like.
+    """
+    rpc_client = rpc_client or snode.rpc_client()
+    if is_primary or lvol.node_id == snode.get_id():
+        ana_state = "optimized"
+    else:
+        ana_state = "non_optimized"
+
+    # Use the per-lvstore port for the lvol's lvstore
+    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+    logger.info("adding listeners")
+    added: list[tuple[str, str]] = []
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            trtype = iface.trtype
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            trtype = "TCP"
+        else:
+            continue
+        logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
+        ret, err = rpc_client.nvmf_subsystem_add_listener(
+            lvol.nqn, trtype, iface.ip4_address, listener_port, ana_state)
+        if not ret:
+            if err and "code" in err and err["code"] == -32602:
+                logger.warning("listener already exists")
+            else:
+                # A node with several matching NICs can get one listener up and
+                # fail on the next. The caller rolls the namespace and the bdev
+                # back, so anything published here would be left pointing at a
+                # deleted bdev -- take them down again first.
+                for done_trtype, done_ip in added:
+                    try:
+                        rpc_client.listeners_del(
+                            lvol.nqn, done_trtype, done_ip, listener_port)
+                    except Exception:
+                        logger.exception(
+                            "failed to remove listener %s %s:%s from %s during rollback",
+                            done_trtype, done_ip, listener_port, lvol.nqn)
+                return False, f"Failed to create listener for {lvol.get_id()}"
+        else:
+            added.append((trtype, iface.ip4_address))
+    return True, None
+
 
 def is_node_leader(snode, lvs_name):
     rpc_client = snode.rpc_client()

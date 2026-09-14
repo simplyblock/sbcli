@@ -10498,7 +10498,8 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {
                 ex.submit(add_lvol_thread, lv, snode,
-                          lvol_ana_state=lvol_ana_state): lv
+                          lvol_ana_state=lvol_ana_state,
+                          defer_listener=True): lv
                 for lv in items
             }
             for fut, lv in futures.items():
@@ -10528,6 +10529,41 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
             len(failures), len(lvol_list), sorted(failures))
         failures = _submit_all(
             [lv for lv in lvol_list if lv.get_id() in failures])
+
+    # Every future is in: only now is it safe to make these subsystems
+    # reachable. The registrations above run concurrently, and on a shared
+    # subsystem each member used to publish the listener as soon as its own
+    # namespace landed -- so the subsystem answered while its remaining members
+    # were still being added, and a client reading one of those got "Invalid
+    # Namespace or Format" with DNR, which is not retried on another path
+    # (2026-09-13: an 838ms window on worker-1, fio took EREMOTEIO).
+    #
+    # A failed member withholds the listener for its whole SUBSYSTEM, not just
+    # for itself. On a shared subsystem every member answers on one NQN, so
+    # publishing a healthy member's listener makes that NQN reachable while the
+    # failed member's namespace is absent -- which is the reachable-but-empty
+    # state this barrier exists to prevent, reached by a different door.
+    # Skipping only the failed lvol id is therefore not enough.
+    #
+    # A subsystem held back this way is already reported as INCOMPLETE
+    # REGISTRATION below, and the lvol monitor's repair cycle is what gives it a
+    # listener once every member's namespace is there.
+    blocked_nqns = {lv.nqn for lv in lvol_list if lv.get_id() in failures}
+    if blocked_nqns:
+        logger.warning(
+            "withholding listeners on %s for %d subsystem(s) with an "
+            "unregistered member: %s",
+            snode.get_id()[:8], len(blocked_nqns), sorted(blocked_nqns))
+    listener_rpc = snode.rpc_client(timeout=10, retry=2)
+    for lvol in lvol_list:
+        if lvol.get_id() in failures or lvol.nqn in blocked_nqns:
+            continue
+        try:
+            ok, msg = _publish_lvol_listener(lvol, snode, listener_rpc, lvol_ana_state)
+        except Exception as e:
+            ok, msg = False, "raised: %s" % e
+        if not ok:
+            failures.setdefault(lvol.get_id(), msg or "listener publication failed")
 
     try:
         probe = snode.rpc_client(timeout=10, retry=1)
@@ -12956,7 +12992,73 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             pass
 
 
-def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
+
+def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
+    """Publish one lvol's listener on ``snode``.
+
+    Split out of add_lvol_thread so the batch registration can run it
+    AFTER every namespace in the batch is attached. On a shared subsystem
+    the members register concurrently, and each one used to publish as soon
+    as its own namespace landed -- which makes the subsystem reachable while
+    the remaining members are still arriving. A client reading one of those
+    namespaces in the gap gets "Invalid Namespace or Format" with DNR, which
+    the kernel does not retry on another path.
+
+    2026-09-13, shared subsystem lvol:64b116a4 rebuilt on worker-1:
+    nsid=1 at 15:50:25.929, nsid=2 at .936, listener at .26.144, nsid=3 at
+    .26.982 -- 838ms reachable-but-incomplete, and fio took EREMOTEIO on the
+    clone at nsid 3.
+
+    Returns ``(True, None)`` or ``(False, reason)``.
+    """
+    db_controller = DBController()
+    # Use per-lvstore port for this lvol's lvstore. get_lvol_subsys_port()'s
+    # fallback to snode.lvol_subsys_port is only correct for lvol.lvs_name ==
+    # snode.lvstore (this node's OWN primary, which legitimately has no
+    # lvstore_ports entry -- it uses the plain node-level port). For any
+    # OTHER lvs_name, a missing entry means the relocation that assigned
+    # snode this non-leader role hasn't finished committing lvstore_ports
+    # yet -- snode here can be a stale, caller-held object (same hazard as
+    # the in_deletion check above). Silently falling back would register
+    # the listener on snode's OWN leader port instead of lvol.lvs_name's
+    # real one (2026-08-18: raced a node-removal relocation live, leaving
+    # two lvols' secondaries listening on the wrong port indefinitely, with
+    # nothing to ever revisit or correct it). Re-fetch once and refuse
+    # rather than guess; the next lvol_monitor repair cycle retries.
+    if lvol.lvs_name != snode.lvstore and lvol.lvs_name not in snode.lvstore_ports:
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if lvol.lvs_name not in snode.lvstore_ports:
+            msg = (f"{snode.get_id()} has no lvstore_ports entry for "
+                   f"{lvol.lvs_name} yet; refusing to add a listener for "
+                   f"{lvol.nqn} on a guessed port")
+            logger.warning(msg)
+            return False, msg
+    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            tr = iface.trtype
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            tr = "TCP"
+        else:
+            continue
+        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.ip4_address, listener_port):
+            logger.info("Listener %s %s:%s already on %s, skipping",
+                        tr, iface.ip4_address, listener_port, lvol.nqn)
+            continue
+        logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
+        # listeners_create returns the RPC result and answers None on an RPC
+        # error without raising, so an unchecked call reports a listener this
+        # subsystem does not have -- and the caller then records the lvol as
+        # serving.
+        if not rpc_client.listeners_create(
+                lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state):
+            msg = (f"Failed to add listener {tr} {iface.ip4_address}:{listener_port} "
+                   f"for {lvol.nqn} on {snode.get_id()}")
+            logger.error(msg)
+            return False, msg
+    return True, None
+
+def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_listener=False):
     db_controller = DBController()
 
     # Refuse to (re)register an lvol that is being torn down: the delete
@@ -13054,42 +13156,11 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
         logger.error(msg)
         return False, msg
 
-    # Use per-lvstore port for this lvol's lvstore. get_lvol_subsys_port()'s
-    # fallback to snode.lvol_subsys_port is only correct for lvol.lvs_name ==
-    # snode.lvstore (this node's OWN primary, which legitimately has no
-    # lvstore_ports entry -- it uses the plain node-level port). For any
-    # OTHER lvs_name, a missing entry means the relocation that assigned
-    # snode this non-leader role hasn't finished committing lvstore_ports
-    # yet -- snode here can be a stale, caller-held object (same hazard as
-    # the in_deletion check above). Silently falling back would register
-    # the listener on snode's OWN leader port instead of lvol.lvs_name's
-    # real one (2026-08-18: raced a node-removal relocation live, leaving
-    # two lvols' secondaries listening on the wrong port indefinitely, with
-    # nothing to ever revisit or correct it). Re-fetch once and refuse
-    # rather than guess; the next lvol_monitor repair cycle retries.
-    if lvol.lvs_name != snode.lvstore and lvol.lvs_name not in snode.lvstore_ports:
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        if lvol.lvs_name not in snode.lvstore_ports:
-            msg = (f"{snode.get_id()} has no lvstore_ports entry for "
-                   f"{lvol.lvs_name} yet; refusing to add a listener for "
-                   f"{lvol.nqn} on a guessed port")
-            logger.warning(msg)
+    if not defer_listener:
+        ok, msg = _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state)
+        if not ok:
             return False, msg
-    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
-    for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-            tr = iface.trtype
-        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-            tr = "TCP"
-        else:
-            continue
-        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.ip4_address, listener_port):
-            logger.info("Listener %s %s:%s already on %s, skipping",
-                        tr, iface.ip4_address, listener_port, lvol.nqn)
-            continue
-        logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
-        rpc_client.listeners_create(
-            lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
+
 
     # Guarded CAS instead of read-modify-write: a delete can land between the
     # entry guard and this point, and an unconditional full-object write both
