@@ -55,6 +55,13 @@ class LVolMigration(BaseModel):
     source_node_id: str = ""
     target_node_id: str = ""
 
+    # Node to actually issue source-side RPCs against. Equals source_node_id
+    # (the primary) unless the primary was offline at create_migration() time,
+    # in which case this is the online secondary/tertiary replica that was
+    # chosen as the effective source. Resolved once at create time and never
+    # re-derived afterward — the runner only ever reads it.
+    active_source_node_id: str = ""
+
     # --- Phase tracking ---
     phase: str = ""
 
@@ -122,12 +129,32 @@ class LVolMigration(BaseModel):
     completed_at: int = 0
     # Unix timestamp after which the migration must abort (0 = no deadline).
     deadline: int = 0
+    # Duration `deadline` was computed from, at start_migration() time.
+    # Persisted (separately from the absolute `deadline` above) so a
+    # retry_on_failure restart can recompute a fresh deadline of the same
+    # length rather than reusing the (by-then long past) original timestamp.
+    deadline_seconds: int = constants.LVOL_MIG_DEADLINE_SEC
 
     # --- Error / retry tracking ---
     error_message: str = ""
     retry_count: int = 0
     max_retries: int = constants.LVOL_MIG_MAX_RETRIES
     canceled: bool = False
+
+    # CLI: `migrate-continue --retry-on-failure`. When True and this migration
+    # ends in STATUS_FAILED (not cancelled), the task runner automatically
+    # starts a brand-new migration (full precreate + start) for the same
+    # lvol_id/target_node_id once LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC has
+    # passed, provided preconditions hold again (no rebalancing, active
+    # source node and target node both online) -- see task_runner's
+    # terminal-FAILED handling in tasks_runner_lvol_migration.py.
+    retry_on_failure: bool = False
+
+    # Connect-string parameters from the original `migrate` call, persisted
+    # so a retry_on_failure restart recreates the target with identical
+    # settings instead of silently reverting to defaults.
+    ctrl_loss_tmo: int = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
+    host_nqn: str = ""
 
     # Set when this migration is part of a batch (shared-namespace) migration.
     # References an LVolMigrationGroup.uuid.  Empty for standalone migrations.
