@@ -1,3 +1,14 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "matplotlib",
+#     "paramiko",
+#     "ping3",
+#     "requests",
+# ]
+# ///
 ### simplyblock e2e tests
 import argparse
 import json
