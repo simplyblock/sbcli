@@ -45,9 +45,8 @@ from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import (  # noqa: F401  (RPCClient kept as a patch target for tests)
-    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, JC_REPLACE_JM_UNKNOWN_VUID,
-    JC_REPLACE_JM_VUID_NOT_USING, RPC_UNSUPPORTED, RPCClient, RPCErrorCode,
-    RPCRemoteError, RPCException, namespace_matches, evict_cached_session)
+    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, RPC_UNSUPPORTED, RPCClient,
+    RPCErrorCode, RPCException, RPCRemoteError, namespace_matches, evict_cached_session)
 from simplyblock_core import rpc_client as rpc_client_module
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import dial_backoff
