@@ -4720,6 +4720,47 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     return best
 
 
+def _recheck_removal_conditions(snode, db_controller):
+    """Re-run the admission conditions that can change after the node is down.
+
+    Admission checks these once, before anything happens. Between then and the
+    teardown the removal shuts the node down, rebuilds its devices onto peers
+    and drains its volumes -- minutes to hours during which another node can go
+    offline, the cluster can lose the FTT headroom the removal was admitted on,
+    or the per-domain balance can stop holding. Committing to the teardown on a
+    judgement made before all of that is how a removal proceeds into a cluster
+    that can no longer absorb it.
+
+    Deliberately the same three questions admission asks, not a looser set: a
+    re-check that admitted something admission would have refused would be
+    worse than no re-check at all.
+
+    Returns (ok, reason).
+    """
+    peers = [
+        n for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        if n.get_id() != snode.get_id()
+        and n.status not in (StorageNode.STATUS_REMOVED,
+                             StorageNode.STATUS_REMOVED_FAILED)
+    ]
+    offline = [n.get_id() for n in peers if n.status != StorageNode.STATUS_ONLINE]
+    if offline:
+        return False, f"peer node(s) not online: {', '.join(offline)}"
+
+    allowed, reason = _check_ftt_allows_node_removal(snode.get_id(), db_controller)
+    if not allowed:
+        return False, reason
+
+    from simplyblock_core.controllers.cluster_expansion.preconditions import (
+        check_fd_admission_for_remove)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
+    if not ok:
+        return False, reason
+
+    return True, ""
+
+
 class RemovalGaveUp(Exception):
     """A removal step ran out of options; the node goes to REMOVED_FAILED.
 
@@ -4894,6 +4935,7 @@ def _drain_lvols_from_node(snode, cursor, db_controller):
 #: "phase 3a" says nothing to anyone reading a stuck task.
 REMOVAL_STEPS = (
     "shutdown",
+    "recheck_conditions",
     "migrate_devices",
     "drain_lvols",
     "relocation_gate",
@@ -4933,6 +4975,7 @@ class RemovalCursor:
         params = (task.function_params if task is not None else None) or {}
         self.step = params.get("step")
         self.data = params.get("step_data") or {}
+        self.entered_at = params.get("step_entered_at") or time.time()
 
     def enter(self, step, message):
         """Mark ``step`` as the one now running and log it unchanged."""
@@ -4940,7 +4983,18 @@ class RemovalCursor:
         if step != self.step:
             self.step = step
             self.data = {}
+            self.entered_at = time.time()
         self._persist()
+
+    def elapsed(self):
+        """Seconds this step has been running, across retries.
+
+        What makes a per-step budget possible at all: the task's own retry
+        count spans the whole removal, so it cannot tell a drain that has
+        legitimately run for hours from a condition check that has been failing
+        for hours and never will pass.
+        """
+        return max(0.0, time.time() - (self.entered_at or time.time()))
 
     def _persist(self):
         if self._task is None:
@@ -4948,6 +5002,7 @@ class RemovalCursor:
         params = self._task.function_params or {}
         params["step"] = self.step
         params["step_data"] = self.data
+        params["step_entered_at"] = self.entered_at
         self._task.function_params = params
 
     def save(self):
@@ -5019,6 +5074,24 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
                     logger.error(f"[REMOVAL] {node_id}: shutdown failed")
                     return False
                 snode = db_controller.get_storage_node_by_id(node_id)
+
+            # Re-check the admission conditions now the node is down. Bounded
+            # separately from everything else: a condition that has not come
+            # back within its own budget is not going to, and waiting the whole
+            # removal budget out would hold a shut-down node hostage to a peer
+            # that is never returning.
+            cursor.enter("recheck_conditions",
+                         f"[REMOVAL] {node_id}: re-check removal conditions")
+            ok, reason = _recheck_removal_conditions(snode, db_controller)
+            if not ok:
+                if cursor.elapsed() >= constants.NODE_REMOVAL_CONDITION_WAIT_SEC:
+                    raise RemovalGaveUp(
+                        f"removal conditions still not met after "
+                        f"{constants.NODE_REMOVAL_CONDITION_WAIT_SEC // 60}min: {reason}")
+                logger.info(
+                    f"[REMOVAL] {node_id}: conditions not met ({reason}); "
+                    f"nothing torn down, retrying")
+                return False
 
             # Devices first, then volumes. Rebuilding this node's data onto its
             # peers is what makes the cluster whole again; the volume drain that
