@@ -48,6 +48,17 @@ def main():
     parser.add_argument('--preserve_resources_on_failure', type=bool,
                         help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
                         default=False)
+    parser.add_argument('--case', type=str, default=None,
+                        help="Case id for a matrix test, e.g. "
+                             "dual_graceful_shutdown_container_stop_sep0_drain. "
+                             "Matrix tests run their whole table when omitted.")
+    parser.add_argument('--resume', action='store_true',
+                        default=os.environ.get("RESUME", "") not in ("", "0",
+                                                                     "false"),
+                        help="Adopt the objects left by the previous run on "
+                             "this cluster and continue from its checkpoint, "
+                             "instead of wiping and starting over. Also "
+                             "settable with RESUME=1 for the workflows.")
     args = parser.parse_args()
     
     tests = get_stress_tests() + get_backup_stress_tests()
@@ -118,6 +129,23 @@ def main():
                         k8s_run=args.run_k8s,
                         tls_enabled=args.tls_enabled,
                         preserve_resources_on_failure=args.preserve_resources_on_failure)
+
+        # Both flags have to land before setup(): the object wipe lives inside
+        # setup(), and eleven classes override it without calling super(), so
+        # anything wired afterwards would arrive after the objects were gone.
+        if args.resume:
+            test_obj.resume_requested = True
+            logger.info("[resume] enabled for %s -- existing objects will be "
+                        "adopted, not deleted", test.__name__)
+        if args.case:
+            if not hasattr(test_obj, "CASE_ID"):
+                logger.warning("[case] %s does not take --case, ignoring %r",
+                               test.__name__, args.case)
+            else:
+                test_obj.CASE_ID = args.case
+                test_obj._init_mixin_state()
+                logger.info("[case] %s running case %s", test.__name__,
+                            args.case)
         try:
             test_obj.setup()
             # After setup(), not inside it: eleven test classes replace

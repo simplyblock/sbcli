@@ -95,6 +95,16 @@ from stress_test.large_scale_lvol_stress import (
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
 )
+from stress_test.dual_outage_matrix import (
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
+)
+from stress_test.product_limits_stress import (
+    ProductLimits_Docker,
+    ProductLimits_K8s,
+    ProductLimits_70TiB_Docker,
+    ProductLimits_70TiB_K8s,
+)
 from stress_test.mass_create_delete_stress import (
     MassCreateDelete_1x500_Docker,
     MassCreateDelete_30x100_Docker,
@@ -443,6 +453,12 @@ ALL_TESTS = [
     BulkLvolHotDeleteK8s,
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
+    ProductLimits_Docker,
+    ProductLimits_K8s,
+    ProductLimits_70TiB_Docker,
+    ProductLimits_70TiB_K8s,
     MassCreateDelete_1x500_Docker,
     MassCreateDelete_30x100_Docker,
     MassCreateDelete_300x10_Docker,
@@ -728,6 +744,12 @@ def get_stress_tests():
         BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
+        DualOutageMatrixDocker,
+        DualOutageMatrixK8s,
+        ProductLimits_Docker,
+        ProductLimits_K8s,
+        ProductLimits_70TiB_Docker,
+        ProductLimits_70TiB_K8s,
         MassCreateDelete_1x500_Docker,
         MassCreateDelete_30x100_Docker,
         MassCreateDelete_300x10_Docker,
