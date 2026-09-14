@@ -115,11 +115,6 @@ on:
         options:
           - 'false'
           - 'true'
-      tls_enabled:
-        description: 'Enable TLS (installs cert-manager, sets tls.enabled + tls.mutual_enabled)'
-        required: false
-        default: true
-        type: boolean
       preserve_resources_on_failure:
         description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
         required: false
@@ -687,7 +682,7 @@ jobs:
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
       - name: Install cert-manager (TLS prerequisite)
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           helm repo add jetstack https://charts.jetstack.io
           helm repo update
@@ -705,10 +700,10 @@ jobs:
           set -euxo pipefail
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
-          TLS_FLAGS=""
-          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
-            TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
-          fi
+          # TLS is always on: the tls_enabled input was removed when this
+          # workflow hit the 25-input workflow_dispatch limit, and true was
+          # already its default.
+          TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
 
           CSI_FLAGS=""
           if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
@@ -828,7 +823,7 @@ jobs:
           done
 
       - name: Setup KMS (vault) for encryption
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           # Ensure vault namespace from previous run is fully terminated before installing.
           echo "Checking if vault namespace is still terminating..."
@@ -980,9 +975,10 @@ jobs:
           fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)
+          # Always configured, for the same reason as TLS_FLAGS above.
           VAULT_SETTINGS=""
           ENCRYPTION_POOL_YAML=""
-          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+          if true; then
             VAULT_SETTINGS="  hashicorpVaultSettings:
               baseURL: \"https://openbao.vault:8200\""
             ENCRYPTION_POOL_YAML="---
@@ -1483,7 +1479,7 @@ jobs:
 
           python3 -u stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} $PRESERVE_ARG $CASE_ARG 2>&1 | tee output.log
+            --run_k8s True --tls_enabled true $PRESERVE_ARG $CASE_ARG 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
