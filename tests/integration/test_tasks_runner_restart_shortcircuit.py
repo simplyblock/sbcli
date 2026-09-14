@@ -31,6 +31,7 @@ Note on import:
 
 import importlib.util
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -43,6 +44,10 @@ _RUNNER_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..",
     "simplyblock_core", "services", "tasks_runner_restart.py",
 )
+
+
+#: Captured before any patching so unrelated threads keep real sleeps.
+_real_sleep = time.sleep
 
 
 def _load_runner_module():

@@ -7,7 +7,8 @@ from datetime import datetime
 from typing import Any
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import ops_gate
+from simplyblock_core.controllers import object_limits, ops_gate
+from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -121,6 +122,9 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #  size validation
     if size < utils.parse_size('100MiB'):
         return False, "Size must be larger than 100M"
+    size_error = object_limits.check_lvol_size(size)
+    if size_error:
+        return False, size_error
 
     #  host validation
     # snode = db_controller.get_storage_node_by_id(host_id_or_name)
@@ -205,7 +209,16 @@ def max_subsystems_for_node(node):
     return node.max_lvol
 
 
-def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False):
+def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
+                      pool_id=None):
+    """Pick candidate primary nodes for a new lvol.
+
+    ``pool_id`` is the pool of the lvol being placed; for namespaced creates
+    it decides which existing subsystems count as joinable (a shared
+    subsystem is exclusive to one pool -- see
+    ``get_next_available_subsystem_on_node``). Non-namespaced placement
+    ignores it.
+    """
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     if all_lvols is None:
@@ -221,7 +234,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
         if node.status == node.STATUS_ONLINE:
             subsys_count = count_lvol_subsystems(node, all_lvols)
             has_ns_slot = bool(
-                namespaced and get_next_available_subsystem_on_node(node.get_id(), all_lvols))
+                namespaced and get_next_available_subsystem_on_node(
+                    node.get_id(), all_lvols, pool_id=pool_id))
             if subsys_count >= max_subsystems_for_node(node) and not has_ns_slot:
                 # At subsystem capacity, and (for namespaced creates) no
                 # existing subsystem on the node has a free namespace slot.
@@ -397,8 +411,9 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
     otherwise both grab the same last free namespace slot). Whatever this
     function assigns to ``lvol.nqn``/``lvol.namespace`` is overwritten there.
 
-    A namespaced lvol joins an existing subsystem on the host node when one
-    has a free namespace slot; otherwise (and for non-namespaced lvols) a new
+    A namespaced lvol joins an existing subsystem OF ITS POOL on the host node
+    when one has a free namespace slot (``lvol.pool_uuid`` must already be
+    set); otherwise (and for non-namespaced lvols) a new
     subsystem is claimed. The node's ``max_lvol`` subsystem cap is enforced
     only when a new subsystem would actually be created — joining an existing
     one consumes no subsystem slot.
@@ -407,7 +422,8 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
     """
     lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
     if namespaced:
-        result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols)
+        result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols,
+                                                      pool_id=lvol.pool_uuid)
         if result:
             lvol.nqn = result.nqn
             lvol.namespace = result.uuid
@@ -523,6 +539,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         return False, f"Pool not found: {pool_id_or_name}"
 
     ops_gate.assert_object_ops_allowed("volume create", cluster_id=pool.cluster_id)
+
+    # Hard product limit on the provisioned size. Deliberately NOT applied to
+    # max_size: that is the thin-provisioning growth ceiling and the CLI/CSI
+    # pass a large default (1000T) when the user gives none -- capping it
+    # rejected every `sbctl volume add` (AWS soak 2026-09-11). Growth is
+    # bounded where it happens: resize_lvol enforces MAX_LVOL_SIZE on new_size.
+    size_error = object_limits.check_lvol_size(size)
+    if size_error:
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, pool, size_error, limit_key="lvol_size")
+        return False, size_error
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
 
@@ -704,7 +731,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.fabric = fabric
 
     if not host_node:
-        nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced))
+        nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced),
+                                  pool_id=pool.get_id())
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
@@ -712,6 +740,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     limit_error = check_lvstore_object_limit(host_node, all_lvols, all_snaps)
     if limit_error:
         logger.error(limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, pool, limit_error,
+            limit_key=f"lvstore_objects:{host_node.get_id()}")
         return False, limit_error
 
     # Create a new subsystem by default unless namespaced is set and an
@@ -3048,6 +3079,16 @@ def resize_lvol(id, new_size, lock=True) -> None:
     lvol = db_controller.get_lvol_by_id(id)
     ops_gate.assert_object_ops_allowed("volume resize", pool_uuid=lvol.pool_uuid)
 
+    size_error = object_limits.check_lvol_size(new_size, what="New size")
+    if size_error:
+        try:
+            _snode = db_controller.get_storage_node_by_id(lvol.node_id)
+            events_controller.log_object_limit_reached(
+                _snode.cluster_id, lvol, size_error, limit_key="lvol_size")
+        except Exception as _e:
+            logger.warning("Could not log resize limit event: %s", _e)
+        raise PreconditionError(size_error)
+
     # Block during restart Phase 5
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -3655,7 +3696,8 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     # Resolve the namespace slot early so we can (a) skip the subsystem limit
     # check when the clone fits into an existing subsystem, and (b) reuse the
     # result below instead of calling get_next_available_subsystem_on_node twice.
-    _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols)
+    _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols,
+                                                             pool_id=lvol.pool_uuid)
 
     if not _available_subsys:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -4087,6 +4129,24 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         random.randint(5001, 5500),  # secondary
         random.randint(6001, 6500),  # tertiary
     ]
+
+    # The target clone shares the source NQN.  During preconnect the host has
+    # live paths to the source (cntlids 1, 1000, 2000) AND tries to add paths
+    # to the inaccessible target simultaneously.  If target uses the same
+    # min_cntlid the kernel rejects it as a duplicate cntlid.  Use windows
+    # above 4000 so source (1/1000/2000) and target never collide.
+    _tgt_cntlids = [
+        random.randint(4001, 4500),  # primary
+        random.randint(5001, 5500),  # secondary
+        random.randint(6001, 6500),  # tertiary
+    ]
+
+    # Migration: preserve the source UUID as the NVMe namespace UUID so the kernel
+    # can merge source and target paths into the same multipath namespace during
+    # the preconnect phase (ANA flip requires matching NSUUID on both paths).
+    # Failover: the source is gone — use the clone's own UUID so it appears as
+    # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
+    _src_ns_uuid = lvol.uuid if for_migration else new_lvol.uuid
 
     # For migration/failover, preserve the source nsid so the kernel can
     # match target paths to source paths under the same NQN. new_lvol is a
@@ -5250,8 +5310,26 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None)-> LVol | None:
-    """``exclude_nqns`` skips subsystems the caller knows are unusable even
+def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None,
+                                         *, pool_id) -> LVol | None:
+    """Pick the shared subsystem on ``node_id`` that a new namespaced lvol of
+    pool ``pool_id`` should join, or ``None`` when it has to open a new one.
+
+    Subsystem/pool alignment: a shared subsystem belongs to exactly ONE pool
+    -- the pool of the lvols already in it. Only a subsystem whose every
+    non-deleted member (in_creation included: that record is a committed
+    slot claim) belongs to ``pool_id`` is joinable, so a pool's lvols never
+    share an NQN with another pool's. A legacy subsystem that already mixes
+    pools (created before alignment was enforced) is frozen: it is never
+    offered for a join, by any pool.
+
+    Fill order: the MOST-occupied joinable subsystem of the pool is offered
+    first, so the pool fills one subsystem completely before the next one is
+    opened -- a new subsystem is created only when none of the pool's
+    subsystems on the node has a free namespace slot (``None`` returned).
+    Ties break on NQN so a conflict retry of the claim is deterministic.
+
+    ``exclude_nqns`` skips subsystems the caller knows are unusable even
     though the DB count says they have room (SPDK rejected the add with
     -32602 — SPDK is the authority on its own namespace table)."""
     # `is None`, NOT falsy: an empty list from an in-transaction snapshot read
@@ -5260,17 +5338,20 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
     if all_lvols is None:
         all_lvols = DBController().get_mini_lvols()
 
-    # Count active namespaces per NQN in a single pass instead of issuing a
-    # separate DB read for every subsystem root (was O(N²)).
+    # One pass: active namespaces per NQN and the set of pools present in
+    # each subsystem (was O(N^2) with a DB read per subsystem root).
     ns_counts: dict[str, int] = {}
+    nqn_pools: dict[str, set] = {}
 
     for lv in all_lvols:
         if lv.node_id != node_id:
             continue
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
             ns_counts[lv.nqn] = ns_counts.get(lv.nqn, 0) + 1
+            nqn_pools.setdefault(lv.nqn, set()).add(lv.pool_uuid)
 
-    ret = []
+    best: LVol | None = None
+    best_key = None
     for lvol in all_lvols:
         if lvol.node_id != node_id:
             continue
@@ -5278,18 +5359,22 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
             continue
         if exclude_nqns and lvol.nqn in exclude_nqns:
             continue
+        # Pool exclusivity: every member must be from the joining lvol's pool.
+        if nqn_pools.get(lvol.nqn) != {pool_id}:
+            continue
         # The subsystem's recorded max is bounded by the hard per-subsystem
         # cap: legacy subsystems created with a larger max stop accepting
         # joins at the cap.
         subsys_max = min(lvol.max_namespace_per_subsys,
                          constants.MAX_NAMESPACES_PER_SUBSYSTEM)
-        if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < subsys_max:
-            if lvol not in ret:
-                ret.append(lvol)
+        used = ns_counts.get(lvol.nqn, 0)
+        if used >= subsys_max:
+            continue
+        key = (-used, lvol.nqn)
+        if best_key is None or key < best_key:
+            best, best_key = lvol, key
 
-    if ret:
-        return ret[random.randint(0, len(ret) - 1)]
-    return None
+    return best
 
 
 # --- Functions carried over from main (reconcile-1276): SSE watch + HA role helper ---
