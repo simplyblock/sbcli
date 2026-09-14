@@ -727,14 +727,27 @@ def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
 
 
 
+#: A node in any of these statuses has a dead SPDK (shut down by the removal
+#: flow) or never had one running yet — a migration task targeting its
+#: distribs can never run and would retry forever. Skip nodes in these
+#: statuses like already-REMOVED nodes when scheduling per-node rebalancing
+#: tasks. STATUS_PENDING_MIGRATION is the status node removal sets right
+#: after shutdown, while it drains this very node's devices and lvols; a
+#: rebalancing task that targets the node's own distribs at that point can
+#: never complete and would otherwise deadlock node removal's own lvol
+#: migration step against migration_controller._can_add_lvol_migration()'s
+#: cluster-wide "rebalancing in progress" gate (observed live 2026-09-13).
+_NODE_UNREACHABLE_FOR_REBALANCE_STATUSES = (
+    StorageNode.STATUS_REMOVED,
+    StorageNode.STATUS_IN_REMOVAL,
+    StorageNode.STATUS_PENDING_MIGRATION,
+)
+
+
 def add_device_failed_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        # IN_REMOVAL nodes have a dead SPDK (shut down by the removal flow);
-        # a migration task targeting their distribs can never run and would
-        # stall the node-removal completion check forever. Skip them like
-        # already-REMOVED nodes.
-        if node.status == StorageNode.STATUS_REMOVED:
+        if node.status in _NODE_UNREACHABLE_FOR_REBALANCE_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
@@ -746,7 +759,7 @@ def add_device_failed_mig_task(device_id):
 def add_new_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        if node.status in _NODE_UNREACHABLE_FOR_REBALANCE_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
