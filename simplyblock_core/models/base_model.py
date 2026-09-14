@@ -488,6 +488,11 @@ class BaseNodeObject(BaseModel):
     STATUS_DOWN = 'down'
     STATUS_IN_REMOVAL = 'in_removal'
     STATUS_PENDING_REMOVAL = 'pending_removal'
+    #: Terminal state for a removal that gave up. The node is shut down and
+    #: may still own data that could not be migrated off it, so it is neither
+    #: ONLINE nor REMOVED. An operator re-drives the removal from the start
+    #: (see remove_storage_node, which admits this status).
+    STATUS_REMOVED_FAILED = 'removed_failed'
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,
@@ -502,4 +507,5 @@ class BaseNodeObject(BaseModel):
         STATUS_DOWN: 40,
         STATUS_IN_REMOVAL: 41,
         STATUS_PENDING_REMOVAL: 42,
+        STATUS_REMOVED_FAILED: 44,
     }
