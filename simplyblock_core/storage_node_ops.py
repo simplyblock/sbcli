@@ -5196,6 +5196,7 @@ def _drain_lvols_from_node(snode, cursor, db_controller):
 #: "phase 3a" says nothing to anyone reading a stuck task.
 REMOVAL_STEPS = (
     "shutdown",
+    "migrate_devices",
     "drain_lvols",
     "relocation_gate",
     "teardown_own_replicas",
@@ -5321,13 +5322,28 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
                     return False
                 snode = db_controller.get_storage_node_by_id(node_id)
 
-            # Drain — migrate this node's volumes off it before anything is
-            # torn down. Deliberately BEFORE in_removal: nothing here is
-            # destructive, so a drain that cannot finish leaves the node
-            # intact and the removal can be abandoned without damage.
+            # Devices first, then volumes. Rebuilding this node's data onto its
+            # peers is what makes the cluster whole again; the volume drain that
+            # follows reads from replicas either way, because the node is shut
+            # down by now. Only the DEVICE half runs here -- the JM half stays
+            # at phase 2, after 3a, for the reason in
+            # _decommission_node_devices' docstring.
             if snode.status != StorageNode.STATUS_MIGRATING_LVOLS:
                 set_node_status(node_id, StorageNode.STATUS_MIGRATING_LVOLS,
                                 caused_by="remove")
+            cursor.enter("migrate_devices",
+                         f"[REMOVAL] {node_id}: migrate devices — fail and rebuild onto peers")
+            if not _fail_and_migrate_node_devices(snode):
+                return False
+            snode = db_controller.get_storage_node_by_id(node_id)
+
+            # Drain — migrate this node's volumes off it before anything is
+            # torn down. Still MIGRATING_LVOLS: the device step above already
+            # moved the node into it, and both halves are one state as far as
+            # anything outside the removal is concerned. Deliberately BEFORE
+            # in_removal: nothing here is destructive, so a drain that cannot
+            # finish leaves the node intact and the removal can be abandoned
+            # without damage.
             cursor.enter("drain_lvols", f"[REMOVAL] {node_id}: drain — migrate volumes off the node")
             if not _drain_lvols_from_node(snode, cursor, db_controller):
                 return False
@@ -6785,16 +6801,34 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
 def _decommission_node_devices(removed_node: StorageNode):
     """Remove, fail and migrate every data device on ``removed_node``.
 
-    Drives each device ONLINE/UNAVAILABLE -> REMOVED -> FAILED (which queues the
-    failure-migration tasks on the surviving online nodes), then waits for them
-    all to reach FAILED_AND_MIGRATED. Returns True only once every data device
-    is migrated; False means "still migrating, retry later".
-
     Also (re)runs _decommission_node_jm -- see its own docstring for why this
-    is a defensive no-op here on any task that already ran it as phase 2."""
-    db_controller = DBController()
+    is a defensive no-op here on any task that already ran it as phase 2. That
+    JM call is the whole reason this wrapper exists separately from
+    _fail_and_migrate_node_devices: the device work can run early, but the JM
+    work cannot, because phase 3a must tear down this node's own hosted
+    replicas BEFORE its JM leaves any JC group (a peer hosting that replica
+    runs a JC instance naming the dying JM, and jc_replace_jm's -17 check
+    rejects the batch while it is live -- reproduced 2026-08-25 and 2026-09-02).
+    """
     _decommission_node_jm(removed_node)
+    return _fail_and_migrate_node_devices(removed_node)
 
+
+def _fail_and_migrate_node_devices(removed_node: StorageNode):
+    """Drive every data device off ``removed_node``, JM untouched.
+
+    Each device goes ONLINE/UNAVAILABLE -> REMOVED -> FAILED, which queues the
+    failure-migration tasks on the surviving online nodes, and then this waits
+    for them all to reach FAILED_AND_MIGRATED. Returns True only once every data
+    device is migrated; False means "still migrating, retry later".
+
+    Split out so the removal can rebuild this node's data onto its peers BEFORE
+    draining its volumes, which is the order the data path wants: by then the
+    node is shut down, so every volume migration reads from a replica anyway,
+    and there is nothing to gain from moving volumes while the devices backing
+    their old home are still being rebuilt.
+    """
+    db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     for dev in removed_node.nvme_devices:
         if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED):

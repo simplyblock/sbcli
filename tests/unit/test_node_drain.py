@@ -213,3 +213,49 @@ class TestGiveUpIsTerminal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDeviceWorkSplitFromJmWork(unittest.TestCase):
+    """Devices migrate early; the JM stays at phase 2.
+
+    Both used to live in one function, so moving the device work ahead of the
+    volume drain would have dragged the JM decommission with it -- ahead of
+    phase 3a, which tears down this node's own hosted replicas. A peer holding
+    such a replica runs a JC instance naming the dying JM, and jc_replace_jm's
+    -17 check rejects the whole batch while it is live (2026-08-25, 2026-09-02).
+    """
+
+    def test_the_early_device_step_leaves_the_jm_alone(self):
+        node = _node()
+        db = MagicMock()
+        db.get_storage_node_by_id.return_value = node
+        node.nvme_devices = []
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", MagicMock()), \
+             patch.object(storage_node_ops, "_decommission_node_jm") as jm:
+            storage_node_ops._fail_and_migrate_node_devices(node)
+        jm.assert_not_called()
+
+    def test_the_phase_5_wrapper_still_re_runs_the_jm_defensively(self):
+        node = _node()
+        node.nvme_devices = []
+        db = MagicMock()
+        db.get_storage_node_by_id.return_value = node
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", MagicMock()), \
+             patch.object(storage_node_ops, "_decommission_node_jm") as jm:
+            storage_node_ops._decommission_node_devices(node)
+        jm.assert_called_once()
+
+    def test_devices_are_migrated_before_volumes_are_drained(self):
+        """The order the data path wants, and the order asked for."""
+        src = __import__("inspect").getsource(
+            storage_node_ops.node_removal_orchestrate)
+        dev = src.index('cursor.enter("migrate_devices"')
+        drain = src.index('cursor.enter("drain_lvols"')
+        teardown = src.index('cursor.enter("teardown_own_replicas"')
+        jm = src.index('cursor.enter("decommission_jm"')
+        self.assertLess(dev, drain, "devices must migrate before the volume drain")
+        self.assertLess(drain, teardown, "nothing may be torn down before the drain")
+        self.assertLess(teardown, jm,
+                        "phase 3a must still precede the JM decommission")
