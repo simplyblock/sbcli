@@ -9,6 +9,7 @@ from sse_starlette import EventSourceResponse
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
+from simplyblock_core.exceptions import InsufficientCapacityError
 from simplyblock_core.models.lvol_model import LVol
 
 from ...._dependencies import Cluster, StoragePool, Volume
@@ -130,6 +131,8 @@ def add(
         raise AssertionError('unreachable')
 
     if volume_id_or_false == False:  # noqa
+        if lvol_controller.is_capacity_error(error):
+            raise InsufficientCapacityError(str(error))
         raise ValueError(error)
 
     return util.creation_response(
