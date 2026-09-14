@@ -1152,6 +1152,26 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
     return not lvol.namespace
 
 
+def _fail_after_ns(lvol, rpc_client, nsid, msg):
+    """Rollback for a failure that happens AFTER the namespace was attached.
+
+    _fail_after_bdev alone removes the bdev stack, which used to be the whole
+    rollback because every failure it covered happened before the namespace
+    existed -- the listener was published first. Now that the namespace goes on
+    before the listener, leaving it behind would point a live namespace at a
+    bdev the rollback is about to delete, which is the resurrected-namespace
+    state the delete flow already guards against (reads on it answered INTERNAL
+    DEVICE ERROR, incident 2026-07-14).
+    """
+    if nsid:
+        try:
+            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, nsid)
+        except Exception:
+            logger.exception("rollback of namespace nsid=%s on %s failed for %s",
+                             nsid, lvol.nqn, lvol.get_id())
+    return _fail_after_bdev(lvol, rpc_client, msg)
+
+
 def _fail_after_bdev(lvol, rpc_client, msg):
     """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
     already produced a bdev/blob. Without this, a post-bdev-stack failure (a
@@ -1431,10 +1451,29 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
     # the first one to get here would publish a listener for a subsystem whose
     # other members are still arriving. That caller publishes once the batch is
     # complete instead.
-    if not defer_listeners:
+    attached_nsid = int(ret) if is_primary else requested_nsid
+    # Only the call that resolved/created the subsystem publishes its listener.
+    # An lvol JOINING an existing namespaced subsystem must not: the listener is
+    # already there from whoever created it, and re-adding it is a wasted RPC
+    # that the attach path explicitly does not pay (see
+    # tests/integration/test_clone_namespace_race.py). The gap a join leaves --
+    # this member's namespace landing after a listener someone else published --
+    # is the cross-member case, and it is closed by the batch barrier in
+    # _register_lvols_on_node rather than here.
+    if resolve_subsys and not defer_listeners:
+        # No re-read of the namespace before publishing here, deliberately.
+        # The batch path polls (_rpc_wait_subsystem_has_ns) because it reads
+        # back state other threads wrote during a recovery; this call just
+        # issued the add itself and holds the nsid the target returned. And the
+        # probe's known failure is the FALSE NEGATIVE -- soak 2026-08-11 read a
+        # present namespace as absent and left every lvol with a namespace and
+        # zero listeners, permanently (see rpc_client.namespace_matches). There
+        # that costs a listener the monitor can repair; here, with the rollback
+        # below, it would delete the namespace and the blob under a create that
+        # actually succeeded.
         ok, err = publish_lvol_listeners(lvol, snode, rpc_client, is_primary=is_primary)
         if not ok:
-            return _fail_after_bdev(lvol, rpc_client, err)
+            return _fail_after_ns(lvol, rpc_client, attached_nsid, err)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly

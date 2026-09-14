@@ -8997,13 +8997,16 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
     # Namespace or Format" with DNR, which is not retried on another path
     # (2026-09-13: an 838ms window on worker-1, fio took EREMOTEIO).
     #
-    # A member that failed to register is published anyway: that is the state
-    # this function already reports as INCOMPLETE REGISTRATION below, and
-    # withholding its listener as well would cost the volume a path it could
-    # otherwise still serve. The gain here is the ordinary case, where the
-    # whole batch succeeds and the subsystem becomes reachable complete.
+    # A member that failed to register is skipped, not published. Its failure
+    # may be the add_ns or the post-condition that follows it, so its namespace
+    # is exactly the one that may be absent -- publishing for it would recreate
+    # the reachable-but-empty subsystem this barrier exists to prevent. It is
+    # already reported as INCOMPLETE REGISTRATION below, and the lvol monitor's
+    # repair cycle is what gives it a listener once its namespace is there.
     listener_rpc = snode.rpc_client(timeout=10, retry=2)
     for lvol in lvol_list:
+        if lvol.get_id() in failures:
+            continue
         try:
             ok, msg = _publish_lvol_listener(lvol, snode, listener_rpc, lvol_ana_state)
         except Exception as e:
@@ -11509,8 +11512,16 @@ def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
                         tr, iface.ip4_address, listener_port, lvol.nqn)
             continue
         logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
-        rpc_client.listeners_create(
-            lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
+        # listeners_create returns the RPC result and answers None on an RPC
+        # error without raising, so an unchecked call reports a listener this
+        # subsystem does not have -- and the caller then records the lvol as
+        # serving.
+        if not rpc_client.listeners_create(
+                lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state):
+            msg = (f"Failed to add listener {tr} {iface.ip4_address}:{listener_port} "
+                   f"for {lvol.nqn} on {snode.get_id()}")
+            logger.error(msg)
+            return False, msg
     return True, None
 
 def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_listener=False):
