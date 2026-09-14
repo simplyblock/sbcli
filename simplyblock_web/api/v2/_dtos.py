@@ -519,7 +519,9 @@ class VolumeDTO(BaseModel):
             try:
                 _grp_seq = _db.get_consistency_group_by_id(model.group_id).last_group_seq
             except KeyError:
-                pass
+                # Missing/deleted consistency-group record is tolerated here;
+                # keep default group_seq=0 for non-resolvable membership.
+                _grp_seq = 0
         return VolumeDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(cluster_id),
