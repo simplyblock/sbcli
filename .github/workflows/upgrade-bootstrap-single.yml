@@ -763,21 +763,21 @@ jobs:
           test -f sbcli/e2e/e2e_tests/upgrade_tests/major_upgrade.py
           test -f sbcli/e2e/logs/cleanup.py
 
-      - name: Install Python deps (best-effort)
+      - name: Install uv
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
-            pip install -r sbcli/e2e/requirements.txt
-          fi
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
 
       - name: Cleanup logs before upgrade e2e
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 logs/cleanup.py
+          ./logs/cleanup.py
 
       - name: Set RUN_BASE_DIR
         shell: bash
@@ -834,7 +834,7 @@ jobs:
           if [[ -n "${TEST_CLASS:-}" ]]; then
             TESTNAME_ARGS=(--testname "${TEST_CLASS}")
           fi
-          python3 -u upgrade_e2e.py \
+          PYTHONUNBUFFERED=1 ./upgrade_e2e.py \
             --base_version "${BASE_SBCLI_BRANCH}" \
             --target_version "${TARGET_SBCLI_BRANCH}" \
             --base_spdk_image "${BASE_SPDK_IMAGE:-}" \

@@ -26,8 +26,9 @@ uv lock --check                     # CI: fail if uv.lock is stale
 ```
 
 Dependency groups (PEP 735) replace the old `*-requirements.txt` files: `test`, `types`,
-`generate`. Install one with `uv sync --group test`. `e2e/requirements.txt` is separate and
-unaffected.
+`generate`. Install one with `uv sync --group test`. The `e2e/` entry points are standalone
+PEP 723 scripts -- each declares its own interpreter and dependencies inline and runs via the
+`#!/usr/bin/env -S uv run --script` shebang, so they need no separate requirements file.
 
 ## Testing
 

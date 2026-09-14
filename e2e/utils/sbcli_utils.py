@@ -13,7 +13,9 @@ class SbcliUtils:
     def __init__(self, cluster_secret, cluster_api_url, cluster_id):
         self.cluster_id = cluster_id
         self.cluster_secret = cluster_secret
-        self.cluster_api_url = cluster_api_url
+        # Endpoints are all rooted ("/lvol", ...), so a trailing slash here would
+        # produce "//lvol". requests <2.34 silently collapsed that; it no longer does.
+        self.cluster_api_url = cluster_api_url.rstrip("/")
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"{cluster_id} {cluster_secret}"

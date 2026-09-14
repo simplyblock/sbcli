@@ -1353,9 +1353,8 @@ jobs:
         run: |
           set -o pipefail
           cd $GITHUB_WORKSPACE/e2e
-          python3 -m venv myenv
-          source myenv/bin/activate
-          python3 -m pip install -r requirements.txt
+          python3 -m pip install --upgrade pip uv
+          export PATH="$(python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))'):$PATH"
 
           export CLUSTER_ID="${{ env.CLUSTER_ID }}"
           export CLUSTER_SECRET="${{ env.CLUSTER_SECRET }}"
@@ -1377,7 +1376,7 @@ jobs:
             PRESERVE_ARG=""
           fi
 
-          python3 -u e2e.py \
+          PYTHONUNBUFFERED=1 ./e2e.py \
             --testname "${{ inputs.testname || 'K8sNativeNodeMigrationTest' }}" \
             --migrate_to_worker "${{ inputs.migrate_to_worker }}" \
             ${NEW_SSD_PCIE_ARG} ${REATTACH_VOL_ARG} ${PRESERVE_ARG} \
