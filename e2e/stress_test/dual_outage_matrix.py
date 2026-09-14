@@ -18,13 +18,20 @@ Shape
 -----
     outage types (5)
     pairs with repetition                          = 15
-    x separation {0, 1, 2}                         = 45
-    x migration {drain, inflight}                  = 90 case definitions
-    run on docker and on k8s-native                = 180 executions
+    x separation {0, 1, 2}                         = 45 topologies
+    x migration {drain, inflight}                  = 90
+    x multipath {nomp, mp}                         = 180 cases per platform
+    run on docker and on k8s-native                = 360 executions
 
-One driver plus a case table, not 90 leaf classes: two registered classes,
-`DualOutageMatrixDocker` and `DualOutageMatrixK8s`, with the case chosen by
-`stress.py --case`.
+One driver plus a case table, not 180 leaf classes. Two registered classes,
+`DualOutageMatrixDocker` and `DualOutageMatrixK8s`, each of which sweeps its
+whole table in a single invocation: a case is a few minutes of outage and
+recovery, and scheduling 180 pipeline runs to cover one platform would spend
+more time bootstrapping clusters than injecting faults.
+
+A sweep that dies at case 120 resumes there rather than restarting, via the
+checkpoint in utils/run_state.py. `stress.py --case <id>` still runs exactly
+one case, which is the debugging path once the sweep has found something.
 
 Separation
 ----------
@@ -68,30 +75,51 @@ SEPARATIONS = (0, 1, 2)
 #: inflight = do not wait, do not assert (what the rapid no-gap tests do)
 MIGRATION_MODES = ("drain", "inflight")
 
+#: Whether one data NIC is down for the whole case. Losing a path and losing a
+#: node are different failures and they interact: with a NIC already down, the
+#: surviving path carries all the IO while the pair goes away, which is where
+#: a multipath bug shows up as data loss rather than a stall. Both halves are
+#: run because "works with multipath" says nothing about "works without".
+MULTIPATH_MODES = ("nomp", "mp")
+
 
 def _build_cases():
-    """The full table, generated once from the three axes.
+    """The full table, generated once from the four axes.
 
     Pairs use combinations_with_replacement, so (A, A) is included: two nodes
     failing the same way is as real as two failing differently, and it is the
     cheapest case to reason about when something breaks.
+
+    15 pairs x 3 separations = 45 topologies, x 2 migration modes x 2 multipath
+    modes = 180 cases per platform, 360 across docker and k8s.
     """
     cases = []
     for type_a, type_b in itertools.combinations_with_replacement(OUTAGE_TYPES, 2):
         for sep in SEPARATIONS:
             for migration in MIGRATION_MODES:
-                cases.append({
-                    "id": "dual_%s_%s_sep%d_%s" % (type_a, type_b, sep, migration),
-                    "type_a": type_a,
-                    "type_b": type_b,
-                    "separation": sep,
-                    "migration": migration,
-                })
+                for mp in MULTIPATH_MODES:
+                    cases.append({
+                        "id": "dual_%s_%s_sep%d_%s_%s" % (
+                            type_a, type_b, sep, migration, mp),
+                        "type_a": type_a,
+                        "type_b": type_b,
+                        "separation": sep,
+                        "migration": migration,
+                        "multipath": mp,
+                    })
     return cases
 
 
 CASES = _build_cases()
 CASES_BY_ID = {c["id"]: c for c in CASES}
+
+
+class DualOutageMatrixComplete(Exception):
+    """Raised by the seam when the whole table has been swept.
+
+    The base class's run() is an open-ended stress loop with no natural end, so
+    finishing a finite matrix has to be signalled rather than returned.
+    """
 
 
 class DualOutageSkip(Exception):
@@ -106,8 +134,17 @@ class DualOutageSkip(Exception):
 class _DualOutageMixin:
     """Case selection, pair picking and outage dispatch for the matrix."""
 
-    # ── case under test (set by stress.py --case) ──────────────────────────
-    CASE_ID = CASES[0]["id"]
+    # ── which cases this class runs ───────────────────────────────────────
+    #
+    # The whole table, in order, in one invocation. A single case is a few
+    # minutes of outage and recovery; the point of the matrix is the sweep, and
+    # scheduling 180 pipeline runs to get it would cost more in bootstrap time
+    # than the outages themselves.
+    #
+    # CASE_ID stays as a debugging override: set it (or pass stress.py --case)
+    # to run exactly one case instead of the sweep, which is what you want when
+    # chasing a specific failure rather than hunting for one.
+    CASE_ID = None
 
     # ── topology preconditions ────────────────────────────────────────────
     MIN_NODES = 6           # sep 2 needs 4 distinct nodes plus headroom
@@ -120,7 +157,7 @@ class _DualOutageMixin:
     INTER_SET_GAP_SEC = 50       # was MIN/MAX_OUTAGE_GAP_SEC, 50-90
 
     # ── multipath axis ────────────────────────────────────────────────────
-    MULTIPATH_MODE = "off"       # off | single_nic_down | random_flap
+    # MULTIPATH_MODE is a property below: it is per-case, not per-class.
     MULTIPATH_FLAP_INTERVAL_SEC = 120
 
     def _init_mixin_state(self):
@@ -133,6 +170,8 @@ class _DualOutageMixin:
         self._multipath_flap_stop = threading.Event()
         self._multipath_flapped_nics = []
         self._dual_outage_events = []
+        self._case_index = 0
+        self._skipped = []
         self._resumed_from = None
         self._checkpoint_iter = 0
 
@@ -168,13 +207,25 @@ class _DualOutageMixin:
         return point
 
     # ── case resolution ───────────────────────────────────────────────────
-    def _resolve_case(self):
+    def cases_to_run(self):
+        """The cases this invocation will sweep.
+
+        The whole table unless CASE_ID names one, which is the debugging path.
+        """
+        if not self.CASE_ID:
+            return list(CASES)
         case = CASES_BY_ID.get(self.CASE_ID)
         if case is None:
             raise ValueError(
                 "unknown case id %r. %d cases available, e.g. %s"
                 % (self.CASE_ID, len(CASES), CASES[0]["id"]))
-        return case
+        return [case]
+
+    def _resolve_case(self):
+        """The case the next outage set will use. Set by the sweep in run();
+        falls back to the first of the table so the mixin is usable before the
+        loop starts."""
+        return getattr(self, "_case", None) or self.cases_to_run()[0]
 
     # ── pair selection ────────────────────────────────────────────────────
     def _pick_pair_by_separation(self, sep):
@@ -227,6 +278,20 @@ class _DualOutageMixin:
             "ring is too short or has gaps" % (sep, len(chain)))
 
     # ── multipath axis ────────────────────────────────────────────────────
+    @property
+    def MULTIPATH_MODE(self):        # noqa: N802 - matches the base attribute
+        """Driven by the case, not by the class.
+
+        Multipath is one of the four axes, so it changes per case within a
+        single run. Exposed under the base class's attribute name so the
+        inherited `_multipath_selected` and everything else that reads it keeps
+        working unchanged.
+        """
+        case = getattr(self, "_case", None)
+        if not case:
+            return "off"
+        return "single_nic_down" if case.get("multipath") == "mp" else "off"
+
     def _apply_multipath_mode(self):
         """Deterministic multipath, replacing the 50/50 coin flip.
 
@@ -311,6 +376,62 @@ class _DualOutageMixin:
         raise NotImplementedError
 
     # ── the seam: replaces random victim selection ────────────────────────
+    def _advance_case(self):
+        """Move to the next runnable case, or end the sweep.
+
+        Skips do not consume an iteration: a topology the cluster cannot
+        express (separation 2 on a 4-node ring, say) is stepped over here so
+        the rest of the table still runs. Abandoning 179 cases because one of
+        them needs a node that does not exist would be the wrong trade.
+        """
+        table = self.cases_to_run()
+        while self._case_index < len(table):
+            case = table[self._case_index]
+            self._case_index += 1
+            try:
+                self._precheck_case(case)
+            except DualOutageSkip as skip:
+                self._skipped.append((case["id"], str(skip)))
+                self.logger.warning("[dual-outage] SKIP %s: %s",
+                                    case["id"], skip)
+                continue
+            self._case = case
+            self.logger.info(
+                "[dual-outage] case %d/%d: %s",
+                self._case_index, len(table), case["id"])
+            return case
+
+        raise DualOutageMatrixComplete(
+            "swept %d case(s), %d skipped" % (len(table), len(self._skipped)))
+
+    def _precheck_case(self, case):
+        """Raise DualOutageSkip if the cluster cannot express *case*."""
+        chain = self.sn_primary_secondary_map
+        total_nodes = len(set(self.sn_nodes_with_sec) | set(chain or {}))
+        if total_nodes < self.MIN_NODES:
+            raise DualOutageSkip(
+                "needs >= %d storage nodes for separation %d, cluster has %d"
+                % (self.MIN_NODES, case["separation"], total_nodes))
+        if int(getattr(self, "npcs", 0) or 0) < self.MIN_NPCS:
+            raise DualOutageSkip(
+                "needs npcs >= %d, run has npcs=%s"
+                % (self.MIN_NPCS, getattr(self, "npcs", None)))
+
+    def run(self):
+        """Sweep the table, then stop.
+
+        The base run() is an open-ended stress loop; the matrix is finite, so
+        completion arrives as DualOutageMatrixComplete from the seam below and
+        is caught here. Anything else propagates and fails the run as usual.
+        """
+        try:
+            super().run()
+        except DualOutageMatrixComplete as done:
+            self.logger.info("[dual-outage] table complete: %s", done)
+            for cid, why in self._skipped:
+                self.logger.info("[dual-outage]   skipped %s: %s", cid, why)
+            self.resume_finished_clean()
+
     def perform_n_plus_k_outages(self):
         """Trigger the case's two outages on a pair at the case's separation.
 
@@ -319,13 +440,13 @@ class _DualOutageMixin:
         `self.current_outage_nodes`, so every inherited recovery and validation
         step keeps working unchanged.
         """
-        case = self._case
-
         # First time through, honour --resume before anything is touched.
         if self._checkpoint_iter == 0:
             self.resume_point()
             if self._resumed_from:
                 self.adopt_existing_objects()
+
+        case = self._advance_case()
 
         self.checkpoint()
         self._apply_multipath_mode()
