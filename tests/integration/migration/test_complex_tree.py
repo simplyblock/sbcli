@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_complex_tree.py – e2e tests for complex snapshot/lvol tree migration.
 

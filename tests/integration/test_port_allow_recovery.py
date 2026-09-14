@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_port_allow_recovery.py — tests for
 ``tasks_runner_port_allow.exec_port_allow_task`` (network-outage recovery).

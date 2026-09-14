@@ -7,7 +7,7 @@ This file provides guidance to AI coding agents when working with code in this r
 Simplyblock Control Plane and CLI (`sbctl`) — a Kubernetes-native distributed block storage solution. FoundationDB backend.
 
 Packaging is PEP 621 (`pyproject.toml`, setuptools backend) and dependencies are locked in
-`uv.lock`. `requires-python` is `>=3.9` because the published `sbctl` wheel is installed on
+`uv.lock`. `requires-python` is `>=3.11` because the published `sbctl` wheel is installed on
 management nodes with whatever system python they have; **the container image runs free-threaded
 3.14 (`3.14t`)**, so the supported range spans both and CI tests both ends.
 
@@ -34,7 +34,7 @@ unaffected.
 Two tiers via tox: `tox run -e unit` (fast, no infra) and `tox run -e integration` (Docker + `libfdb_c` required). See `tests/AGENTS.md` for tier criteria, the testcontainers FDB fixture, and how to reuse an existing dev-compose FDB instance.
 
 Both tiers have a `py314t-` twin (`tox run -e py314t-unit`) running the image's free-threaded
-interpreter. The un-prefixed envs use python3.9, the floor the published wheel must keep working
+interpreter. The un-prefixed envs use python3.11, the floor the published wheel must keep working
 on. tox-uv fetches both interpreters, so neither needs to be installed on the host. **A change
 that touches runtime behaviour must be green on both** — the GIL-off build is where a
 previously-masked data race surfaces.
@@ -48,7 +48,7 @@ mypy simplyblock_web simplyblock_cli simplyblock_core  # Type check (or: tox -e 
 
 ## Architecture
 
-Three packages, one entry point:
+Three packages, two front-ends (CLI and Web API) over a shared core:
 
 | Package | Role |
 |---------|------|
@@ -56,7 +56,12 @@ Three packages, one entry point:
 | `simplyblock_core/` | Business logic, data models, background services, FDB access |
 | `simplyblock_web/` | REST API — FastAPI (v2) + Flask (v1) hybrid on a single uvicorn process |
 
-Data flows: **CLI → Web API → Core controllers → FoundationDB**. Storage nodes are reached via JSON-RPC (`rpc_client.py`).
+Two front-ends sit on top of the core and **both call it in-process** — the CLI does *not* go through the Web API:
+
+- **`sbctl` CLI → Core controllers → FoundationDB.** `clibase.py` imports `simplyblock_core` directly (`cluster_ops`, `storage_node_ops`, the `controllers` package, `DBController`) and instantiates `DBController()` itself.
+- **Web API → Core controllers → FoundationDB.** `simplyblock_web` is a separate entry point serving remote/programmatic clients over the same core.
+
+Storage nodes are reached via JSON-RPC (`rpc_client.py`).
 
 ## Coding Conventions
 
@@ -209,3 +214,13 @@ symlink target directly.
 ### Local overrides
 
 At every level where an `AGENTS.md` exists, also check for a sibling `AGENTS.local.md`. If present, load it in addition to `AGENTS.md` — its contents extend or override the checked-in instructions. `AGENTS.local.md` is gitignored and intended for per-developer notes that should not be committed.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

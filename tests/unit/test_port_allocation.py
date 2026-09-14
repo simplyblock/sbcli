@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_port_allocation.py – unit tests for the unified port allocation system.
 

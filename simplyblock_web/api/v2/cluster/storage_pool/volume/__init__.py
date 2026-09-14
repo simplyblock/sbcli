@@ -1,8 +1,10 @@
-from typing import Annotated, List, Literal, Optional, Union
+import builtins
+from typing import Annotated, Literal, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, RootModel
+from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
@@ -11,6 +13,7 @@ from simplyblock_core.models.lvol_model import LVol
 
 from ...._dependencies import Cluster, StoragePool, Volume
 from ...._dtos import BackupDTO, VolumeDTO, SnapshotDTO
+from ...._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .... import util
 from .replication import (
     api as replication_api,
@@ -23,8 +26,14 @@ api = APIRouter()
 db = DBController()
 
 
-@api.get('/', name='clusters:storage-pools:volumes:list')
-def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDTO]:
+@api.get('/', name='clusters:storage-pools:volumes:list', response_model=builtins.list[VolumeDTO], responses=WATCH_RESPONSES)
+def list(request: Request, cluster: Cluster, pool: StoragePool, watch: WatchParam = False) -> Union[builtins.list[VolumeDTO], EventSourceResponse]:
+    if watch:
+        cluster_id = cluster.get_id()
+        return sse_response(
+            lvol_controller.watch_volumes(cluster_id, pool.get_id()),
+            lambda lvol: VolumeDTO.from_model(lvol, request, cluster_id, None),
+        )
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
         stat_obj = None
@@ -39,39 +48,39 @@ class _CreateParams(BaseModel):
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
-    ha_type: Optional[Literal['single', 'ha']] = None
-    host_id: Optional[str] = None
+    ha_type: Literal['single', 'ha'] | None = None
+    host_id: str | None = None
     priority_class: Literal[0, 1] = 0
-    namespaced: Optional[bool] = False
-    pvc_name: Optional[str] = None
+    namespaced: bool | None = False
+    pvc_name: str | None = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
-    allowed_hosts: Optional[List[str]] = None
+    allowed_hosts: builtins.list[str] | None = None
     fabric: str = "tcp"
     # None → resolved by add_lvol_ha: a shareable default for namespaced
     # volumes, 1 otherwise.
-    max_namespace_per_subsys: Optional[int] = None
+    max_namespace_per_subsys: int | None = None
     do_replicate: bool = False
-    replication_cluster_id: Optional[str] = None
+    replication_cluster_id: str | None = None
     # Optional replication policy (id or name): assigning it at create time
     # configures replication for the volume.
-    replication_policy: Optional[str] = None
+    replication_policy: str | None = None
     encrypt: bool = False
 
 
 class _CloneParams(BaseModel):
     name: str
-    snapshot_id: Annotated[Optional[str], Field(pattern=core_utils.UUID_PATTERN)]
+    snapshot_id: Annotated[str | None, Field(pattern=core_utils.UUID_PATTERN)]
     size: util.Size = 0
-    pvc_name: Optional[str] = None
-    pvc_namespace: Optional[str] = None
+    pvc_name: str | None = None
+    pvc_namespace: str | None = None
     delete_snap_on_lvol_delete: bool = False
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
 def add(
         request: Request, cluster: Cluster, pool: StoragePool,
-        parameters: RootModel[Union[_CreateParams, _CloneParams]],
+        parameters: RootModel[_CreateParams | _CloneParams],
         response_format: util.CreationResponseFormatParameter = "empty",
 ) -> Response:
     data = parameters.root
@@ -139,22 +148,34 @@ def add(
 instance_api = APIRouter(prefix='/{volume_id}')
 
 
-@instance_api.get('/', name='clusters:storage-pools:volumes:detail')
-def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> VolumeDTO:
+@instance_api.get('/', name='clusters:storage-pools:volumes:detail', response_model=VolumeDTO, responses=WATCH_RESPONSES)
+def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume, watch: WatchParam = False) -> Union[VolumeDTO, EventSourceResponse]:
+    if watch:
+        cluster_id = cluster.get_id()
+
+        def _volume_dto(lvol: LVol) -> VolumeDTO:
+            rep_info = lvol_controller.get_replication_info(lvol.get_id())
+            return VolumeDTO.from_model(lvol, request, cluster_id, None, rep_info)
+
+        return sse_response(
+            lvol_controller.watch_volume(cluster_id, pool.get_id(), volume.get_id()),
+            _volume_dto,
+            single=True,
+        )
     stat_obj = None
     rep_info = lvol_controller.get_replication_info(volume.get_id())
     return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj, rep_info)
 
 
 class UpdatableLVolParams(BaseModel):
-    name: Optional[str] = None
+    name: str | None = None
     max_rw_iops: util.Unsigned = 0
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
-    size: Optional[util.Size] = None
+    size: util.Size | None = None
     # Omitted leaves the volume's policy alone; null detaches it.
-    replication_policy_id: Optional[UUID] = None
+    replication_policy_id: UUID | None = None
 
 
 @instance_api.put('/', name='clusters:storage-pools:volumes:update', status_code=204, responses={204: {"content": None}})
@@ -228,7 +249,7 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
+def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str | None = None):
     details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
         return Response(status_code=404, content=err)
@@ -236,7 +257,7 @@ def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optio
 
 
 @instance_api.get('/capacity', name='clusters:storage-pools:volumes:capacity')
-def capacity(cluster: Cluster, pool: StoragePool, volume: Volume, history: Optional[str] = None):
+def capacity(cluster: Cluster, pool: StoragePool, volume: Volume, history: str | None = None):
     records_or_false = lvol_controller.get_capacity(volume.get_id(), history, parse_sizes=False)
     if records_or_false == False:  # noqa
         raise ValueError('Failed to compute capacity')
@@ -244,7 +265,7 @@ def capacity(cluster: Cluster, pool: StoragePool, volume: Volume, history: Optio
 
 
 @instance_api.get('/iostats', name='clusters:storage-pools:volumes:iostats')
-def iostats(cluster: Cluster, pool: StoragePool, volume: Volume, history: Optional[str] = None):
+def iostats(cluster: Cluster, pool: StoragePool, volume: Volume, history: str | None = None):
     records_or_false = lvol_controller.get_io_stats(
         volume.get_id(),
         history,
@@ -257,7 +278,7 @@ def iostats(cluster: Cluster, pool: StoragePool, volume: Volume, history: Option
 
 
 @instance_api.get('/snapshots', name='clusters:storage-pools:volumes:snapshots:list')
-def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> List[SnapshotDTO]:
+def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> builtins.list[SnapshotDTO]:
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
@@ -314,8 +335,8 @@ def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 def clone(
         request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
         clone_name: str,
-        new_size: Optional[str] = None,
-        pvc_name: Optional[str] = None,
+        new_size: str | None = None,
+        pvc_name: str | None = None,
 ) -> Response:
     size = None
     if new_size is not None:
@@ -336,7 +357,7 @@ def clone(
 
 
 @instance_api.get('/backups', name='clusters:storage-pools:volumes:backups:list')
-def backups(volume: Volume) -> List[BackupDTO]:
+def backups(volume: Volume) -> builtins.list[BackupDTO]:
     rows = db.get_backups_by_lvol_id(volume.get_id())
     rows = sorted(rows, key=lambda b: (b.created_at, b.uuid), reverse=True)
     return [BackupDTO.from_model(b) for b in rows]

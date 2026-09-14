@@ -5,7 +5,7 @@ import threading
 from collections import OrderedDict
 from enum import IntEnum
 from json import JSONDecodeError
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 import jsonschema
 import requests
@@ -115,6 +115,44 @@ _response_schema = {
 }
 
 
+def nvme_bdev_opts_params():
+    """The bdev_nvme global options this control plane intends to run with.
+
+    Single source of truth for bdev_nvme_set_options() and for verification
+    via RPCClient.get_effective_nvme_options() -- checking the live SPDK
+    against a stale second copy of the intent would be worse than not
+    checking at all.
+
+    bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an aborted
+    IO on the alternate path of an NVMe-oF multipath bdev, per
+    https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are multipath
+    whenever an FTT>=1 cluster exists, regardless of how many data NICs the
+    local node has, so the retries are set unconditionally. See
+    constants.BDEV_RETRY / constants.TRANSPORT_RETRY for the chosen values
+    and the worst-case retry budget.
+    """
+    params = {
+        "bdev_retry_count": constants.BDEV_RETRY,
+        "transport_retry_count": constants.TRANSPORT_RETRY,
+        "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
+        "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
+        "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
+        "keep_alive_timeout_ms": constants.KATO,
+        "timeout_us": constants.NVME_TIMEOUT_US,
+        "pci_timeout_us": constants.PCIE_TIMEOUT_US,
+        "transport_ack_timeout": constants.ACK_TO,
+        # action_on_timeout=abort caused multi-minute IO hangs when a
+        # remote target wedged: the timeout_cb sent an NVMe abort that
+        # itself never completed against the wedged qpair, and the bdev
+        # IO sat pending until something else (keep-alive, reset on
+        # abort_cpl failure) eventually disconnected the qpair. reset
+        # tears down the qpair immediately, which fails the in-flight
+        # IOs back up to the bdev/distrib layer with a clean error.
+        "action_on_timeout": "reset"
+    }
+    return params
+
+
 class RPCErrorCode(IntEnum):
     invalid_state = -1
     invalid_request = -32600
@@ -159,6 +197,17 @@ _response_validator = jsonschema.validators.validator_for(_response_schema)(_res
 RPC_METHOD_NOT_FOUND = -32601
 #: Returned instead of a result when the target does not implement the method.
 RPC_UNSUPPORTED = "__rpc_unsupported__"
+#: ``jc_remove_jm``: the JM is still referenced by at least one jm_vuid, so JC
+#: refuses to release it and the bdev must NOT be deleted. Deliberately a
+#: module-local constant rather than a member of RPCErrorCode: the JC codes are
+#: a separate, JC-specific space whose small negatives collide with that enum's
+#: generic meanings (-1 there is invalid_state). See RPCClient.jc_remove_jm.
+JC_REMOVE_JM_STILL_IN_USE = -22
+#: ``jc_remove_jm``: JC does not know this JM at all. After a successful
+#: ``jc_replace_jm`` this is the NORMAL answer, not a failure -- measured live
+#: 2026-09-02 on spdk R26.3: replacing the JM out of every vuid on a node also
+#: drops it from JC, so the follow-up release finds nothing left to do.
+JC_REMOVE_JM_NOT_USED = -13
 
 
 def _build_session(host, port, username, password: SecretStr, retry: int,
@@ -197,7 +246,7 @@ class RPCSessionPool:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._sessions: "OrderedDict[tuple, requests.Session]" = OrderedDict()
+        self._sessions: OrderedDict[tuple, requests.Session] = OrderedDict()
 
     @staticmethod
     def _fingerprint(password: SecretStr) -> str:
@@ -374,7 +423,7 @@ class RPCClient:
     def subsystem_list(self) -> list[dict]:
         return self._request3("nvmf_get_subsystems")
 
-    def subsystem_get(self, nqn: str) -> Optional[dict]:
+    def subsystem_get(self, nqn: str) -> dict | None:
         try:
             return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
         except RPCRemoteError as e:
@@ -874,7 +923,9 @@ class RPCClient:
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
-                           write_protection=False, full_page_unmap=False):
+                           write_protection=False, full_page_unmap=False,
+                           checksum_method=0, cache_size=0, cache_eviction_threshold=0,
+                           force_4k_atomic=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -898,6 +949,19 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
+        # Inline CRC checksum validation. method: 0=off, 1=md-on-device, 2=fallback (extra md page).
+        # The data plane reads md_size from spdk_bdev_get_md_size and refuses method=1 when md_size==0,
+        # so the caller must pick method=2 for devices without NVMe metadata support.
+        if checksum_method:
+            params["checksum_validation_method"] = int(checksum_method)
+            if cache_size:
+                params["cache_size"] = int(cache_size)
+            if cache_eviction_threshold:
+                params["cache_eviction_threshold"] = int(cache_eviction_threshold)
+            # The device's logical block size is <4K but it guarantees 4K write
+            # atomicity (cluster.atomic_4k). Tell the data plane to skip its >=4K
+            # block-size gate for fallback-mode checksum validation.
+            params["cv_ignore_block_size"] = bool(force_4k_atomic)
         return self._request("bdev_alceml_create", params)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
@@ -1253,35 +1317,38 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
+    def framework_get_config(self, name):
+        """Dump one SPDK subsystem's effective configuration.
+
+        Reads back what is actually in force on a running SPDK rather than
+        what we believe we told it. bdev_nvme writes its global options into
+        this dump (bdev_nvme.c, bdev_nvme_config_json), so the ``bdev``
+        subsystem carries the real timeout_us / transport_ack_timeout /
+        keep_alive_timeout_ms.
+        """
+        return self._request("framework_get_config", {"name": name})
+
+    def get_effective_nvme_options(self):
+        """The bdev_nvme global options actually in force; {} if unknown.
+
+        There is no bdev_nvme_get_options RPC in our SPDK, so this picks the
+        bdev_nvme_set_options entry out of the ``bdev`` subsystem config dump.
+        """
+        try:
+            cfg = self.framework_get_config("bdev")
+        except Exception as e:
+            logger.warning("framework_get_config(bdev) failed: %s", e)
+            return {}
+        if isinstance(cfg, dict):
+            cfg = cfg.get("config") or cfg.get("subsystems") or []
+        for entry in cfg or []:
+            if isinstance(entry, dict) and entry.get("method") == "bdev_nvme_set_options":
+                return entry.get("params") or {}
+        return {}
+
     def bdev_nvme_set_options(self):
-        # bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an
-        # aborted IO on the alternate path of an NVMe-oF multipath bdev,
-        # per https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are
-        # multipath whenever an FTT≥1 cluster exists, regardless of how
-        # many data NICs the local node has — so the retries are set
-        # unconditionally. See ``constants.BDEV_RETRY`` /
-        # ``constants.TRANSPORT_RETRY`` for the chosen values and the
-        # worst-case retry budget.
-        params = {
-            "bdev_retry_count": constants.BDEV_RETRY,
-            "transport_retry_count": constants.TRANSPORT_RETRY,
-            "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
-            "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
-            "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
-            "keep_alive_timeout_ms": constants.KATO,
-            "timeout_us": constants.NVME_TIMEOUT_US,
-            "pci_timeout_us": constants.PCIE_TIMEOUT_US,
-            "transport_ack_timeout": constants.ACK_TO,
-            # action_on_timeout=abort caused multi-minute IO hangs when a
-            # remote target wedged: the timeout_cb sent an NVMe abort that
-            # itself never completed against the wedged qpair, and the bdev
-            # IO sat pending until something else (keep-alive, reset on
-            # abort_cpl failure) eventually disconnected the qpair. reset
-            # tears down the qpair immediately, which fails the in-flight
-            # IOs back up to the bdev/distrib layer with a clean error.
-            "action_on_timeout": "reset"
-        }
-        return self._request("bdev_nvme_set_options", params)
+        return self._request("bdev_nvme_set_options", nvme_bdev_opts_params())
+
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
         params = {"bdev_auto_examine": False}
@@ -1448,6 +1515,36 @@ class RPCClient:
 
     def bdev_wait_for_examine(self):
         return self._request("bdev_wait_for_examine")
+
+    def bdev_aio_create(self, name, filename, block_size=0):
+        """Create an SPDK AIO bdev over a Linux block device (lblk cluster
+        mode). ``filename`` is the device path — prefer the stable
+        /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
+        logical block size."""
+        params = {"name": name, "filename": filename}
+        if block_size:
+            params["block_size"] = block_size
+        return self._request("bdev_aio_create", params)
+
+    def bdev_aio_delete(self, name):
+        return self._request("bdev_aio_delete", {"name": name})
+
+    def bdev_aio_rescan(self, name):
+        """Re-read the backing device's size (device grow pickup)."""
+        return self._request("bdev_aio_rescan", {"name": name})
+
+    def bdev_set_qd_sampling_period(self, name, period_us):
+        """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
+        queue_depth/io_time — the hung-IO watchdog's signal for AIO base
+        bdevs (period 0 disables)."""
+        params = {"name": name, "period": period_us}
+        return self._request("bdev_set_qd_sampling_period", params)
+
+    def get_bdevs_2(self, name):
+        """(ret, err) probe variant of bdev_get_bdevs, mirroring
+        bdev_nvme_controller_list_2 — used where the caller must distinguish
+        'bdev gone' from RPC failure without raising."""
+        return self._request2("bdev_get_bdevs", {"name": name})
 
     def bdev_enable_histogram(self, name, enable=True, opc=None):
         # opc filters to a single I/O type (e.g. "read"/"write"); requires
@@ -1840,6 +1937,21 @@ class RPCClient:
         """
         return self._request2("jc_set_dual_node", {"enable": bool(enable)})
 
+    def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
+        """One crash-consistent snapshot per consistency-group member.
+
+        ``snapshots`` is a list of {"lvol_name": "LVS_1/LVOL_5",
+        "snapshot_name": "SNAP_123"}; all members must be in ``lvs_name``.
+        IO on every member is frozen before the first snapshot and released
+        after the last; a mid-sequence failure unfreezes first and then
+        garbage-collects the snapshots already taken (SPDK side).
+        Returns [{"lvol_name", "snapshot_name", "uuid"}, ...] or False.
+        """
+        return self._request2("bdev_lvol_snapshot_group", {
+            "lvs_name": lvs_name,
+            "snapshots": snapshots,
+        })
+
     def jc_suspend_compression(self, jm_vuid, suspend=False):
         params = {
             "jm_vuid": jm_vuid,
@@ -1972,6 +2084,51 @@ class RPCClient:
             return None
         return result or []
 
+    def jc_remove_jm(self, name):
+        """Close JC's descriptor + IO channel on a JM bdev and drop its JC
+        context, so the bdev itself can then safely be deleted.
+
+        ``name``: the JM bdev name (e.g. ``remote_jm_<uuid>n1``). It must be
+        known to JC and **unused by every jm_vuid** -- swap it out of each one
+        with ``jc_replace_jm`` first.
+
+        This is the step that must come BEFORE deleting the bdev. Detaching the
+        controller while JC still holds a descriptor leaves JC referencing a
+        bdev that no longer exists (observed live 2026-09-02: a JC member list
+        naming a ``remote_jm_*`` bdev absent from that node's
+        ``bdev_get_bdevs``).
+
+        Only one removal may be in progress cluster-side at a time.
+
+        Returns True on success, or ``RPC_UNSUPPORTED`` on a build without the
+        RPC (checked, not assumed -- ``spdk:main-latest`` as of 2026-09-02 does
+        not expose it, so callers must degrade rather than fail). Any other
+        error raises ``RPCRemoteError``, whose ``.code`` distinguishes:
+
+            -10 JC is closing
+            -11 invalid (empty) JM name
+            -12 this JM is already being removed, or another removal is running
+            -13 this JM is not used by JC (unknown name)
+            -21 involved in a pending jc_replace_jm
+            -22 STILL IN USE by one or more jm_vuids
+             -3 JC started closing during the operation
+             -6 timed out closing the JM (c_jc_tmo_ms_remove_jm)
+
+        -22 is the useful one for node removal: it is positive proof that some
+        jm_vuid on this node still references the JM, including one the control
+        plane cannot enumerate (a vuid whose primary has already been removed
+        appears in no `decisions` map and under no back-reference). Treat it as
+        "do not delete this bdev", never as a transient failure.
+        """
+        result, error = self._request2("jc_remove_jm", {"name": name})
+        if error:
+            if error.get("code") == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            raise RPCRemoteError(
+                f"jc_remove_jm({name}) failed: {error.get('message')}",
+                error.get("code", 0), error.get("data"))
+        return result
+
     def jc_compression_get_status(self, jm_vuid):
         """
         Return value:
@@ -2010,6 +2167,14 @@ class RPCClient:
         }
         return self._request("bdev_raid_get_bdevs", params)
 
+    def rpc_get_methods(self):
+        """Names of every RPC method the node's running SPDK app exposes
+        (standard SPDK ``rpc_get_methods``). Used to probe data-plane
+        capabilities without side effects — e.g. whether the image carries
+        the runtime shared-placement RPCs (see
+        cluster_ops.all_nodes_support_shared_placement)."""
+        return self._request("rpc_get_methods")
+
     def bdev_lvs_dump_tree(self, lvstore_uuid):
         params = {
             "uuid": lvstore_uuid
@@ -2024,22 +2189,46 @@ class RPCClient:
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
         return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
-    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0):
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
+                           allow_partial=False):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
 
         Returns the RPC result (truthy on success) or None on error.
         Poll progress with :meth:`bdev_lvol_transfer_stat`.
+
+        *allow_partial* opts this transfer into the dirty-bitmap delta path: the
+        SPDK side then ships only the ranges written since the previous snapshot
+        instead of every allocated cluster. It is a REQUEST, not a guarantee --
+        the fork gates the bitmap path on the snapshot carrying a COMPLETE
+        dirty generation and silently sends a full transfer whenever it does
+        not, so passing it can never produce less data than the destination
+        needs *from this transfer*.
+
+        What it does NOT excuse is the destination's starting content: a partial
+        transfer only ships the delta, so everything outside the delta must
+        already be on the destination. Pass it only when the landing volume is a
+        clone of the destination's copy of the PREVIOUS snapshot. Passing it for
+        a transfer into a fresh empty volume would silently drop every cluster
+        the delta does not cover.
         """
-        return self._request("bdev_lvol_transfer", {
+        params = {
             "lvol_name": name,
             "lvol_id": lvol_id,
             "offset": offset,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
             "operation": operation,
-        })
+        }
+        # The delta path is DISABLED (PR #1276, commit 52e75afb2): the SPDK
+        # fork's fragment write path corrupts partial transfers, so
+        # allow_partial is never emitted and every transfer is a full one,
+        # regardless of what the caller requests. Re-enable the emission once
+        # the fork is fixed.
+        # if allow_partial:
+        #     params["allow_partial"] = True
+        return self._request("bdev_lvol_transfer", params)
 
     def bdev_lvol_transfer_stat(self, name):
         """

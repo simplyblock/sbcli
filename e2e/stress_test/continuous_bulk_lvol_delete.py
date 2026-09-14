@@ -29,6 +29,7 @@ import time
 
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from datetime import UTC
 
 logger = setup_logger(__name__)
 
@@ -272,7 +273,7 @@ class _BulkDeleteMixin:
     def _write_monitoring_json(self, results):
         """Write standardised timing JSON for monitoring suite aggregation."""
         import json as _json
-        from datetime import datetime, timezone
+        from datetime import datetime
         from pathlib import Path
 
         phases = []
@@ -307,7 +308,7 @@ class _BulkDeleteMixin:
 
         report = {
             "test_class": self.__class__.__name__,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "status": "passed" if all(
                 r["failed"] + r["stale"] == 0 for r in results
             ) and total_core_dumps == 0 else "failed",

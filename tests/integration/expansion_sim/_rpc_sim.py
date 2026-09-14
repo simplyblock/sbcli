@@ -1,4 +1,3 @@
-# coding=utf-8
 """SPDK RPC server simulator framework.
 
 Per-storage-node simulator (:class:`RpcServerSim`) that tracks bdev /
@@ -25,7 +24,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -58,17 +57,17 @@ class SubsystemSim:
     serial_number: str
     model_number: str
     min_cntlid: int
-    listeners: List[Tuple[str, int, str]] = field(default_factory=list)
+    listeners: list[tuple[str, int, str]] = field(default_factory=list)
     # (traddr, trsvcid, ana_state)
-    allowed_hosts: List[str] = field(default_factory=list)
-    namespaces: List[str] = field(default_factory=list)
+    allowed_hosts: list[str] = field(default_factory=list)
+    namespaces: list[str] = field(default_factory=list)
 
 
 @dataclass
 class NvmeControllerSim:
     name: str
     nqn: str
-    paths: List[Tuple[str, int, str]] = field(default_factory=list)
+    paths: list[tuple[str, int, str]] = field(default_factory=list)
     # (traddr, trsvcid, trtype)
 
 
@@ -95,16 +94,16 @@ class RpcServerSim:
         self.mgmt_ip = mgmt_ip
         self.rpc_port = rpc_port
         self.lifecycle = Lifecycle.READY  # phase 1: nodes start ready
-        self.bdevs: Dict[str, BdevSim] = {}
-        self.subsystems: Dict[str, SubsystemSim] = {}
-        self.controllers: Dict[str, NvmeControllerSim] = {}
-        self.firewall: Dict[Tuple[int, str], bool] = {}
+        self.bdevs: dict[str, BdevSim] = {}
+        self.subsystems: dict[str, SubsystemSim] = {}
+        self.controllers: dict[str, NvmeControllerSim] = {}
+        self.firewall: dict[tuple[int, str], bool] = {}
         # call_log captures every dispatched RPC for assertions
-        self.call_log: List[Tuple[str, dict]] = []
+        self.call_log: list[tuple[str, dict]] = []
         # JM membership view: which JMs (by remote_jm_<id>n1 key) the JC
         # currently sees. Phase 1 just defaults to all known peers True.
-        self.jm_status: Dict[int, Dict[str, bool]] = defaultdict(dict)
-        self.cluster_sim: Optional["ClusterSim"] = None
+        self.jm_status: dict[int, dict[str, bool]] = defaultdict(dict)
+        self.cluster_sim: ClusterSim | None = None
 
     # -- Bdev operations ----------------------------------------------------
 
@@ -379,13 +378,13 @@ class ClusterSim:
     cross-node validation logic."""
 
     def __init__(self):
-        self.servers: Dict[str, RpcServerSim] = {}  # node_id -> sim
-        self._by_endpoint: Dict[Tuple[str, int], RpcServerSim] = {}
+        self.servers: dict[str, RpcServerSim] = {}  # node_id -> sim
+        self._by_endpoint: dict[tuple[str, int], RpcServerSim] = {}
         # Cluster-wide "persisted lvstore superblock" registry: base bdev
         # name (raid / single distrib) -> lvstore name. Populated when an
         # lvstore is created and read back when any node examines the base
         # bdev, so a non-leader rediscovers the lvstore the way SPDK does.
-        self.lvstore_by_base: Dict[str, str] = {}
+        self.lvstore_by_base: dict[str, str] = {}
         # Lvstores destroyed via bdev_lvol_delete_lvstore (a data-destroying
         # operation on shared storage). Expansion tests assert this stays
         # empty — re-homing a role must unwind raid+distribs, never the lvs.
@@ -396,13 +395,13 @@ class ClusterSim:
         self._by_endpoint[(sim.mgmt_ip, sim.rpc_port)] = sim
         sim.cluster_sim = self
 
-    def get_by_endpoint(self, mgmt_ip: str, rpc_port: int) -> Optional[RpcServerSim]:
+    def get_by_endpoint(self, mgmt_ip: str, rpc_port: int) -> RpcServerSim | None:
         return self._by_endpoint.get((mgmt_ip, int(rpc_port)))
 
-    def get_by_node_id(self, node_id: str) -> Optional[RpcServerSim]:
+    def get_by_node_id(self, node_id: str) -> RpcServerSim | None:
         return self.servers.get(node_id)
 
-    def node_ids(self) -> List[str]:
+    def node_ids(self) -> list[str]:
         return list(self.servers.keys())
 
 
@@ -415,10 +414,10 @@ class RpcRouter:
     installed via :func:`set_active_cluster_sim` (per-test session).
     """
 
-    _active_cluster: Optional[ClusterSim] = None
+    _active_cluster: ClusterSim | None = None
 
     @classmethod
-    def set_active_cluster(cls, sim: Optional[ClusterSim]) -> None:
+    def set_active_cluster(cls, sim: ClusterSim | None) -> None:
         cls._active_cluster = sim
 
     def __init__(self, mgmt_ip: str, rpc_port: int,
@@ -455,7 +454,7 @@ class RpcRouter:
         return _delegated
 
 
-def install_rpc_router(modules: List[str]) -> List[Tuple[Any, str, Any]]:
+def install_rpc_router(modules: list[str]) -> list[tuple[Any, str, Any]]:
     """Replace ``RPCClient`` with :class:`RpcRouter` in every named module.
 
     Returns the original (module, attr, value) tuples so callers can
@@ -471,7 +470,7 @@ def install_rpc_router(modules: List[str]) -> List[Tuple[Any, str, Any]]:
     return saved
 
 
-def restore_rpc_router(saved: List[Tuple[Any, str, Any]]) -> None:
+def restore_rpc_router(saved: list[tuple[Any, str, Any]]) -> None:
     for mod, attr, value in saved:
         setattr(mod, attr, value)
 
@@ -494,16 +493,16 @@ class FirewallClientSim:
     signature.
     """
 
-    _active_cluster: Optional[ClusterSim] = None
+    _active_cluster: ClusterSim | None = None
 
     @classmethod
-    def set_active_cluster(cls, sim: Optional[ClusterSim]) -> None:
+    def set_active_cluster(cls, sim: ClusterSim | None) -> None:
         cls._active_cluster = sim
 
     def __init__(self, snode, timeout=None, retry=None):
         self.snode = snode
 
-    def _server(self) -> Optional[RpcServerSim]:
+    def _server(self) -> RpcServerSim | None:
         active = type(self)._active_cluster
         if active is None:
             return None
@@ -526,7 +525,7 @@ class FirewallClientSim:
         return {"status": "ok"}
 
 
-def install_firewall_stub(modules: List[str]) -> List[Tuple[Any, str, Any]]:
+def install_firewall_stub(modules: list[str]) -> list[tuple[Any, str, Any]]:
     """Replace ``FirewallClient`` with :class:`FirewallClientSim` in every
     named module. Symmetric with :func:`install_rpc_router`."""
     import importlib
@@ -539,6 +538,6 @@ def install_firewall_stub(modules: List[str]) -> List[Tuple[Any, str, Any]]:
     return saved
 
 
-def restore_firewall_stub(saved: List[Tuple[Any, str, Any]]) -> None:
+def restore_firewall_stub(saved: list[tuple[Any, str, Any]]) -> None:
     for mod, attr, value in saved:
         setattr(mod, attr, value)

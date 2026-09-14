@@ -1,4 +1,3 @@
-# coding=utf-8
 """Regression tests for ``LocalKMS`` against a real FoundationDB.
 
 The original bug: ``LocalKMS.get_data_encryption_keys`` called ``.wait()`` on

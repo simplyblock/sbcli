@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_parse_distr_cluster_map.py — regression test for node-status parsing in
 ``distr_controller.parse_distr_cluster_map``.

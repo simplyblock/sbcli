@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_failure_domain.py – unit tests for the failure-domain feature.
 

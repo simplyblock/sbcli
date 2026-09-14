@@ -1,4 +1,3 @@
-# coding=utf-8
 """Extract per-RPC timing from a sb_logs tarball's ``spdk_proxy_*.log``
 files.
 

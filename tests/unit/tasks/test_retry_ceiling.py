@@ -1,4 +1,3 @@
-# coding=utf-8
 """Behavioural regression tests for task-runner retry ceilings.
 
 Background: an S3 backup whose ``bdev_lvol_s3_backup`` RPC crashed SPDK was
@@ -193,7 +192,7 @@ def test_fdb_backup_fails_when_max_retry_reached(fdb_backup_runner, monkeypatch)
     assert "max retry" in task.function_result
     create_backup.assert_not_called()
     fdb_backup_runner.fdb_backup_events.fdb_backup_failed.assert_called_once_with(
-        task.cluster_id, task.uuid)
+        task.cluster_id, task)
 
 
 def test_fdb_backup_runs_below_max_retry(fdb_backup_runner, monkeypatch):
@@ -390,13 +389,24 @@ def _spec_node_add(runner, monkeypatch):
 
 
 def _spec_replication_final(runner, monkeypatch):
+    # The endgame params are pre-set so each pass skips the shrink machinery
+    # and goes straight to run_cutover, which is mocked to fail every cycle.
+    # The target node stays ONLINE on purpose: an offline target deliberately
+    # does NOT burn task.retry (waiting out an outage is transient), so the
+    # ceiling must be driven by the work itself failing. Each failure walks
+    # the hub-attempt ladder (REPL_CUTOVER_MAX_HUB_ATTEMPTS cooldown attempts
+    # per burned retry); the fake clock's giant steps make every cooldown
+    # already elapsed by the next poll.
     task = _make_task(
         JobSchedule.FN_REPLICATION_FINAL,
-        lvol_id="lv-1", tgt_node_id="tgt-1", src_node_id="src-1")
-    db, _cluster, node = _wire_base(runner, monkeypatch, task)
-    # Target node never comes online -> cutover cannot proceed, retry each poll.
-    node.status = StorageNode.STATUS_OFFLINE
+        lvol_id="lv-1", tgt_node_id="tgt-1", src_node_id="src-1",
+        tgt_lvol_composite="lvs_tgt/LVOL_1", tgt_map_id=1,
+        tgt_snap_composite="lvs_tgt/SNAP_1",
+        shrink_snap_id="S_endgame", shrink_round=0)
+    db, _cluster, _node = _wire_base(runner, monkeypatch, task)
     db.get_lvol_by_id.return_value = MagicMock()
+    monkeypatch.setattr(runner.replication_final_step, "run_cutover",
+                        lambda *a, **k: (False, "boom"))
     return task
 
 

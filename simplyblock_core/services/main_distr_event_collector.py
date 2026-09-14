@@ -1,4 +1,3 @@
-# coding=utf-8
 import collections
 import threading
 import time
@@ -177,7 +176,7 @@ def _is_target_remote_controller_healthy(device_obj, event_node_obj):
     else:
         remote_bdev = f"remote_{device_obj.alceml_bdev}n1"
 
-    ctrl_name = remote_bdev[:-2] if remote_bdev.endswith("n1") else remote_bdev
+    ctrl_name = remote_bdev.removesuffix("n1")
     ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(ctrl_name)
     if not ret:
         return False
@@ -239,8 +238,15 @@ def process_device_event(event, logger):
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, target remote controller ok, skipping")
                     event.status = f'skipping_late_by_{int(time_delta.total_seconds())}s_but_controller_ok'
                     return
-                ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
-                if err and err['code'] == 22:
+                if device_obj.bdev_type == "aio":
+                    # AIO devices have no nvme controller — probe the base
+                    # bdev instead: bdev gone => the late event is real.
+                    ret, err = event_node_obj.rpc_client().get_bdevs_2(device_obj.nvme_bdev)
+                    controller_missing = bool(err) or not ret
+                else:
+                    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
+                    controller_missing = bool(err) and err['code'] == 22
+                if controller_missing:
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, checking controller filed")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s'
                 else:
@@ -453,6 +459,17 @@ def start_event_collector_on_node(node_id):
 
     try:
         while True:
+            # Same reason as the JM collector: removal leaves the record in
+            # place with status=removed, so nothing else here would ever end
+            # this loop and it would keep polling a node whose SPDK is gone.
+            try:
+                if db.get_storage_node_by_id(node_id).status == StorageNode.STATUS_REMOVED:
+                    logger.info(f"Node {node_id} removed; stopping Distr collector")
+                    return
+            except KeyError:
+                logger.info(f"Node {node_id} deleted; stopping Distr collector")
+                return
+
             page = 1
             events_groups: dict[Any, dict[Any, dict[Any, EventObj]]] = {}
             events_list = []
@@ -640,6 +657,12 @@ def start_jm_event_collector_on_node(node_id):
                 try:
                     snode = db.get_storage_node_by_id(node_id)
                 except KeyError:
+                    logger.info(f"Node {node_id} deleted; stopping JM collector")
+                    return
+                if snode.status == StorageNode.STATUS_REMOVED:
+                    # Removal does not delete the record, so the KeyError above
+                    # never fires for a removed node -- this is what the
+                    # message there always meant to catch.
                     logger.info(f"Node {node_id} removed; stopping JM collector")
                     return
                 backlog_alerted = check_jm_compression_backlog(
@@ -701,6 +724,17 @@ def ensure_collectors(nodes):
     """
     for snode in nodes:
         node_id = snode.get_id()
+        if snode.status == StorageNode.STATUS_REMOVED:
+            # A removed node's record is NOT deleted -- it stays with
+            # status=removed -- so without this check we keep (re)starting
+            # collectors that RPC a node whose SPDK is gone, forever. Live
+            # 2026-09-02: 1036 "Failed to process JM events ... connection
+            # error" in the 1.5h after one removal, still going. The collector
+            # loops exit on removal too, but on their own that is not enough:
+            # this function restarts anything not alive within ~5s.
+            for source in ("distr", "jm"):
+                threads_maps.pop(f"{node_id}:{source}", None)
+            continue
         sources = [("distr", start_event_collector_on_node)]
         if node_id not in jm_unsupported_nodes:
             sources.append(("jm", start_jm_event_collector_on_node))

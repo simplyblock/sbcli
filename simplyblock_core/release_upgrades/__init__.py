@@ -1,4 +1,3 @@
-# coding=utf-8
 """Release-specific upgrade plug-ins.
 
 Some releases need one-off steps around ``cluster update`` that must not
@@ -58,6 +57,15 @@ class UpgradePlugin:
 
     def upgrade_complete(self, cluster) -> list:
         raise NotImplementedError
+
+
+def release_matches(running: str, wanted: str) -> bool:
+    """True when ``running`` is ``wanted`` or a more specific build of it.
+
+    Prefix semantics on ``.``/``-``-separated parts, so "RC26.3" covers
+    "RC26.3-RC1". Also used by cluster_ops to gate release-specific steps.
+    """
+    return _release_matches(running, wanted)
 
 
 def _release_matches(running: str, wanted: str) -> bool:

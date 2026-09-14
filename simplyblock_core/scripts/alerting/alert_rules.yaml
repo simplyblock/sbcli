@@ -667,3 +667,65 @@ groups:
           labels:
             app: simplyblock
           isPaused: false
+        - uid: 59ca1552-b1ea-40a6-9c6f-b13ccb211128
+          title: API_request_latency_high
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: code
+                expr: |
+                  sum(http_request_duration_seconds_sum{handler!="none",handler!~".*/_meta/.*"})
+                  /
+                  sum(http_request_duration_seconds_count{handler!="none",handler!~".*/_meta/.*"})
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+                useBackend: false
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 15
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - A
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: OK
+          execErrState: Error
+          for: 5m
+          annotations:
+            description: 'The rule alerts when the control plane REST API is slow - mean request latency above 15s, from the http_request_duration_seconds histogram the API exposes at /_meta/metrics. The counters are cumulative, so this is the mean since the API process started, not over the last 5 minutes.'
+            summary: 'Control plane API mean request latency has exceeded 15s.'
+          labels:
+            app: simplyblock
+          isPaused: false

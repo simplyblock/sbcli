@@ -4,9 +4,10 @@ import time
 import logging
 import uuid
 
-from simplyblock_core import distr_controller, utils, storage_node_ops
+from simplyblock_core import constants, distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
@@ -19,6 +20,39 @@ from simplyblock_core.prom_client import PromClient
 DEVICE_FLAP_DEBOUNCE_SEC = 10.0
 
 logger = logging.getLogger()
+
+
+def _explode_devices(nodes, node_id):
+    # Devices are embedded in their StorageNode record; expose them as per-device
+    # entries so the diff yields device-level events. The one place that knows
+    # devices live inside nodes.
+    for node in nodes:
+        if node.get_id() == node_id:
+            return list(node.nvme_devices)
+    return []
+
+
+async def watch_devices(cluster_id, node_id):
+    """Stream device changes for one storage node (a device change is a node write)."""
+    db = DBController()
+    async for batch in db.watch(
+            StorageNode, scope=(cluster_id,), entity_id=node_id,
+            select=lambda nodes: _explode_devices(nodes, node_id),
+            ancestors=[(Cluster, (), cluster_id), (StorageNode, (cluster_id,), node_id)]):
+        yield batch
+
+
+async def watch_device(cluster_id, node_id, device_id):
+    """Stream changes for a single device."""
+    db = DBController()
+    async for batch in db.watch(
+            StorageNode, scope=(cluster_id,), entity_id=node_id,
+            select=lambda nodes: [
+                device for device in _explode_devices(nodes, node_id)
+                if device.get_id() == device_id
+            ],
+            ancestors=[(Cluster, (), cluster_id), (StorageNode, (cluster_id,), node_id)]):
+        yield batch
 
 
 def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNode:
@@ -64,6 +98,19 @@ CAUSE_OTHER = "other"
 CAUSE_LOCAL_FAILURE = "local_failure"
 CAUSE_DEVICE_RESTART = "device_restart"
 CAUSE_FAILURE_MIGRATION = "failure_migration"
+# CAUSE_ADMIN_REMOVE: the operator asked for the device to go away
+# (`sn remove-device`, or the v1/v2 API remove endpoints). It is the ONLY
+# removal that self-repair refuses to undo -- see device_repair_due(). Every
+# other route to STATUS_REMOVED is an unsolicited SPDK removal and is a
+# candidate for repair, because SPDK also unregisters a bdev for reasons that
+# have nothing to do with the device being gone: the ALCEML stuck-IO watchdog
+# unregisters on stalled queue heads, and it cannot tell a device that has
+# stopped completing IO from a poller thread that has not been scheduled
+# (2026-09-05: a starved host stalled the distrib reactors for 6-7s, the
+# watchdog attributed it to the device at 4s and unregistered a drive that was
+# demonstrably healthy -- the JM alceml on the same physical SSD never
+# faltered. 6 migration tasks then span for hours on "only 7 devices online").
+CAUSE_ADMIN_REMOVE = "admin_remove"
 # Network-outage recovery (tasks_runner_port_allow): the node is provably
 # reachable again (mgmt + data-NIC gates passed) but its FDB status flips
 # ONLINE only after the port unblock — re-admitting its devices must happen
@@ -284,6 +331,32 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
     if state == NVMeDevice.STATUS_READONLY and device.status == NVMeDevice.STATUS_UNAVAILABLE:
         return False
 
+    if state == NVMeDevice.STATUS_ONLINE and (device.repair_attempts or device.last_repair_tsc):
+        # Reaching ONLINE ends the unavailability episode, so the repair budget
+        # is spent. This is the ONLY reset, and it is deliberately route-blind:
+        # `sn restart-device`, a node restart (which sets its devices online on
+        # the way back up), a successful self-repair and an operator fixing the
+        # network all land here. Without it, five failed attempts against a
+        # cause that later cleared would strand a healthy device for good.
+        logger.info(
+            "Device %s back online: clearing repair budget (was %d/%d attempts)",
+            device_id, device.repair_attempts,
+            len(constants.DEVICE_REPAIR_BACKOFF_SEC))
+        device.repair_attempts = 0
+        device.last_repair_tsc = 0.0
+
+    if state == NVMeDevice.STATUS_ONLINE:
+        # A device that is online is neither deleted nor operator-removed.
+        # STATUS_REMOVED sets deleted=True above, so a repair (or an operator
+        # re-adding the device) has to clear it here or the record stays
+        # logically deleted while serving IO.
+        if device.deleted or device.admin_removed:
+            logger.info(
+                "Device %s back online: clearing deleted/admin_removed flags",
+                device_id)
+        device.deleted = False
+        device.admin_removed = False
+
     if device.status != state:
         device.previous_status = device.status
         device.status = state
@@ -295,6 +368,9 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
             "flap_count": device.flap_count,
             "last_flap_tsc": device.last_flap_tsc,
             "retries_exhausted": device.retries_exhausted,
+            "repair_attempts": device.repair_attempts,
+            "last_repair_tsc": device.last_repair_tsc,
+            "admin_removed": device.admin_removed,
             "deleted": device.deleted,
         }
 
@@ -372,6 +448,206 @@ def device_set_online(device_id, cause=CAUSE_OTHER, connect_peers=True):
     return ret
 
 
+def probe_device_stack(device_obj, snode, rpc_client=None):
+    """Report which layers of a device's stack are present, bottom-up.
+
+    Returns (present: dict[str, bool], missing: list[str]).
+
+    The point is to distinguish a device whose LOCAL stack has lost a layer
+    from one that is intact and unavailable for a remote reason. The
+    `unavailable` verdict is reached by consensus -- more than half the nodes
+    failing to reach the device over NVMe-oF -- so a network fault between
+    nodes produces exactly the same verdict as a deleted bdev. Rebuilding a
+    stack that is already whole cannot fix the former, and must not consume a
+    repair attempt.
+
+    Every probe is a single bounded RPC and nothing here retries, so a wedged
+    layer cannot make the repair itself hang.
+    """
+    rpc_client = rpc_client or snode.rpc_client()
+    present: dict = {}
+
+    def _safe(label, fn):
+        try:
+            present[label] = bool(fn())
+        except Exception as e:
+            logger.warning("probe %s for device %s raised: %s",
+                           label, device_obj.get_id(), e)
+            present[label] = False
+
+    _safe("nvme_controller",
+          lambda: rpc_client.bdev_nvme_controller_list(device_obj.nvme_controller))
+    if device_obj.alceml_bdev:
+        _safe("alceml", lambda: rpc_client.get_bdevs(device_obj.alceml_bdev))
+        _safe("pt", lambda: rpc_client.get_bdevs(f"{device_obj.alceml_bdev}_PT"))
+    if device_obj.nvmf_nqn:
+        subsys: list = []
+
+        def _get_subsys():
+            subsys.extend(rpc_client.subsystem_get(device_obj.nvmf_nqn) or [])
+            return subsys
+
+        _safe("subsystem", _get_subsys)
+        if subsys:
+            entry = subsys[0] if isinstance(subsys[0], dict) else {}
+            present["listener"] = bool(entry.get("listen_addresses"))
+            present["namespace"] = bool(entry.get("namespaces"))
+        else:
+            present["listener"] = False
+            present["namespace"] = False
+
+    missing = [k for k, v in present.items() if not v]
+    return present, missing
+
+
+def device_repair(device_id, force=False):
+    """Bounded, differential self-repair of an `unavailable` device.
+
+    Deliberately NOT restart_device(): that tears the subsystem, PT and alceml
+    down before rebuilding, which forces every consumer to disconnect. Here we
+    probe first and let _def_create_device_stack() -- which is additive, every
+    layer guarded by an existence check -- fill in only what is missing.
+
+    Attempts are budgeted by constants.DEVICE_REPAIR_BACKOFF_SEC (immediate,
+    10s, 60s, 3m, 10m) and the budget is cleared the moment the device reaches
+    ONLINE by any route. An attempt is only counted when there was something
+    local to rebuild: a fully intact stack means the device is unavailable for
+    a remote reason and no number of local rebuilds will change that.
+
+    Returns True if the device was brought back online.
+    """
+    db_controller = DBController()
+    device = db_controller.get_storage_device_by_id(device_id)
+    if not device:
+        logger.error("device not found: %s", device_id)
+        return False
+    snode = db_controller.get_storage_node_by_id(device.node_id)
+
+    if device.admin_removed:
+        # Not overridable by force: force forgives the retry budget, it does
+        # not overrule an operator who asked for this device to be removed.
+        logger.info(
+            "Device %s was removed by operator request; not repairing",
+            device_id)
+        return False
+
+    if device.status != NVMeDevice.STATUS_ONLINE and device.retries_exhausted and not force:
+        logger.debug("Device %s repair budget exhausted; not retrying", device_id)
+        return False
+
+    device_obj = next((d for d in snode.nvme_devices if d.get_id() == device_id), None)
+    if not device_obj:
+        logger.error("device %s not on node %s", device_id, snode.get_id())
+        return False
+
+    rpc_client = snode.rpc_client()
+    present, missing = probe_device_stack(device_obj, snode, rpc_client)
+    logger.info("Device %s repair probe: present=%s missing=%s",
+                device_id, present, missing)
+
+    if not missing:
+        # Intact locally. The unavailability is remote (consensus) and a
+        # rebuild would be a no-op, so do not spend an attempt on it.
+        logger.info(
+            "Device %s local stack is intact; unavailability is remote "
+            "(consensus) -- not counting a repair attempt", device_id)
+        return False
+
+    attempts = device.repair_attempts
+    logger.warning("Device %s repairing, attempt %d/%d, missing: %s",
+                   device_id, attempts + 1,
+                   len(constants.DEVICE_REPAIR_BACKOFF_SEC), ", ".join(missing))
+
+    ok = True
+    if not present.get("nvme_controller", False):
+        # Bottom layer gone: rebind the PCIe function before anything above it
+        # can be rebuilt.
+        try:
+            snode.client(timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
+            rpc_client.bdev_nvme_controller_attach(device_obj.nvme_controller,
+                                                   device_obj.pcie_address)
+            rpc_client.bdev_examine(f"{device_obj.nvme_controller}n1")
+            rpc_client.bdev_wait_for_examine()
+        except Exception as e:
+            logger.error("Device %s: re-attaching the nvme controller failed: %s",
+                         device_id, e)
+            ok = False
+
+    if ok:
+        try:
+            ok = bool(_def_create_device_stack(device_obj, snode))
+        except Exception as e:
+            logger.error("Device %s: stack recreate raised: %s", device_id, e)
+            ok = False
+
+    if ok:
+        _present2, missing2 = probe_device_stack(device_obj, snode, rpc_client)
+        if missing2:
+            logger.error("Device %s still missing after repair: %s",
+                         device_id, ", ".join(missing2))
+            ok = False
+
+    if ok:
+        logger.info("Device %s repaired; setting online", device_id)
+        device_set_io_error(device_id, False)
+        # connect_peers=True is what re-establishes the remote NVMe-oF clients.
+        device_set_online(device_id, cause=CAUSE_DEVICE_RESTART, connect_peers=True)
+        return True
+
+    # Count the failed attempt and arm the next backoff step.
+    attempts += 1
+    exhausted = attempts >= len(constants.DEVICE_REPAIR_BACKOFF_SEC)
+
+    _now = time.time()
+    def _apply(d, _a=attempts, _t=_now, _e=exhausted):
+        d.repair_attempts = _a
+        d.last_repair_tsc = _t
+        if _e:
+            d.retries_exhausted = True
+        return True
+
+    _atomic_device_set(db_controller, snode.get_id(), device_id, _apply)
+    if exhausted:
+        logger.error(
+            "Device %s: %d repair attempts failed; giving up. It stays "
+            "unavailable until it is failed or repaired by hand (a device "
+            "restart or a node restart clears the budget).",
+            device_id, attempts)
+    return False
+
+
+#: States a device can be self-repaired out of.
+#:
+#: STATUS_UNAVAILABLE is a consensus verdict -- more than half the nodes failed
+#: to reach the device over NVMe-oF -- and can be produced by a purely remote
+#: cause such as a network problem.
+#:
+#: STATUS_REMOVED means SPDK unregistered the bdev and the control plane tore
+#: the rest of the stack down after it. That is equally repairable, and for the
+#: same reason: an unsolicited SPDK removal is not proof the hardware is gone.
+#: The exception is a removal the operator asked for, which admin_removed
+#: records and which is never undone here.
+DEVICE_REPAIRABLE_STATES = (
+    NVMeDevice.STATUS_UNAVAILABLE,
+    NVMeDevice.STATUS_REMOVED,
+)
+
+
+def device_repair_due(device):
+    """True when a device is due its next self-repair attempt."""
+    if device.status not in DEVICE_REPAIRABLE_STATES or device.retries_exhausted:
+        return False
+    if device.admin_removed:
+        # The operator removed this device on purpose. Never resurrect it --
+        # not on any attempt, and not under force.
+        return False
+    schedule = constants.DEVICE_REPAIR_BACKOFF_SEC
+    if device.repair_attempts >= len(schedule):
+        return False
+    wait = schedule[device.repair_attempts]
+    return (time.time() - device.last_repair_tsc) >= wait
+
+
 def get_alceml_name(alceml_id):
     return f"alceml_{alceml_id}"
 
@@ -417,12 +693,21 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
     if not rpc_client.get_bdevs(alceml_name):
+        checksum_method, cache_size, cache_eviction_threshold = utils.alceml_checksum_params(cluster, device_obj)
+        if cluster.inline_checksum and not device_obj.md_supported:
+            logger.warning(
+                f"Inline checksum: device {device_obj.get_id()} ({device_obj.pcie_address}) has no NVMe metadata; "
+                f"alceml will run in fallback mode (extra md page, ~1.17%% capacity overhead)."
+            )
         ret = snode.create_alceml(
             alceml_name, nvme_bdev, alceml_id,
             pba_init_mode=3 if clear_data else 2,
             write_protection=cluster.distr_ndcs > 1,
             pba_page_size=cluster.page_size_in_blocks,
-            full_page_unmap=cluster.full_page_unmap
+            full_page_unmap=cluster.full_page_unmap,
+            checksum_method=checksum_method,
+            cache_size=cache_size,
+            cache_eviction_threshold=cache_eviction_threshold,
         )
 
         if not ret:
@@ -563,7 +848,34 @@ def restart_device(device_id, force=False):
         except Exception as e:
             logger.error(f"Failed to log teardown-warning event for {device_id}: {e}")
 
-    if not snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
+    if device_obj.bdev_type == "aio":
+        # lblk mode: the base bdev is an AIO bdev over a kernel block device.
+        # Re-resolve serial-first (kernel names shift), recreate if gone.
+        if not snode.rpc_client().get_bdevs(device_obj.nvme_bdev):
+            try:
+                filename = device_obj.by_id_path or device_obj.device_path
+                try:
+                    inventory, _ = snode.client(timeout=30, retry=1).get_blockdevices()
+                    for blk in inventory or []:
+                        if blk.get("serial") == device_obj.serial_number:
+                            filename = blk.get("by_id_path") or blk.get("device_path")
+                            device_obj.device_path = blk.get("device_path", device_obj.device_path)
+                            device_obj.by_id_path = blk.get("by_id_path", device_obj.by_id_path)
+                            break
+                except Exception as e:
+                    logger.warning(f"blockdevices inventory failed, using stored path: {e}")
+                if not filename:
+                    logger.error(f"No block device path known for {device_id}")
+                    return False
+                snode.rpc_client().bdev_aio_create(device_obj.nvme_bdev, filename)
+                snode.rpc_client().bdev_examine(device_obj.nvme_bdev)
+                snode.rpc_client().bdev_wait_for_examine()
+                snode.rpc_client().bdev_set_qd_sampling_period(
+                    device_obj.nvme_bdev, constants.AIO_QD_SAMPLING_PERIOD_US)
+            except Exception as e:
+                logger.error(e)
+                return False
+    elif not snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
         try:
             ret = snode.client(timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
             logger.debug(ret)
@@ -731,6 +1043,24 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
         if force is False:
             return False
 
+    # Record operator intent BEFORE the teardown, and durably: everything below
+    # can fail or be interrupted, and if the device ends up REMOVED anyway the
+    # monitor must still see that a human asked for it. Written atomically
+    # because the flag lives inside the StorageNode record.
+    admin = (cause == CAUSE_ADMIN_REMOVE)
+    if admin != device.admin_removed:
+        def _mark(d, _a=admin):
+            d.admin_removed = _a
+            return True
+
+        _atomic_device_set(db_controller, snode.get_id(), device_id, _mark)
+        device.admin_removed = admin
+    if admin:
+        logger.info(
+            "Device %s removal is operator-initiated; self-repair will not "
+            "bring it back (use `sn add-device` / `sn restart-device`)",
+            device_id)
+
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not remove device")
@@ -745,7 +1075,11 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     device_set_unavailable(device_id, cause=cause)
 
     logger.info("Disconnecting device from all nodes")
-    distr_controller.disconnect_device(device)
+    # Detach the peers' controllers ONLY when a human asked for this removal.
+    # See distr_controller.disconnect_device() for why an unsolicited removal
+    # must leave them attached.
+    distr_controller.disconnect_device(
+        device, detach_controllers=(cause == CAUSE_ADMIN_REMOVE))
 
     logger.info("Removing device fabric")
     rpc_client = snode.rpc_client()
@@ -894,7 +1228,6 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
 
     out = []
     for record in records_list:
-        logger.debug(record)
         out.append({
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
             "Absolut": utils.humanbytes(record['size_total']),
@@ -983,12 +1316,24 @@ def reset_storage_device(dev_id):
     logger.info("Resetting device")
     rpc_client = snode.rpc_client()
 
-    controller_name = device.nvme_controller
-    response = rpc_client.reset_device(controller_name)
-    if not response:
-        logger.error(f"Failed to reset NVMe BDev {controller_name}")
-        return False
-    time.sleep(3)
+    if device.bdev_type == "aio":
+        # No controller-reset primitive for AIO bdevs, and deleting/
+        # recreating the bdev here would cascade a REMOVE through the
+        # alceml stack. Liveness-probe instead: bdev present => clear the
+        # error state below (device_set_online also forgives flaps);
+        # bdev gone => fail so the tasks framework escalates to
+        # restart_device, whose full stack rebuild is the real recovery.
+        if not rpc_client.get_bdevs(device.nvme_bdev):
+            logger.error(f"AIO bdev {device.nvme_bdev} is gone; reset cannot "
+                         f"recover it — restart the device instead")
+            return False
+    else:
+        controller_name = device.nvme_controller
+        response = rpc_client.reset_device(controller_name)
+        if not response:
+            logger.error(f"Failed to reset NVMe BDev {controller_name}")
+            return False
+        time.sleep(3)
 
     # set io_error flag False
     device_set_io_error(dev_id, False)
@@ -1333,18 +1678,47 @@ def new_device_from_failed(device_id):
         logger.error("Device is already added back from failed")
         return False
 
-    if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
-        try:
-            ret = device_node.client(timeout=30, retry=1).bind_device_to_spdk(device.pcie_address)
-            logger.debug(ret)
-            device_node.rpc_client().bdev_nvme_controller_attach(device.nvme_controller, device.pcie_address)
-        except Exception as e:
-            logger.error(e)
+    if device.bdev_type == "aio":
+        # lblk mode: ensure the AIO bdev exists again (serial-first
+        # re-resolution against the live host; stored path as fallback).
+        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+            try:
+                filename = device.by_id_path or device.device_path
+                try:
+                    inventory, _ = device_node.client(timeout=30, retry=1).get_blockdevices()
+                    for blk in inventory or []:
+                        if blk.get("serial") == device.serial_number:
+                            filename = blk.get("by_id_path") or blk.get("device_path")
+                            break
+                except Exception as e:
+                    logger.warning(f"blockdevices inventory failed, using stored path: {e}")
+                if not filename:
+                    logger.error(f"No block device path known for {device_id}")
+                    return False
+                device_node.rpc_client().bdev_aio_create(device.nvme_bdev, filename)
+                device_node.rpc_client().bdev_examine(device.nvme_bdev)
+                device_node.rpc_client().bdev_wait_for_examine()
+                device_node.rpc_client().bdev_set_qd_sampling_period(
+                    device.nvme_bdev, constants.AIO_QD_SAMPLING_PERIOD_US)
+            except Exception as e:
+                logger.error(e)
+                return False
+        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+            logger.error(f"Failed to find AIO bdev {device.nvme_bdev}")
             return False
+    else:
+        if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
+            try:
+                ret = device_node.client(timeout=30, retry=1).bind_device_to_spdk(device.pcie_address)
+                logger.debug(ret)
+                device_node.rpc_client().bdev_nvme_controller_attach(device.nvme_controller, device.pcie_address)
+            except Exception as e:
+                logger.error(e)
+                return False
 
-    if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
-        logger.error(f"Failed to find device nvme controller {device.nvme_controller}")
-        return False
+        if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
+            logger.error(f"Failed to find device nvme controller {device.nvme_controller}")
+            return False
 
     new_device = NVMeDevice(device.to_dict())
     new_device.uuid = str(uuid.uuid4())
@@ -1378,6 +1752,16 @@ def get_device_health_info(device_id):
     except KeyError as e:
         logger.error(e)
         return False
+
+    if device.bdev_type == "aio":
+        # SMART is not reachable through SPDK for AIO bdevs; host-side
+        # smartctl via the node agent is a possible follow-up.
+        return json.dumps({
+            "bdev_type": "aio",
+            "device_path": device.device_path,
+            "smart": None,
+            "message": "SMART data is not available through SPDK for AIO devices",
+        }, indent=2)
 
     rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_controller)

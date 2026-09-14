@@ -1,6 +1,5 @@
-# coding=utf-8
 import datetime
-from typing import ClassVar, List
+from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
@@ -40,7 +39,7 @@ class Backup(BaseModel):
     completed_at: int = 0
     error_message: str = ""
     # Security params from the source lvol (for cross-cluster restore)
-    allowed_hosts: List[dict] = default_factory(list)
+    allowed_hosts: list[dict] = default_factory(list)
     # S3 metadata written to metadata bucket
     s3_metadata: dict = default_factory(dict)
     encrypted: bool = False
@@ -49,7 +48,7 @@ class Backup(BaseModel):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
         super().write_to_db(kv_store)
 
 
@@ -86,7 +85,7 @@ class BackupPolicy(BaseModel):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
-        self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self.updated_at = str(datetime.datetime.now(datetime.UTC))
         super().write_to_db(kv_store)
 
 
@@ -100,3 +99,11 @@ class BackupPolicyAttachment(BaseModel):
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
+
+
+class DBBackup(BaseModel):
+    """FDB backup metadata."""
+
+    backup_name: str = ""
+    cluster_id: str = ""
+

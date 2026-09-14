@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 conftest.py – shared fixtures for all tests in tests/.
 

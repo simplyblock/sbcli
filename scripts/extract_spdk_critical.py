@@ -31,7 +31,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from collections.abc import Iterable
 
 TS_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\]")
 TS_FMT = "%Y-%m-%d %H:%M:%S.%f"

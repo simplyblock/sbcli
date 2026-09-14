@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_dhchap_e2e.py – end-to-end tests for DHCHAP key registration flow.
 

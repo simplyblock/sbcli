@@ -1,11 +1,12 @@
-# coding=utf-8
 
-from typing import ClassVar, List
+from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class LVol(BaseModel):
+
+    _WATCHED = True
 
     STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
@@ -26,7 +27,7 @@ class LVol(BaseModel):
     }
 
     base_bdev: str = ""
-    bdev_stack: List = default_factory(list)
+    bdev_stack: list = default_factory(list)
     blobid: int = 0
     cloned_from_snap: str = ""
     comp_bdev: str = ""
@@ -47,17 +48,36 @@ class LVol(BaseModel):
     max_size: int = 0
     namespace: str = ""
     node_id: str = ""
-    nodes: List[str] = default_factory(list)
+    nodes: list[str] = default_factory(list)
     nqn: str = ""
     ns_id: int = 1
+    # The UUID the NVMe namespace advertises on the wire when it differs from
+    # the record's uuid (migration/fail-back clones inherit another volume's
+    # identity so the client's multipath head keeps its paths). Empty means
+    # the namespace carries the record's own uuid. connect_lvol reports it as
+    # target_lvol_id so the CSI globs /dev/disk/by-id/nvme-uuid.<this>.
+    ns_uuid: str = ""
     max_namespace_per_subsys: int = 1
+
+    def get_ns_uuid(self) -> str:
+        """The UUID this volume's NVMe namespace advertises on the wire.
+
+        Every site that registers or verifies the namespace must use this,
+        never the record ``uuid``: after a fail-back the two differ, and
+        probing or re-adding by the record uuid flags a healthy volume
+        unhealthy — or re-registers the namespace under an identity the
+        client's multipath head rejects ("IDs don't match for shared
+        namespace N"), severing its paths (run 2026-09-02 ~19:40: the lvol
+        monitor's self-heal fought the fail-back identity every cycle).
+        """
+        return self.ns_uuid or self.uuid
     subsys_port: int = 9090
     # Node ids whose sync delete already completed inline in the API delete
     # call (lvol_controller._delete_lvol_from_all_nodes). lvol_monitor skips
     # these when it finalises the record, so a node never receives a second
     # sync delete — a repeat walks the replica blob tree again and errors on
     # every entry the first pass cleaned.
-    sync_deleted_nodes: List[str] = default_factory(list)
+    sync_deleted_nodes: list[str] = default_factory(list)
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""
@@ -72,7 +92,7 @@ class LVol(BaseModel):
     fabric: str = "tcp"
     ndcs: int = 0
     npcs: int = 0
-    allowed_hosts: List[dict] = default_factory(list)
+    allowed_hosts: list[dict] = default_factory(list)
     delete_snap_on_lvol_delete: bool = False
     do_replicate: bool = False
     replication_node_id: str = ""
@@ -98,6 +118,9 @@ class LVol(BaseModel):
     # replication service keeps reading exactly what it reads today; attaching a
     # policy derives them from policy + target.
     replication_policy_id: str = ""
+
+    def watch_scope(self):
+        return (self.pool_uuid,)
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)
@@ -144,6 +167,10 @@ class LVolReplication(BaseModel):
     # client keeps the same NQN/namespace across fail-over and migration.
     target_nqn: str = ""
     target_ns_id: int = 0
+    # Set to True by POST .../replication/cutover-proceed once the operator has
+    # connected the target NVMe paths. The task runner waits for this before
+    # calling run_cutover(); REPL_CUTOVER_PROCEED_TIMEOUT_SEC is the safety fallback.
+    cutover_proceed: bool = False
 
 class LVolMini(BaseModel):
     lvol_uuid: str = ""

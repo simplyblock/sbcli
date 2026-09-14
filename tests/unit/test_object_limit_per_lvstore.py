@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the hard per-lvstore object cap (2026-08-04).
 
 An lvstore serves at most constants.MAX_OBJECTS_PER_LVSTORE objects

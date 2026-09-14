@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 conftest.py – fixtures for FTT=2 restart test suite.
 
@@ -26,7 +25,6 @@ Impact per outage:
 import os
 import time
 import uuid as _uuid_mod
-from typing import List
 from unittest.mock import patch
 
 import pytest
@@ -169,7 +167,7 @@ def ftt2_env(ensure_db, mock_rpc_servers):
 
     # --- Nodes ---
     jm_vuids = [100, 200, 300, 400]
-    nodes: List[StorageNode] = []
+    nodes: list[StorageNode] = []
 
     for i in range(NUM_NODES):
         port = _BASE_PORT + offset + i

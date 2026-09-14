@@ -1,4 +1,3 @@
-# coding=utf-8
 """Release-specific upgrade step: hold JC compression across the upgrade.
 
 Shipped with release RC26.3 (first tag: RC26.3-RC1). DELETE this module —

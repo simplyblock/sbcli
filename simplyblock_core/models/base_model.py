@@ -1,16 +1,20 @@
-# coding=utf-8
-import pprint
-
 import json
-from inspect import ismethod, isfunction
-import sys
-from typing import Callable, ClassVar, Mapping, Type, TypeVar, Union, cast, get_origin
 from collections import ChainMap
+from collections.abc import Callable, Mapping
+from inspect import get_annotations, ismethod, isfunction
+from types import UnionType
+from typing import ClassVar, TypeVar, Union, cast, get_args, get_origin
 
 from pydantic import SecretBytes, SecretStr
 
+from simplyblock_core import watches
+
 
 _T = TypeVar('_T')
+
+#: `typing.Union[X, Y]` and `X | Y` are distinct objects before 3.14, where
+#: `types.UnionType` became `typing.Union`.
+_UNION_ORIGINS = (Union, UnionType)
 
 
 class _DefaultFactory:
@@ -62,9 +66,15 @@ def _detached(value: _T) -> _T:
     return value
 
 
-class BaseModel(object):
+class BaseModel:
 
     _STATUS_CODE_MAP: ClassVar[dict] = {}
+
+    # When True, write_to_db()/remove() atomically maintain the watch_index/
+    # version index (rollup + per-entity version keyed by watch_scope()) in the
+    # same FDB transaction so watchers (SSE API) wake up. Plain class attribute,
+    # not an annotation: must stay out of get_attrs_map()/to_dict().
+    _WATCHED = False
 
     id: str = ""
     uuid: str = ""
@@ -82,23 +92,14 @@ class BaseModel(object):
         self.from_dict(data)
 
     @classmethod
-    def all_annotations(cls) -> Mapping[str, Type]:
+    def all_annotations(cls) -> Mapping[str, type]:
         """Returns a dictionary-like ChainMap that includes annotations for all
            attributes defined in cls or inherited from superclasses."""
-        if sys.version_info >= (3, 10):
-            from inspect import get_annotations
-            return ChainMap(*(
-                get_annotations(c)
-                for c
-                in cls.__mro__
-            ))
-        else:
-            return ChainMap(*(
-                c.__annotations__
-                for c
-                in cls.__mro__
-                if '__annotations__' in c.__dict__
-            ))
+        return ChainMap(*(
+            get_annotations(c)
+            for c
+            in cls.__mro__
+        ))
 
     def get_id(self):
         return self.uuid
@@ -165,6 +166,13 @@ class BaseModel(object):
             value = value_dict['default']
             if data is not None and attr in data:
                 dtype = value_dict['type']
+                # `get_origin` is the only spelling-independent way to ask what
+                # a generic annotation is: a PEP 604 union (`X | None`) carries
+                # no `__origin__` before 3.14, and a bare `list` carries none on
+                # any version.
+                generic_origin = get_origin(dtype)
+                origin = generic_origin or dtype
+                args = get_args(dtype)
                 value = data[attr]
                 if dtype in [int, float, str, bool]:
                     try:
@@ -183,39 +191,44 @@ class BaseModel(object):
                     else:
                         value = SecretBytes((value or "").encode())
 
-                elif hasattr(dtype, '__origin__'):
-                    if dtype.__origin__ is list:
-                        if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
-                            value = [dtype.__args__[0]().from_dict(item) for item in data[attr]]
-                        else:
-                            value = data[attr]
-                    elif dtype.__origin__ == Mapping:
-                        if hasattr(dtype, "__args__") and hasattr(dtype.__args__[1], "from_dict"):
-                            value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
-                        else:
-                            value = value_dict['type'](data[attr])
-                    elif dtype.__origin__ is Union:
-                        if data[attr] is None:
-                            value = None
-                        else:
-                            inner_types = [t for t in dtype.__args__ if t is not type(None)]
-                            inner = inner_types[0] if inner_types else None
-                            if inner is not None and hasattr(inner, "from_dict"):
-                                value = inner().from_dict(data[attr])
-                            elif inner is SecretStr:
-                                value = data[attr] if isinstance(data[attr], SecretStr) else SecretStr(data[attr] or "")
-                            elif inner is SecretBytes:
-                                raw = data[attr]
-                                if isinstance(raw, SecretBytes):
-                                    value = raw
-                                elif isinstance(raw, (bytes, bytearray)):
-                                    value = SecretBytes(bytes(raw))
-                                else:
-                                    value = SecretBytes((raw or "").encode())
-                            elif inner is not None:
-                                value = inner(data[attr])
+                elif origin is list:
+                    if args and hasattr(args[0], "from_dict"):
+                        value = [args[0]().from_dict(item) for item in data[attr]]
+                    else:
+                        value = data[attr]
+                elif origin is Mapping:
+                    if args and hasattr(args[1], "from_dict"):
+                        value = {item: args[1]().from_dict(data[attr][item]) for item in data[attr]}
+                    else:
+                        value = dtype(data[attr])
+                elif origin in _UNION_ORIGINS:
+                    if data[attr] is None:
+                        value = None
+                    else:
+                        inner_types = [t for t in args if t is not type(None)]
+                        inner = inner_types[0] if inner_types else None
+                        if inner is not None and hasattr(inner, "from_dict"):
+                            value = inner().from_dict(data[attr])
+                        elif inner is SecretStr:
+                            value = data[attr] if isinstance(data[attr], SecretStr) else SecretStr(data[attr] or "")
+                        elif inner is SecretBytes:
+                            raw = data[attr]
+                            if isinstance(raw, SecretBytes):
+                                value = raw
+                            elif isinstance(raw, (bytes, bytearray)):
+                                value = SecretBytes(bytes(raw))
+                            else:
+                                value = SecretBytes((raw or "").encode())
+                        elif inner is not None:
+                            value = inner(data[attr])
+                elif generic_origin is not None:
+                    # A parameterized generic with no rule of its own
+                    # (`dict[str, str]`, `tuple[int, ...]`): the payload is
+                    # already the right shape, and the alias is not always
+                    # callable — `typing.Dict[str, str]()` raises.
+                    value = data[attr]
                 else:
-                    value = value_dict['type'](data[attr])
+                    value = dtype(data[attr])
 
                 value = _detached(value)
             setattr(self, attr, value)
@@ -270,7 +283,7 @@ class BaseModel(object):
         return data
 
     def to_str(self):
-        return pprint.pformat(self.to_dict())
+        return str(self.to_dict())
 
     # Per-chunk row count for one range-read transaction. An unbounded
     # get_range_startswith over a large prefix (e.g. the job-task table during
@@ -360,12 +373,32 @@ class BaseModel(object):
             return objects[0]
         return None
 
+    def watch_scope(self):
+        """Parent-id path locating this entity in the watch index.
+
+        Watched subclasses override to return their ancestor ids (e.g.
+        ``(self.pool_uuid,)``); the default empty tuple places the entity
+        directly under its class (a root, e.g. Cluster).
+        """
+        return ()
+
+    @staticmethod
+    def _write_tx(tr, key, value, rollup_key, version_key):
+        tr.set(key, value)
+        tr.add(rollup_key, watches.ONE_LE64)
+        tr.add(version_key, watches.ONE_LE64)
+
+    @staticmethod
+    def _remove_tx(tr, key, rollup_key, version_key):
+        tr.clear(key)
+        tr.add(rollup_key, watches.ONE_LE64)
+        tr.clear(version_key)
+
     def write_to_db(self, kv_store=None):
         if not kv_store:
             from simplyblock_core.db_controller import DBController
             kv_store = DBController().kv_store
         try:
-            prefix = self.get_db_id()
             if self.name == "StorageNode":
                 # Tripwire (2026-07-21 d3fc2c16 incident): a full-object write
                 # of a STALE StorageNode copy silently resurrected
@@ -387,8 +420,17 @@ class BaseModel(object):
                     "[NODE-WRITE] full-object write of %s status=%s by %s",
                     self.get_id(), getattr(self, "status", "?"),
                     " <- ".join(reversed(frames)))
-            st = json.dumps(self.to_dict(unwrap_secrets=True))
-            kv_store.set(prefix.encode(), st.encode())
+            key = self.get_db_id().encode()
+            value = json.dumps(self.to_dict(unwrap_secrets=True)).encode()
+            if self._WATCHED:
+                import fdb
+                scope = self.watch_scope()
+                fdb.transactional(BaseModel._write_tx)(
+                    kv_store, key, value,
+                    watches.watch_index_rollup_key(type(self), scope),
+                    watches.watch_index_version_key(type(self), scope, self.get_id()))
+            else:
+                kv_store.set(key, value)
             return True
         except Exception:
             from simplyblock_core import utils
@@ -396,8 +438,15 @@ class BaseModel(object):
             exit(1)
 
     def remove(self, kv_store):
-        prefix = self.get_db_id()
-        return kv_store.clear(prefix.encode())
+        key = self.get_db_id().encode()
+        if not self._WATCHED:
+            return kv_store.clear(key)
+        import fdb
+        scope = self.watch_scope()
+        return fdb.transactional(BaseModel._remove_tx)(
+            kv_store, key,
+            watches.watch_index_rollup_key(type(self), scope),
+            watches.watch_index_version_key(type(self), scope, self.get_id()))
 
     def keys(self):
         return self.get_attrs_map().keys()

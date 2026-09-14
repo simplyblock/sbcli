@@ -3,6 +3,7 @@ import re
 import threading
 import time
 import boto3
+import requests
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils, RunnerK8sLog, _compress_and_cleanup_old_dumps
 from exceptions.custom_exception import LvolNotConnectException
@@ -11,7 +12,7 @@ from utils.common_utils import CommonUtils
 from logger_config import setup_logger, start_log_flusher
 from utils.common_utils import sleep_n_sec
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 import string
 import random
@@ -598,7 +599,7 @@ class TestClusterBase:
         # API retries fail, the workflow graylog-collect step can find
         # the test run folder instead of creating an orphaned directory.
         # Record UTC start time for Graylog log export at teardown
-        self.test_start_time_utc = datetime.now(timezone.utc)
+        self.test_start_time_utc = datetime.now(UTC)
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
@@ -815,6 +816,10 @@ class TestClusterBase:
             self.start_root_monitor()
 
         self.start_nvme_iostat_monitor()
+        try:
+            self.start_alert_collection()
+        except Exception as e:
+            self.logger.warning(f"[alerts] could not start sampler: {e}")
         self.collect_bdev_snapshot(tag="start")
 
         sleep_n_sec(120)
@@ -1778,18 +1783,73 @@ class TestClusterBase:
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
 
+    def device_subsys_nqn(self, client, device):
+        """The NQN of the subsystem currently backing *device*, or "".
+
+        Simplyblock NQNs embed the volume's UUID
+        (``nqn.2023-02.io.simplyblock:<cluster>:lvol:<lvol_id>``), so this
+        answers "which volume is actually on this device *right now*" without
+        trusting anything the test recorded earlier.
+        """
+        dev_short = device.rsplit("/", 1)[-1]
+        out, _ = self.ssh_obj.exec_command(
+            node=client,
+            command=f"cat /sys/block/{dev_short}/device/subsysnqn 2>/dev/null",
+            supress_logs=True,
+        )
+        return (out or "").strip()
+
+    def _device_claim_is_live(self, client, device, claim_name, claim_det):
+        """Is a registry entry's claim on *device* still true on the host?
+
+        The registry stores kernel device paths, and those are only valid while
+        the controller behind them lives. An outage that tears down every
+        controller on a client frees index 0, so the next volume to connect
+        legitimately becomes /dev/nvme0n1 -- and a months-old entry naming that
+        same path then refuses a perfectly correct device.
+
+        That is exactly what aborted
+        n_plus_k_failover_multi_client_ha_all_nodes-20260914-081252 after 7h51m:
+        `pllvl..._0` had held /dev/nvme0n1 since 08:28, the 15:43 outage removed
+        every namespace on the client, and the new volume took the recycled
+        index at 15:48. Both of the guard's *live* checks (NSID, mount) passed;
+        only the in-memory one, which talks to no one, objected.
+
+        Fails closed. If the owner cannot be read the claim is treated as live,
+        because refusing a good device costs a run while formatting a live one
+        costs the data.
+        """
+        nqn = self.device_subsys_nqn(client, device)
+        if not nqn:
+            self.logger.warning(
+                f"[device_guard] cannot read the owner of {device} on {client}; "
+                f"treating {claim_name}'s claim as live")
+            return True
+
+        claim_id = (claim_det or {}).get("ID")
+        if claim_id and str(claim_id).lower() in nqn.lower():
+            return True
+
+        self.logger.info(
+            f"[device_guard] {claim_name} no longer holds {device} on {client} "
+            f"(device is now {nqn}); dropping the stale claim")
+        return False
+
     def _assert_device_unclaimed(self, client, device, obj_name,
                                  expected_ns_id=None):
         """Refuse a device that belongs to a different namespace or volume.
 
-        Called immediately before mkfs. Two checks:
+        Called immediately before mkfs. Three checks:
 
         * the device's own NSID matches what the control plane said. On a shared
           subsystem the sibling namespaces differ only by this number, and the
           names (nvmeXn1 vs nvmeXn2) are easy to resolve wrongly.
-        * no other lvol or clone in this run is already using it. A device that
-          is already claimed is, by definition, carrying another volume's
-          filesystem.
+        * no other lvol or clone in this run is already using it -- and, before
+          refusing on that, that the claim is still true on the host. See
+          _device_claim_is_live: device paths do not survive a controller
+          teardown, so an unverified registry match is a false positive waiting
+          for the next total outage.
+        * the device is not already mounted.
         """
         dev_short = device.rsplit("/", 1)[-1]
 
@@ -1812,6 +1872,12 @@ class TestClusterBase:
                 if name == obj_name:
                     continue
                 if det.get("Device") == device and det.get("Client") == client:
+                    if not self._device_claim_is_live(client, device, name, det):
+                        # Stale path from a controller that no longer exists.
+                        # Clear it, or it refuses this device again on every
+                        # later attempt and misleads anyone reading the registry.
+                        det["Device"] = None
+                        continue
                     raise LvolNotConnectException(
                         f"[device_guard] REFUSING {device} for {obj_name}: "
                         f"already held by {kind} {name} on {client}."
@@ -2293,6 +2359,253 @@ class TestClusterBase:
         )
         return stop_event
 
+    # ── Alerts endpoint sampler ─────────────────────────────────────────
+
+    def start_alert_collection(self, interval=None):
+        """Poll ``GET /clusters/{id}/alerts`` and record every response.
+
+        The endpoint answers "what is wrong right now", so a single reading
+        at the end of a run says nothing useful -- by then the outages have
+        healed and the answer is an empty list either way. The value is in
+        the series: an alert that fires when a node goes down and clears
+        when it comes back is alerting working; one that never fires, or
+        one that never clears, is the bug the sampler exists to catch.
+
+        Two details matter for that to hold.
+
+        *Window.* Each poll asks for ``history_seconds = 2 * interval``, so
+        the reply also carries alerts that fired **and** resolved since the
+        previous poll. Without it a 5-minute poll only ever sees conditions
+        that outlive 5 minutes, which during rapid outages is almost none of
+        them -- the sampler would report "no alerts" for a run full of them.
+
+        *Tolerance.* The poll is one request with a short timeout and no
+        retry, unlike :meth:`SbcliUtils.get_request`. A failed poll is data:
+        the API being unreachable while a node is down is exactly the sort of
+        thing being tested, and a retry loop would both hide it and stall the
+        thread through the outage it is meant to observe.
+
+        Platform-neutral -- it is an HTTP call against the cluster API, so
+        docker and k8s runs take the same path. Off via ``COLLECT_ALERTS``,
+        period via ``ALERT_POLL_INTERVAL_SEC``.
+        """
+        if os.getenv("COLLECT_ALERTS", "true").lower() in ("false", "0", "no"):
+            self.logger.info("[alerts] COLLECT_ALERTS disabled; not sampling.")
+            return
+        if getattr(self, "_alert_thread", None) and self._alert_thread.is_alive():
+            self.logger.info("[alerts] Sampler already running; skipping start.")
+            return
+        if not self.cluster_id or not self.cluster_secret:
+            self.logger.warning(
+                "[alerts] No CLUSTER_ID/CLUSTER_SECRET; not sampling.")
+            return
+
+        interval = interval or int(os.getenv("ALERT_POLL_INTERVAL_SEC", "300"))
+        window = interval * 2
+
+        # Two transports, because the two modes reach the control plane
+        # differently and only one of them has an HTTP base at all.
+        #
+        # Docker (SbcliUtils) talks to the API over HTTP, so poll the
+        # endpoint. cluster_api_url is the v1 wrapper's base and may already
+        # carry the /api/v1 suffix -- strip it and build the v2 prefix the
+        # same way SbcliUtilsV2 does, or every poll 404s.
+        #
+        # K8s-native (K8sSbcliUtils) has neither cluster_api_url nor headers:
+        # it runs everything as `kubectl exec` into the admin pod. The API
+        # service is not reachable from that pod (verified: empty reply on
+        # both the service and the pod IP), and sbctl does not need it --
+        # the CLI calls the core controllers in-process. So call the same
+        # controller the endpoint calls. The route is a thin severity/status
+        # filter over get_alerts(), so this exercises the alerting logic;
+        # what it does not cover is the HTTP layer itself.
+        api_url = getattr(self.sbcli_utils, "cluster_api_url", None)
+        if api_url:
+            raw = api_url.rstrip("/")
+            if raw.endswith("/api/v1"):
+                raw = raw[: -len("/api/v1")]
+            source = f"{raw}/api/v2/clusters/{self.cluster_id}/alerts/"
+            # v2 authenticates with HTTPBearer against the cluster secret
+            # alone. sbcli_utils.headers carries the v1 form,
+            # "Authorization: <cluster_id> <secret>", whose scheme is not
+            # Bearer -- v2 rejects that with 403 before any handler runs.
+            headers = {"Authorization": f"Bearer {self.cluster_secret}"}
+
+            def _fetch():
+                resp = requests.get(source, headers=headers, timeout=30,
+                                    params={"history_seconds": window})
+                if resp.status_code != 200:
+                    return resp.status_code, [], (resp.text or "")[:500]
+                body = resp.json()
+                return 200, (body if isinstance(body, list) else []), None
+        else:
+            source = "kubectl exec -> alerts_controller.get_alerts"
+            _marker = "ALERTS_JSON:"
+            _cmd = (
+                "python3 - <<'PYEOF'\n"
+                "import json\n"
+                "from simplyblock_core.controllers import alerts_controller as a\n"
+                f"print('{_marker}' + json.dumps(\n"
+                f"    a.get_alerts('{self.cluster_id}', include_history=True,\n"
+                f"                 history_seconds={window})))\n"
+                "PYEOF"
+            )
+
+            def _fetch():
+                out, err = self.sbcli_utils.k8s.exec_sbcli(
+                    _cmd, supress_logs=True)
+                # The controller logs each transition at CRITICAL, so the
+                # payload is one line in a stream of them -- hence the marker
+                # rather than "parse whatever came back".
+                for line in (out or "").splitlines():
+                    if line.startswith(_marker):
+                        body = json.loads(line[len(_marker):])
+                        return 200, (body if isinstance(body, list) else []), None
+                return None, [], (err or out or "no ALERTS_JSON line")[:500]
+
+        out_dir = os.path.join(self.docker_logs_path, "alerts")
+        os.makedirs(out_dir, exist_ok=True)
+        samples_path = os.path.join(out_dir, "alerts.jsonl")
+        transitions_path = os.path.join(out_dir, "alert_transitions.log")
+
+        self._alert_stop = threading.Event()
+        self._alert_stats = {
+            "polls": 0, "failures": 0, "kinds": set(),
+            "max_firing": 0, "raised": 0, "resolved": 0,
+            "source": source, "interval": interval,
+        }
+        stats = self._alert_stats
+        started = time.time()
+
+        def _write(path, line):
+            try:
+                with open(path, "a") as fh:
+                    fh.write(line + "\n")
+            except Exception as e:                      # pragma: no cover
+                self.logger.warning(f"[alerts] write {path}: {e}")
+
+        def _poll_loop():
+            self.logger.info(
+                f"[alerts] Sampling {source} every {interval}s "
+                f"(window {window}s) -> {samples_path}"
+            )
+            previous = {}
+            seen_statuses = set()
+            while True:
+                ts = datetime.now(timezone.utc)
+                record = {
+                    "ts": ts.isoformat(),
+                    "elapsed_sec": round(time.time() - started, 1),
+                }
+                t0 = time.time()
+                try:
+                    status, alerts, body = _fetch()
+                    record["duration_ms"] = round((time.time() - t0) * 1000, 1)
+                    record["http_status"] = status
+                    record["alerts"] = alerts
+                    if body is not None:
+                        record["body"] = body
+                        stats["failures"] += 1
+                        # A misconfigured sampler fails the same way on every
+                        # poll, so say it once per status rather than 200
+                        # times -- but say it, because a silent stream of 403s
+                        # looks exactly like a cluster with nothing wrong.
+                        if status not in seen_statuses:
+                            seen_statuses.add(status)
+                            hint = {
+                                404: "this build has no alerts endpoint "
+                                     "(added in R26.3)",
+                                401: "token rejected; check CLUSTER_SECRET",
+                                403: "auth scheme rejected; v2 wants "
+                                     "'Bearer <cluster_secret>'",
+                            }.get(status, body[:200])
+                            self.logger.warning(
+                                f"[alerts] poll failed (status={status})"
+                                f"{' -- ' + hint if hint else ''}. "
+                                "Still recording."
+                            )
+                except Exception as e:
+                    record["duration_ms"] = round((time.time() - t0) * 1000, 1)
+                    record["error"] = f"{type(e).__name__}: {e}"
+                    record["alerts"] = []
+                    stats["failures"] += 1
+
+                alerts = record["alerts"]
+                firing = {
+                    a.get("id"): a for a in alerts
+                    if a.get("status", "firing") == "firing"
+                }
+                record["firing_count"] = len(firing)
+                record["total_count"] = len(alerts)
+                stats["polls"] += 1
+                stats["max_firing"] = max(stats["max_firing"], len(firing))
+                for a in alerts:
+                    if a.get("kind"):
+                        stats["kinds"].add(a["kind"])
+
+                _write(samples_path, json.dumps(record, default=str))
+
+                # Only transitions go to the readable log, so a condition
+                # that stands for an hour is two lines rather than twelve.
+                for aid, a in firing.items():
+                    if aid not in previous:
+                        stats["raised"] += 1
+                        line = (f"{ts.isoformat()} RAISED   "
+                                f"[{a.get('severity')}] {a.get('kind')} "
+                                f"node={a.get('node_id') or '-'} "
+                                f"dev={a.get('device_id') or '-'} :: "
+                                f"{a.get('message')}")
+                        _write(transitions_path, line)
+                        self.logger.info(f"[alerts] {line}")
+                for aid, a in previous.items():
+                    if aid not in firing:
+                        stats["resolved"] += 1
+                        line = (f"{ts.isoformat()} RESOLVED "
+                                f"[{a.get('severity')}] {a.get('kind')} "
+                                f"node={a.get('node_id') or '-'} "
+                                f"dev={a.get('device_id') or '-'}")
+                        _write(transitions_path, line)
+                        self.logger.info(f"[alerts] {line}")
+                previous = firing
+
+                if self._alert_stop.wait(interval):
+                    break
+            self.logger.info("[alerts] Sampler exiting.")
+
+        t = threading.Thread(target=_poll_loop, name="AlertSampler", daemon=True)
+        t.start()
+        self._alert_thread = t
+
+    def stop_alert_collection(self):
+        """Stop the sampler and write a summary next to the samples."""
+        if not getattr(self, "_alert_stop", None):
+            return
+        self._alert_stop.set()
+        if getattr(self, "_alert_thread", None):
+            self._alert_thread.join(timeout=60)
+
+        stats = getattr(self, "_alert_stats", None)
+        if not stats:
+            return
+        summary = {
+            "source": stats["source"],
+            "interval_sec": stats["interval"],
+            "polls": stats["polls"],
+            "failed_polls": stats["failures"],
+            "alerts_raised": stats["raised"],
+            "alerts_resolved": stats["resolved"],
+            "max_concurrent_firing": stats["max_firing"],
+            "kinds_seen": sorted(stats["kinds"]),
+        }
+        try:
+            out_dir = os.path.join(self.docker_logs_path, "alerts")
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "alert_summary.json"), "w") as fh:
+                json.dump(summary, fh, indent=2)
+        except Exception as e:                          # pragma: no cover
+            self.logger.warning(f"[alerts] summary write: {e}")
+        self.logger.info(f"[alerts] Summary: {json.dumps(summary)}")
+
     def collect_management_details(self, post_teardown=False, suffix=None):
         if suffix is None:
             suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
@@ -2643,6 +2956,10 @@ class TestClusterBase:
         self.stop_root_monitor()
         self.collect_bdev_snapshot(tag="end")
         self.stop_nvme_iostat_monitor()
+        try:
+            self.stop_alert_collection()
+        except Exception as e:
+            self.logger.warning(f"[alerts] could not stop sampler: {e}")
 
         if not self.k8s_test:
             retry_check = 100
@@ -2804,16 +3121,8 @@ class TestClusterBase:
         try:
             os_url = self._opensearch_base_url()
             os_session = self._build_opensearch_session()
-            from_ms = int(
-                datetime.fromisoformat(
-                    from_iso.replace("Z", "+00:00")
-                ).timestamp() * 1000
-            )
-            to_ms = int(
-                datetime.fromisoformat(
-                    to_iso.replace("Z", "+00:00")
-                ).timestamp() * 1000
-            )
+            from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+            to_ms = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
             os_pairs = self._os_discover_containers(
                 os_session, os_url, from_ms, to_ms
             )
@@ -2833,8 +3142,8 @@ class TestClusterBase:
         search_url = f"{base_url}/search/universal/absolute"
         pairs = set()
 
-        t_start = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-        t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+        t_start = datetime.fromisoformat(from_iso)
+        t_end = datetime.fromisoformat(to_iso)
         total_minutes = (t_end - t_start).total_seconds() / 60
 
         # Use ~10 slices, minimum 1 minute each
@@ -3128,16 +3437,8 @@ class TestClusterBase:
 
         PAGE_SIZE = 1000
 
-        from_ms = int(
-            datetime.fromisoformat(
-                from_iso.replace("Z", "+00:00")
-            ).timestamp() * 1000
-        )
-        to_ms = int(
-            datetime.fromisoformat(
-                to_iso.replace("Z", "+00:00")
-            ).timestamp() * 1000
-        )
+        from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+        to_ms = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
 
         # One-time probe (cached across calls)
         if probe_cache is None:
@@ -3389,8 +3690,8 @@ class TestClusterBase:
                 f"{total} entries in {chunk_minutes}m window, "
                 f"splitting into {sub_minutes}m sub-windows"
             )
-            t = datetime.fromisoformat(f_iso.replace("Z", "+00:00"))
-            t_end = datetime.fromisoformat(t_iso.replace("Z", "+00:00"))
+            t = datetime.fromisoformat(f_iso)
+            t_end = datetime.fromisoformat(t_iso)
             delta = timedelta(minutes=sub_minutes)
             written = 0
             while t < t_end:
@@ -3422,8 +3723,8 @@ class TestClusterBase:
                     f"[graylog-export] {container_name}: {total} entries "
                     f"(>{MAX_RESULT_WINDOW}), using adaptive sub-windows"
                 )
-                t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-                t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+                t = datetime.fromisoformat(from_iso)
+                t_end = datetime.fromisoformat(to_iso)
                 chunk = timedelta(minutes=10)
                 while t < t_end:
                     chunk_end = min(t + chunk, t_end)
@@ -3484,7 +3785,7 @@ class TestClusterBase:
             from_iso = self.test_start_time_utc.strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z"
             )
-            to_iso = datetime.now(timezone.utc).strftime(
+            to_iso = datetime.now(UTC).strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z"
             )
 
@@ -3570,16 +3871,8 @@ class TestClusterBase:
             os_probe_cache = {}
             if use_opensearch:
                 try:
-                    from_ms = int(
-                        datetime.fromisoformat(
-                            from_iso.replace("Z", "+00:00")
-                        ).timestamp() * 1000
-                    )
-                    to_ms = int(
-                        datetime.fromisoformat(
-                            to_iso.replace("Z", "+00:00")
-                        ).timestamp() * 1000
-                    )
+                    from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+                    to_ms = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
                     os_probe_cache["index"] = self._os_get_index(os_session, os_url)
                     os_probe_cache["probe"] = self._os_probe(
                         os_session, os_url, os_probe_cache["index"], from_ms, to_ms
@@ -4548,7 +4841,7 @@ class TestClusterBase:
         Raises:
             RuntimeError: If any migration task failed, is incomplete, is stuck, or if the timeout is reached.
         """
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now(UTC)
         end_time = start_time + timedelta(seconds=timeout)
 
         # Log initial task list via API (works in both SSH and K8s-native modes)
@@ -4560,7 +4853,7 @@ class TestClusterBase:
 
         migration_tasks_found = False
 
-        while datetime.now(timezone.utc) < end_time:
+        while datetime.now(UTC) < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
             filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp, window_minutes=10)
 
@@ -4573,12 +4866,12 @@ class TestClusterBase:
 
                 for task in filtered_tasks:
                     try:
-                        updated_at = datetime.fromisoformat(task['updated_at']).astimezone(timezone.utc)
+                        updated_at = datetime.fromisoformat(task['updated_at']).astimezone(UTC)
                     except ValueError as e:
                         self.logger.error(f"Error parsing timestamp for task {task['id']}: {e}")
                         continue
 
-                    if datetime.now(timezone.utc) - updated_at > timedelta(minutes=65) and task["status"] != "done":
+                    if datetime.now(UTC) - updated_at > timedelta(minutes=65) and task["status"] != "done":
                         raise RuntimeError(
                             f"Migration task {task['id']} is stuck (last updated at {updated_at.isoformat()})."
                         )

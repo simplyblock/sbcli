@@ -11,7 +11,7 @@ Three contracts (2026-08-21):
   * the same look-up says which side is ACTIVE right now: the source until the
     cutover completes or a fail-over happens, the target from then on.
 """
-from typing import Any, List
+from typing import Any
 
 import pytest
 
@@ -172,7 +172,7 @@ class _Task:
 
 
 def _run_finalize(monkeypatch, delete_source, delete_raises=False):
-    events: List[Any] = []
+    events: list[Any] = []
     rep = _rep(LVolReplication.STATE_CUTOVER_PENDING)
 
     class _SrcLvol(_LvolRef):

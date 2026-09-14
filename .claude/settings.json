@@ -6,8 +6,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.agents/hooks/guard-dev-compose.py\"",
+            "command": "PY=python3; python3 -c '' >/dev/null 2>&1 || PY=python; \"$PY\" \"${CLAUDE_PROJECT_DIR:-.}/.agents/hooks/guard-dev-compose.py\"",
             "statusMessage": "Checking dev-compose guard"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PY=python3; python3 -c '' >/dev/null 2>&1 || PY=python; \"$PY\" \"${CLAUDE_PROJECT_DIR:-.}/e2e/.agents/hooks/check-repo-maps.py\"",
+            "statusMessage": "Checking external repo maps"
           }
         ]
       }

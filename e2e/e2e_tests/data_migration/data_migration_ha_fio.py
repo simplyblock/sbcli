@@ -33,7 +33,7 @@ class FioWorkloadTest(TestClusterBase):
             pool_name=self.pool_name
         )
 
-        for i in range(0, len(self.storage_nodes)):
+        for i in range(len(self.storage_nodes)):
             node_uuid = self.sbcli_utils.get_node_without_lvols()
             sn_lvol_data[node_uuid] = []
             self.logger.info(f"Creating 2 lvols on node {node_uuid}.")

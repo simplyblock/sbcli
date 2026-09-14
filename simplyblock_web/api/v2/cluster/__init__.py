@@ -1,12 +1,15 @@
+import builtins
 from threading import Thread
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Literal, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
+from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 from simplyblock_core import cluster_ops
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
@@ -18,7 +21,8 @@ from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .subsystem import api as subsystem_api
 from .task import api as task_api
-from .._dtos import ClusterDTO
+from .._dtos import ClusterDTO, ClusterLogEntryDTO
+from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .. import util as util
 
 
@@ -29,28 +33,28 @@ db = DBController()
 class _ReplicationParams(BaseModel):
     snapshot_replication_target_cluster: str
     snapshot_replication_timeout: int = 0
-    target_pool: Optional[str] = None
+    target_pool: str | None = None
 
 class _UpdateParams(BaseModel):
-    management_image: Optional[str]
-    spdk_image: Optional[str]
+    management_image: str | None
+    spdk_image: str | None
     restart: bool = Field(False)
 
 
 class BackupConfigParams(BaseModel):
-    access_key_id: Optional[SecretStr] = None
-    secret_access_key: Optional[SecretStr] = None
-    local_endpoint: Optional[str] = None
-    bucket_name: Optional[str] = None
-    snapshot_backups: Optional[bool] = None
-    with_compression: Optional[bool] = None
-    secondary_target: Optional[int] = Field(default=None, ge=0)
-    local_testing: Optional[bool] = None
-    s3_thread_pool_size: Optional[int] = Field(default=None, ge=0)
+    access_key_id: SecretStr | None = None
+    secret_access_key: SecretStr | None = None
+    local_endpoint: str | None = None
+    bucket_name: str | None = None
+    snapshot_backups: bool | None = None
+    with_compression: bool | None = None
+    secondary_target: int | None = Field(default=None, ge=0)
+    local_testing: bool | None = None
+    s3_thread_pool_size: int | None = Field(default=None, ge=0)
 
 
 class HashicorpVaultSettings(BaseModel):
-    base_url: Optional[Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])]] = None
+    base_url: Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])] | None = None
     transit_mount: str = "simplyblock/transit"
     kv_mount: str = "simplyblock/kv"
     cert_role: str = "simplyblock-webappapi"
@@ -83,8 +87,8 @@ class ClusterParams(BaseModel):
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
-    backup_config: Optional[BackupConfigParams] = None
-    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
+    backup_config: BackupConfigParams | None = None
+    hashicorp_vault_settings: HashicorpVaultSettings | None = None
     enable_failure_domain: bool = False
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
@@ -98,6 +102,9 @@ class ClusterParams(BaseModel):
     max_subsys: util.Unsigned
     hugepages_mem: util.Size = 0
     spdk_vcpu_count: util.Unsigned
+    device_mode: Literal["nvme", "lblk"] = "nvme"
+    inline_checksum: bool = False
+    atomic_4k: bool = False
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):
@@ -110,8 +117,15 @@ class ClusterParams(BaseModel):
         return self.distr_npcs
 
 
-@api.get('/', name='clusters:list')
-def list() -> List[ClusterDTO]:
+def _cluster_dto(cluster: ClusterModel) -> ClusterDTO:
+    ret = db.get_cluster_capacity(cluster, 1)
+    return ClusterDTO.from_model(cluster, ret[0] if ret else None)
+
+
+@api.get('/', name='clusters:list', response_model=builtins.list[ClusterDTO], responses=WATCH_RESPONSES)
+def list(watch: WatchParam = False) -> Union[builtins.list[ClusterDTO], EventSourceResponse]:
+    if watch:
+        return sse_response(cluster_ops.watch_clusters(), _cluster_dto)
     data = []
     for cluster in db.get_clusters():
         stat_obj = None
@@ -148,8 +162,14 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
 instance_api = APIRouter(prefix='/{cluster_id}')
 
 
-@instance_api.get('/', name='clusters:detail')
-def get(cluster: Cluster) -> ClusterDTO:
+@instance_api.get('/', name='clusters:detail', response_model=ClusterDTO, responses=WATCH_RESPONSES)
+def get(cluster: Cluster, watch: WatchParam = False) -> Union[ClusterDTO, EventSourceResponse]:
+    if watch:
+        return sse_response(
+            cluster_ops.watch_cluster(cluster.get_id()),
+            _cluster_dto,
+            single=True,
+        )
     stat_obj = None
     ret = db.get_cluster_capacity(cluster, 1)
     if ret:
@@ -158,7 +178,7 @@ def get(cluster: Cluster) -> ClusterDTO:
 
 
 class UpdatableClusterParameters(BaseModel):
-    name: Optional[str] = None
+    name: str | None = None
 
 
 @instance_api.put('/', name='clusters:update')
@@ -179,7 +199,7 @@ def delete(cluster: Cluster) -> Response:
 
 
 @instance_api.get('/capacity', name='clusters:capacity')
-def capacity(cluster: Cluster, history: Optional[str] = None):
+def capacity(cluster: Cluster, history: str | None = None):
     capacity_or_false = cluster_ops.get_capacity(
             cluster.get_id(), history)
     if not capacity_or_false:
@@ -189,7 +209,7 @@ def capacity(cluster: Cluster, history: Optional[str] = None):
 
 
 @instance_api.get('/iostats', name='clusters:iostats')
-def iostats(cluster: Cluster, history: Optional[str] = None):
+def iostats(cluster: Cluster, history: str | None = None):
     iostats_or_false = cluster_ops.get_iostats_history(
             cluster.get_id(), history, with_sizes=True)
     if not iostats_or_false:
@@ -198,14 +218,14 @@ def iostats(cluster: Cluster, history: Optional[str] = None):
     return iostats_or_false
 
 
-@instance_api.get('/logs', name='clusters:logs')
-def logs(cluster: Cluster, limit: int = 50):
-    logs_or_false = cluster_ops.get_logs(
-            cluster.get_id(), is_json=True, limit=limit)
-    if not logs_or_false:
-        raise ValueError('Failed to access logs')
-
-    return logs_or_false
+@instance_api.get('/logs', name='clusters:logs', response_model=builtins.list[ClusterLogEntryDTO], responses=WATCH_RESPONSES)
+def logs(cluster: Cluster, limit: int = 50, watch: WatchParam = False) -> Union[builtins.list[ClusterLogEntryDTO], EventSourceResponse]:
+    if watch:
+        return sse_response(
+            cluster_ops.watch_events(cluster.get_id()),
+            ClusterLogEntryDTO.from_model,
+        )
+    return [ClusterLogEntryDTO.from_model(e) for e in cluster_ops.get_log_events(cluster.get_id(), limit)]
 
 
 @instance_api.post('/start', name='clusters:start', status_code=202, responses={202: {"content": None}})

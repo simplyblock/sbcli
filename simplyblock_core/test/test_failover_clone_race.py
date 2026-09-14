@@ -82,7 +82,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(lvol_controller.snapshot_controller,
                         "object_mutation_lock", _Lock)
 
-    def _fake_select(db, lvol_id, cluster_id, generation=0):
+    def _fake_select(db, lvol_id, cluster_id, generation=0, pin_snapshot_id=None):
         """Stand-in for _last_replicated_target_snapshot.
 
         Mirrors the real selector: newest first, skipping anything missing or
@@ -97,7 +97,7 @@ def harness(monkeypatch):
 
     monkeypatch.setattr(lvol_controller, "_last_replicated_target_snapshot", _fake_select)
 
-    def _fake_clone(db, lvol, target_node, pool_uuid, snapshot):
+    def _fake_clone(db, lvol, target_node, pool_uuid, snapshot, for_migration=False):
         state["cloned_from"].append(snapshot.get_id())
         return object(), None
 

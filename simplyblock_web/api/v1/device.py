@@ -1,4 +1,3 @@
-# encoding: utf-8
 
 import logging
 
@@ -94,7 +93,8 @@ def device_remove(uuid):
     except KeyError:
         return utils.get_response_error(f"device not found: {uuid}", 404)
 
-    data = device_controller.device_remove(uuid)
+    data = device_controller.device_remove(
+        uuid, cause=device_controller.CAUSE_ADMIN_REMOVE)
     return utils.get_response(data)
 
 

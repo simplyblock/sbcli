@@ -1,4 +1,3 @@
-# coding=utf-8
 """FoundationDB provisioning for the integration tier.
 
 Resolution order:

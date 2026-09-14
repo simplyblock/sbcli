@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_nvmeof_security.py – unit tests for NVMe-oF TLS / DH-HMAC-CHAP security.
 

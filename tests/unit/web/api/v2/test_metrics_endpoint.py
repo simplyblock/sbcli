@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the v2 Prometheus exporter.
 
 The exporter's contract is not only "emits the right numbers" but also "emits
@@ -25,7 +24,7 @@ def _samples(body, name):
     prefix = name + '{'
     return [
         line for line in body.splitlines()
-        if line.startswith(prefix) or line.startswith(name + ' ')
+        if line.startswith((prefix, name + ' '))
     ]
 
 

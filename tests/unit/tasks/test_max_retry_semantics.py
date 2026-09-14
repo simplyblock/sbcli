@@ -1,4 +1,3 @@
-# coding=utf-8
 """Behavioural retry-ceiling tests for the task runners.
 
 These exercise the per-task entry points directly — now possible because each

@@ -90,8 +90,7 @@ def apply_deprecated_warning(item):
 
 
 def make_identifier(name):
-    if name.startswith("--"):
-        name = name[2:]
+    name = name.removeprefix("--")
     return re.sub("-", "_", name.lower())
 
 

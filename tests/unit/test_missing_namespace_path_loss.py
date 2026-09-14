@@ -1,4 +1,3 @@
-# coding=utf-8
 """A listener must never be published in front of an empty subsystem.
 
 K8sNativeResilientFailoverTest iteration 28 (2026-08-09): worker-3 carried 19

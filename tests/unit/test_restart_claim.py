@@ -1,4 +1,3 @@
-# coding=utf-8
 """Per-node restart claim: cross-ACTOR mutual exclusion for one node's restart.
 
 Regression suite for the 2026-08-06 soak iter-50 incident: a manual CLI
@@ -40,7 +39,7 @@ import simplyblock_core.services.tasks_runner_restart as restart_runner
 
 
 def _now():
-    return datetime.datetime.now(datetime.timezone.utc)
+    return datetime.datetime.now(datetime.UTC)
 
 
 def _node(node_id="node-1", cluster_id="cl-1", status=StorageNode.STATUS_OFFLINE,
@@ -98,6 +97,10 @@ def test_claim_active_naive_ts_treated_as_utc():
 class _FakeTr(dict):
     def __setitem__(self, key, value):
         dict.__setitem__(self, key, value)
+
+    def add(self, key, value):
+        """Atomic-increment op for the watch-index counters; a no-op here
+        since these tests assert on claim logic, not watch delivery."""
 
 
 def _run_tx(monkeypatch, nodes, node_id="node-1", cluster_id="cl-1",

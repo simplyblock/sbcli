@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for ``cluster_expansion.orchestrator.execute_expand_plan``.
 
 These exercise the cursor / persistence / abort loop without touching SPDK.
@@ -8,7 +7,6 @@ crash-resume correctness).
 """
 
 import unittest
-from typing import List
 
 from simplyblock_core.controllers.cluster_expansion.orchestrator import (
     MoveExecutor,
@@ -36,7 +34,7 @@ class FakeCluster:
     def __init__(self, expand_state=None):
         self.uuid = "cluster-fake"
         self.expand_state = expand_state or {}
-        self.write_history: List[dict] = []
+        self.write_history: list[dict] = []
 
     def write_to_db(self):
         # Snapshot the current state at write time so we can assert ordering
@@ -51,7 +49,7 @@ class FailingExecutor(MoveExecutor):
     def __init__(self, fail_at: int, exc: Exception):
         self.fail_at = fail_at
         self.exc = exc
-        self.executed: List[RoleMove] = []
+        self.executed: list[RoleMove] = []
 
     def execute(self, move: RoleMove) -> None:
         if len(self.executed) == self.fail_at:
@@ -66,7 +64,7 @@ class CursorObservingExecutor(MoveExecutor):
 
     def __init__(self, cluster: FakeCluster):
         self.cluster = cluster
-        self.cursors_seen: List[int] = []
+        self.cursors_seen: list[int] = []
 
     def execute(self, move: RoleMove) -> None:
         self.cursors_seen.append(self.cluster.expand_state["cursor"])

@@ -1,11 +1,10 @@
-# encoding: utf-8
 import json
 import math
 import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any
 
 import docker
 import psutil
@@ -75,21 +74,21 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: Optional[List[str]] = Field(None)
-    spdk_debug: Optional[bool] = Field(False)
-    l_cores: Optional[str] = Field(None)
+    ssd_pcie: list[str] | None = Field(None)
+    spdk_debug: bool | None = Field(False)
+    l_cores: str | None = Field(None)
     spdk_mem: int = Field(core_utils.parse_size('4GiB'))
-    total_mem: Optional[Union[int, str]] = Field('')
-    multi_threading_enabled: Optional[bool] = Field(False)
-    timeout: Optional[int] = Field(5 * 60)
-    spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-    cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
+    total_mem: int | str | None = Field('')
+    multi_threading_enabled: bool | None = Field(False)
+    timeout: int | None = Field(5 * 60)
+    spdk_image: str | None = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_proxy_image: str | None = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    cluster_ip: str | None = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
-    socket: Optional[int] = Field(None, ge=0)
+    socket: int | None = Field(None, ge=0)
     firewall_port: int = Field(constants.FW_PORT_START)
     cluster_id: str
-    mcp_max_unavailable: Optional[int] = Field(None)  # OpenShift-only (MCP); ignored here
+    mcp_max_unavailable: int | None = Field(None)  # OpenShift-only (MCP); ignored here
 
 
 @api.post('/spdk_process_start', responses={
@@ -302,6 +301,70 @@ def spdk_process_kill(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
+@api.get('/spdk_process_cleanup', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_cleanup(query: utils.RPCPortParams):
+    """Synchronous, resurrection-proof teardown of ``spdk_<port>`` and its
+    proxy, VERIFIED at the container level.
+
+    spdk_process_kill is deliberately fast (detached remove) for the peer-
+    termination paths — but that leaves two gaps for the add-node/restart
+    FAILURE cleanup: the containers run with a restart policy that can
+    resurrect them after the SIGKILL if the detached remove loses the race
+    against a loaded dockerd, and spdk_process_is_up probes the RPC Unix
+    socket, so an SPDK that never brought its RPC up reads as "down" while
+    its container lives on holding all hugepages (2026-08-05 incident: the
+    zombie starved every add-node retry on the host). This endpoint is the
+    slow, authoritative sibling: disable the restart policy first, remove
+    synchronously, and only report success when the containers are GONE.
+    """
+    from docker.errors import NotFound
+
+    client = get_docker_client()
+    names = [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]
+    ok = True
+    for name in names:
+        try:
+            container = client.containers.get(name)
+        except NotFound:
+            continue
+        except Exception as exc:
+            logger.error("cleanup: resolving %s failed: %s", name, exc)
+            ok = False
+            continue
+        try:
+            # No restart policy => dockerd cannot resurrect it between the
+            # kill and the (synchronous) remove below.
+            client.api.update_container(container.id,
+                                        restart_policy={"Name": "no"})
+        except Exception as exc:
+            logger.warning("cleanup: clearing restart policy on %s failed: %s",
+                           container.id[:12], exc)
+        try:
+            container.remove(force=True)
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.error("cleanup: remove(%s) failed: %s", container.id[:12], exc)
+            ok = False
+    # Verification: success means the names resolve to nothing.
+    for name in names:
+        try:
+            client.containers.get(name)
+            ok = False
+            logger.error("cleanup: %s still present after remove", name)
+        except NotFound:
+            pass
+        except Exception:
+            ok = False
+    if not ok:
+        return utils.get_response(None, "spdk container cleanup incomplete")
+    return utils.get_response(True)
+
+
 # Tight client timeout for the dockerd fall-through in spdk_process_is_up.
 # The docker-py default is 60s, which under post-outage Swarm reconciliation
 # (incident 2026-04-24, vm205) caused this endpoint to take 76-80s. The
@@ -356,7 +419,7 @@ def _spdk_thread_sample(pid):
     try:
         for tid in os.listdir(f"/proc/{pid}/task"):
             t = f"/proc/{pid}/task/{tid}"
-            entry: Dict[str, Any] = {"tid": tid}
+            entry: dict[str, Any] = {"tid": tid}
             for field, path in (("comm", "comm"), ("wchan", "wchan")):
                 try:
                     with open(f"{t}/{path}") as fh:
@@ -557,6 +620,36 @@ def get_node_lsblk():
     data = json.loads(out)
     logger.debug("function:get_node_lsblk end")
     return data
+
+
+@api.get('/blockdevices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def get_blockdevices():
+    """Whole-disk inventory for the lblk cluster mode (eligibility fields,
+    serial/WWN identity, by-id path, NUMA)."""
+    return utils.get_response(node_utils.get_block_devices_info())
+
+
+class _WipeBlockDeviceParams(BaseModel):
+    device_name: str
+
+
+@api.post('/wipe_block_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def wipe_block_device(body: _WipeBlockDeviceParams):
+    """--force-format for lblk add-node: wipe partition/FS signatures from a
+    whole disk. Refuses busy devices (mounts/holders/root disk)."""
+    ok, reason = node_utils.wipe_block_device_signatures(body.device_name)
+    if not ok:
+        return utils.get_response(None, reason)
+    return utils.get_response(True)
 
 
 def get_nodes_config():
@@ -786,26 +879,26 @@ def bind_device_to_spdk(body: utils.DeviceParams):
 
 
 class PersistNodeConfigParams(BaseModel):
-    max_lvol: Optional[int] = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
-    huge_page_memory: Optional[int] = Field(None, ge=0)
+    max_lvol: int | None = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
+    huge_page_memory: int | None = Field(None, ge=0)
     # small/large_pool_count are written alongside huge_page_memory whenever
     # add_node recalculates it against the cluster's real max_lvol/core count
     # -- they are what that memory figure was derived from (calculate_pool_count
     # -> calculate_minimum_hp_memory), so they must never drift from it.
-    small_pool_count: Optional[int] = Field(None, ge=0)
-    large_pool_count: Optional[int] = Field(None, ge=0)
-    numa_node: Optional[int] = Field(None, ge=0)
-    ssd_list: Optional[List[str]] = Field(None)
+    small_pool_count: int | None = Field(None, ge=0)
+    large_pool_count: int | None = Field(None, ge=0)
+    numa_node: int | None = Field(None, ge=0)
+    ssd_list: list[str] | None = Field(None)
     # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
     # storage_node_ops.apply_cluster_vcpu_count). Written together, once, by
     # the same caller -- never partially, so the file never holds a mask from
     # one layout next to a distribution from another.
-    cpu_mask: Optional[str] = None
-    isolated: Optional[List[int]] = None
-    l_cores: Optional[str] = None
-    distribution: Optional[dict] = None
-    core_to_index: Optional[dict] = None
-    number_of_distribs: Optional[int] = Field(None, ge=0)
+    cpu_mask: str | None = None
+    isolated: list[int] | None = None
+    l_cores: str | None = None
+    distribution: dict | None = None
+    core_to_index: dict | None = None
+    number_of_distribs: int | None = Field(None, ge=0)
 
 
 @api.post('/persist_node_config', responses={
@@ -859,7 +952,7 @@ def persist_node_config(body: PersistNodeConfigParams):
     # list changes here is exactly the kind of drift that bites whoever
     # trusts them next. Recompute unconditionally; cheap, and correct
     # regardless of which field this call actually changed.
-    all_isolated_cores: Set[int] = set()
+    all_isolated_cores: set[int] = set()
     for n in node_info["nodes"]:
         all_isolated_cores.update(n.get("isolated") or [])
     node_info["isolated_cores"] = sorted(all_isolated_cores)
@@ -1100,8 +1193,8 @@ def read_allowed_list():
 
 
 class CoresParams(BaseModel):
-    cores: Optional[List[int]] = Field(default=None)
-    number_of_alceml_devices: Optional[int] = Field(None, ge=0)
+    cores: list[int] | None = Field(default=None)
+    number_of_alceml_devices: int | None = Field(None, ge=0)
 
 
 @api.post('/recalculate_cores_distribution', responses={

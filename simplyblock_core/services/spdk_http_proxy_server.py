@@ -1,3 +1,4 @@
+import atexit
 import base64
 from typing import ClassVar
 import json
@@ -7,7 +8,6 @@ import socket
 import sys
 import threading
 import time
-from typing import Optional
 
 from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
@@ -16,29 +16,42 @@ from http.server import BaseHTTPRequestHandler
 from simplyblock_core.settings import Settings
 
 
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
-logger.addHandler(logger_handler)
+if __name__ == "__main__":
+    # Attach the stdout handler only when running as the proxy script.
+    # Attaching on IMPORT handed every importer (e.g. the test suite) a
+    # duplicate root handler, doubling every log line in the process.
+    logger_handler = logging.StreamHandler(stream=sys.stdout)
+    logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+    logger.addHandler(logger_handler)
 logger.setLevel(logging.INFO)
 
 read_line_time_diff: dict = {}
 recv_from_spdk_time_diff: dict = {}
+#: Set at interpreter exit so the stats thread stops before finalization.
+#:
+#: It is a daemon thread, so Python does not join it -- it keeps running while
+#: the interpreter tears down. Once logging's stream is closed every emit
+#: raises ValueError("I/O operation on closed file"), and the handler below
+#: used to log THAT to the same closed stream and loop again. Spinning through
+#: finalization is what produced "Fatal Python error: _enter_buffered_busy:
+#: could not acquire lock for <_io.BufferedWriter name='<stderr>'> at
+#: interpreter shutdown", aborting the process (exit -6 / 250) after every one
+#: of the 1213 integration tests had already passed.
+_stats_stop = threading.Event()
+atexit.register(_stats_stop.set)
+
+
 def print_stats():
-    # Paced by monotonic elapsed time, not just the sleep call: several
-    # integration tests patch a bare-imported `time.sleep` on some other
-    # module (e.g. storage_node_ops), which mutates the same shared stdlib
-    # `time` module and turns THIS sleep into a no-op for the duration of
-    # that patch. Without this guard the loop degenerates into a hot spin
-    # that floods stdout with duplicate stats and burns CPU other threads
-    # need — see tests/AGENTS.md's note on deadline loops paced by sleep().
-    last_log = time.monotonic()
-    while True:
+    # wait() doubles as the sleep and the shutdown check: exit is immediate
+    # at interpreter shutdown (atexit sets the event) instead of up to 3s
+    # late, AND it is immune to the integration-test hazard main's older
+    # guard addressed -- some tests patch a bare-imported `time.sleep` on
+    # another module, mutating the shared stdlib `time` and turning a
+    # `time.sleep` here into a no-op (hot spin). Event.wait() does not use
+    # time.sleep, so it cannot degenerate that way.
+    while not _stats_stop.wait(3):
         try:
-            time.sleep(3)
-            if time.monotonic() - last_log < 2.5:
-                continue
-            last_log = time.monotonic()
             t = time.time_ns()
             if len(read_line_time_diff) > 0:
                 read_line_time_diff_max = max(list(read_line_time_diff.values()))
@@ -69,6 +82,10 @@ def print_stats():
                 logger.info(f"Periodic stats: {t}: recv_from_spdk_time: max={recv_from_spdk_time_max} ns, avg={recv_from_spdk_time_avg} ns, last_3s_avg={recv_from_spdk_time_avg_last_3_sec} ns")
                 if len(recv_from_spdk_time_diff) > 10000:
                     recv_from_spdk_time_diff.clear()
+        except (ValueError, OSError):
+            # The log stream is gone (interpreter shutdown, or the handler was
+            # closed). Do not try to report it through that same stream.
+            return
         except Exception as e:
             logger.error(e)
 
@@ -111,7 +128,7 @@ def wait_for_spdk_ready():
                     return
                 except ValueError:
                     continue
-        except (socket.error, OSError) as e:
+        except OSError as e:
             logger.info(f"Waiting for SPDK to be ready: {e}")
         finally:
             if sock:
@@ -201,7 +218,7 @@ def _rpc_call_inner(req, req_data, req_time, sock_timeout):
         logger.info(f"Response:{req_time}")
 
         return buf
-    except socket.timeout:
+    except TimeoutError:
         logger.error(f"Socket timeout waiting for SPDK response (request {req_time}, function: {req_data.get('method', 'unknown')})")
         raise ValueError('SPDK response timeout')
     finally:
@@ -230,7 +247,7 @@ class ServerHandler(BaseHTTPRequestHandler):
     # own `httpd.timeout` (set in run_server(), only bounds serve_forever()'s
     # accept loop). Assigned in run_server() once KEEPALIVE_TIMEOUT exists,
     # same as `key` below.
-    timeout: ClassVar[Optional[float]] = None
+    timeout: ClassVar[float | None] = None
 
     def do_HEAD(self, content_length=0):
         self.send_response(200)
@@ -412,4 +429,13 @@ spdk_semaphore = threading.Semaphore(MAX_CONCURRENT_SPDK)
 logger.info(f"SPDK concurrency limit: {MAX_CONCURRENT_SPDK}")
 
 is_threading_enabled = bool(is_threading_enabled)
-run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)
+
+if __name__ == "__main__":
+    # Start ONLY when executed as the proxy script (deploy_spdk.yaml and the
+    # docker snode path both run this file directly). Starting on import made
+    # every importer spawn the print_stats daemon thread too: after the proxy
+    # e2e tests ran, that thread logged every 3s for the rest of the pytest
+    # session and could hold the stderr buffer lock at interpreter shutdown —
+    # "Fatal Python error: _enter_buffered_busy", SIGABRT, a red CI run with
+    # 1227/1227 tests passed (2026-09-04).
+    run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)

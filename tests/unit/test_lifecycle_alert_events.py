@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_lifecycle_alert_events.py — two conditions an operator must see in the
 cluster event log.
 

@@ -1,4 +1,3 @@
-# coding=utf-8
 import builtins
 import contextlib
 import logging as lg
@@ -20,6 +19,7 @@ from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
@@ -27,6 +27,25 @@ from simplyblock_core.models.storage_node import StorageNode
 
 
 logger = lg.getLogger()
+
+
+async def watch_snapshots(cluster_id, pool_id):
+    """Stream snapshot changes for one pool (same scope as get_snapshots_by_pool_id)."""
+    db = DBController()
+    async for batch in db.watch(
+            SnapShot, scope=(pool_id,),
+            select=lambda models: db.get_snapshots_by_pool_id(pool_id, source=models),
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
+        yield batch
+
+
+async def watch_snapshot(cluster_id, pool_id, snapshot_id):
+    """Stream changes for a single snapshot."""
+    db = DBController()
+    async for batch in db.watch(
+            SnapShot, scope=(pool_id,), entity_id=snapshot_id,
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
+        yield batch
 
 db_controller = DBController()
 
@@ -533,6 +552,72 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
             cluster_id, node.get_id(), bdev_name, primary_node.get_id())
 
 
+def check_snapshot_capacity(pool, cluster, lvol, all_lvols=None, all_snaps=None):
+    """Admission control for taking a snapshot, at pool AND cluster level.
+
+    A new snapshot immediately owns the source volume's utilized bytes (the
+    blobstore hands the volume's allocated clusters to the snapshot, the
+    volume continues as a thin overlay), so the snapshot must be charged at
+    the source's UTILIZED size — not the source's provisioned size. Block
+    the snapshot when
+
+        provisioned-capacity limit
+          - sum of provisioned volume sizes
+          - actual utilization by existing snapshots
+        <  utilized size of the source volume
+
+    on either level: the pool (pool_max_size against
+    get_pool_total_capacity, which is exactly that sum) or the cluster
+    (prov_cap_crit percent of effective cluster capacity against the
+    collector's lvol-only size_prov plus get_cluster_snapshot_utilization).
+    Unlimited pools/clusters skip the respective scans entirely; a missing
+    stats record falls back to the provisioned size (conservative).
+
+    Returns an error message, or None when the snapshot is admitted.
+    """
+    size = lvol.size
+    if pool.lvol_max_size > 0 or pool.pool_max_size > 0 or cluster.prov_cap_crit:
+        rec = db_controller.get_lvol_stats(lvol, 1)
+        if rec:
+            size = rec[0].size_used
+
+    if 0 < pool.lvol_max_size < size:
+        return (f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, "
+                f"LVol size: {utils.humanbytes(size)} must be below this limit")
+
+    if pool.pool_max_size > 0:
+        # Only load the full lvol/snapshot sets when a pool size limit is set
+        # (the capacity sum). Unlimited pools — the common case — skip both scans.
+        if not all_lvols:
+            all_lvols = db_controller.get_mini_lvols()
+        if not all_snaps:
+            all_snaps = db_controller.get_mini_snapshots()
+        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
+        if total + size > pool.pool_max_size:
+            return (f"Cannot take snapshot: pool capacity would reach "
+                    f"{utils.humanbytes(total + size)} of "
+                    f"{utils.humanbytes(pool.pool_max_size)} (snapshot inherits "
+                    f"{utils.humanbytes(size)} utilized from the volume)")
+
+    if cluster.prov_cap_crit:
+        records = db_controller.get_cluster_capacity(cluster, 1)
+        if records and records[0].size_total > 0:
+            # size_prov is lvol-only (see capacity_and_stats_collector);
+            # snapshots hold ACTUAL bytes on top of it.
+            if not all_snaps:
+                all_snaps = db_controller.get_mini_snapshots()
+            snap_used = pool_controller.get_cluster_snapshot_utilization(
+                cluster.get_id(), all_snaps=all_snaps)
+            cl_rec = records[0]
+            util = int(((cl_rec.size_prov + snap_used + size) / cl_rec.size_total) * 100)
+            if cluster.prov_cap_crit < util:
+                return (f"Cannot take snapshot: cluster provisioned cap would "
+                        f"reach {util}% of the {cluster.prov_cap_crit}% limit "
+                        f"(snapshot inherits {utils.humanbytes(size)} utilized "
+                        f"from the volume)")
+    return None
+
+
 def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
         bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
     try:
@@ -625,40 +710,19 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
-    # The stats read only refines the size used for the pool-limit checks
-    # below; on unlimited pools (the common case) its result is never
-    # consulted, so skip the FDB stats lookup entirely.
-    size = lvol.size
-    if pool.lvol_max_size > 0 or pool.pool_max_size > 0:
-        rec = db_controller.get_lvol_stats(lvol, 1)
-        if rec:
-            size = rec[0].size_used
-
-    if 0 < pool.lvol_max_size < size:
-        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
-        logger.error(msg)
-        return False, msg
-
-    if pool.pool_max_size > 0:
-        # Only load the full lvol/snapshot sets when a pool size limit is set
-        # (the capacity sum). Unlimited pools — the common case — skip both scans.
-        if not all_lvols:
-            all_lvols = db_controller.get_mini_lvols()
-        if not all_snaps:
-            all_snaps = db_controller.get_mini_snapshots()
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
-        if total + size > pool.pool_max_size:
-            msg = f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
-            logger.error(msg)
-            return False, msg
-        if total + lvol.size > pool.pool_max_size:
-            msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
-            logger.error(msg)
-            return False, msg
-
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
+
+    # Pool- and cluster-level capacity admission: the snapshot is charged at
+    # the source volume's UTILIZED size (see check_snapshot_capacity). This
+    # replaces the former extra pool check at the source's full provisioned
+    # size, which rejected snapshots the capacity model actually allows.
+    cap_error = check_snapshot_capacity(pool, cluster, lvol,
+                                        all_lvols=all_lvols, all_snaps=all_snaps)
+    if cap_error:
+        logger.error(cap_error)
+        return False, cap_error
 
     snap_vuid = utils.get_random_snapshot_vuid()
     snap_bdev_name = f"SNAP_{snap_vuid}"
@@ -692,10 +756,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
 
-        # Build nodes list with all secondaries
-        secondary_ids = [host_node.secondary_node_id]
-        if host_node.tertiary_node_id:
-            secondary_ids.append(host_node.tertiary_node_id)
+        # Build nodes list with all secondaries (skip empty role ids)
+        secondary_ids = lvol_controller.role_secondary_ids(host_node)
         lvol.nodes = [host_node.get_id()] + secondary_ids
 
         # Detect leader via RPC (no status checks)
@@ -941,7 +1003,6 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
 
     data = []
     for snap in snaps:
-        logger.debug(snap)
         clones = clones_by_snap.get(snap.get_id(), [])
         d = {
             "UUID": snap.uuid,
@@ -1351,7 +1412,13 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         # zero on a cluster whose collector has not yet reported any device --
         # skip the check rather than dividing by it.
         rec = records[0]
-        cluster_size_prov_util = int(((rec.size_prov+size) / rec.size_total) * 100)
+        # rec.size_prov is lvol-only; snapshots hold ACTUAL bytes on top of it
+        # (see pool_controller.get_cluster_snapshot_utilization).
+        if not all_snaps:
+            all_snaps = db_controller.get_mini_snapshots()
+        snap_used = pool_controller.get_cluster_snapshot_utilization(
+            cluster.get_id(), all_snaps=all_snaps)
+        cluster_size_prov_util = int(((rec.size_prov + snap_used + size) / rec.size_total) * 100)
 
         if cluster.prov_cap_crit and cluster.prov_cap_crit < cluster_size_prov_util:
             msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_crit}"
@@ -1496,9 +1563,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
 
         host_node = snode
-        secondary_ids = [host_node.secondary_node_id]
-        if host_node.tertiary_node_id:
-            secondary_ids.append(host_node.tertiary_node_id)
+        # skip empty role ids — non-HA topologies
+        secondary_ids = lvol_controller.role_secondary_ids(host_node)
         lvol.nodes = [host_node.get_id()] + secondary_ids
 
         # Detect leader via RPC (no status checks)

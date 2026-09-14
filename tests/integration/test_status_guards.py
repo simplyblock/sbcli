@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_status_guards.py — regression tests for the "don't clobber a node
 mid-restart" guards added to:

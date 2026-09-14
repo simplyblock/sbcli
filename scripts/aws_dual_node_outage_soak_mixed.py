@@ -1408,7 +1408,7 @@ class SoakRunner:
         if not self.topology:
             raise TestRunError("Empty topology; cannot pick representative pairs")
 
-        lvs_name = sorted(self.topology.keys())[0]
+        lvs_name = min(self.topology.keys())
         roles = self.topology[lvs_name]
         p = roles.get("primary")
         s = roles.get("secondary")

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Offline protocol generator for cluster-expansion scenarios.
 
 Given a scenario (host topology, FTT, lvols-per-primary), this module:
@@ -38,7 +37,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from simplyblock_core.controllers.cluster_expansion.planner import (
     ROLE_PRIMARY,
@@ -76,13 +74,13 @@ _FALLBACK_MS = {
 }
 
 
-def load_timing(path: Path) -> Dict[str, float]:
+def load_timing(path: Path) -> dict[str, float]:
     """Load the extracted timing JSON and return ``{rpc_name -> p50_ms}``."""
     data = json.loads(path.read_text())
     return {name: entry["p50_ms"] for name, entry in data["rpcs"].items()}
 
 
-def rpc_cost_ms(timing: Dict[str, float], rpc_name: str) -> float:
+def rpc_cost_ms(timing: dict[str, float], rpc_name: str) -> float:
     """Return p50_ms for ``rpc_name``, falling back to the static map and
     finally to a generic 5ms when neither has the call."""
     if rpc_name in timing:
@@ -102,18 +100,18 @@ class ScenarioSpec:
     name: str                                     # e.g. "p1_ftt2_4_to_5"
     description: str
     ftt: int
-    current_topology: List[List[str]]             # hosts × slots before
-    new_topology: List[List[str]]                 # hosts × slots after
+    current_topology: list[list[str]]             # hosts × slots before
+    new_topology: list[list[str]]                 # hosts × slots after
     lvols_per_primary: int = 8                    # FDB load
     nodes_per_host_label: int = 1                 # for protocol header
 
     @property
-    def newcomer_node_ids(self) -> List[str]:
+    def newcomer_node_ids(self) -> list[str]:
         existing = {n for h in self.current_topology for n in h}
         return [n for h in self.new_topology for n in h if n not in existing]
 
 
-def all_scenarios(lvols_per_primary: int = 8) -> List[ScenarioSpec]:
+def all_scenarios(lvols_per_primary: int = 8) -> list[ScenarioSpec]:
     """The four scenarios from the design matrix."""
     return [
         ScenarioSpec(
@@ -175,7 +173,7 @@ class RpcEvent:
     rpc: str                   # function name (matches log entry)
     detail: str = ""           # short context (lvol id, bdev name, etc.)
     duration_ms: float = 0.0   # how long this RPC took (p50)
-    move_index: Optional[int] = None  # which move emitted this RPC
+    move_index: int | None = None  # which move emitted this RPC
     role: str = ""             # role being created / re-homed / created-primary
     phase: str = ""            # "pre_block" | "blocked" | "post_unblock" | "" (Phase B)
 
@@ -185,7 +183,7 @@ class RpcEvent:
 # ---------------------------------------------------------------------------
 
 
-def _seq_create_primary(move: RoleMove, lvols_per_primary: int) -> List[Tuple[str, str, str]]:
+def _seq_create_primary(move: RoleMove, lvols_per_primary: int) -> list[tuple[str, str, str]]:
     """Sequence of (target_node, rpc, detail) for a Phase B create-primary
     move. Mirrors what ``storage_node_ops.create_lvstore`` does.
 
@@ -194,7 +192,7 @@ def _seq_create_primary(move: RoleMove, lvols_per_primary: int) -> List[Tuple[st
     """
     target = move.to_node_id
     lvs = f"LVS_{target}"
-    seq: List[Tuple[str, str, str]] = []
+    seq: list[tuple[str, str, str]] = []
     # 1. Bring up the bdev stack: alceml -> distrib -> raid -> lvstore.
     seq.append((target, "bdev_alceml_create", f"alceml_{target}_0"))
     seq.append((target, "bdev_distrib_create", f"distr_{target}_0"))
@@ -217,7 +215,7 @@ def _seq_create_primary(move: RoleMove, lvols_per_primary: int) -> List[Tuple[st
 
 
 def _seq_create_sec(move: RoleMove, primary_id: str,
-                    lvols_per_primary: int) -> List[Tuple[str, str, str]]:
+                    lvols_per_primary: int) -> list[tuple[str, str, str]]:
     """Build a sec/tert stack on ``move.to_node_id`` for ``primary_id``.
 
     The recipient connects to the primary's hublvol and rebuilds the
@@ -226,7 +224,7 @@ def _seq_create_sec(move: RoleMove, primary_id: str,
     """
     holder = move.to_node_id
     lvs = f"LVS_{primary_id}"
-    seq: List[Tuple[str, str, str]] = []
+    seq: list[tuple[str, str, str]] = []
     # Connect to the primary's hublvol via NVMe-oF and discover the lvstore.
     seq.append((holder, "bdev_nvme_attach_controller",
                 f"hub_{primary_id} -> {primary_id}:4421"))
@@ -253,9 +251,9 @@ def _seq_create_sec(move: RoleMove, primary_id: str,
 
 
 def _seq_teardown_donor(donor_id: str, primary_id: str,
-                        lvols_per_primary: int) -> List[Tuple[str, str, str]]:
+                        lvols_per_primary: int) -> list[tuple[str, str, str]]:
     """Inverse of :func:`_seq_create_sec` for teardown on the donor."""
-    seq: List[Tuple[str, str, str]] = []
+    seq: list[tuple[str, str, str]] = []
     # Per-lvol subsystem deletion.
     for j in range(lvols_per_primary):
         nqn = f"nqn.lvol.{primary_id}.{j}"
@@ -270,7 +268,7 @@ def _seq_teardown_donor(donor_id: str, primary_id: str,
 
 def _seq_sibling_reattach(sibling_id: str, primary_id: str,
                           old_failover_id: str,
-                          new_failover_id: str) -> List[Tuple[str, str, str]]:
+                          new_failover_id: str) -> list[tuple[str, str, str]]:
     """Additive-then-subtractive multipath repoint on a sibling sec_2.
     See ``storage_node_ops.reattach_sibling_failover``."""
     return [
@@ -286,9 +284,9 @@ def _seq_sibling_reattach(sibling_id: str, primary_id: str,
 # ---------------------------------------------------------------------------
 
 
-def _emit(events: List[RpcEvent], t: float, target: str, rpc: str,
-          detail: str, timing: Dict[str, float],
-          move_index: Optional[int] = None,
+def _emit(events: list[RpcEvent], t: float, target: str, rpc: str,
+          detail: str, timing: dict[str, float],
+          move_index: int | None = None,
           role: str = "", phase: str = "") -> float:
     """Append an event with its p50 cost and return the new ``t``."""
     cost = rpc_cost_ms(timing, rpc)
@@ -306,22 +304,22 @@ def _emit(events: List[RpcEvent], t: float, target: str, rpc: str,
 
 
 def generate_protocol(spec: ScenarioSpec,
-                      timing: Dict[str, float]) -> Tuple[List[RoleMove],
-                                                          List[RpcEvent]]:
+                      timing: dict[str, float]) -> tuple[list[RoleMove],
+                                                          list[RpcEvent]]:
     """Compute the planner's move list and the synthesized RPC trace."""
     moves = compute_role_diff_topology(
         spec.current_topology, spec.new_topology, ftt=spec.ftt)
 
     # Build a quick lookup so re-home moves can decide whether sibling
     # reattach is needed.
-    primary_to_secs: Dict[str, Dict[str, str]] = {}
+    primary_to_secs: dict[str, dict[str, str]] = {}
     # For the *post-expand* layout we know sec_1 / sec_2 from desired
     # rotation; reuse the planner formula here for sibling lookup.
     from simplyblock_core.controllers.cluster_expansion.planner import _host_rotation_layout
     for pid, sec, tert in _host_rotation_layout(spec.current_topology, spec.ftt):
         primary_to_secs[pid] = {ROLE_SECONDARY: sec, ROLE_TERTIARY: tert}
 
-    events: List[RpcEvent] = []
+    events: list[RpcEvent] = []
     t = 0.0
 
     for move_index, move in enumerate(moves):
@@ -409,10 +407,10 @@ def generate_protocol(spec: ScenarioSpec,
 
 
 def format_protocol(spec: ScenarioSpec,
-                    moves: List[RoleMove],
-                    events: List[RpcEvent]) -> str:
+                    moves: list[RoleMove],
+                    events: list[RpcEvent]) -> str:
     """Return a multi-section human-readable protocol string."""
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("=" * 78)
     lines.append(f"EXPANSION PROTOCOL — {spec.name}")
     lines.append("=" * 78)
@@ -462,8 +460,8 @@ def format_protocol(spec: ScenarioSpec,
     lines.append("-" * 78)
     lines.append("RPC FREQUENCY")
     lines.append("-" * 78)
-    counts: Dict[str, int] = {}
-    cumulative_ms: Dict[str, float] = {}
+    counts: dict[str, int] = {}
+    cumulative_ms: dict[str, float] = {}
     for ev in events:
         counts[ev.rpc] = counts.get(ev.rpc, 0) + 1
         cumulative_ms[ev.rpc] = cumulative_ms.get(ev.rpc, 0.0) + ev.duration_ms

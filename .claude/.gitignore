@@ -1,0 +1,3 @@
+# Per-developer machine paths, mirroring e2e/.claude/.gitignore. The committed
+# template lives at e2e/.claude/settings.local.example.json.
+settings.local.json

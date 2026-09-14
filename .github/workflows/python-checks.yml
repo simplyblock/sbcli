@@ -7,6 +7,7 @@ on:
     branches:
       - main
       - R26.2-PRE
+      - R26.3
 
 permissions:
   contents: read
@@ -22,7 +23,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v7
       with:
-        python-version: '3.9'
+        python-version: '3.11'
         cache: 'pip'
 
     - name: Install tox
@@ -99,7 +100,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v7
       with:
-        python-version: '3.9'
+        python-version: '3.11'
         cache: 'pip'
 
     - name: Install linter
@@ -108,7 +109,7 @@ jobs:
     - name: Execute linter
       run: ruff check
 
-    # ruff's target version comes from requires-python (>=3.9); this asserts the
+    # ruff's target version comes from requires-python (>=3.11); this asserts the
     # sources also parse on the interpreter the image actually runs.
     - name: Check sources parse on the image interpreter
       run: |
@@ -127,7 +128,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v7
       with:
-        python-version: '3.9'
+        python-version: '3.11'
         cache: 'pip'
 
     - name: Install tox

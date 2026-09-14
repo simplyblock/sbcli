@@ -1,4 +1,3 @@
-# coding=utf-8
 
 from typing import Any
 from logging import DEBUG, ERROR, INFO
@@ -362,10 +361,53 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
             passed = bool(ret)
             logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
-        elif passed and is_sec2 and auto_fix and primary_node.secondary_node_id \
-                and primary_node.lvstore_status == "ready":
+        elif passed and is_sec2 and (auto_fix or repair_paths) and primary_node.secondary_node_id:
+            # No primary_node.lvstore_status == "ready" gate here, deliberately.
+            #
+            # The path being added targets the SECONDARY, not the primary --
+            # it is the tertiary's redirect to whoever leads once the primary
+            # is gone. Requiring the primary to be "ready" closed this repair
+            # at exactly the moment it matters: the primary dying is what makes
+            # the path load-bearing. The controller already exists (`passed`),
+            # so nothing here needs the primary healthy; the sec1 status check
+            # below is the relevant one.
             # Controller exists but may only have the optimized path; ensure secondary path is present
             # ret is [{..., "ctrlrs": [path1, path2, ...]}, ...] — paths are inside ctrlrs
+            #
+            # `auto_fix or repair_paths`, not `auto_fix` alone. This is the same
+            # correction already made for the NIC-path repair below, and for the
+            # same reason: the caller escalates to auto_fix only once the coarse
+            # existence check has FAILED, and a controller that exists with one
+            # of its two paths PASSES that check. Gated on auto_fix this branch
+            # was unreachable in exactly the state it exists to repair.
+            #
+            # That state is not cosmetic. The tertiary's second path is its
+            # redirect to the secondary, and it is the only thing that keeps a
+            # redirect alive when the PRIMARY dies: NVMe multipath fails the
+            # controller over to it. With one path, losing the primary destroys
+            # the controller outright -- the hub bdev is removed and reopening
+            # returns ENODEV -- and the peer, having nothing to redirect
+            # through, promotes itself on the next write
+            # (spdk_lvs_trigger_leadership_switch, "Leadership changed due to
+            # receive new IO"). Two leaders, writer conflict, and the conflict
+            # handler then blocks the peer's own client port.
+            #
+            # Both 2026-09 incidents come back to this one missing path:
+            #   * AWS 2026-09-04 17:11:23 (fc32e143, LVS_10): the tertiary's
+            #     only hublvol path died with the container-killed primary and
+            #     never reconnected; 35 s later the restart moved leadership and
+            #     four uninvolved nodes self-aborted, suspending the cluster.
+            #   * k8s 2026-09-05 08:57 (1fb83b67, LVS_13): "Receive remove event
+            #     from callback" then "hub bdev LVS_13/hublvoln1 cannot be
+            #     opened, error=-19" on BOTH survivors; both promoted, both
+            #     blocked their ports, and the client lost every path -> EIO.
+            #
+            # The path is established by a deferred, post-unblock, best-effort
+            # pass in the restart flow (deferred_tertiary_paths ->
+            # add_hublvol_failover_path). Nothing re-checked it afterwards, so a
+            # skipped or failed deferral -- or a later disconnect from a network
+            # hiccup -- left the peer single-pathed indefinitely. This is that
+            # re-check.
             ctrlrs = ret[0].get("ctrlrs", []) if ret else []
             if len(ctrlrs) < 2 and not _restart_owns_lvs(primary_node):
                 try:
@@ -467,6 +509,10 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             duplicate_ips = (storage_node_ops.duplicate_attached_paths(ret)
                              if hub_bdev else set())
             if duplicate_ips:
+                logger.error(
+                    "Hublvol %s on %s has duplicate path(s) %s -- node is NOT "
+                    "healthy; repair_multipath_controller will prune them",
+                    primary_node.hublvol.bdev_name, node.get_id(), duplicate_ips)
                 # Detecting this without acting on it is what made the
                 # 2026-09-01 multipath soak unrunnable: LVS_4/hublvol carried
                 # peer 98.248 three times (97.36 twice, cntlid 1002 and 1003),
@@ -928,20 +974,30 @@ def check_node(node_id, with_devices=True):
             for remote_device in snode.remote_jm_devices:
 
                 name = remote_device.remote_bdev
-                bdev_info = rpc_client.get_bdevs(name)
-                logger.log(INFO if bdev_info else ERROR,
-                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                # Owner resolved BEFORE the probe, not after. Previously the
+                # RPC went out unconditionally and the ERROR line was logged
+                # before anything knew the owner was gone -- so a removed
+                # node's stale entry cost one RPC per cycle and left an ERROR
+                # in the log that the very next line classified as expected,
+                # and never retracted. Live 2026-09-02: 1797 such hits on one
+                # removed node's JM.
                 try:
                     jm_owner = db_controller.get_storage_node_by_id(remote_device.node_id)
                 except KeyError:
                     jm_owner = None
-                if _peer_connections_relevant(jm_owner):
-                    node_remote_devices_check &= bool(bdev_info)
-                elif not bdev_info:
+                owner_relevant = _peer_connections_relevant(jm_owner)
+                if not owner_relevant:
                     logger.info(
-                        "Remote JM %s missing, but owning node %s is %s — expected, "
-                        "not failing health", name, remote_device.node_id,
+                        "Remote JM %s belongs to node %s (%s); not probing and not "
+                        "failing health", name, remote_device.node_id,
                         jm_owner.status if jm_owner else "not-found")
+                    connected_jms.append(remote_device.get_id())
+                    continue
+
+                bdev_info = rpc_client.get_bdevs(name)
+                logger.log(INFO if bdev_info else ERROR,
+                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                node_remote_devices_check &= bool(bdev_info)
                 connected_jms.append(remote_device.get_id())
 
                 controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
@@ -1096,6 +1152,26 @@ def check_remote_device(device_id, target_node=None):
         logger.exception("node not found")
         return False
 
+    # The device's OWNER decides whether a remote connection to it is even
+    # expected. Skip the probe entirely when it is not -- same rule, and the
+    # same reason, as the remote-JM loop above: a missing connection to a
+    # departed owner is the expected consequence of its teardown.
+    #
+    # Gating only the verdict is not enough. The caller already discards the
+    # result for an irrelevant owner, but it calls this function first, so the
+    # two RPCs below still went out on every cycle for every surviving node.
+    # For a REMOVED node's devices that never stops: each miss makes SPDK log
+    # `*ERROR*: ctrlr 'remote_alceml_<uuid>' does not exist`, measured at
+    # 3-15 errors/min still climbing 35 minutes after the removal that made
+    # those devices failed_and_migrated (2026-09-03, devices 04fce724 /
+    # b0ada39d / ddf660f5 of the removed 2vk79, probed by 9 surviving nodes).
+    # Real faults then drown in a permanent error stream.
+    if not _peer_connections_relevant(snode):
+        logger.info(
+            "Remote device %s belongs to node %s (%s); not probing and not "
+            "failing health", device_id, device.node_id, snode.status)
+        return True
+
     result = True
     if target_node:
         nodes = [target_node]
@@ -1157,7 +1233,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
                 bdev_check = check_bdev(lvol.top_bdev, rpc_client=rpc_client)
             passed &= bdev_check
 
-        passed &= check_subsystem(lvol.nqn, rpc_client=rpc_client, ns_uuid=lvol.uuid)
+        # The namespace advertises the WIRE identity, which differs from the
+        # record uuid after a fail-back — checking the record uuid flags every
+        # failed-back volume unhealthy and triggers the monitor's self-heal.
+        passed &= check_subsystem(lvol.nqn, rpc_client=rpc_client, ns_uuid=lvol.get_ns_uuid())
 
     except Exception as e:
         logger.error(e)
@@ -1201,7 +1280,7 @@ def check_snap(snap_id):
     snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     check_primary = snode.rpc_client().get_bdevs(snap.snap_bdev)
     logger.info(f"Checking snap bdev: {snap.snap_bdev} on node: {snap.lvol.node_id} is {bool(check_primary)}")
-    if snode.secondary_node_id:
+    if snap.lvol.ha_type != "single" and snode.secondary_node_id:
         secondary_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         check_secondary = secondary_node.rpc_client().get_bdevs(snap.snap_bdev)
         logger.info(f"Checking snap bdev: {snap.snap_bdev} on node: {snode.secondary_node_id} is {bool(check_secondary)}")

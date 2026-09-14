@@ -19,7 +19,7 @@ Header layout (fio verify.h, struct verify_header):
 import argparse
 import struct
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 MAGIC = 0xACCA
 HDR = "<HHIQQII"
@@ -41,7 +41,7 @@ def describe(h, asked):
         return f"NO HEADER (magic=0x{h['magic']:04x})"
     when = "-"
     if 0 < h["time_sec"] < 2**31:
-        when = datetime.fromtimestamp(h["time_sec"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        when = datetime.fromtimestamp(h["time_sec"], tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
         when += f".{h['time_usec']:06d}Z"
     tag = "ok" if h["offset"] == asked else f"MISMATCH (header says {h['offset']})"
     return f"written {when}  hdr_offset={h['offset']} {tag}"
@@ -75,8 +75,8 @@ def main():
                 seen.append(h["time_sec"])
 
     if seen:
-        lo = datetime.fromtimestamp(min(seen), tz=timezone.utc).strftime("%H:%M:%SZ")
-        hi = datetime.fromtimestamp(max(seen), tz=timezone.utc).strftime("%H:%M:%SZ")
+        lo = datetime.fromtimestamp(min(seen), tz=UTC).strftime("%H:%M:%SZ")
+        hi = datetime.fromtimestamp(max(seen), tz=UTC).strftime("%H:%M:%SZ")
         print(f"\nneighbourhood last written between {lo} and {hi} "
               f"({len(seen)} blocks with valid headers)")
     else:

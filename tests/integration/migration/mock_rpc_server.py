@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 mock_rpc_server.py – in-process JSON-RPC 2.0 mock simulating one SPDK storage node.
 
@@ -28,7 +27,7 @@ import threading
 import time
 import uuid as _uuid_mod
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Dict, Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -58,29 +57,29 @@ class NodeState:
         self.lvstore_uuid = str(_uuid_mod.uuid4())
 
         # composite_name (e.g. "lvs/myvol") → bdev dict
-        self.lvols: Dict[str, dict] = {}
+        self.lvols: dict[str, dict] = {}
         # composite_name → bdev dict (immutable after convert)
-        self.snapshots: Dict[str, dict] = {}
+        self.snapshots: dict[str, dict] = {}
         # nqn → subsystem dict {nqn, serial, model, namespaces:[{nsid,bdev}], listeners:[]}
-        self.subsystems: Dict[str, dict] = {}
+        self.subsystems: dict[str, dict] = {}
         # ctrl_name → {nqn, traddr, trsvcid, trtype}
-        self.nvme_controllers: Dict[str, dict] = {}
+        self.nvme_controllers: dict[str, dict] = {}
         # remote bdev name (e.g. "<ctrl_name>n1") → {name, controller} — mirrors
         # the local bdev(s) real SPDK creates when bdev_nvme_attach_controller
         # succeeds, so get_bdevs()-based "already attached" checks work.
-        self.nvme_bdevs: Dict[str, dict] = {}
+        self.nvme_bdevs: dict[str, dict] = {}
         # async-delete: composite_name → complete_at float
-        self.delete_ops: Dict[str, float] = {}
+        self.delete_ops: dict[str, float] = {}
         # async-transfer: composite_name → {complete_at, state}
         # state is "In progress" until complete_at, then "Done" (or "Failed" in fault-inject)
-        self.transfer_ops: Dict[str, dict] = {}
+        self.transfer_ops: dict[str, dict] = {}
 
         # NVMe bdev options (set by bdev_nvme_set_options)
-        self.nvme_options: Dict[str, Any] = {}
+        self.nvme_options: dict[str, Any] = {}
 
         self._blobid_counter = 1000
         self._map_id_counter = 1
-        self._nsid_counter: Dict[str, int] = {}  # nqn → next nsid
+        self._nsid_counter: dict[str, int] = {}  # nqn → next nsid
         self.lock = threading.Lock()
 
         # Per node rather than one shared stream: otherwise adding a single RPC
@@ -114,7 +113,7 @@ class NodeState:
             return composite.split('/', 1)[1]
         return composite
 
-    def all_bdevs(self) -> Dict[str, dict]:
+    def all_bdevs(self) -> dict[str, dict]:
         """Lvol-store bdevs only (lvols + snapshots) — excludes NVMe-attached
         remote bdevs, which have a different shape and are looked up separately
         (see ``_bdev_get_bdevs``)."""
@@ -217,7 +216,7 @@ class _RpcError(Exception):
 # Lookup table: method → [possible error codes]
 # ---------------------------------------------------------------------------
 
-_METHOD_ERROR_CODES: Dict[str, list] = {
+_METHOD_ERROR_CODES: dict[str, list] = {
     "bdev_lvol_get_lvstores":        [-1, -19],        # generic, ENODEV
     "bdev_lvol_create":              [-1, -22, -17],   # generic, EINVAL, EEXIST
     "bdev_lvol_delete":              [-1, -2, -22],    # generic, ENOENT, EINVAL
@@ -588,7 +587,7 @@ def _bdev_lvol_snapshot_register(s: NodeState, p: dict):
 # ---- get bdevs / lvols ----
 
 def _bdev_get_bdevs(s: NodeState, p: dict):
-    name: Optional[str] = p.get('name')
+    name: str | None = p.get('name')
     all_bdevs = {**s.all_bdevs(), **s.nvme_bdevs}
     if name:
         composite = name if name in all_bdevs else s.composite(name)
@@ -657,21 +656,34 @@ def _bdev_lvol_transfer_stat(s: NodeState, p: dict):
 
 
 def _bdev_lvol_transfer_final_step(s: NodeState, p: dict):
-    """Start async final-migration (source lvol → target blobstore).
+    """Final migration (source lvol → target blobstore) — SYNCHRONOUS.
 
-    Wire name for ``RPCClient.bdev_lvol_final_migration`` (a deprecated alias
-    for ``bdev_lvol_transfer_final_step``).
+    The real RPC blocks through the IO drain and delta copy and returns a
+    stat dict; the runner requires ``transfer_state == 'Done'`` on the return
+    itself (tasks_runner_lvol_migration, strict check added 2026-08 after the
+    batch-migration "Failed slipped through" bug). This mock used to model it
+    as async (register op, return True) — a stale contract that made every
+    completed migration read as ``transfer_state=None`` and failed 26 tests
+    while the code worked on real clusters.
+
+    Failure injection still applies: the dispatch layer times out or errors
+    BEFORE this handler runs, which exercises the runner's not-ret /
+    exception paths, including the crash-recovery stat poll — served by the
+    'Done' op recorded here.
     """
     lvol_name = _req(p, 'lvol_name')
     composite = lvol_name if lvol_name in s.lvols else s.composite(lvol_name)
     if composite not in s.lvols:
         raise _RpcError(-2, f"source lvol {composite} not found")
+    # Block briefly like the real drain does, but cap the exponential tail —
+    # a synchronous multi-second stall would serialize the whole suite.
+    time.sleep(min(_async_delay(s.rng), 0.5))
     s.transfer_ops[composite] = {
-        'complete_at': time.time() + _async_delay(s.rng),
-        'state': 'In progress',
+        'complete_at': time.time(),
+        'state': 'Done',
     }
-    logger.debug("mock bdev_lvol_transfer_final_step started for %s", composite)
-    return True
+    logger.debug("mock bdev_lvol_transfer_final_step completed for %s", composite)
+    return {'transfer_state': 'Done', 'offset': 0}
 
 
 # ---- NVMe-oF subsystems ----
@@ -953,8 +965,8 @@ class MockRpcServer:
         self.rpc_username = rpc_username
         self.rpc_password = rpc_password
         self.state = NodeState(lvstore)
-        self._server: Optional[_MockHTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self._server: _MockHTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     def start(self):
         self._server = _MockHTTPServer(

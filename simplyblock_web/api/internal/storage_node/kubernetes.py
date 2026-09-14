@@ -1,10 +1,8 @@
-# encoding: utf-8
 import json
 import logging
 import os
 import time
 import traceback
-from typing import List, Optional, Union
 
 from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException, V1DeleteOptions
@@ -143,6 +141,36 @@ def get_info():
     })
 
 
+@api.get('/blockdevices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def get_blockdevices():
+    """Whole-disk inventory for the lblk cluster mode (eligibility fields,
+    serial/WWN identity, by-id path, NUMA)."""
+    return utils.get_response(node_utils.get_block_devices_info())
+
+
+class _WipeBlockDeviceParams(BaseModel):
+    device_name: str
+
+
+@api.post('/wipe_block_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def wipe_block_device(body: _WipeBlockDeviceParams):
+    """--force-format for lblk add-node: wipe partition/FS signatures from a
+    whole disk. Refuses busy devices (mounts/holders/root disk)."""
+    ok, reason = node_utils.wipe_block_device_signatures(body.device_name)
+    if not ok:
+        return utils.get_response(None, reason)
+    return utils.get_response(True)
+
+
 @api.post('/join_swarm', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
@@ -208,21 +236,21 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(ge=1, lt=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: List[str] = Field([])
+    ssd_pcie: list[str] = Field([])
     l_cores: str
-    namespace: Optional[str]
-    total_mem: Union[int, str] = Field('')
+    namespace: str | None
+    total_mem: int | str = Field('')
     spdk_mem: int = Field(core_utils.parse_size('64GiB'))
     system_mem: int = Field(core_utils.parse_size('4GiB'))
     fdb_connection: str = Field('')
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    spdk_proxy_image: str | None = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
-    socket: Optional[int] = Field(None, ge=0)
-    firewall_port: Optional[int] = Field(constants.FW_PORT_START)
+    socket: int | None = Field(None, ge=0)
+    firewall_port: int | None = Field(constants.FW_PORT_START)
     cluster_id: str
-    mcp_max_unavailable: Optional[int] = Field(None)
+    mcp_max_unavailable: int | None = Field(None)
 
 
 @api.post('/spdk_process_start', responses={
@@ -590,6 +618,20 @@ def spdk_process_kill(query: utils.RPCPortParams):
         return utils.get_response(False, f"Pod {pod_name} did not terminate in time")
 
     return utils.get_response(True)
+
+
+@api.get('/spdk_process_cleanup', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_cleanup(query: utils.RPCPortParams):
+    """Authoritative SPDK teardown for failure-cleanup paths. Pod deletion in
+    this deployment mode is already synchronous and verified (see
+    spdk_process_kill's poll-until-gone), so this is an alias kept for parity
+    with the docker agent, where kill (fast, detached remove) and cleanup
+    (slow, verified remove) are distinct."""
+    return spdk_process_kill(query)
 
 
 def _is_pod_up(rpc_port, cluster_id):
