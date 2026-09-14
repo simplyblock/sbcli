@@ -157,6 +157,62 @@ jobs:
           ref: ${{ github.event.inputs.operator_repo_branch || 'main' }}
           path: 'simplyblock-operator'
 
+      # Every moving part can be on a different ref, and workflow_dispatch
+      # inputs are not exposed by the REST API for a finished run. Without this
+      # artifact, debugging a failure weeks later means guessing which code ran
+      # -- and a log line resolved against the wrong commit is worse than one
+      # not resolved at all, because it looks like an answer.
+      # Consumed by e2e/.agents/scripts/pin_from_run.py --run <id>.
+      - name: Record run versions
+        if: always()
+        run: |
+          set -euo pipefail
+          op_sha="$(git -C simplyblock-operator rev-parse HEAD 2>/dev/null || echo '')"
+          cat > run-versions.json <<JSON
+          {
+            "run_id": "${{ github.run_id }}",
+            "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "workflow": "${{ github.workflow }}",
+            "automation_branch": "${{ github.ref_name }}",
+            "automation_sha": "${{ github.sha }}",
+            "simplyblock_image": "${{ github.event.inputs.simplyblock_image }}",
+            "simplyblock_repository": "${{ github.event.inputs.simplyblock_repository }}",
+            "spdk_image": "${{ github.event.inputs.spdk_image }}",
+            "operator_repo_branch": "${{ github.event.inputs.operator_repo_branch }}",
+            "operator_resolved_sha": "${op_sha}",
+            "operator_tag": "${{ github.event.inputs.operator_tag }}",
+            "csi_tag": "${{ github.event.inputs.csi_tag }}",
+            "testname": "${{ github.event.inputs.testname }}"
+          }
+          JSON
+          python3 -c "import json;json.load(open('run-versions.json'))"
+          cat run-versions.json
+          {
+            echo "### Versions under test"
+            echo ""
+            echo "| Component | Ref |"
+            echo "|---|---|"
+            echo "| e2e automation | \`${{ github.ref_name }}\` @ \`${{ github.sha }}\` |"
+            echo "| simplyblock image | \`${{ github.event.inputs.simplyblock_image }}\` |"
+            echo "| SPDK image | \`${{ github.event.inputs.spdk_image }}\` |"
+            echo "| operator branch | \`${{ github.event.inputs.operator_repo_branch }}\` @ \`${op_sha}\` |"
+            echo "| operator image | \`${{ github.event.inputs.operator_tag }}\` |"
+            echo "| CSI image | \`${{ github.event.inputs.csi_tag }}\` |"
+            echo ""
+            echo "Pin local repo maps to this run:"
+            echo '```'
+            echo "python .agents/scripts/pin_from_run.py --run ${{ github.run_id }} --build"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload run versions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-versions
+          path: run-versions.json
+          retention-days: 90
+
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
         run: |
@@ -1372,6 +1428,15 @@ jobs:
           CLIENT_IP: ${{ github.event.inputs.client_ips }}
           SKIP_NFS: ${{ github.event.inputs.skip_nfs || 'false' }}
           RUN_DIR_FILE: ${{ env.RUN_DIR_FILE }}
+          # Surfaced in the Slack summary so a failure notification names the
+          # code that failed. Same values as the run-versions artifact.
+          AUTOMATION_REF: ${{ github.ref_name }}@${{ github.sha }}
+          SIMPLYBLOCK_IMAGE: ${{ github.event.inputs.simplyblock_image }}
+          SPDK_IMAGE: ${{ github.event.inputs.spdk_image }}
+          OPERATOR_REPO_BRANCH: ${{ github.event.inputs.operator_repo_branch }}
+          OPERATOR_TAG: ${{ github.event.inputs.operator_tag }}
+          CSI_TAG: ${{ github.event.inputs.csi_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 

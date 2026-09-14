@@ -4,6 +4,10 @@
     "The real config is gitignored: paths are per-developer, not project facts.",
     "Then:  python3 .agents/scripts/repo_map.py",
     "",
+    "A repo can also carry a \"ref\" key to pin it to a branch, tag or sha",
+    "instead of whatever is checked out. For debugging a specific CI run,",
+    "prefer pin_from_run.py, which writes repo-maps/pins.json from the run.",
+    "",
     "exclude_dirs keeps a subtree out of the index. Its main use is excluding",
     "the directory the session is opened in, which is readable with the file",
     "tools already and does not need indexing."

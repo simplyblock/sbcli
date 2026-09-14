@@ -37,7 +37,75 @@ except ValueError:          # different drive on Windows
     REL = AGENTS
 CONFIG = os.path.join(AGENTS, "repo-map.config.json")
 MAPS = os.path.join(AGENTS, "repo-maps")
+PINS = os.path.join(MAPS, "pins.json")
 SCRIPT = os.path.join(AGENTS, "scripts", "repo_map.py")
+
+
+def interpreter():
+    """The python name that actually runs here, for the copy-paste hint.
+
+    On Windows a bare `python3` is usually the Microsoft Store alias stub: it
+    is on PATH, exits 49, and runs nothing. Printing it in a hint sends the
+    reader to a command that fails for reasons that have nothing to do with
+    what they were debugging.
+    """
+    try:
+        ok = subprocess.run(["python3", "-c", ""], capture_output=True,
+                            timeout=10).returncode == 0
+    except Exception:                                 # noqa: BLE001
+        ok = False
+    return "python3" if ok else "python"
+
+
+def ref_candidates(ref):
+    """Spellings to try. Image tags do not spell branch names: SPDK tags an
+    image `26.3` while the branch is `R26.3`."""
+    out = [ref, "origin/" + ref]
+    if not ref.startswith("R"):
+        out += ["R" + ref, "origin/R" + ref]
+    if ref.startswith("v"):
+        out += [ref[1:], "origin/" + ref[1:]]
+    return out
+
+
+def near_refs(path, ref):
+    """Branches whose name contains the ref, so an unresolvable pin points at
+    what does exist instead of just failing."""
+    try:
+        out = subprocess.run(["git", "branch", "-a", "--list", "*%s*" % ref],
+                             cwd=path, capture_output=True, text=True,
+                             timeout=15)
+        names = [ln.strip().lstrip("* ").replace("remotes/", "")
+                 for ln in out.stdout.splitlines() if ln.strip()]
+        return names[:3]
+    except Exception:                                 # noqa: BLE001
+        return []
+
+
+def rev(path, ref):
+    """Short sha for a ref, trying the usual variants. Empty if unresolvable."""
+    for cand in ref_candidates(ref):
+        try:
+            out = subprocess.run(["git", "rev-parse", "--short", cand],
+                                 cwd=path, capture_output=True, text=True,
+                                 timeout=15)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except Exception:                             # noqa: BLE001
+            pass
+    return ""
+
+
+def load_pins():
+    """Pinned refs, written by pin_from_run.py or by hand. Never raises."""
+    if not os.path.exists(PINS):
+        return {}, {}
+    try:
+        with open(PINS, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc.get("pins", {}) or {}, doc
+    except Exception:                                 # noqa: BLE001
+        return {}, {}
 
 
 def short_head(path):
@@ -66,6 +134,8 @@ def main():
     if not repos:
         return 0
 
+    pins, pindoc = load_pins()
+
     current, stale, missing, absent = [], [], [], []
     for name, rcfg in repos.items():
         path = rcfg.get("path", "")
@@ -76,7 +146,13 @@ def main():
         if not os.path.exists(map_md):
             missing.append(name)
             continue
-        head = short_head(path)
+        # A pinned map must be judged against its pin, not against whatever
+        # the developer happens to have checked out. Judging it against HEAD
+        # is how a correctly pinned map gets reported STALE and rebuilt into
+        # the wrong code, which is the exact failure this is meant to stop.
+        ref = (pins.get(name) or {}).get("ref", "")
+        want = rev(path, ref) if ref else short_head(path)
+        label = f"{name}@{ref}" if ref else name
         recorded = ""
         try:
             with open(map_md, encoding="utf-8") as fh:
@@ -87,11 +163,16 @@ def main():
         except OSError:
             missing.append(name)
             continue
-        if head and head not in recorded:
-            stale.append(f"{name} (map at {recorded.replace('head: ', '')}, "
-                         f"repo at {head})")
+        if ref and not want:
+            near = near_refs(path, ref)
+            hint = (f"did you mean {', '.join(near)}?" if near
+                    else f"git -C {path} fetch --all")
+            stale.append(f"{label} (pinned ref does not resolve -- {hint})")
+        elif want and want not in recorded:
+            stale.append(f"{label} (map at {recorded.replace('head: ', '')}, "
+                         f"want {want})")
         else:
-            current.append(name)
+            current.append(label)
 
     if not (current or stale or missing or absent):
         return 0
@@ -111,8 +192,12 @@ def main():
         print(f"[repo-maps] no map yet: {', '.join(sorted(missing))}")
     if absent:
         print(f"[repo-maps] configured but not present here: {'; '.join(absent)}")
+    if pins:
+        src = pindoc.get("source") or "pins.json"
+        print(f"[repo-maps] PINNED to the code a run used, from {src}. "
+              f"Maps are NOT your working tree.")
     if stale or missing:
-        print(f"[repo-maps] refresh with: python3 "
+        print(f"[repo-maps] refresh with: {interpreter()} "
               f"{os.path.join(REL, 'scripts', 'repo_map.py')}")
     return 0
 

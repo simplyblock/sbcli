@@ -24,6 +24,19 @@ Usage
     python3 .agents/scripts/repo_map.py                 # all repos in the config
     python3 .agents/scripts/repo_map.py --only spdk     # one repo
     python3 .agents/scripts/repo_map.py --check         # staleness only, no writes
+    python3 .agents/scripts/repo_map.py --ref spdk=26.3 --ref ultra=some-fix
+
+Pinning
+-------
+Every moving part can be on a different ref: the e2e automation on one branch,
+the product on another, SPDK on a release branch, the operator on a fix branch.
+A map built from your own checkout is then confidently wrong -- it resolves a
+log line to a real file:line in code the run never executed.
+
+So a map can be pinned. Precedence: --ref beats repo-maps/pins.json, which
+beats a "ref" key in the repo config, which beats the working tree. Pinned
+builds use a detached git worktree, so your own checkout and any uncommitted
+work are never touched. pin_from_run.py writes pins.json from a CI run.
 
 Config: .agents/repo-map.config.json (see repo-map.config.example.json).
 Output: .agents/repo-maps/<name>.md, which is gitignored by default because it
@@ -31,11 +44,14 @@ is a derived artefact and its size scales with someone else's repo.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -43,6 +59,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 AGENTS_DIR = os.path.dirname(HERE)
 CONFIG = os.path.join(AGENTS_DIR, "repo-map.config.json")
 OUT_DIR = os.path.join(AGENTS_DIR, "repo-maps")
+
+# Which ref each map should be built from. Written by hand, or by
+# pin_from_run.py from a CI run. Absent means "index whatever is checked out",
+# which is the right default while editing and the wrong one while debugging a
+# run that used different code. See load_pins().
+PINS = os.path.join(OUT_DIR, "pins.json")
 
 # Symbol patterns per language. Deliberately conservative: a missed symbol costs
 # one grep, a wrong one costs confusion every time the map is read.
@@ -152,6 +174,85 @@ def git_head(path):
     return sha, branch
 
 
+def load_pins(path=PINS):
+    """Read the pin file: {"pins": {"<repo>": {"ref": "26.3", ...}}}.
+
+    Missing or unreadable means no pins. A debugging aid that refuses to start
+    because its own metadata is malformed is worse than one that degrades to
+    the unpinned default, so this never raises.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh).get("pins", {}) or {}
+    except Exception:                                 # noqa: BLE001
+        return {}
+
+
+def ref_candidates(ref):
+    """Spellings to try for a ref, in order of decreasing confidence.
+
+    Image tags do not spell branch names. SPDK tags an image `26.3` while the
+    branch is `R26.3`, so a literal lookup fails on exactly the release refs
+    you most want to pin. Trying the obvious variants costs one cheap rev-parse
+    each and turns a dead end into a hit.
+    """
+    out = [ref, "origin/" + ref]
+    if not ref.startswith("R"):
+        out += ["R" + ref, "origin/R" + ref]
+    if ref.startswith("v"):
+        out += [ref[1:], "origin/" + ref[1:]]
+    return out
+
+
+def resolve_ref(root, ref):
+    """Resolve a ref to (short_sha, name_that_worked), or ("", "").
+
+    Tries the ref verbatim first, then origin/<ref>: the usual case is a branch
+    that exists on the remote but was never checked out locally, and failing on
+    that would make pinning useless for exactly the branches you did not work
+    on yourself.
+    """
+    for candidate in ref_candidates(ref):
+        sha = run(["git", "rev-parse", "--short", candidate], cwd=root).strip()
+        if sha:
+            return sha, candidate
+    return "", ""
+
+
+@contextlib.contextmanager
+def checkout_at(root, ref):
+    """Yield (scan_root, sha, branch_label) with <ref> available to index.
+
+    A detached worktree, not a checkout: pinning a map must never move the
+    developer's HEAD or disturb uncommitted work in a repo they are mid-edit
+    in. With no ref, this is a no-op that yields the working tree as-is.
+    """
+    if not ref:
+        sha, branch = git_head(root)
+        yield root, sha, branch
+        return
+
+    sha, resolved = resolve_ref(root, ref)
+    if not sha:
+        raise RuntimeError(
+            "cannot resolve ref %r in %s -- try: git -C %s fetch --all" % (
+                ref, root, root))
+
+    tmp = tempfile.mkdtemp(prefix="repo-map-pin-")
+    wt = os.path.join(tmp, "wt")
+    run(["git", "worktree", "add", "--detach", wt, resolved], cwd=root)
+    if not os.path.isdir(wt):
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError("git worktree add failed for %s@%s" % (root, ref))
+    try:
+        yield wt, sha, ref
+    finally:
+        run(["git", "worktree", "remove", "--force", wt], cwd=root)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def find_rg():
     """Locate a REAL ripgrep binary, or return None.
 
@@ -230,14 +331,23 @@ def layout(root, langs, excludes=None):
     return counts, exts
 
 
-def build_map(name, cfg, check_only=False):
+def build_map(name, cfg, check_only=False, ref=None):
     root = cfg["path"]
     if not os.path.isdir(root):
         return None, f"{name}: path does not exist: {root}"
 
     langs = cfg.get("languages") or ["c", "cpp", "python", "go"]
-    sha, branch = git_head(root)
+    ref = ref or cfg.get("ref") or ""
     out_path = os.path.join(OUT_DIR, f"{name}.md")
+
+    # What the map SHOULD be built from. Pinned: the ref, wherever HEAD sits.
+    # Unpinned: whatever is checked out. Conflating the two is the bug this
+    # whole mechanism exists to prevent -- a map that matches your checkout
+    # while the run under debug used something else is confidently wrong.
+    if ref:
+        want_sha, _ = resolve_ref(root, ref)
+    else:
+        want_sha, _ = git_head(root)
 
     if check_only:
         if not os.path.exists(out_path):
@@ -248,21 +358,29 @@ def build_map(name, cfg, check_only=False):
                 if line.startswith("head:"):
                     head_line = line.strip()
                     break
-        if sha and sha not in head_line:
-            return None, (f"{name}: map is STALE (map {head_line!r}, "
-                          f"repo now at {sha})")
-        return None, f"{name}: map current ({sha})"
+        pin_note = f" [pinned {ref}]" if ref else ""
+        if not want_sha:
+            return None, (f"{name}: cannot resolve {ref!r}{pin_note} -- "
+                          f"git -C {root} fetch --all")
+        if want_sha not in head_line:
+            return None, (f"{name}: map is STALE{pin_note} (map {head_line!r}, "
+                          f"want {want_sha})")
+        return None, f"{name}: map current ({want_sha}){pin_note}"
 
     # Per-repo excludes. The main use is keeping the agent's own project root
     # out of its map: when a session opens with e2e/ as root, e2e is directly
     # readable with the file tools and indexing it again is pure duplication.
     excludes = cfg.get("exclude_dirs") or []
-    counts, exts = layout(root, langs, excludes)
-
     sym_res = {lang: tuple(re.compile(p) for p in pats)
                for lang, pats in SYMBOL_PATTERNS.items() if lang in langs}
     log_res = {lang: rx for lang, rx in STRING_RE.items() if lang in langs}
-    syms, logs = scan(root, langs, sym_res, log_res, excludes)
+
+    # Everything that touches the tree happens inside the worktree context, so
+    # a pinned checkout exists for exactly as long as the scan needs it and is
+    # torn down even if the scan raises.
+    with checkout_at(root, ref) as (scan_root, sha, branch):
+        counts, exts = layout(scan_root, langs, excludes)
+        syms, logs = scan(scan_root, langs, sym_res, log_res, excludes)
 
     # De-duplicate, keeping the first definition seen for each name.
     seen_sym = {}
@@ -313,6 +431,7 @@ def build_map(name, cfg, check_only=False):
         "",
         "path: " + root,
         "head: %s (%s)" % (sha, branch),
+        "ref: " + (ref or "(working tree)"),
         "generated: " + now,
         "languages: " + ", ".join(langs),
         "",
@@ -374,7 +493,20 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="report staleness without writing anything")
     ap.add_argument("--config", default=CONFIG)
+    ap.add_argument("--ref", action="append", metavar="NAME=REF", default=[],
+                    help="build NAME from REF (branch, tag or sha) instead of "
+                         "its checked-out HEAD; repeatable")
+    ap.add_argument("--pins", default=PINS,
+                    help="pin file to read (default: repo-maps/pins.json)")
     args = ap.parse_args()
+
+    cli_refs = {}
+    for item in args.ref:
+        if "=" not in item:
+            print(f"--ref needs NAME=REF, got {item!r}")
+            return 1
+        k, v = item.split("=", 1)
+        cli_refs[k.strip()] = v.strip()
 
     if not os.path.exists(args.config):
         print(f"no config at {args.config}")
@@ -390,10 +522,16 @@ def main():
             print(f"no repo named {args.only!r} in the config")
             return 1
 
+    pins = load_pins(args.pins)
+    if pins and not args.check:
+        print("[pins] %s" % ", ".join(
+            "%s@%s" % (k, v.get("ref", "?")) for k, v in sorted(pins.items())))
+
     rc = 0
     for name, rcfg in repos.items():
+        ref = cli_refs.get(name) or (pins.get(name) or {}).get("ref")
         try:
-            _, msg = build_map(name, rcfg, check_only=args.check)
+            _, msg = build_map(name, rcfg, check_only=args.check, ref=ref)
             print(msg)
             if args.check and ("STALE" in msg or "NO MAP" in msg):
                 rc = 2

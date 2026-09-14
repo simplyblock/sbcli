@@ -28,7 +28,10 @@ confirm" for two days.
     .agents/repo-map.config.example.json     committed template
     .agents/repo-map.config.json             YOUR paths (gitignored)
     .agents/repo-maps/                       generated indexes (gitignored)
+    .agents/scripts/pin_from_run.py          pin the maps to a CI run's refs
+    .agents/repo-maps/pins.json              which ref each map is built from (gitignored)
     ../.claude/settings.json                 wires the hook (e2e-scoped)
+    ../../.claude/settings.json              same hook, for repo-root sessions
 
 ## Use
 
@@ -37,6 +40,56 @@ confirm" for two days.
     # edit the paths in both, then
     python3 .agents/scripts/repo_map.py           # index everything
     python3 .agents/scripts/repo_map.py --check   # staleness only
+
+## Pinning to the code a run actually used
+
+Every moving part can be on a different ref: the automation on a feature
+branch, the product image on `main`, SPDK on `R26.3`, the operator on a fix
+branch. A map built from your own checkout is then *confidently wrong* - a log
+line resolves to a real `file:line` in code the run never executed, which is
+worse than not resolving it at all, because it looks like an answer.
+
+Measured, not hypothetical: `Forcing application shutdown via abort` is
+`lib/lvol/lvol.c:2945` on SPDK `master` and `:2942` on `R26.3`.
+
+    # pin to a CI run (needs its run-versions artifact) and rebuild
+    python3 .agents/scripts/pin_from_run.py --run 12345678 --build
+
+    # or by hand, when you already know what ran
+    python3 .agents/scripts/pin_from_run.py --set spdk=R26.3 --set sbcli=main
+    python3 .agents/scripts/repo_map.py
+
+    # back to your own checkouts (then rebuild)
+    python3 .agents/scripts/pin_from_run.py --clear
+
+Precedence is `--ref` > `pins.json` > a `ref` key in the repo config > the
+working tree. Pinned builds use a detached `git worktree`, so your own checkout
+and any uncommitted work are never touched. While pins are in effect the
+SessionStart hook says so on every session, and judges staleness against the
+pin rather than against your `HEAD`.
+
+Image tags do not spell branch names - SPDK tags an image `26.3` while the
+branch is `R26.3` - so ref lookup also tries `origin/<ref>` and an `R` prefix,
+and an unresolvable pin suggests branches whose names contain it.
+
+### Where the refs come from
+
+`.github/workflows/k8s-native-e2e.yaml` writes a `run-versions` artifact
+holding the dispatch inputs verbatim, plus the resolved operator SHA, and
+prints the same table to the run summary. `--run` downloads that artifact;
+workflow_dispatch inputs are not exposed by the REST API for a finished run, so
+there is no way to derive them from a run id alone. The same values are handed
+to the test process as env vars, so the Slack summary names the code that
+failed.
+
+One honest gap: these images carry no `org.opencontainers.image.revision`
+label, so a tag identifies a *branch*, and that branch's tip today is not
+necessarily the commit the image was built from. `pins.json` keeps the raw tag
+next to the derived ref so the inference stays auditable. Labelling the image
+builds with the commit SHA would close this properly.
+
+`ultra` has no workflow input at all - it is built into the SPDK image - so
+`pin_from_run.py` leaves it unpinned and says so rather than guessing.
 
 Both files are gitignored, because absolute paths are per-developer.
 

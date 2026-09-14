@@ -16,6 +16,31 @@ class CommonUtils:
         self.logger = setup_logger(__name__)
         self.slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")  # Load from environment variable
 
+    def versions_under_test(self):
+        """The refs this run is exercising, as Slack-ready lines.
+
+        A failure notification that does not say which code failed sends the
+        reader back to the workflow inputs, and weeks later to guesswork. Every
+        moving part can be on a different ref, so the notification names all of
+        them. Values come from the CI env; anything unset is omitted rather
+        than reported as a wrong default.
+        """
+        fields = [
+            ("e2e automation", "AUTOMATION_REF"),
+            ("simplyblock image", "SIMPLYBLOCK_IMAGE"),
+            ("SPDK image", "SPDK_IMAGE"),
+            ("operator branch", "OPERATOR_REPO_BRANCH"),
+            ("operator image", "OPERATOR_TAG"),
+            ("CSI image", "CSI_TAG"),
+        ]
+        lines = [f"- *{label}:* `{os.getenv(var)}`"
+                 for label, var in fields if os.getenv(var)]
+        if not lines:
+            return ""
+        run_url = os.getenv("RUN_URL")
+        footer = f"\n<{run_url}|run>" if run_url else ""
+        return "\n*Versions under test:*\n" + "\n".join(lines) + footer + "\n"
+
     def send_slack_summary(self, subject, body):
         """
         Sends a Slack message with the test summary.
@@ -30,7 +55,7 @@ class CommonUtils:
 
         # Format Slack message
         slack_message = {
-            "text": f"*{subject}*\n{body}"
+            "text": f"*{subject}*\n{self.versions_under_test()}{body}"
         }
 
         try:

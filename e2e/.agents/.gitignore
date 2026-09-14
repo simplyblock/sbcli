@@ -5,3 +5,8 @@ repo-map.config.json
 # and go stale on their next commit. Rebuild with scripts/repo_map.py.
 repo-maps/*.md
 repo-maps/*.tsv
+
+# Which refs the maps are pinned to. Per-developer and per-run: whoever is
+# debugging picks the run, and committing one person's pins would silently
+# repoint everyone else's maps.
+repo-maps/pins.json
