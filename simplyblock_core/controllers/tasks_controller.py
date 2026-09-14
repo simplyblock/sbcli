@@ -775,11 +775,19 @@ def add_node_add_task(cluster_id, function_params):
 
 
 def add_node_removal_task(cluster_id, node_id, function_params=None):
-    # max_retry=-1: the removal runner drives a multi-step, possibly multi-hour
-    # orchestration (shutdown -> LVS rewire -> device fail+migrate). Migration
-    # waits legitimately suspend-and-retry many times; do not cap retries.
+    # The removal runner drives a multi-step, possibly multi-hour orchestration
+    # (shutdown -> LVS rewire -> device fail+migrate), and its migration waits
+    # legitimately suspend-and-retry many times -- so the ceiling is hours, not
+    # a handful of passes.
+    #
+    # It is no longer uncapped, though. This was max_retry=-1 on the reasoning
+    # that the waits are long; the result was a removal that could retry without
+    # end and never say why (68 retries observed on one task, 2026-09-11). A
+    # removal that cannot finish has to reach a terminal state an operator can
+    # see and act on -- STATUS_REMOVED_FAILED -- rather than spin silently.
     return _add_task(JobSchedule.FN_NODE_REMOVAL, cluster_id, node_id, "",
-                     function_params=function_params or {}, max_retry=-1)
+                     function_params=function_params or {},
+                     max_retry=constants.NODE_REMOVAL_MAX_RETRY)
 
 
 def get_active_node_removal_task(cluster_id, node_id):

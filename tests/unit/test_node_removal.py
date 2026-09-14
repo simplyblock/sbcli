@@ -1901,11 +1901,12 @@ class TestDecommissionDevices(unittest.TestCase):
              patch.object(storage_node_ops, "device_controller", dc):
             ret = storage_node_ops._decommission_node_devices(removed)
 
-        # Each device is driven ONLINE -> REMOVED -> FAILED (queuing failure
-        # migration on the surviving nodes). The completion gate's early
-        # `return False` is currently commented out, so the first pass reports
-        # True rather than waiting for FAILED_AND_MIGRATED.
-        self.assertTrue(ret)
+        # Each device is driven ONLINE -> REMOVED -> FAILED, which QUEUES the
+        # failure migration on the surviving nodes. Queued is not migrated, so
+        # the first pass must report "not done" and be retried -- the gate used
+        # to fall through to an unconditional True, declaring the removal
+        # complete while every migration was still outstanding.
+        self.assertFalse(ret)
         dc.remove_jm_device.assert_called_once()
         self.assertEqual(dc.device_set_state.call_count, 2)
         self.assertEqual(dc.device_set_failed.call_count, 2)

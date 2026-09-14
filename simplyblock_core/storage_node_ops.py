@@ -4264,7 +4264,12 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
                             StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_IN_REMOVAL,
-                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE]:
+                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE,
+                            # A removal that gave up is re-drivable: the
+                            # operator fixes whatever blocked it and starts
+                            # again. The old task is DONE, not active, so the
+                            # guard above correctly creates a fresh one.
+                            StorageNode.STATUS_REMOVED_FAILED]:
         logger.error(
             f"Can not remove node {node_id}: (current status: {snode.status}).")
         return False
@@ -6291,13 +6296,39 @@ def _decommission_node_devices(removed_node: StorageNode):
             device_controller.device_set_failed(dev.get_id())
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    pending = []
     for dev in removed_node.nvme_devices:
         if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
             continue
+        pending.append(dev.get_id())
         logger.info(
             f"[REMOVAL] {removed_node.get_id()}: device {dev.get_id()} "
             f"status={dev.status}, migration not complete"
         )
+
+    if pending:
+        # Report "not done" so the caller retries, per this function's stated
+        # contract. It never did: the loop above only logged and fell through
+        # to an unconditional `return True`, so phase 5 declared the removal
+        # complete the moment it had QUEUED the failure-migration tasks,
+        # without waiting for any of them.
+        #
+        # Both ends of the contract were already built for the wait --
+        # tasks_runner_node_removal.process_task suspends and revisits the task
+        # on False ("incomplete, retry later ... most commonly: device failure-
+        # migration still in progress"), and node_removal_orchestrate's
+        # already_removed short-circuit re-enters straight at phase 5. Only the
+        # middle was missing.
+        #
+        # Consequence while it was missing (2026-09-11): a removal returned
+        # "done" in ~20s with failure-migration tasks still queued; the next
+        # removal was then refused with "Task found: 4, can not remove storage
+        # node" while the cluster already reported ACTIVE, which reads to an
+        # operator as a spurious refusal rather than as work still in flight.
+        logger.info(
+            f"[REMOVAL] {removed_node.get_id()}: {len(pending)} device(s) still "
+            f"migrating, retry later")
+        return False
 
     return True
 
