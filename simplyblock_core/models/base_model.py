@@ -488,6 +488,11 @@ class BaseNodeObject(BaseModel):
     STATUS_DOWN = 'down'
     STATUS_IN_REMOVAL = 'in_removal'
     STATUS_PENDING_REMOVAL = 'pending_removal'
+    #: A removal is draining the node: its devices' data is being rebuilt
+    #: elsewhere and its volumes migrated to other nodes. Between
+    #: PENDING_REMOVAL and IN_REMOVAL -- nothing has been torn down yet, so a
+    #: removal that gives up here leaves the node intact.
+    STATUS_MIGRATING_LVOLS = 'migrating_lvols'
     #: Terminal state for a removal that gave up. The node is shut down and
     #: may still own data that could not be migrated off it, so it is neither
     #: ONLINE nor REMOVED. An operator re-drives the removal from the start
@@ -507,5 +512,6 @@ class BaseNodeObject(BaseModel):
         STATUS_DOWN: 40,
         STATUS_IN_REMOVAL: 41,
         STATUS_PENDING_REMOVAL: 42,
+        STATUS_MIGRATING_LVOLS: 43,
         STATUS_REMOVED_FAILED: 44,
     }

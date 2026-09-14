@@ -31,13 +31,15 @@ from simplyblock_core.utils import rpc_budget
 from simplyblock_core.utils import hublvol_reconnect
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
+    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller, \
+    migration_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -4579,12 +4581,20 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove node {node_id}: {reason}")
         return False
 
+    # Volumes are no longer a reason to refuse. The removal drains them itself
+    # (see _drain_lvols_from_node), which is the only way a node that is OFFLINE
+    # can be removed at all: its volumes cannot be migrated by hand first when
+    # nothing can read from their primary.
+    #
+    # Refusing here was a deliberate earlier decision -- "LVol migration is no
+    # longer part of node removal", with the operator expected to migrate them
+    # separately. That is reversed on purpose; standalone `volume migrate` keeps
+    # working exactly as before, and removal is simply another caller of it.
     lvols = db_controller.get_lvols_by_node_id(node_id)
     if lvols:
-        logger.error(
-            f"Can not remove node {node_id}: {len(lvols)} LVol(s) present. "
-            f"Migrate or delete them first.")
-        return False
+        logger.info(
+            f"Node {node_id} holds {len(lvols)} LVol(s); the removal will "
+            f"migrate them off before tearing anything down.")
 
     node_snaps = [
         sn for sn in db_controller.get_snapshots()
@@ -5010,12 +5020,181 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     return best
 
 
+class RemovalGaveUp(Exception):
+    """A removal step ran out of options; the node goes to REMOVED_FAILED.
+
+    Distinct from returning False, which means "not finished, ask me again".
+    This says "asking again will not help" -- every target has been tried, or
+    there was never a legal one. The runner turns it into the terminal status
+    rather than letting the retry ceiling eventually notice.
+    """
+
+
+def _drain_unit_key(lvol):
+    """Volumes sharing an NVMe-oF subsystem move as one unit.
+
+    ``create_batch_migration`` migrates a whole shared-namespace subsystem to a
+    single target, so members of one subsystem cannot be split across nodes;
+    grouping by nqn is what decides batch-vs-single, not a separate flag.
+    """
+    return lvol.nqn or f"lvol:{lvol.get_id()}"
+
+
+def _node_drain_units(snode, db_controller):
+    """The node's live volumes, grouped into the units migration accepts."""
+    units: dict = {}
+    for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+        if lvol.status in (LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION):
+            continue
+        units.setdefault(_drain_unit_key(lvol), []).append(lvol)
+    return units
+
+
+def _pick_drain_target(snode, lvol, tried, db_controller):
+    """Next candidate host for ``lvol``, or None when they are exhausted.
+
+    Reuses the placement the create path already uses -- same subsystem-capacity
+    accounting, same namespace-slot preference, same load weighting -- rather
+    than growing a second notion of "a good node for a volume". Failure-domain
+    diversity is deliberately not a factor: a migrated volume joins the target's
+    EXISTING lvstore, whose replica topology it does not change.
+
+    Excluded: every node already tried for this unit, and the departing node
+    itself. The departing node is normally filtered out anyway (drain runs after
+    shutdown, so it is not ONLINE), but saying so here does not rely on that.
+    """
+    exclude = list(tried) + [snode.get_id()]
+    candidates = lvol_controller._get_next_3_nodes(
+        snode.cluster_id, lvol.size,
+        namespaced=bool(getattr(lvol, "max_namespace_per_subsys", 1) > 1),
+        exclude_ids=exclude)
+    for cand in candidates:
+        cand_id = cand.get_id() if hasattr(cand, "get_id") else cand
+        if cand_id not in exclude:
+            return cand_id
+    return None
+
+
+def _start_drain_unit(snode, key, lvols, state, db_controller):
+    """Begin (or re-begin) one unit's migration. Mutates ``state`` in place."""
+    lvol = lvols[0]
+    tried = state.setdefault("tried", [])
+    target = _pick_drain_target(snode, lvol, tried, db_controller)
+    if target is None:
+        raise RemovalGaveUp(
+            f"no remaining target can host {key} ({len(lvols)} volume(s)); "
+            f"already tried {tried or 'none'}")
+
+    batch = len(lvols) > 1
+    if batch:
+        mig_id, _ = migration_controller.create_batch_migration(lvol.get_id(), target)
+        migration_controller.start_batch_migration(mig_id)
+    else:
+        mig_id, _ = migration_controller.create_migration(lvol.get_id(), target)
+        migration_controller.start_migration(mig_id)
+
+    state.update({"migration_id": mig_id, "batch": batch, "target": target})
+    state.setdefault("restarts", 0)
+    logger.info(
+        f"[REMOVAL] {snode.get_id()}: drain {key} -> {target} "
+        f"({'batch' if batch else 'single'}, migration {mig_id})")
+
+
+def _drain_unit_status(state, db_controller):
+    """Terminal state of a unit's in-flight migration, or None while running."""
+    mig_id = state.get("migration_id")
+    if not mig_id:
+        return None
+    try:
+        if state.get("batch"):
+            status = db_controller.get_migration_group_by_id(mig_id).status
+        else:
+            status = db_controller.get_migration_by_id(mig_id).status
+    except KeyError:
+        # The record is gone. Treat as failed rather than as success: a
+        # migration that left no trace did not demonstrably move anything.
+        return "failed"
+    if status in (LVolMigration.STATUS_DONE,):
+        return "done"
+    if status in (LVolMigration.STATUS_FAILED, LVolMigration.STATUS_CANCELLED):
+        return "failed"
+    return None
+
+
+def _drain_lvols_from_node(snode, cursor, db_controller):
+    """Migrate every volume off ``snode``. True once none remain.
+
+    Returns False while any unit is still in flight -- the caller retries, and
+    the per-unit bookkeeping in ``cursor.data`` means a retry polls what is
+    already running instead of issuing it again.
+
+    Raises RemovalGaveUp when a unit has exhausted every eligible target.
+
+    Escalation per unit: retry the same target up to
+    NODE_DRAIN_MAX_RESTARTS_PER_TARGET times, then move to the next candidate,
+    and only when there is no candidate left does the removal fail. Attempts are
+    paced NODE_DRAIN_RETRY_WAIT_SEC apart -- the runner ticks every few seconds
+    and a migration that just failed will not succeed if re-issued immediately.
+    """
+    units = _node_drain_units(snode, db_controller)
+    if not units:
+        return True
+
+    drain = cursor.data.setdefault("drain", {})
+    now = time.time()
+    outstanding = 0
+
+    for key, lvols in units.items():
+        state = drain.setdefault(key, {})
+        result = _drain_unit_status(state, db_controller)
+
+        if result == "done":
+            # The volume should have left the node; if the enumeration above
+            # still lists it the next pass will simply start a fresh migration.
+            outstanding += 1
+            continue
+
+        if result == "failed":
+            state["restarts"] = state.get("restarts", 0) + 1
+            state["migration_id"] = None
+            if state["restarts"] >= constants.NODE_DRAIN_MAX_RESTARTS_PER_TARGET:
+                failed_target = state.get("target")
+                if failed_target:
+                    state.setdefault("tried", []).append(failed_target)
+                state["restarts"] = 0
+                logger.warning(
+                    f"[REMOVAL] {snode.get_id()}: drain {key} failed "
+                    f"{constants.NODE_DRAIN_MAX_RESTARTS_PER_TARGET}x on "
+                    f"{failed_target}; trying another target")
+            state["next_at"] = now + constants.NODE_DRAIN_RETRY_WAIT_SEC
+            outstanding += 1
+            continue
+
+        if result is None and state.get("migration_id"):
+            outstanding += 1          # still running, leave it alone
+            continue
+
+        if now < state.get("next_at", 0):
+            outstanding += 1          # waiting out the pacing interval
+            continue
+
+        _start_drain_unit(snode, key, lvols, state, db_controller)
+        outstanding += 1
+
+    cursor.save()
+    logger.info(
+        f"[REMOVAL] {snode.get_id()}: drain in progress, {outstanding} unit(s) "
+        f"of {len(units)} outstanding")
+    return False
+
+
 #: Ordered removal steps, by the name the cursor records. The orchestrator's
 #: own "phase N" vocabulary is kept in the log lines so existing greps and
 #: incident notes still resolve; these names are what gets persisted, because
 #: "phase 3a" says nothing to anyone reading a stuck task.
 REMOVAL_STEPS = (
     "shutdown",
+    "drain_lvols",
     "relocation_gate",
     "teardown_own_replicas",
     "decommission_jm",
@@ -5139,6 +5318,18 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
                     logger.error(f"[REMOVAL] {node_id}: shutdown failed")
                     return False
                 snode = db_controller.get_storage_node_by_id(node_id)
+
+            # Drain — migrate this node's volumes off it before anything is
+            # torn down. Deliberately BEFORE in_removal: nothing here is
+            # destructive, so a drain that cannot finish leaves the node
+            # intact and the removal can be abandoned without damage.
+            if snode.status != StorageNode.STATUS_MIGRATING_LVOLS:
+                set_node_status(node_id, StorageNode.STATUS_MIGRATING_LVOLS,
+                                caused_by="remove")
+            cursor.enter("drain_lvols", f"[REMOVAL] {node_id}: drain — migrate volumes off the node")
+            if not _drain_lvols_from_node(snode, cursor, db_controller):
+                return False
+            snode = db_controller.get_storage_node_by_id(node_id)
 
             if snode.status != StorageNode.STATUS_IN_REMOVAL:
                 set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")

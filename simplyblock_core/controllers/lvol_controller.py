@@ -205,8 +205,21 @@ def max_subsystems_for_node(node):
     return node.max_lvol
 
 
-def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False):
+def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
+                      exclude_ids=None):
+    """Up to three candidate host nodes, best first, weighted by how little
+    each is already carrying.
+
+    exclude_ids removes nodes from consideration outright. Creation has
+    never needed it -- the ONLINE filter below is enough when the only
+    unsuitable node is one that is down. A node DRAIN does: it walks candidates
+    until one accepts the volume, so each attempt has to exclude the ones
+    already tried, and it must never offer the node currently acting as the
+    migration's source (an offline primary's replica stands in for it, and that
+    replica is ONLINE and otherwise eligible).
+    """
     db_controller = DBController()
+    exclude_ids = set(exclude_ids or [])
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     if all_lvols is None:
         all_lvols = db_controller.get_mini_lvols()
@@ -217,6 +230,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
     nodes_with_ns_slot = set()
     for node in snodes:
         if node.is_secondary_node:  # pass
+            continue
+        if node.get_id() in exclude_ids:
             continue
         if node.status == node.STATUS_ONLINE:
             subsys_count = count_lvol_subsystems(node, all_lvols)

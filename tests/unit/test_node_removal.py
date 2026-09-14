@@ -173,13 +173,16 @@ class TestRemovePreconditions(unittest.TestCase):
         ret, _ = self._run(FakeDB(cl, nodes))
         self.assertEqual(ret, "task-uuid-1")
 
-    def test_reject_lvols_present(self):
+    def test_accepts_lvols_present_and_drains_them(self):
+        """Volumes used to be a hard refusal, with the operator expected to
+        migrate them first. That is impossible for an OFFLINE node -- nothing
+        can read from its primary -- so the removal drains them itself now."""
         cl = _cluster()
         nodes = [_node("n1"), _node("n2")]
         db = FakeDB(cl, nodes, lvols={"n1": [MagicMock()]})
         ret, tc = self._run(db)
-        self.assertFalse(ret)
-        tc.add_node_removal_task.assert_not_called()
+        self.assertTrue(ret)
+        tc.add_node_removal_task.assert_called_once()
 
     def test_reject_snapshots_present(self):
         cl = _cluster()
@@ -2559,10 +2562,13 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["_teardown_replicas_of_primary"].assert_called_once()
         mocks["_relocate_replicas_hosted_on"].assert_called_once()
         mocks["_finalize_node_removal"].assert_called_once()
-        # Two transitions: IN_REMOVAL right after shutdown (so other code /
-        # monitors can see the node is mid-removal, not still ONLINE), then
-        # REMOVED once phase 4 finalizes.
+        # Three transitions: MIGRATING_LVOLS while the node is drained (nothing
+        # destructive has happened yet, so a removal abandoned here leaves it
+        # intact), IN_REMOVAL once teardown begins (so other code / monitors can
+        # see the node is mid-removal, not still ONLINE), then REMOVED once
+        # phase 4 finalizes.
         self.assertEqual(mocks["set_node_status"].call_args_list, [
+            call("n1", StorageNode.STATUS_MIGRATING_LVOLS, caused_by="remove"),
             call("n1", StorageNode.STATUS_IN_REMOVAL, caused_by="remove"),
             call("n1", StorageNode.STATUS_REMOVED, caused_by="remove"),
         ])

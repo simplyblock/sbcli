@@ -205,6 +205,15 @@ TASK_EXEC_INTERVAL_SEC = 10
 #: elapsed retries to a particular wait. Per-step budgets arrive with it.
 NODE_REMOVAL_MAX_WAIT_SEC = 6 * 3600
 NODE_REMOVAL_MAX_RETRY = NODE_REMOVAL_MAX_WAIT_SEC // TASK_EXEC_INTERVAL_SEC
+
+#: Node drain: how many times one volume-migration unit is retried against the
+#: SAME target before the drain gives up on that target and tries another.
+NODE_DRAIN_MAX_RESTARTS_PER_TARGET = 10
+#: Pacing between those attempts. The removal runner ticks every few seconds;
+#: a migration that has just failed does not succeed by being re-issued
+#: immediately, and hammering it would burn the whole per-target budget in
+#: under a minute. Matches the standalone retry-on-failure pacing.
+NODE_DRAIN_RETRY_WAIT_SEC = 300
 TASK_EXEC_RETRY_COUNT = 8
 # Shorter interval + lower ceiling for node/device restart tasks.  Restart
 # tasks are time-critical (cluster is degraded until the node is back) and
