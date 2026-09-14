@@ -2426,6 +2426,11 @@ commands:
             dest: batch
             type: bool
             action: store_true
+          - name: "--retry-on-failure"
+            help: "If this migration ends in failure, automatically start a brand-new migration (full precreate + start) for the same volume/target once preconditions are met again (no rebalancing, source and target both online)."
+            dest: retry_on_failure
+            type: bool
+            action: store_true
       - name: migrate-list
         help: "List volume migrations."
         arguments:

@@ -931,6 +931,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
         subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
         subcommand.add_argument('--batch', help='ID is a batch migration group ID.', dest='batch', action='store_true')
+        subcommand.add_argument('--retry-on-failure', help='If this migration ends in failure, automatically start a brand-new migration (full precreate + start) for the same volume/target once preconditions are met again (no rebalancing, source and target both online).', dest='retry_on_failure', action='store_true')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations.')

@@ -1001,6 +1001,7 @@ class CLIWrapperBase:
                     group_id=args.migration_id,
                     max_retries=args.max_retries,
                     deadline_seconds=args.deadline_seconds,
+                    retry_on_failure=getattr(args, 'retry_on_failure', False),
                 )
             except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
                 print(f"Error: {e}")
@@ -1012,6 +1013,7 @@ class CLIWrapperBase:
                 migration_id=args.migration_id,
                 max_retries=args.max_retries,
                 deadline_seconds=args.deadline_seconds,
+                retry_on_failure=getattr(args, 'retry_on_failure', False),
             )
         except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
             print(f"Error: {e}")

@@ -91,6 +91,7 @@ from simplyblock_core.controllers import (
     migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -2979,8 +2980,14 @@ def task_runner(task):
 
     # --- Already terminal ---
     if migration.status in (LVolMigration.STATUS_DONE,
-                             LVolMigration.STATUS_FAILED,
                              LVolMigration.STATUS_CANCELLED):
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
+
+    if migration.status == LVolMigration.STATUS_FAILED:
+        if migration.retry_on_failure:
+            return _attempt_migration_retry(task, migration)
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         return True
@@ -3918,6 +3925,68 @@ def _suspend_task(task, migration, reason, charge_retry=True):
     migration.error_message = reason
     migration.write_to_db(db.kv_store)
     logger.warning(f"Migration task suspended: {reason}")
+    return False
+
+
+def _attempt_migration_retry(task, migration):
+    """
+    Handle a FN_LVOL_MIG task whose migration has already reached
+    STATUS_FAILED (not cancelled) with retry_on_failure set.
+
+    Paces attempts LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC apart -- both the
+    initial wait after the failure and, if preconditions still aren't met,
+    every subsequent recheck -- rather than hammering create_migration on
+    every runner tick. Once a fresh migration actually starts, this task is
+    repointed at its migration_id and keeps tracking it exactly as it would
+    have tracked the original.
+
+    create_migration()/start_migration() own the precondition checks (no
+    rebalancing, active source node online, target node online); any
+    ValueError/PreconditionError/MigrationConflictError they raise just
+    means "not ready yet" here, not a permanent failure.
+    """
+    now = time.time()
+    next_attempt_at = task.function_params.get('retry_on_failure_next_attempt_at')
+    if next_attempt_at is None:
+        next_attempt_at = (migration.completed_at or now) + constants.LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC
+
+    if now < next_attempt_at:
+        task.function_params['retry_on_failure_next_attempt_at'] = next_attempt_at
+        task.function_result = (
+            f"migration {migration.uuid} failed ({migration.error_message}); "
+            f"retry_on_failure waiting {next_attempt_at - now:.0f}s more")
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
+
+    try:
+        new_migration_id, _ = migration_controller.create_migration(
+            migration.lvol_id, migration.target_node_id,
+            ctrl_loss_tmo=migration.ctrl_loss_tmo,
+            host_nqn=migration.host_nqn or None)
+        migration_controller.start_migration(
+            new_migration_id,
+            max_retries=migration.max_retries,
+            deadline_seconds=migration.deadline_seconds,
+            retry_on_failure=True)
+    except (ValueError, PreconditionError, MigrationConflictError) as e:
+        # Preconditions still not met -- pace the next recheck the same way
+        # instead of retrying create_migration on every runner tick.
+        task.function_params['retry_on_failure_next_attempt_at'] = now + constants.LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC
+        task.function_result = f"retry_on_failure: preconditions not met yet: {e}"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
+
+    task.function_params.pop('retry_on_failure_next_attempt_at', None)
+    task.function_params['migration_id'] = new_migration_id
+    task.status = JobSchedule.STATUS_NEW
+    task.function_result = f"retry_on_failure: restarted as migration {new_migration_id}"
+    task.retry = 0
+    task.write_to_db(db.kv_store)
+    logger.info(
+        f"Migration {migration.uuid} retry_on_failure: preconditions met, "
+        f"started fresh migration {new_migration_id}")
     return False
 
 

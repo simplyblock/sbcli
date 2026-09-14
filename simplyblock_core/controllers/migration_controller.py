@@ -72,11 +72,17 @@ db = DBController()
 
 def start_migration(migration_id,
                     max_retries=constants.LVOL_MIG_MAX_RETRIES,
-                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC,
+                    retry_on_failure=False):
     """
     Promote a PHASE_PRE_CREATED migration record to PHASE_SNAP_COPY and launch
     the task runner.  Always call create_migration first to set up target
     infrastructure and obtain the migration_id and connect strings.
+
+    retry_on_failure: if this migration later ends in STATUS_FAILED (not
+    cancelled), the task runner automatically starts a brand-new migration
+    for the same lvol/target once preconditions hold again — see
+    tasks_runner_lvol_migration.py's terminal-FAILED handling.
 
     Returns migration_uuid on success; raises ValueError on failure.
     """
@@ -172,7 +178,9 @@ def start_migration(migration_id,
     migration.intermediate_snap_rounds = 0
     migration.started_at = int(time.time())
     migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
+    migration.deadline_seconds = deadline_seconds
     migration.max_retries = max_retries
+    migration.retry_on_failure = retry_on_failure
     # RUNNING, not NEW: _cancel_stale_new_migrations treats STATUS_NEW as
     # "operator never called migrate-continue" and auto-cancels it after 5
     # minutes. Once continued, the migration is actively in progress even if
@@ -1409,6 +1417,11 @@ def create_migration(lvol_id, target_node_id,
     migration.target_lvol_bdev = composite
     migration.target_subsystem_nqn = nqn if _subsystem_created_node_ids else ""
     migration.target_subsystem_node_ids = _subsystem_created_node_ids
+    # Persisted (not just used transiently for connect-string generation)
+    # so a retry_on_failure restart recreates the target with identical
+    # settings — see start_migration()'s retry_on_failure param.
+    migration.ctrl_loss_tmo = ctrl_loss_tmo
+    migration.host_nqn = host_nqn or ""
     migration.write_to_db(db.kv_store)
 
     logger.info(
@@ -1545,6 +1558,11 @@ def create_batch_migration(lvol_id, target_node_id,
     group.phase = LVolMigrationGroup.PHASE_PRE_CREATED
     group.status = LVolMigrationGroup.STATUS_RUNNING
     group.create_dt = str(datetime.now())
+    # Persisted (not just used transiently for connect-string generation)
+    # so a retry_on_failure restart recreates the target with identical
+    # settings — see start_batch_migration()'s retry_on_failure param.
+    group.ctrl_loss_tmo = ctrl_loss_tmo
+    group.host_nqn = host_nqn or ""
     group.write_to_db(db_inst.kv_store)
 
     for rec in member_records:
@@ -1565,10 +1583,17 @@ def create_batch_migration(lvol_id, target_node_id,
 
 def start_batch_migration(group_id,
                           max_retries=constants.LVOL_MIG_MAX_RETRIES,
-                          deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+                          deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC,
+                          retry_on_failure=False):
     """
     Promote a PHASE_PRE_CREATED group to PHASE_SNAP_COPY and launch worker tasks
     for each member plus the main orchestrator task.
+
+    retry_on_failure: if this group later ends in STATUS_FAILED (not
+    cancelled), the task runner automatically starts a brand-new batch
+    migration for the same shared-namespace subsystem/target once
+    preconditions hold again — see tasks_runner_batch_migration.py's
+    terminal-FAILED handling.
 
     Returns group_uuid on success; raises ValueError on failure.
     """
@@ -1673,6 +1698,8 @@ def start_batch_migration(group_id,
 
     # Advance group to SNAP_COPY and launch the main orchestrator task.
     group.phase = LVolMigrationGroup.PHASE_SNAP_COPY
+    group.deadline_seconds = deadline_seconds
+    group.retry_on_failure = retry_on_failure
     group.write_to_db(db.kv_store)
 
     task_uuid = tasks_controller.add_batch_mig_task(group)

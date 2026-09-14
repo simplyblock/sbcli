@@ -42,6 +42,7 @@ import time
 
 from simplyblock_core import constants, db_controller as db_mod, utils
 from simplyblock_core.controllers import migration_controller, migration_events, tasks_controller, tasks_events
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
@@ -1089,6 +1090,70 @@ def _batch_budget_suspend(task, group, group_id, error_msg):
     return False
 
 
+def _attempt_batch_migration_retry(task, group):
+    """
+    Handle a FN_LVOL_BATCH_MIG task whose group has already reached
+    STATUS_FAILED (not cancelled) with retry_on_failure set.
+
+    Mirrors _attempt_migration_retry in tasks_runner_lvol_migration.py for
+    the solo path: paces attempts LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC apart,
+    then calls create_batch_migration()/start_batch_migration() again for
+    the same shared-namespace subsystem/target -- their own precondition
+    checks (no rebalancing, active source node online, target node online)
+    decide whether a fresh attempt can start yet. Any lvol_id in the old
+    group's members re-discovers the whole subsystem, so the (arbitrary)
+    leader member is used.
+    """
+    now = time.time()
+    next_attempt_at = task.function_params.get('retry_on_failure_next_attempt_at')
+    if next_attempt_at is None:
+        next_attempt_at = (group.completed_at or now) + constants.LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC
+
+    if now < next_attempt_at:
+        task.function_params['retry_on_failure_next_attempt_at'] = next_attempt_at
+        task.function_result = (
+            f"group {group.uuid} failed ({group.error_message}); "
+            f"retry_on_failure waiting {next_attempt_at - now:.0f}s more")
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
+
+    leader_migration_id = group.leader_migration_id()
+    try:
+        leader = db.get_migration_by_id(leader_migration_id) if leader_migration_id else None
+        if leader is None:
+            raise ValueError(f"group {group.uuid} has no members to derive a retry from")
+
+        new_group_id, _ = migration_controller.create_batch_migration(
+            leader.lvol_id, group.target_node_id,
+            ctrl_loss_tmo=group.ctrl_loss_tmo,
+            host_nqn=group.host_nqn or None)
+        migration_controller.start_batch_migration(
+            new_group_id,
+            max_retries=leader.max_retries,
+            deadline_seconds=group.deadline_seconds,
+            retry_on_failure=True)
+    except (ValueError, PreconditionError, MigrationConflictError, KeyError) as e:
+        # Preconditions still not met -- pace the next recheck the same way
+        # instead of retrying create_batch_migration on every runner tick.
+        task.function_params['retry_on_failure_next_attempt_at'] = now + constants.LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC
+        task.function_result = f"retry_on_failure: preconditions not met yet: {e}"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
+
+    task.function_params.pop('retry_on_failure_next_attempt_at', None)
+    task.function_params['group_id'] = new_group_id
+    task.status = JobSchedule.STATUS_NEW
+    task.function_result = f"retry_on_failure: restarted as group {new_group_id}"
+    task.retry = 0
+    task.write_to_db(db.kv_store)
+    logger.info(
+        f"Group {group.uuid} retry_on_failure: preconditions met, "
+        f"started fresh group {new_group_id}")
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Main task runner
 # ---------------------------------------------------------------------------
@@ -1118,9 +1183,15 @@ def task_runner(task):
 
     if group.status in (
         LVolMigrationGroup.STATUS_DONE,
-        LVolMigrationGroup.STATUS_FAILED,
         LVolMigrationGroup.STATUS_CANCELLED,
     ):
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
+
+    if group.status == LVolMigrationGroup.STATUS_FAILED:
+        if group.retry_on_failure:
+            return _attempt_batch_migration_retry(task, group)
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         return True
@@ -1304,6 +1375,7 @@ def task_runner(task):
 
         group.phase = LVolMigrationGroup.PHASE_COMPLETED
         group.status = LVolMigrationGroup.STATUS_DONE
+        group.completed_at = int(time.time())
         group.write_to_db(db.kv_store)
         task.status = JobSchedule.STATUS_DONE
         task.function_result = "Batch migration completed successfully"
@@ -1324,6 +1396,7 @@ def task_runner(task):
                                   primary_src_node=primary_src_node)
 
         group.status = LVolMigrationGroup.STATUS_FAILED
+        group.completed_at = int(time.time())
         group.write_to_db(db.kv_store)
         task.status = JobSchedule.STATUS_DONE
         task.function_result = group.error_message or "Batch migration failed; target cleaned up"

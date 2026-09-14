@@ -831,6 +831,14 @@ LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — sk
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
 LVOL_MIG_TRANSFER_BATCH_SIZE = 256
 
+#: `sbctl volume migrate-continue --retry-on-failure`: once a migration (or
+#: batch group) reaches a terminal FAILED status (not cancelled) with
+#: retry_on_failure set, wait this long before attempting a brand-new
+#: migration (full precreate + start) for the same lvol/target, so a
+#: transient condition -- a bouncing target node, an in-flight rebalance --
+#: has time to clear before the precondition checks are retried.
+LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC = 300
+
 #: How long a deferred lvol register task tolerates a missing lvol record
 #: before treating it as obsolete. add_lvol_ha queues the task in its
 #: pre-check but writes the lvol record only at the end of the create, so

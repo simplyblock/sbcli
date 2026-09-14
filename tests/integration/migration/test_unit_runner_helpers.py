@@ -297,6 +297,81 @@ class TestSuspendTask(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _attempt_migration_retry
+# ---------------------------------------------------------------------------
+
+class TestAttemptMigrationRetry(unittest.TestCase):
+
+    def _failed_migration(self, completed_seconds_ago):
+        import time
+        m = _migration_obj(status=LVolMigration.STATUS_FAILED, error="target node offline")
+        m.lvol_id = "lvol-1"
+        m.target_node_id = "node-tgt"
+        m.ctrl_loss_tmo = 1234
+        m.host_nqn = "nqn.host"
+        m.max_retries = 7
+        m.deadline_seconds = 999
+        m.completed_at = int(time.time()) - completed_seconds_ago
+        return m
+
+    def test_waits_out_the_full_window_before_first_attempt(self):
+        task = _task(status=JobSchedule.STATUS_RUNNING)
+        mig = self._failed_migration(completed_seconds_ago=10)
+
+        mock_db = MagicMock()
+        with patch.object(runner, 'db', mock_db), \
+             patch.object(runner, 'migration_controller') as mock_mc:
+            result = runner._attempt_migration_retry(task, mig)
+
+        assert result is False
+        assert task.status == JobSchedule.STATUS_SUSPENDED
+        assert 'retry_on_failure_next_attempt_at' in task.function_params
+        mock_mc.create_migration.assert_not_called()
+        mock_mc.start_migration.assert_not_called()
+
+    def test_preconditions_not_met_reschedules_without_crashing(self):
+        from simplyblock_core.exceptions import PreconditionError
+
+        task = _task(status=JobSchedule.STATUS_RUNNING)
+        mig = self._failed_migration(completed_seconds_ago=9999)
+
+        mock_db = MagicMock()
+        with patch.object(runner, 'db', mock_db), \
+             patch.object(runner, 'migration_controller') as mock_mc:
+            mock_mc.create_migration.side_effect = PreconditionError("cluster is rebalancing")
+            result = runner._attempt_migration_retry(task, mig)
+
+        assert result is False
+        assert task.status == JobSchedule.STATUS_SUSPENDED
+        assert "preconditions not met yet" in task.function_result
+        # A fresh window was scheduled rather than hammering create_migration
+        # again on the very next tick.
+        assert task.function_params['retry_on_failure_next_attempt_at'] > __import__('time').time()
+
+    def test_successful_restart_repoints_task_at_new_migration(self):
+        task = _task(status=JobSchedule.STATUS_RUNNING)
+        task.retry = 3
+        mig = self._failed_migration(completed_seconds_ago=9999)
+
+        mock_db = MagicMock()
+        with patch.object(runner, 'db', mock_db), \
+             patch.object(runner, 'migration_controller') as mock_mc:
+            mock_mc.create_migration.return_value = ("mig-2", [])
+            mock_mc.start_migration.return_value = "mig-2"
+            result = runner._attempt_migration_retry(task, mig)
+
+        assert result is False
+        mock_mc.create_migration.assert_called_once_with(
+            "lvol-1", "node-tgt", ctrl_loss_tmo=1234, host_nqn="nqn.host")
+        mock_mc.start_migration.assert_called_once_with(
+            "mig-2", max_retries=7, deadline_seconds=999, retry_on_failure=True)
+        assert task.function_params['migration_id'] == "mig-2"
+        assert 'retry_on_failure_next_attempt_at' not in task.function_params
+        assert task.status == JobSchedule.STATUS_NEW
+        assert task.retry == 0
+
+
+# ---------------------------------------------------------------------------
 # _fail_task
 # ---------------------------------------------------------------------------
 
