@@ -1225,7 +1225,7 @@ def _lvol_secondary_index(lvol, node):
 
 
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None, ns_uuid=None,
-                     primary_nsid=None):
+                     primary_nsid=None, defer_listeners=False):
     rpc_client = snode.rpc_client()
 
     # Refuse to attach a new namespace to a shared subsystem while any
@@ -1322,39 +1322,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                         logger.warning("[DHCHAP-DEBUG] subsystem_add_host PLAIN — no DHCHAP keys at all")
                         rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
-        if is_primary or lvol.node_id == snode.get_id():
-            ana_state = "optimized"
-        else:
-            ana_state = "non_optimized"
-
-        # add listeners
-        # Use the per-lvstore port for the lvol's lvstore
-        listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
-        logger.info("adding listeners")
-        for iface in snode.data_nics:
-            if iface.ip4_address and lvol.fabric==iface.trtype.lower():
-                logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-                ret, err = rpc_client.nvmf_subsystem_add_listener(
-                    lvol.nqn, iface.trtype, iface.ip4_address, listener_port, ana_state)
-                if not ret:
-                    if err and "code" in err and err["code"] == -32602:
-                        logger.warning("listener already exists")
-                    else:
-                        return _fail_after_bdev(
-                            lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}")
-            elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-                logger.info("adding listener for %s on IP %s, fabric TCP port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-                ret, err = rpc_client.nvmf_subsystem_add_listener(
-                        lvol.nqn, "TCP", iface.ip4_address, listener_port, ana_state)
-                if not ret:
-                    if err and "code" in err and err["code"] == -32602:
-                        logger.warning("listener already exists")
-                    else:
-                        return _fail_after_bdev(
-                            lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}")
-
     logger.info("Add BDev to subsystem")
     # Cluster-consistent namespace IDs: the PRIMARY add lets the target
     # auto-assign (nsid omitted) and persists the result in lvol.ns_id;
@@ -1445,9 +1412,29 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 except SubsystemCapacityError as e:
                     logger.error(str(e))
                     return _fail_after_bdev(lvol, rpc_client, str(e))
-                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
+                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index,
+                                        defer_listeners=defer_listeners)
         return _fail_after_bdev(
             lvol, rpc_client, "Failed to add bdev to subsystem")
+
+    # The namespace is attached: only now may the subsystem be reachable.
+    #
+    # This used to run inside the resolve_subsys block above, so the listener
+    # went up first and the subsystem answered on the network while this lvol's
+    # namespace did not exist yet. A client reading it in that window gets
+    # "Invalid Namespace or Format" with DNR set, and DNR means the kernel does
+    # not try another path -- it fails the I/O to the application. See
+    # tests/unit/test_listener_after_namespace.py for the incident.
+    #
+    # defer_listeners is for the caller that registers a whole node's lvols at
+    # once: on a shared subsystem the members are registered concurrently, so
+    # the first one to get here would publish a listener for a subsystem whose
+    # other members are still arriving. That caller publishes once the batch is
+    # complete instead.
+    if not defer_listeners:
+        ok, err = publish_lvol_listeners(lvol, snode, rpc_client, is_primary=is_primary)
+        if not ok:
+            return _fail_after_bdev(lvol, rpc_client, err)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
@@ -1469,6 +1456,41 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return lvol_bdev, None
     else:
         return False, "Failed to get lvol bdev"
+
+def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
+    """Publish ``lvol``'s subsystem listeners on ``snode``.
+
+    Separated from add_lvol_on_node so it can be called once a whole batch of
+    namespaces is attached: see the defer_listeners note there. Returns
+    ``(True, None)`` or ``(False, reason)``; "listener already exists" is a
+    success, since that is what a re-registration looks like.
+    """
+    rpc_client = rpc_client or snode.rpc_client()
+    if is_primary or lvol.node_id == snode.get_id():
+        ana_state = "optimized"
+    else:
+        ana_state = "non_optimized"
+
+    # Use the per-lvstore port for the lvol's lvstore
+    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+    logger.info("adding listeners")
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            trtype = iface.trtype
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            trtype = "TCP"
+        else:
+            continue
+        logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
+        ret, err = rpc_client.nvmf_subsystem_add_listener(
+            lvol.nqn, trtype, iface.ip4_address, listener_port, ana_state)
+        if not ret:
+            if err and "code" in err and err["code"] == -32602:
+                logger.warning("listener already exists")
+            else:
+                return False, f"Failed to create listener for {lvol.get_id()}"
+    return True, None
+
 
 def is_node_leader(snode, lvs_name):
     rpc_client = snode.rpc_client()

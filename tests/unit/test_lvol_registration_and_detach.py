@@ -63,7 +63,7 @@ def _run(monkeypatch, lvols, results, node=None, label="LVS_13"):
     """
     calls = []
 
-    def _fake(lvol, snode, lvol_ana_state="optimized"):
+    def _fake(lvol, snode, lvol_ana_state="optimized", defer_listener=False):
         calls.append(lvol.get_id())
         r = results.get(lvol.get_id(), (True, None))
         if isinstance(r, Exception):
@@ -71,6 +71,8 @@ def _run(monkeypatch, lvols, results, node=None, label="LVS_13"):
         return r
 
     monkeypatch.setattr(storage_node_ops, "add_lvol_thread", _fake)
+    monkeypatch.setattr(storage_node_ops, "_publish_lvol_listener",
+                        lambda *a, **kw: (True, None))
     failed = storage_node_ops._register_lvols_on_node(
         lvols, node or _Node(), "non_optimized", lvs_label=label)
     return failed, calls
@@ -99,11 +101,13 @@ class TestFailuresAreNoLongerSwallowed:
     def test_failures_are_retried_once(self, monkeypatch):
         seen = {"n": 0}
 
-        def _flaky(lvol, snode, lvol_ana_state="optimized"):
+        def _flaky(lvol, snode, lvol_ana_state="optimized", defer_listener=False):
             seen["n"] += 1
             return (seen["n"] > 1, "first attempt timed out")
 
         monkeypatch.setattr(storage_node_ops, "add_lvol_thread", _flaky)
+        monkeypatch.setattr(storage_node_ops, "_publish_lvol_listener",
+                            lambda *a, **kw: (True, None))
         failed = storage_node_ops._register_lvols_on_node(
             [_Lvol("a")], _Node(), "non_optimized")
         assert failed == [], "a transient failure should be retried and clear"
