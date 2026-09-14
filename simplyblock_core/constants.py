@@ -214,6 +214,13 @@ NODE_DRAIN_MAX_RESTARTS_PER_TARGET = 10
 #: immediately, and hammering it would burn the whole per-target budget in
 #: under a minute. Matches the standalone retry-on-failure pacing.
 NODE_DRAIN_RETRY_WAIT_SEC = 300
+
+#: How long the post-shutdown condition re-check may keep failing before the
+#: removal gives up. Its own budget, not the whole-removal one: a drain may
+#: legitimately run for hours, but a peer that has not come back within this
+#: window is not coming back on the removal timescale, and waiting the full
+#: budget out holds a shut-down node hostage to it.
+NODE_REMOVAL_CONDITION_WAIT_SEC = 30 * 60
 TASK_EXEC_RETRY_COUNT = 8
 # Shorter interval + lower ceiling for node/device restart tasks.  Restart
 # tasks are time-critical (cluster is degraded until the node is back) and
