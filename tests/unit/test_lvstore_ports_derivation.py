@@ -1,4 +1,3 @@
-# coding=utf-8
 """The lvstore_ports map must be complete BEFORE lvols are registered.
 
 Registering an lvol on a non-leader looks its ``lvs_name`` up in

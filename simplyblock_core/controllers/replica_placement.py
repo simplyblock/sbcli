@@ -1,4 +1,3 @@
-# coding=utf-8
 """Global, constraint-solving planner for secondary/tertiary replica placement.
 
 Pure logic -- no DB access, no SPDK calls -- so it can be unit-tested in
@@ -57,7 +56,8 @@ not -- instead of a warning buried in a log.
 """
 
 import logging
-from typing import Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import NamedTuple
+from collections.abc import Mapping, Sequence
 
 logger = logging.getLogger()
 
@@ -114,10 +114,10 @@ class DiversityPlan(NamedTuple):
     satisfied (empty iff ``full_diversity``). ``notes`` records how the plan
     was reached (which stage / which fallback), for the operator-facing log.
     """
-    layout: Dict[str, Placement]
+    layout: dict[str, Placement]
     full_diversity: bool
-    violations: List[str]
-    notes: List[str]
+    violations: list[str]
+    notes: list[str]
 
 
 class InfeasiblePlacement(Exception):
@@ -134,7 +134,7 @@ class InfeasiblePlacement(Exception):
 # Min-cost perfect matching (Hungarian / Jonker-Volgenant, O(n^3))
 # ---------------------------------------------------------------------------
 
-def min_cost_matching(cost: Sequence[Sequence[int]]) -> List[int]:
+def min_cost_matching(cost: Sequence[Sequence[int]]) -> list[int]:
     """Min-cost perfect matching on a rectangular cost matrix (rows <= cols).
 
     ``cost[i][j]`` is the cost of assigning row ``i`` to column ``j``. Returns
@@ -215,7 +215,7 @@ def full_diversity_violations(
     layout: Mapping[str, Placement],
     fd_by_node: Mapping[str, int],
     ftt: int,
-) -> List[str]:
+) -> list[str]:
     """Report every LVS whose roles are NOT pairwise domain-distinct.
 
     Deliberately stricter than
@@ -228,7 +228,7 @@ def full_diversity_violations(
     domain on a *role holder* counts as a violation, since "unknown" cannot
     be asserted to be disjoint.
     """
-    violations: List[str] = []
+    violations: list[str] = []
     for primary_id in sorted(layout):
         placement = layout[primary_id]
         fd_p = fd_by_node.get(primary_id, -1)
@@ -237,7 +237,7 @@ def full_diversity_violations(
         roles = [(ROLE_SECONDARY, placement.secondary)]
         if ftt >= 2:
             roles.append((ROLE_TERTIARY, placement.tertiary))
-        seen: Dict[int, str] = {fd_p: f"primary {primary_id}"}
+        seen: dict[int, str] = {fd_p: f"primary {primary_id}"}
         for role, holder in roles:
             if not holder:
                 violations.append(f"LVS@{primary_id} (fd={fd_p}) has no {role}")
@@ -261,7 +261,7 @@ def full_diversity_violations(
 # Feasibility (Hall's condition, specialised)
 # ---------------------------------------------------------------------------
 
-def secondary_overloaded_domains(domain_sizes: Mapping[int, int]) -> List[int]:
+def secondary_overloaded_domains(domain_sizes: Mapping[int, int]) -> list[int]:
     """Domains that make a fully diverse SECONDARY permutation impossible.
 
     Every node hosts exactly one secondary, so the secondary assignment is a
@@ -275,9 +275,9 @@ def secondary_overloaded_domains(domain_sizes: Mapping[int, int]) -> List[int]:
 
 
 def tertiary_blocking_pairs(
-    forbidden_pairs: Mapping[Tuple[int, int], int],
+    forbidden_pairs: Mapping[tuple[int, int], int],
     domain_sizes: Mapping[int, int],
-) -> List[Tuple[int, int]]:
+) -> list[tuple[int, int]]:
     """Domain pairs that make the TERTIARY stage infeasible under a given
     secondary assignment.
 
@@ -302,7 +302,7 @@ def tertiary_blocking_pairs(
     pairs.
     """
     total = sum(domain_sizes.values())
-    blocking: List[Tuple[int, int]] = []
+    blocking: list[tuple[int, int]] = []
     for (d, e), count in sorted(forbidden_pairs.items()):
         capacity = total - domain_sizes.get(d, 0) - domain_sizes.get(e, 0)
         if count > capacity:
@@ -318,12 +318,12 @@ def _assignment_from_matching(
     primaries: Sequence[str],
     hosts: Sequence[str],
     cost: Sequence[Sequence[int]],
-) -> Optional[Dict[str, str]]:
+) -> dict[str, str] | None:
     """Run the matcher and reject the result if it had to use a forbidden
     edge. ``None`` means no assignment satisfying the hard constraints
     exists."""
     matching = min_cost_matching(cost)
-    assignment: Dict[str, str] = {}
+    assignment: dict[str, str] = {}
     for i, j in enumerate(matching):
         if j < 0 or cost[i][j] >= FORBIDDEN:
             return None
@@ -331,7 +331,7 @@ def _assignment_from_matching(
     return assignment
 
 
-def _pair_key(a: int, b: int) -> Tuple[int, int]:
+def _pair_key(a: int, b: int) -> tuple[int, int]:
     return (a, b) if a <= b else (b, a)
 
 
@@ -341,8 +341,8 @@ def plan_diverse_layout(
     current_layout: Mapping[str, Placement],
     ftt: int,
     *,
-    host_by_node: Optional[Mapping[str, str]] = None,
-    label_by_node: Optional[Mapping[str, int]] = None,
+    host_by_node: Mapping[str, str] | None = None,
+    label_by_node: Mapping[str, int] | None = None,
 ) -> DiversityPlan:
     """Compute the cheapest fully domain-diverse layout over ``node_ids``.
 
@@ -383,7 +383,7 @@ def plan_diverse_layout(
     """
     nodes = list(node_ids)
     n = len(nodes)
-    notes: List[str] = []
+    notes: list[str] = []
     if n == 0:
         return DiversityPlan({}, True, [], notes)
     if ftt not in (1, 2):
@@ -397,7 +397,7 @@ def plan_diverse_layout(
     fd_of = {node: fd_by_node.get(node, -1) for node in nodes}
     fd_enabled = all(fd_of[node] >= 0 for node in nodes) and len(set(fd_of.values())) > 1
 
-    domain_sizes: Dict[int, int] = {}
+    domain_sizes: dict[int, int] = {}
     for node in nodes:
         domain_sizes[fd_of[node]] = domain_sizes.get(fd_of[node], 0) + 1
 
@@ -420,10 +420,10 @@ def plan_diverse_layout(
             f"a fully diverse layout is structurally impossible")
 
     # -- stage 1: secondary permutation ------------------------------------
-    def _secondary_cost(enforce_fd: bool, pair_penalties: Mapping[Tuple[int, int], int]):
-        matrix: List[List[int]] = []
+    def _secondary_cost(enforce_fd: bool, pair_penalties: Mapping[tuple[int, int], int]):
+        matrix: list[list[int]] = []
         for primary in nodes:
-            row: List[int] = []
+            row: list[int] = []
             for host in nodes:
                 if host == primary or _host(host) == _host(primary):
                     row.append(FORBIDDEN)
@@ -440,8 +440,8 @@ def plan_diverse_layout(
         return matrix
 
     enforce_fd = fd_enabled and not overloaded
-    penalties: Dict[Tuple[int, int], int] = {}
-    secondary: Optional[Dict[str, str]] = None
+    penalties: dict[tuple[int, int], int] = {}
+    secondary: dict[str, str] | None = None
     for attempt in range(MAX_PAIR_RETRIES + 1):
         secondary = _assignment_from_matching(
             nodes, nodes, _secondary_cost(enforce_fd, penalties))
@@ -449,7 +449,7 @@ def plan_diverse_layout(
             break
         if not enforce_fd or ftt < 2:
             break
-        pair_counts: Dict[Tuple[int, int], int] = {}
+        pair_counts: dict[tuple[int, int], int] = {}
         for primary in nodes:
             key = _pair_key(fd_of[primary], fd_of[secondary[primary]])
             pair_counts[key] = pair_counts.get(key, 0) + 1
@@ -483,10 +483,10 @@ def plan_diverse_layout(
 
     # -- stage 2: tertiary permutation, given the secondary domains --------
     def _tertiary_cost(enforce: bool):
-        matrix: List[List[int]] = []
+        matrix: list[list[int]] = []
         for primary in nodes:
             sec = secondary[primary]
-            row: List[int] = []
+            row: list[int] = []
             for host in nodes:
                 if host in (primary, sec):
                     row.append(FORBIDDEN)
@@ -530,7 +530,7 @@ def diff_layout(
     current_layout: Mapping[str, Placement],
     target_layout: Mapping[str, Placement],
     ftt: int,
-) -> List[ReplicaMove]:
+) -> list[ReplicaMove]:
     """Unordered set of role relocations turning ``current`` into ``target``.
 
     Only primaries present in ``target_layout`` are considered -- a primary
@@ -538,7 +538,7 @@ def diff_layout(
     the caller, not relocated. ``from_node_id`` is ``""`` when the role has
     no current host.
     """
-    moves: List[ReplicaMove] = []
+    moves: list[ReplicaMove] = []
     roles = [(ROLE_SECONDARY, 0)] + ([(ROLE_TERTIARY, 1)] if ftt >= 2 else [])
     for primary in sorted(target_layout):
         target = target_layout[primary]
@@ -552,12 +552,39 @@ def diff_layout(
     return moves
 
 
+def _make_emitter(ordered, occupied, survivors, free):
+    """Build the callback that records one ordered move and keeps the
+    slot bookkeeping in step.
+
+    A factory rather than a closure over ``order_moves``'s per-role loop
+    variables: the emitter is created and consumed inside a single iteration,
+    so late binding would in fact be harmless, but taking the four structures
+    as parameters states that instead of leaving a reader (and B023) to prove
+    it. All four are mutated in place, which is the point -- the caller sees
+    every update.
+    """
+    def _emit(move: ReplicaMove) -> None:
+        ordered.append(move)
+        if move.from_node_id:
+            occupied.pop(move.from_node_id, None)
+            # A role vacated off the node being removed frees nothing
+            # usable: that node is on its way out and must never be
+            # picked as a scratch host.
+            if move.from_node_id in survivors and move.from_node_id not in free:
+                free.append(move.from_node_id)
+        occupied[move.to_node_id] = move.lvs_primary_node_id
+        if move.to_node_id in free:
+            free.remove(move.to_node_id)
+
+    return _emit
+
+
 def order_moves(
     moves: Sequence[ReplicaMove],
     current_layout: Mapping[str, Placement],
     all_node_ids: Sequence[str],
     ftt: int,
-) -> List[ReplicaMove]:
+) -> list[ReplicaMove]:
     """Order ``moves`` so every one lands on a host slot that is free at the
     time it runs -- and insert scratch hops where that is impossible.
 
@@ -594,34 +621,23 @@ def order_moves(
     in place, where a rotation is unexecutable while
     ``lvstore_stack_secondary`` / ``_tertiary`` stay single-valued.
     """
-    ordered: List[ReplicaMove] = []
+    ordered: list[ReplicaMove] = []
     roles = [(ROLE_SECONDARY, 0)] + ([(ROLE_TERTIARY, 1)] if ftt >= 2 else [])
     for role, index in roles:
         role_moves = [m for m in moves if m.role == role]
         if not role_moves:
             continue
-        occupied: Dict[str, str] = {}
+        occupied: dict[str, str] = {}
         for primary, placement in current_layout.items():
             holder = placement[index]
             if holder:
                 occupied[holder] = primary
-        pending: Dict[str, ReplicaMove] = {m.lvs_primary_node_id: m for m in role_moves}
+        pending: dict[str, ReplicaMove] = {m.lvs_primary_node_id: m for m in role_moves}
         # A slot is free when no surviving primary's role currently sits on it.
         survivors = set(all_node_ids)
         free = sorted(node for node in all_node_ids if node not in occupied)
 
-        def _emit(move: ReplicaMove) -> None:
-            ordered.append(move)
-            if move.from_node_id:
-                occupied.pop(move.from_node_id, None)
-                # A role vacated off the node being removed frees nothing
-                # usable: that node is on its way out and must never be
-                # picked as a scratch host.
-                if move.from_node_id in survivors and move.from_node_id not in free:
-                    free.append(move.from_node_id)
-            occupied[move.to_node_id] = move.lvs_primary_node_id
-            if move.to_node_id in free:
-                free.remove(move.to_node_id)
+        _emit = _make_emitter(ordered, occupied, survivors, free)
 
         _break_cycles(pending, free, role, _emit)
 
@@ -656,9 +672,9 @@ def _break_cycles(pending, free, role, emit) -> None:
     for start in sorted(pending):
         if start in visited:
             continue
-        path: List[str] = []
-        position: Dict[str, int] = {}
-        cursor: Optional[str] = start
+        path: list[str] = []
+        position: dict[str, int] = {}
+        cursor: str | None = start
         while cursor is not None and cursor not in visited:
             position[cursor] = len(path)
             path.append(cursor)
@@ -672,7 +688,7 @@ def _break_cycles(pending, free, role, emit) -> None:
                 f"({' -> '.join(path[position[cursor]:])}) has to be broken and "
                 f"no host slot is free to park a replica on")
         scratch_host = free[0]
-        primary = sorted(path[position[cursor]:])[0]
+        primary = min(path[position[cursor]:])
         move = pending[primary]
         emit(ReplicaMove(primary, role, move.from_node_id, scratch_host, scratch=True))
         pending[primary] = ReplicaMove(primary, role, scratch_host, move.to_node_id)
@@ -685,7 +701,7 @@ def plan_moves(
     target_layout: Mapping[str, Placement],
     all_node_ids: Sequence[str],
     ftt: int,
-) -> List[ReplicaMove]:
+) -> list[ReplicaMove]:
     """:func:`diff_layout` followed by :func:`order_moves`."""
     return order_moves(
         diff_layout(current_layout, target_layout, ftt),

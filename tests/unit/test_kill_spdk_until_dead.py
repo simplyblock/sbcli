@@ -1,4 +1,3 @@
-# coding=utf-8
 """_kill_spdk_until_dead must not report death it did not observe.
 
 Its return value gates whether the caller drops the StorageNode record

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 ``health_controller.check_remote_device`` must not probe for a device whose
 owning node has departed.

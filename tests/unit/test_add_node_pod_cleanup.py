@@ -1,4 +1,3 @@
-# coding=utf-8
 """add_node must not leave an SPDK pod behind when it bails out.
 
 Between ``spdk_process_start`` and the StorageNode record being written there

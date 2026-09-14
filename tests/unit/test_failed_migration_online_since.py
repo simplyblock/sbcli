@@ -1,4 +1,3 @@
-# coding=utf-8
 """The failed-migration runner must actually wait for a freshly-online node.
 
 ``online_since`` is stamped timezone-aware (storage_node_ops.py, via
@@ -16,9 +15,9 @@ storage_node_monitor.py) already passed timezone.utc; this one was missed.
 import ast
 import inspect
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import ClassVar, List
+from typing import ClassVar
 
 import simplyblock_core.services.tasks_runner_failed_migration as runner
 
@@ -29,12 +28,12 @@ ONLINE_SINCE_STAMP_IS_AWARE = True  # storage_node_ops stamps datetime.now(timez
 class TestOnlineSinceComparison(unittest.TestCase):
 
     def _stamp(self, seconds_ago):
-        return str(datetime.now(timezone.utc) - timedelta(seconds=seconds_ago))
+        return str(datetime.now(UTC) - timedelta(seconds=seconds_ago))
 
     def test_an_aware_stamp_can_be_subtracted_without_raising(self):
         """The regression: this is exactly the expression the runner evaluates."""
         online_since = self._stamp(10)
-        diff = datetime.now(timezone.utc) - datetime.fromisoformat(online_since)
+        diff = datetime.now(UTC) - datetime.fromisoformat(online_since)
         self.assertLess(diff.total_seconds(), 60)
 
     def test_a_naive_now_against_the_real_stamp_raises(self):
@@ -88,7 +87,7 @@ class TestAllOnlineSinceCallSitesAgree(unittest.TestCase):
     was not; nothing held them together.
     """
 
-    SITES: ClassVar[List[str]] = [
+    SITES: ClassVar[list[str]] = [
         "simplyblock_core/services/tasks_runner_failed_migration.py",
         "simplyblock_core/services/tasks_runner_migration.py",
         "simplyblock_core/services/tasks_runner_new_dev_migration.py",

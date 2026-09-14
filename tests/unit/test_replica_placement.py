@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Unit tests for the global replica placement planner
 (``simplyblock_core.controllers.replica_placement``).
