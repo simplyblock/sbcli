@@ -1536,7 +1536,7 @@ def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
     # Use the per-lvstore port for the lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     logger.info("adding listeners")
-    added = []
+    added: list[tuple[str, str]] = []
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             trtype = iface.trtype
