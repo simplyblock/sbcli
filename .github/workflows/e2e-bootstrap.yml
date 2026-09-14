@@ -260,6 +260,10 @@ jobs:
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.210/grafana' }}
       SBCLI_CMD: "sbctl"
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'main' }}
+      # Not main: carries the uv-based sbctl install. The nodes ship python3.9,
+      # below sbctl's >=3.11 floor, so bootstrap-cluster.sh installs it as a uv
+      # tool against a uv-managed interpreter instead of the system one.
+      DEPLOY_BRANCH: "uv"
 
       # SSH/client env
       SSH_USER: ${{ inputs.SSH_USER || 'root' }}
@@ -615,7 +619,8 @@ jobs:
         run: |
           set -euxo pipefail
           rm -rf simplyBlockDeploy
-          git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
+          git clone --branch "${DEPLOY_BRANCH}" --single-branch \
+            https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
 
       - name: Write cluster security/backup config to mgmt node
@@ -812,21 +817,21 @@ jobs:
           test -f sbcli/e2e/e2e.py
           test -f sbcli/e2e/logs/cleanup.py
 
-      - name: Install Python deps (best-effort)
+      - name: Install uv
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
-            pip install -r sbcli/e2e/requirements.txt
-          fi
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
 
       - name: Cleanup logs before e2e
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 logs/cleanup.py
+          ./logs/cleanup.py
 
       - name: Set RUN_BASE_DIR
         shell: bash
@@ -875,6 +880,9 @@ jobs:
       - name: Run e2e tests
         shell: bash
         working-directory: sbcli/e2e
+        env:
+          # Replaces `python3 -u`: output is piped to tee and parsed downstream.
+          PYTHONUNBUFFERED: "1"
         run: |
           set -euxo pipefail
           TESTNAME_ARGS=()
@@ -904,7 +912,7 @@ jobs:
             EXTRA_ARGS+=(--extra_sn_args "${EXTRA_SN_ARGS}")
           fi
 
-          python3 -u e2e.py \
+          ./e2e.py \
             "${TESTNAME_ARGS[@]}" \
             "${NEW_NODES_ARGS[@]}" \
             --ndcs "${NDCS}" \
