@@ -15,6 +15,7 @@ All data-plane RPCs / device-controller / DB access is mocked — these are
 pure control-flow + bookkeeping tests.
 """
 
+import datetime
 import unittest
 from unittest.mock import DEFAULT, MagicMock, call, patch
 
@@ -65,6 +66,7 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     n.lvstore_stack_tertiary = stack_tertiary
     n.failure_domain = failure_domain
     n.mgmt_ip = mgmt_ip or unique_ip(node_id)
+    n.devices_drained_at = ""
     n.write_to_db = MagicMock()
     n.rpc_client = MagicMock(return_value=MagicMock())
     n.hublvol_nqn_for_lvstore = MagicMock(return_value=f"nqn:hub:{lvstore}")
@@ -1226,10 +1228,11 @@ class TestDecommissionDevices(unittest.TestCase):
             ret = storage_node_ops._decommission_node_devices(removed)
 
         # Each device is driven ONLINE -> REMOVED -> FAILED (queuing failure
-        # migration on the surviving nodes). The completion gate's early
-        # `return False` is currently commented out, so the first pass reports
-        # True rather than waiting for FAILED_AND_MIGRATED.
-        self.assertTrue(ret)
+        # migration on the surviving nodes), but neither has reached
+        # FAILED_AND_MIGRATED yet on this first pass -- the completion gate
+        # must report False so the caller retries rather than treating the
+        # node as drained.
+        self.assertFalse(ret)
         dc.remove_jm_device.assert_called_once()
         self.assertEqual(dc.device_set_state.call_count, 2)
         self.assertEqual(dc.device_set_failed.call_count, 2)
@@ -1868,6 +1871,9 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         # still ONLINE) must not skip phases 1/3a/3b/4.
         cl = _cluster()
         node = _node("n1", status=StorageNode.STATUS_ONLINE)
+        # Already past the post-drain courtesy window -- this test is about
+        # phase ordering/completion, not the courtesy wait itself.
+        node.devices_drained_at = str(datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC))
         db = FakeDB(cl, [node])
         with self._patch_all() as mocks:
             mocks["DBController"].return_value = db
@@ -1923,6 +1929,9 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         # Net required order: 3a, then JM decommission, then 3b.
         cl = _cluster()
         node = _node("n1", status=StorageNode.STATUS_ONLINE)
+        # Already past the post-drain courtesy window -- this test is about
+        # phase ordering, not the courtesy wait itself.
+        node.devices_drained_at = str(datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC))
         db = FakeDB(cl, [node])
         order = []
         with self._patch_all() as mocks:
@@ -2193,6 +2202,116 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
         self.assertFalse(
             self._run_gate(Cluster.STATUS_SUSPENDED),
             "the gate must still hold for genuinely non-serving clusters")
+
+
+class TestMigrateNodeLvolsIsSequential(unittest.TestCase):
+    """_migrate_node_lvols must start at most ONE lvol migration per call,
+    never one per still-resident lvol. Running every lvol's migration off
+    the removed node concurrently was observed live to trip a port-block on
+    peer nodes that never got released, bouncing them down/online for
+    several minutes (2026-09-14).
+    """
+
+    @staticmethod
+    def _lvol(uuid, nqn=None, max_ns=1):
+        lv = MagicMock()
+        lv.uuid = uuid
+        lv.size = 100
+        lv.nqn = nqn or f"nqn:{uuid}"
+        lv.max_namespace_per_subsys = max_ns
+        return lv
+
+    def _patch_all(self):
+        return patch.multiple(
+            storage_node_ops,
+            DBController=DEFAULT,
+            lvol_controller=DEFAULT,
+            migration_controller=DEFAULT,
+        )
+
+    def test_no_lvols_left_reports_done(self):
+        node = _node("n1")
+        db = MagicMock()
+        db.get_lvols_by_node_id.return_value = []
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            ret = storage_node_ops._migrate_node_lvols(node)
+
+        self.assertTrue(ret)
+
+    def test_starts_exactly_one_migration_when_several_are_eligible(self):
+        node = _node("n1")
+        lv1, lv2 = self._lvol("lv-1"), self._lvol("lv-2")
+        db = MagicMock()
+        db.get_lvols_by_node_id.return_value = [lv1, lv2]
+        db.get_mini_lvols.return_value = [lv1, lv2]
+        target = MagicMock()
+        target.get_id.return_value = "n2"
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["migration_controller"].get_active_migration_for_lvol.return_value = None
+            mocks["migration_controller"].get_active_migration_for_nqn.return_value = None
+            mocks["lvol_controller"]._get_next_3_nodes.return_value = [target]
+            mocks["migration_controller"].create_migration.return_value = ("mig-1", None)
+            ret = storage_node_ops._migrate_node_lvols(node)
+
+        self.assertFalse(ret, "more lvols remain -- must report incomplete")
+        mocks["migration_controller"].create_migration.assert_called_once_with("lv-1", "n2")
+        mocks["migration_controller"].start_migration.assert_called_once_with("mig-1")
+
+    def test_does_not_start_a_second_migration_while_one_is_in_flight(self):
+        node = _node("n1")
+        lv1, lv2 = self._lvol("lv-1"), self._lvol("lv-2")
+        db = MagicMock()
+        db.get_lvols_by_node_id.return_value = [lv1, lv2]
+        db.get_mini_lvols.return_value = [lv1, lv2]
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["migration_controller"].get_active_migration_for_lvol.side_effect = (
+                lambda uuid, cluster_id: "active-mig" if uuid == "lv-1" else None)
+            mocks["migration_controller"].get_active_migration_for_nqn.return_value = None
+            ret = storage_node_ops._migrate_node_lvols(node)
+
+        self.assertFalse(ret)
+        mocks["migration_controller"].create_migration.assert_not_called()
+        mocks["migration_controller"].create_batch_migration.assert_not_called()
+        mocks["lvol_controller"]._get_next_3_nodes.assert_not_called()
+
+    def test_does_not_start_a_second_batch_while_a_sibling_groups_batch_runs(self):
+        # Two members of the same shared-namespace group: a sibling's whole-
+        # group batch migration is already running, so this pass must wait
+        # rather than start anything -- even solo -- for the other member.
+        node = _node("n1")
+        lv1 = self._lvol("lv-1", nqn="shared-nqn", max_ns=2)
+        lv2 = self._lvol("lv-2", nqn="shared-nqn", max_ns=2)
+        db = MagicMock()
+        db.get_lvols_by_node_id.return_value = [lv1, lv2]
+        db.get_mini_lvols.return_value = [lv1, lv2]
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["migration_controller"].get_active_migration_for_lvol.return_value = None
+            mocks["migration_controller"].get_active_migration_for_nqn.return_value = "active-batch"
+            ret = storage_node_ops._migrate_node_lvols(node)
+
+        self.assertFalse(ret)
+        mocks["migration_controller"].create_migration.assert_not_called()
+        mocks["migration_controller"].create_batch_migration.assert_not_called()
+        mocks["lvol_controller"]._get_next_3_nodes.assert_not_called()
+
+    def test_waits_when_no_target_node_available_yet(self):
+        node = _node("n1")
+        lv1 = self._lvol("lv-1")
+        db = MagicMock()
+        db.get_lvols_by_node_id.return_value = [lv1]
+        db.get_mini_lvols.return_value = [lv1]
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["migration_controller"].get_active_migration_for_lvol.return_value = None
+            mocks["lvol_controller"]._get_next_3_nodes.return_value = []
+            ret = storage_node_ops._migrate_node_lvols(node)
+
+        self.assertFalse(ret)
+        mocks["migration_controller"].create_migration.assert_not_called()
 
 
 if __name__ == "__main__":

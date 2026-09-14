@@ -109,6 +109,14 @@ class StorageNode(BaseNodeObject):
     # dead — defense against a lost-update reverting the offline flip (incident
     # 2026-06-18).
     shutdown_since: str = ""
+    # ISO timestamp of when node removal confirmed every data device on this
+    # node reached FAILED_AND_MIGRATED (failed-device migration genuinely
+    # complete, not just kicked off). node_removal_orchestrate holds lvol
+    # migration back for a courtesy window after this before starting it —
+    # concurrent device- and lvol-migration churn was observed to trip a
+    # port-block on peer nodes that never got released, bouncing them
+    # down/online for several minutes (2026-09-14).
+    devices_drained_at: str = ""
     partitions_count: int = 0  # Unused
     poller_cpu_cores: list[int] = default_factory(list)
     ssd_pcie: list = default_factory(list)

@@ -4722,6 +4722,28 @@ def node_removal_orchestrate(node_id, force_remove=False):
             if not _decommission_node_devices(snode):
                 return False
 
+            # Devices are now genuinely drained (every one reached
+            # FAILED_AND_MIGRATED -- see _decommission_node_devices's
+            # completion gate). Stamp when that happened, once, and hold lvol
+            # migration back for a courtesy window afterward: concurrent
+            # device- and lvol-migration churn was observed to trip a
+            # port-block on peer nodes that never got released, bouncing them
+            # down/online for several minutes (2026-09-14). This is a
+            # settling window, not a fix for that underlying bug.
+            snode = db_controller.get_storage_node_by_id(node_id)
+            if not snode.devices_drained_at:
+                snode.devices_drained_at = str(datetime.datetime.now(datetime.UTC))
+                snode.write_to_db(db_controller.kv_store)
+
+            drained_since = datetime.datetime.fromisoformat(snode.devices_drained_at)
+            elapsed = (datetime.datetime.now(datetime.UTC) - drained_since).total_seconds()
+            if elapsed < constants.NODE_REMOVAL_DEVICE_DRAIN_COURTESY_WAIT_SEC:
+                logger.info(
+                    f"[REMOVAL] {node_id}: devices drained {elapsed:.0f}s ago, "
+                    f"waiting out the {constants.NODE_REMOVAL_DEVICE_DRAIN_COURTESY_WAIT_SEC}s "
+                    f"courtesy window before starting lvol migration")
+                return False
+
             logger.info(f"[REMOVAL] {node_id}: phase M2 — lvol migration")
             if not _migrate_node_lvols(snode):
                 return False
@@ -4793,11 +4815,17 @@ def _migrate_node_lvols(removed_node: StorageNode) -> bool:
     that status, so every migration started here correctly sources data from
     a live secondary/tertiary replica rather than this (shut down) node.
 
+    Migrates ONE lvol at a time, not all of them concurrently: running every
+    lvol's migration off this node in parallel was observed to trip a
+    port-block on peer nodes that never got released, bouncing them
+    down/online for several minutes (2026-09-14). If any lvol from this node
+    already has a migration in flight (solo, or for a shared-namespace
+    member, its whole group's batch migration), this call does nothing but
+    wait for it — it never starts a second one alongside it.
+
     Idempotent / resumable: a re-entry only sees lvols still resident (a
     completed migration has already moved lvol.node_id off this node, so
-    get_lvols_by_node_id no longer returns it) and skips any lvol whose
-    migration — solo, or for a shared-namespace member, the whole group's
-    batch migration — is already in flight.
+    get_lvols_by_node_id no longer returns it).
 
     Returns True once the node has zero lvols left; False to mean "still
     migrating, retry later" (mirrors _decommission_node_devices' contract).
@@ -4810,50 +4838,47 @@ def _migrate_node_lvols(removed_node: StorageNode) -> bool:
         return True
 
     all_lvols = db_controller.get_mini_lvols()
-    pending = False
 
     for lvol in lvols:
         if migration_controller.get_active_migration_for_lvol(lvol.uuid, cluster_id):
-            pending = True
-            continue
+            return False
+        if lvol.max_namespace_per_subsys > 1 and any(
+                lv.nqn == lvol.nqn and lv.uuid != lvol.uuid for lv in all_lvols) \
+                and migration_controller.get_active_migration_for_nqn(lvol.nqn, cluster_id):
+            # A sibling member's whole-group batch migration is already
+            # running -- wait for it rather than starting anything else.
+            return False
 
-        # A shared-namespace member must move with its whole group (--batch)
-        # rather than solo — this branch has no per-member solo migration.
-        is_shared = lvol.max_namespace_per_subsys > 1 and any(
-            lv.nqn == lvol.nqn and lv.uuid != lvol.uuid for lv in all_lvols)
-        if is_shared and migration_controller.get_active_migration_for_nqn(lvol.nqn, cluster_id):
-            # A sibling member already started this group's batch migration
-            # earlier in this same pass — nothing new to do for this lvol.
-            pending = True
-            continue
+    # Nothing is in flight for this node right now -- start exactly one.
+    lvol = lvols[0]
+    is_shared = lvol.max_namespace_per_subsys > 1 and any(
+        lv.nqn == lvol.nqn and lv.uuid != lvol.uuid for lv in all_lvols)
 
-        candidates = lvol_controller._get_next_3_nodes(
-            cluster_id, lvol.size, all_lvols, namespaced=is_shared)
-        if not candidates:
-            logger.warning(
-                f"[REMOVAL] {node_id}: no target node available yet for lvol "
-                f"{lvol.uuid}; will retry")
-            pending = True
-            continue
-        target_node_id = candidates[0].get_id()
+    candidates = lvol_controller._get_next_3_nodes(
+        cluster_id, lvol.size, all_lvols, namespaced=is_shared)
+    if not candidates:
+        logger.warning(
+            f"[REMOVAL] {node_id}: no target node available yet for lvol "
+            f"{lvol.uuid}; will retry")
+        return False
+    target_node_id = candidates[0].get_id()
 
-        try:
-            if is_shared:
-                migration_id, _ = migration_controller.create_batch_migration(lvol.uuid, target_node_id)
-                migration_controller.start_batch_migration(migration_id)
-            else:
-                migration_id, _ = migration_controller.create_migration(lvol.uuid, target_node_id)
-                migration_controller.start_migration(migration_id)
-            logger.info(
-                f"[REMOVAL] {node_id}: started {'batch ' if is_shared else ''}"
-                f"migration {migration_id} for lvol {lvol.uuid} -> {target_node_id}")
-        except Exception as e:
-            logger.warning(
-                f"[REMOVAL] {node_id}: could not start migration for lvol "
-                f"{lvol.uuid} (will retry): {e}")
-        pending = True
+    try:
+        if is_shared:
+            migration_id, _ = migration_controller.create_batch_migration(lvol.uuid, target_node_id)
+            migration_controller.start_batch_migration(migration_id)
+        else:
+            migration_id, _ = migration_controller.create_migration(lvol.uuid, target_node_id)
+            migration_controller.start_migration(migration_id)
+        logger.info(
+            f"[REMOVAL] {node_id}: started {'batch ' if is_shared else ''}"
+            f"migration {migration_id} for lvol {lvol.uuid} -> {target_node_id}")
+    except Exception as e:
+        logger.warning(
+            f"[REMOVAL] {node_id}: could not start migration for lvol "
+            f"{lvol.uuid} (will retry): {e}")
 
-    return not pending
+    return False
 
 
 def _teardown_replicas_of_primary(removed_node: StorageNode):
@@ -5592,15 +5617,17 @@ def _decommission_node_devices(removed_node: StorageNode):
             device_controller.device_set_failed(dev.get_id())
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    all_done = True
     for dev in removed_node.nvme_devices:
         if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
             continue
+        all_done = False
         logger.info(
             f"[REMOVAL] {removed_node.get_id()}: device {dev.get_id()} "
             f"status={dev.status}, migration not complete"
         )
 
-    return True
+    return all_done
 
 
 def _finalize_node_removal(removed_node: StorageNode):

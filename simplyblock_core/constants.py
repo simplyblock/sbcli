@@ -798,6 +798,14 @@ LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — sk
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
 LVOL_MIG_TRANSFER_BATCH_SIZE = 256
 
+#: Node removal (storage_node_ops.node_removal_orchestrate): once every data
+#: device on the node being removed has genuinely reached FAILED_AND_MIGRATED,
+#: wait this long before starting lvol migration off the same node. Back-to-
+#: back device- and lvol-migration churn was observed to trip a port-block on
+#: peer nodes that never got released, bouncing them down/online for several
+#: minutes (2026-09-14) -- a courtesy settling window, not a fix for that bug.
+NODE_REMOVAL_DEVICE_DRAIN_COURTESY_WAIT_SEC = 300
+
 #: How long a deferred lvol register task tolerates a missing lvol record
 #: before treating it as obsolete. add_lvol_ha queues the task in its
 #: pre-check but writes the lvol record only at the end of the create, so
