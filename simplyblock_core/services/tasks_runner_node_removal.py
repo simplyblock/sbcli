@@ -49,6 +49,18 @@ def process_task(task):
     try:
         done = storage_node_ops.node_removal_orchestrate(
             task.node_id, force_remove=force_remove, cursor=cursor)
+    except storage_node_ops.RemovalGaveUp as e:
+        # A step reported that retrying cannot help -- every drain target
+        # exhausted, say. Terminal, and distinct from the retry ceiling, which
+        # only catches waits that never end on their own.
+        msg = f"removal failed at step '{cursor.step or 'unknown'}': {e}"
+        logger.error(f"Node-removal task {task.uuid}: {msg}")
+        storage_node_ops.set_node_status(
+            task.node_id, StorageNode.STATUS_REMOVED_FAILED, caused_by="remove")
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
     except Exception as e:
         logger.error(f"Node-removal task {task.uuid} raised: {e}")
         logger.exception(e)
