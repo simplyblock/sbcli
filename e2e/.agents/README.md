@@ -62,6 +62,15 @@ Measured, not hypothetical: `Forcing application shutdown via abort` is
     # back to your own checkouts (then rebuild)
     python3 .agents/scripts/pin_from_run.py --clear
 
+Add `--keep` to park each pinned checkout under `.agents/worktrees/<name>/`,
+so the pinned source is *readable* and not merely indexed. This matters more
+than it sounds: the map gives the right `file:line` for the pinned commit, but
+opening that file still lands in whatever is checked out, and at the same line
+number another branch usually holds a different, plausible statement. SPDK
+`lvol.c:2942` is `Forcing application shutdown via abort` on `R26.3` and
+`Cannot update lvolstore on failover` on `master` - both real lines from the
+same failover chain, which is how a confident and wrong RCA gets written.
+
 Precedence is `--ref` > `pins.json` > a `ref` key in the repo config > the
 working tree. Pinned builds use a detached `git worktree`, so your own checkout
 and any uncommitted work are never touched. While pins are in effect the

@@ -66,6 +66,14 @@ OUT_DIR = os.path.join(AGENTS_DIR, "repo-maps")
 # run that used different code. See load_pins().
 PINS = os.path.join(OUT_DIR, "pins.json")
 
+# Where --keep parks the pinned checkouts. A map gives the right
+# file:line for the pinned commit, but reading that file still goes to
+# whatever is checked out -- and at the same line number a different
+# branch often holds a different, plausible statement. That produces a
+# coherent and completely wrong answer, so the pinned tree has to be
+# readable, not just indexable.
+WORKTREES = os.path.join(AGENTS_DIR, "worktrees")
+
 # Symbol patterns per language. Deliberately conservative: a missed symbol costs
 # one grep, a wrong one costs confusion every time the map is read.
 SYMBOL_PATTERNS = {
@@ -221,13 +229,26 @@ def resolve_ref(root, ref):
     return "", ""
 
 
+def drop_worktree(root, path):
+    """Remove a worktree and its registration, tolerating either being gone."""
+    if os.path.isdir(path):
+        run(["git", "worktree", "remove", "--force", path], cwd=root)
+    if os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+    run(["git", "worktree", "prune"], cwd=root)
+
+
 @contextlib.contextmanager
-def checkout_at(root, ref):
+def checkout_at(root, ref, keep_as=None):
     """Yield (scan_root, sha, branch_label) with <ref> available to index.
 
     A detached worktree, not a checkout: pinning a map must never move the
     developer's HEAD or disturb uncommitted work in a repo they are mid-edit
     in. With no ref, this is a no-op that yields the working tree as-is.
+
+    keep_as parks the worktree at a stable path and leaves it there, so the
+    pinned source can be read with ordinary file tools instead of only through
+    `git show`.
     """
     if not ref:
         sha, branch = git_head(root)
@@ -239,6 +260,15 @@ def checkout_at(root, ref):
         raise RuntimeError(
             "cannot resolve ref %r in %s -- try: git -C %s fetch --all" % (
                 ref, root, root))
+
+    if keep_as:
+        drop_worktree(root, keep_as)          # a stale pin must not survive
+        os.makedirs(os.path.dirname(keep_as), exist_ok=True)
+        run(["git", "worktree", "add", "--detach", keep_as, resolved], cwd=root)
+        if not os.path.isdir(keep_as):
+            raise RuntimeError("git worktree add failed for %s@%s" % (root, ref))
+        yield keep_as, sha, ref
+        return
 
     tmp = tempfile.mkdtemp(prefix="repo-map-pin-")
     wt = os.path.join(tmp, "wt")
@@ -331,7 +361,7 @@ def layout(root, langs, excludes=None):
     return counts, exts
 
 
-def build_map(name, cfg, check_only=False, ref=None):
+def build_map(name, cfg, check_only=False, ref=None, keep=False):
     root = cfg["path"]
     if not os.path.isdir(root):
         return None, f"{name}: path does not exist: {root}"
@@ -378,7 +408,8 @@ def build_map(name, cfg, check_only=False, ref=None):
     # Everything that touches the tree happens inside the worktree context, so
     # a pinned checkout exists for exactly as long as the scan needs it and is
     # torn down even if the scan raises.
-    with checkout_at(root, ref) as (scan_root, sha, branch):
+    keep_as = os.path.join(WORKTREES, name) if (keep and ref) else None
+    with checkout_at(root, ref, keep_as) as (scan_root, sha, branch):
         counts, exts = layout(scan_root, langs, excludes)
         syms, logs = scan(scan_root, langs, sym_res, log_res, excludes)
 
@@ -432,6 +463,7 @@ def build_map(name, cfg, check_only=False, ref=None):
         "path: " + root,
         "head: %s (%s)" % (sha, branch),
         "ref: " + (ref or "(working tree)"),
+        "readable at: " + (keep_as or root),
         "generated: " + now,
         "languages: " + ", ".join(langs),
         "",
@@ -498,6 +530,9 @@ def main():
                          "its checked-out HEAD; repeatable")
     ap.add_argument("--pins", default=PINS,
                     help="pin file to read (default: repo-maps/pins.json)")
+    ap.add_argument("--keep", action="store_true",
+                    help="park each pinned checkout under .agents/worktrees/ "
+                         "so the pinned source is readable, not just indexed")
     args = ap.parse_args()
 
     cli_refs = {}
@@ -531,7 +566,8 @@ def main():
     for name, rcfg in repos.items():
         ref = cli_refs.get(name) or (pins.get(name) or {}).get("ref")
         try:
-            _, msg = build_map(name, rcfg, check_only=args.check, ref=ref)
+            _, msg = build_map(name, rcfg, check_only=args.check, ref=ref,
+                               keep=args.keep)
             print(msg)
             if args.check and ("STALE" in msg or "NO MAP" in msg):
                 rc = 2

@@ -10,3 +10,7 @@ repo-maps/*.tsv
 # debugging picks the run, and committing one person's pins would silently
 # repoint everyone else's maps.
 repo-maps/pins.json
+
+# Pinned checkouts parked by repo_map.py --keep. Real git worktrees of
+# someone else s repo; never committed.
+worktrees/

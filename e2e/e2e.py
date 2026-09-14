@@ -307,6 +307,11 @@ def main():
 
     errors = {}
     passed_cases = []
+    # Per-test NFS log directory, for the Slack summary. A failure
+    # notification that names the test but not its logs makes the reader go
+    # hunting for a path the run summary already knew.
+    test_log_paths = {}
+
     for i, test in enumerate(test_class_run):
         logger.info(f"Running Test {test}")
         test_obj = test(fio_debug=args.fio_debug,
@@ -392,6 +397,7 @@ def main():
 
             # Copy e2e/logs/ folder to NFS so automation logs are accessible post-run
             log_path = getattr(test_obj, "docker_logs_path", "")
+            test_log_paths[test.__name__] = log_path
             if log_path:
                 logs_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
                 if os.path.isdir(logs_src):
@@ -512,6 +518,9 @@ def main():
         elif test.__name__ in failed_cases:
             logger.info(f"{test.__name__} FAILED CASE.")
             summary += f"❌ {test.__name__}: *FAILED*\n"
+            _lp = test_log_paths.get(test.__name__)
+            if _lp:
+                summary += f"    `{_lp}`\n"
         else:
             logger.info(f"{test.__name__} SKIPPED CASE.")
             summary += f"⚠️ {test.__name__}: *SKIPPED*\n"
