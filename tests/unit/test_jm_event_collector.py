@@ -34,7 +34,15 @@ class _Stop(Exception):
 
 
 class TestJmEventLogging(unittest.TestCase):
-    """Every event received is written to the cluster event log."""
+    """Only FAILED events are written to the cluster event log.
+
+    Compression runs continuously and emits a started AND a finished event
+    per cycle per node. Persisting those put two records per node per
+    compression into the log an operator scans for faults, and the events
+    that matter scrolled off. Successes stay in the service log and in the
+    JM's own event list; the cluster event log keeps failures, plus the
+    latched JM_COMPRESSION_BACKLOG warning the collector raises separately.
+    """
 
     def _log(self, event_dict):
         with patch.object(events_controller, "DBController"), \
@@ -42,27 +50,39 @@ class TestJmEventLogging(unittest.TestCase):
             obj = events_controller.log_jm_event("cl-1", "node-1", event_dict)
         return obj, alert
 
-    def test_success_is_informational(self):
+    def test_started_is_not_persisted(self):
+        obj, _ = self._log(STARTED)
+        self.assertIsNone(obj)
+
+    def test_finished_is_not_persisted(self):
         obj, _ = self._log(FINISHED)
-        self.assertEqual(obj.event_level, EventObj.LEVEL_INFO)
-        self.assertEqual(obj.domain, events_controller.DOMAIN_JM)
-        self.assertEqual(obj.event, "jm_compression")
-        self.assertEqual(obj.message, "compression_finished")
-        self.assertEqual(obj.vuid, 1)
-        self.assertEqual(obj.node_id, "node-1")
+        self.assertIsNone(obj)
+
+    def test_a_success_still_reaches_the_service_log(self):
+        """The compression history is not lost, only unpersisted."""
+        _, alert = self._log(FINISHED)
+        alert.assert_called_once()
+        args = alert.call_args.args
+        self.assertIn(EventObj.LEVEL_INFO, args)
+        self.assertIn("compression_finished", args)
 
     def test_failure_is_an_error_and_carries_the_code(self):
         obj, _ = self._log(FAILED)
+        self.assertIsNotNone(obj)
         self.assertEqual(obj.event_level, EventObj.LEVEL_ERROR)
+        self.assertEqual(obj.domain, events_controller.DOMAIN_JM)
+        self.assertEqual(obj.event, "jm_compression")
         self.assertIn("error_code=11", obj.message)
         self.assertEqual(obj.vuid, 2)
+        self.assertEqual(obj.node_id, "node-1")
 
     def test_nonzero_error_code_outweighs_a_benign_status(self):
         obj, _ = self._log(dict(STARTED, error_code=5))
+        self.assertIsNotNone(obj)
         self.assertEqual(obj.event_level, EventObj.LEVEL_ERROR)
 
     def test_unparseable_vuid_does_not_break_logging(self):
-        obj, _ = self._log(dict(STARTED, jm_vuid=None))
+        obj, _ = self._log(dict(FAILED, jm_vuid=None))
         self.assertEqual(obj.vuid, -1)
 
     def test_the_raw_event_is_kept(self):
@@ -87,7 +107,9 @@ class TestJmCollectorDeduplicates(unittest.TestCase):
 
         def record(cluster_id, node_id, event_dict):
             logged.append(event_dict)
-            return MagicMock()
+            # None is what the real one returns for a successful
+            # compression; the collector must handle that.
+            return None if event_dict.get("error_code") == 0 else MagicMock()
 
         sleeps = [None] * (len(poll_results) - 1) + [_Stop()]
         with patch.object(collector, "db") as db, \

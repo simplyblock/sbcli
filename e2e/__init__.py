@@ -200,6 +200,7 @@ from e2e_tests.test_negative_cases import TestCrossResourceNegative
 from e2e_tests.test_namespace_placement import TestNamespacePlacement
 from e2e_tests.test_namespace_fio import TestNamespaceFio
 from e2e_tests.test_namespace_limits import TestNamespaceLimits
+from e2e_tests.test_object_limits import TestObjectLimits
 from e2e_tests.test_namespace_negative import TestNamespaceNegative
 from e2e_tests.test_volume_suspend_resume import TestVolumeSuspendResume      # UNCERTAIN: volume suspend/resume may not be wired
 from e2e_tests.test_volume_clone_lvol import TestVolumeCloneLvol
@@ -500,6 +501,7 @@ ALL_TESTS = [
     TestNamespacePlacement,
     TestNamespaceFio,
     TestNamespaceLimits,
+    TestObjectLimits,
     TestNamespaceNegative,
     TestVolumeSuspendResume,
     TestVolumeCloneLvol,
