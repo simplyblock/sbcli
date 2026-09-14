@@ -2114,9 +2114,7 @@ class TestClusterBase:
         # what it does not cover is the HTTP layer itself.
         api_url = getattr(self.sbcli_utils, "cluster_api_url", None)
         if api_url:
-            raw = api_url.rstrip("/")
-            if raw.endswith("/api/v1"):
-                raw = raw[: -len("/api/v1")]
+            raw = api_url.rstrip("/").removesuffix("/api/v1")
             source = f"{raw}/api/v2/clusters/{self.cluster_id}/alerts/"
             # v2 authenticates with HTTPBearer against the cluster secret
             # alone. sbcli_utils.headers carries the v1 form,
@@ -2185,7 +2183,7 @@ class TestClusterBase:
             previous = {}
             seen_statuses = set()
             while True:
-                ts = datetime.now(timezone.utc)
+                ts = datetime.now(UTC)
                 record = {
                     "ts": ts.isoformat(),
                     "elapsed_sec": round(time.time() - started, 1),

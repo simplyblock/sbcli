@@ -857,12 +857,13 @@ class SshUtils:
         ``exec_command`` and the thread parked in ``recv_exit_status()`` while
         four nodes sat unreachable.
 
-        Raising ``socket.timeout`` here lands in the existing retry handler, so
+        Raising ``TimeoutError`` here lands in the existing retry handler (it
+        is an ``OSError``, which that handler catches), so
         the call fails cleanly after ``max_retries`` instead of hanging.
         """
         if channel.status_event.wait(timeout=timeout):
             return channel.recv_exit_status()
-        raise socket.timeout(
+        raise TimeoutError(
             f"timed out after {timeout}s waiting for command exit status "
             f"(remote host likely went away mid-command)"
         )
@@ -1546,9 +1547,7 @@ class SshUtils:
         """
         heads = []
         for raw in names:
-            name = (raw or "").strip().rstrip(':').lstrip('/')
-            if name.startswith('dev/'):
-                name = name[4:]
+            name = (raw or "").strip().rstrip(':').lstrip('/').removeprefix('dev/')
             if not name or cls._CONTROLLER_SCOPED_NS.match(name):
                 continue
             m = cls._HEAD_NS.match(name)
