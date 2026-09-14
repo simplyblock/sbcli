@@ -81,6 +81,9 @@ def detach_member(cluster: Cluster, group: ConsistencyGroupResource, lvol_id: st
             volume.group_id = ""
             volume.write_to_db(db.kv_store)
     except KeyError:
+        # Best-effort cleanup: if the volume record is already missing, the
+        # detach operation has already removed membership and should still be
+        # treated as successful/idempotent.
         pass
     return Response(status_code=204)
 
