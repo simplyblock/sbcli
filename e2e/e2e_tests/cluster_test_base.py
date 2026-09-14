@@ -1476,18 +1476,73 @@ class TestClusterBase:
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
 
+    def device_subsys_nqn(self, client, device):
+        """The NQN of the subsystem currently backing *device*, or "".
+
+        Simplyblock NQNs embed the volume's UUID
+        (``nqn.2023-02.io.simplyblock:<cluster>:lvol:<lvol_id>``), so this
+        answers "which volume is actually on this device *right now*" without
+        trusting anything the test recorded earlier.
+        """
+        dev_short = device.rsplit("/", 1)[-1]
+        out, _ = self.ssh_obj.exec_command(
+            node=client,
+            command=f"cat /sys/block/{dev_short}/device/subsysnqn 2>/dev/null",
+            supress_logs=True,
+        )
+        return (out or "").strip()
+
+    def _device_claim_is_live(self, client, device, claim_name, claim_det):
+        """Is a registry entry's claim on *device* still true on the host?
+
+        The registry stores kernel device paths, and those are only valid while
+        the controller behind them lives. An outage that tears down every
+        controller on a client frees index 0, so the next volume to connect
+        legitimately becomes /dev/nvme0n1 -- and a months-old entry naming that
+        same path then refuses a perfectly correct device.
+
+        That is exactly what aborted
+        n_plus_k_failover_multi_client_ha_all_nodes-20260914-081252 after 7h51m:
+        `pllvl..._0` had held /dev/nvme0n1 since 08:28, the 15:43 outage removed
+        every namespace on the client, and the new volume took the recycled
+        index at 15:48. Both of the guard's *live* checks (NSID, mount) passed;
+        only the in-memory one, which talks to no one, objected.
+
+        Fails closed. If the owner cannot be read the claim is treated as live,
+        because refusing a good device costs a run while formatting a live one
+        costs the data.
+        """
+        nqn = self.device_subsys_nqn(client, device)
+        if not nqn:
+            self.logger.warning(
+                f"[device_guard] cannot read the owner of {device} on {client}; "
+                f"treating {claim_name}'s claim as live")
+            return True
+
+        claim_id = (claim_det or {}).get("ID")
+        if claim_id and str(claim_id).lower() in nqn.lower():
+            return True
+
+        self.logger.info(
+            f"[device_guard] {claim_name} no longer holds {device} on {client} "
+            f"(device is now {nqn}); dropping the stale claim")
+        return False
+
     def _assert_device_unclaimed(self, client, device, obj_name,
                                  expected_ns_id=None):
         """Refuse a device that belongs to a different namespace or volume.
 
-        Called immediately before mkfs. Two checks:
+        Called immediately before mkfs. Three checks:
 
         * the device's own NSID matches what the control plane said. On a shared
           subsystem the sibling namespaces differ only by this number, and the
           names (nvmeXn1 vs nvmeXn2) are easy to resolve wrongly.
-        * no other lvol or clone in this run is already using it. A device that
-          is already claimed is, by definition, carrying another volume's
-          filesystem.
+        * no other lvol or clone in this run is already using it -- and, before
+          refusing on that, that the claim is still true on the host. See
+          _device_claim_is_live: device paths do not survive a controller
+          teardown, so an unverified registry match is a false positive waiting
+          for the next total outage.
+        * the device is not already mounted.
         """
         dev_short = device.rsplit("/", 1)[-1]
 
@@ -1510,6 +1565,12 @@ class TestClusterBase:
                 if name == obj_name:
                     continue
                 if det.get("Device") == device and det.get("Client") == client:
+                    if not self._device_claim_is_live(client, device, name, det):
+                        # Stale path from a controller that no longer exists.
+                        # Clear it, or it refuses this device again on every
+                        # later attempt and misleads anyone reading the registry.
+                        det["Device"] = None
+                        continue
                     raise LvolNotConnectException(
                         f"[device_guard] REFUSING {device} for {obj_name}: "
                         f"already held by {kind} {name} on {client}."

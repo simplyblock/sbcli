@@ -566,11 +566,31 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             (f"/dev/{d.strip()}" for d in final_devices if d not in initial_devices),
             None,
         )
-        if not lvol_device and already_connected:
-            # The subsystem was already held on this client, so no new device
-            # shows up in the diff. Resolve by NQN *and* ns_id -- a shared
-            # subsystem holds one namespace per lvol, so the NQN alone can
-            # return a sibling volume's device.
+
+        # The diff assumes the only device that can appear in this window is the
+        # one just connected. During failover recovery that is false: with
+        # --ctrl-loss-tmo=-1 the kernel keeps retrying, so an unrelated namespace
+        # that dropped during the outage can reappear here and be attributed to
+        # this volume. Confirm the device really belongs to this lvol before
+        # trusting it, and fall back to resolving by NQN + NSID when it does not.
+        if lvol_device:
+            owner = self.device_subsys_nqn(client_node, lvol_device)
+            if owner and str(lvol_id).lower() not in owner.lower():
+                self.logger.warning(
+                    f"[connect] device diff gave {lvol_device} for {lvol_name}, "
+                    f"but it belongs to {owner}. It reappeared during recovery "
+                    f"rather than being ours; resolving by NSID instead.")
+                lvol_device = None
+
+        if not lvol_device:
+            # Either the subsystem was already held on this client, so no new
+            # device shows up in the diff, or the diff produced someone else's
+            # device and was rejected just above. Resolve by NQN *and* ns_id --
+            # a shared subsystem holds one namespace per lvol, so the NQN alone
+            # can return a sibling volume's device.
+            self.logger.info(
+                f"[connect] resolving {lvol_name} by NSID "
+                f"(subsystem already held: {already_connected})")
             lvol_device, _found_on = self._resolve_device_by_ns(
                 client_node, lvol_id, lvol_name)
             if lvol_device and _found_on and _found_on != client_node:
