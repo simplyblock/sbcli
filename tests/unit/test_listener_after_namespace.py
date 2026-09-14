@@ -196,7 +196,7 @@ class BatchSkipsFailedRegistrationsTest(unittest.TestCase):
     barrier exists to prevent.
     """
 
-    def test_a_failed_registration_gets_no_listener(self):
+    def test_a_failed_member_withholds_its_whole_subsystem(self):
         from simplyblock_core import storage_node_ops as ops
 
         published = []
@@ -210,11 +210,14 @@ class BatchSkipsFailedRegistrationsTest(unittest.TestCase):
             published.append(lvol.get_id())
             return True, None
 
+        # lvol-good and lvol-bad SHARE an NQN; lvol-elsewhere has its own.
         lvols = []
-        for name in ("lvol-good", "lvol-bad"):
+        for name, nqn in (("lvol-good", "nqn.2023-02.io.simplyblock:cl:lvol:shared"),
+                          ("lvol-bad", "nqn.2023-02.io.simplyblock:cl:lvol:shared"),
+                          ("lvol-elsewhere", "nqn.2023-02.io.simplyblock:cl:lvol:other")):
             lv = MagicMock(name=name)
             lv.get_id.return_value = name
-            lv.nqn = "nqn.2023-02.io.simplyblock:cl:lvol:shared"
+            lv.nqn = nqn
             lvols.append(lv)
 
         snode = MagicMock(name="snode")
@@ -230,8 +233,18 @@ class BatchSkipsFailedRegistrationsTest(unittest.TestCase):
             "a listener was published for an lvol whose registration failed: "
             "its namespace may never have attached, which is the empty-subsystem "
             "state this barrier exists to prevent")
-        self.assertIn("lvol-good", published,
-                      "the members that did register must still be published")
+        # The whole SUBSYSTEM is withheld, not just the failed member: on a
+        # shared NQN, publishing a healthy member makes that NQN reachable while
+        # the failed member's namespace is absent -- the same empty-subsystem
+        # state, reached by a different door.
+        self.assertNotIn(
+            "lvol-good", published,
+            "a listener was published for a healthy member of a shared subsystem "
+            "whose other member failed to register: the NQN is now reachable with "
+            "one namespace missing")
+        self.assertIn(
+            "lvol-elsewhere", published,
+            "an unrelated subsystem must not be held back by another one's failure")
 
 
 if __name__ == "__main__":
