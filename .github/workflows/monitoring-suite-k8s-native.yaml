@@ -979,9 +979,8 @@ jobs:
         run: |
           set -o pipefail
           cd $GITHUB_WORKSPACE/e2e
-          python3 -m venv myenv
-          source myenv/bin/activate
-          python3 -m pip install -r requirements.txt
+          python3 -m pip install --upgrade pip uv
+          export PATH="$(python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))'):$PATH"
           pip install matplotlib || true
 
           export CLUSTER_ID="${{ env.CLUSTER_ID }}"
@@ -989,7 +988,7 @@ jobs:
           export K8S_LOCAL_KUBECTL=1
           export SBCLI_CMD=sbctl
 
-          python3 -u stress.py \
+          PYTHONUNBUFFERED=1 ./stress.py \
             --testname "${{ matrix.test }}" \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} \

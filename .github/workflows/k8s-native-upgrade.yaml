@@ -1301,9 +1301,8 @@ jobs:
         run: |
           set -o pipefail
           cd $GITHUB_WORKSPACE/e2e
-          python3 -m venv myenv
-          source myenv/bin/activate
-          python3 -m pip install -r requirements.txt
+          python3 -m pip install --upgrade pip uv
+          export PATH="$(python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))'):$PATH"
 
           export CLUSTER_ID="${{ env.CLUSTER_ID }}"
           export CLUSTER_SECRET="${{ env.CLUSTER_SECRET }}"
@@ -1329,7 +1328,7 @@ jobs:
             TESTNAME_ARG="--testname ${TESTNAME}"
           fi
 
-          python3 -u upgrade_e2e.py \
+          PYTHONUNBUFFERED=1 ./upgrade_e2e.py \
             --base_version "$BASE_SB_IMAGE" \
             --target_version "$TARGET_SB_IMAGE" \
             --base_spdk_image "$BASE_SPDK_IMAGE" \

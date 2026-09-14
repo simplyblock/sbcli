@@ -169,6 +169,15 @@ jobs:
             git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
           fi
 
+      - name: Install uv
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
+
       # ============================================================
       # Common: Validate runner and ensure NFS is mounted
       # ============================================================
@@ -679,7 +688,7 @@ jobs:
           # Clean any leftover files from previous runs to avoid mixing
           rm -rf "${OUTPUT_DIR}"
           mkdir -p "${OUTPUT_DIR}"
-          python3 sbcli/e2e/utils/test_graylog_export.py
+          sbcli/e2e/utils/test_graylog_export.py
 
       # ============================================================
       # Common: Copy to NFS (if configured)
@@ -781,7 +790,7 @@ jobs:
             exit 0
           fi
 
-          python3 sbcli/e2e/logs/upload_logs_to_miniio_parallel.py \
+          sbcli/e2e/logs/upload_logs_to_miniio_parallel.py \
             --access_key "${MINIO_ACCESS_KEY}" \
             --secret_key "${MINIO_SECRET_KEY}" \
             --source_dir "${OUTPUT_DIR}" \

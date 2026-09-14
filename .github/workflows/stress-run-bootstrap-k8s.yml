@@ -698,19 +698,21 @@ jobs:
           fi
           test -f sbcli/e2e/stress.py
 
-      - name: Install Python deps
+      - name: Install uv
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          [[ -f "sbcli/e2e/requirements.txt" ]] && pip install -r sbcli/e2e/requirements.txt || true
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
 
       - name: Cleanup logs before stress
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 logs/cleanup.py
+          ./logs/cleanup.py
 
       - name: Set RUN_DIR_FILE
         shell: bash
@@ -736,7 +738,7 @@ jobs:
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 -u stress.py \
+          PYTHONUNBUFFERED=1 ./stress.py \
             --testname "${TEST_CLASS}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
