@@ -2333,7 +2333,11 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
             _cg = db_controller.get_consistency_group_by_id(lvol.group_id)
             _cgc.remove_member_from_group(_cg, lvol.get_id())
         except KeyError:
-            pass
+            logger.debug(
+                "Skipping consistency-group detach for lvol %s: group %s not found",
+                lvol.get_id(),
+                lvol.group_id,
+            )
 
     logger.debug(lvol)
     if snode is None:
