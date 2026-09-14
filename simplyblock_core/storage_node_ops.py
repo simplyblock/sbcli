@@ -4802,7 +4802,15 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
             if other.failure_domain >= 0:
                 other_fd = other.failure_domain
         except KeyError:
-            pass
+            # The other role's holder is already gone. other_fd stays None, so
+            # full_avoid carries only the primary's own domain -- the placement
+            # is still diverse from everything that actually exists. Relaxing
+            # by one here is correct rather than merely tolerable: demanding
+            # diversity from a departed node would rule out hosts that are
+            # genuinely free.
+            logger.debug(
+                "no record for %s's other-role holder %s; planning %s placement "
+                "without its domain", primary.get_id(), other_id, role)
 
     full_avoid = {primary.failure_domain}
     if other_fd is not None:

@@ -356,7 +356,6 @@ class TestFourDomainShrink(unittest.TestCase):
         nodes, fd = _grid(4, 3)
         layout = _rotation(nodes, fd, 2)
         self.assertEqual(rp.full_diversity_violations(layout, fd, 2), [])
-        alive = list(nodes)
         for victim in victims:
             alive, current = _remove(layout, victim)
             plan = rp.plan_diverse_layout(alive, fd, current, 2)
