@@ -96,6 +96,17 @@ on:
         options:
           - 'false'
           - 'true'
+      test_case:
+        description: 'Case id for matrix tests (--case), e.g. dual_graceful_shutdown_container_stop_sep0_drain. Leave empty for non-matrix tests.'
+        required: false
+        default: ''
+
+      resume:
+        description: 'Continue the previous run on this cluster instead of wiping its objects. Requires use_existing_cluster=true, since recreating the setup destroys exactly what resume would adopt.'
+        required: false
+        type: boolean
+        default: false
+
       use_existing_cluster:
         description: 'Skip cluster cleanup and setup, reuse existing cluster'
         required: false
@@ -143,6 +154,21 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # resume adopts the objects a previous run left behind. Recreating the
+      # setup deletes exactly those, so the combination cannot do what it says
+      # and is far more likely a mistake than an intent. Failing here costs
+      # seconds; discovering it after the wipe costs the run.
+      - name: Validate resume inputs
+        if: ${{ github.event.inputs.resume == 'true' }}
+        run: |
+          if [ "${{ github.event.inputs.use_existing_cluster }}" != "true" ]; then
+            echo "::error::resume=true needs use_existing_cluster=true."
+            echo "::error::This run would recreate the cluster and delete the objects resume is meant to adopt."
+            exit 1
+          fi
+          echo "resume=true with use_existing_cluster=true -- the previous run's objects will be adopted."
+          echo "If no checkpoint exists for this test class on this cluster, the run starts fresh and says so."
 
       - uses: actions/checkout@master
         name: Checkout simplyblock-operator
@@ -1447,9 +1473,17 @@ jobs:
             PRESERVE_ARG="--preserve_resources_on_failure True"
           fi
 
+          CASE_ARG=""
+          if [ -n "${TEST_CASE:-}" ]; then
+            CASE_ARG="--case ${TEST_CASE}"
+          fi
+          if [ -n "${RESUME:-}" ]; then
+            echo "RESUME=1: adopting the objects left by the previous run on this cluster"
+          fi
+
           python3 -u stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} $PRESERVE_ARG 2>&1 | tee output.log
+            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} $PRESERVE_ARG $CASE_ARG 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -1459,6 +1493,9 @@ jobs:
           CLIENT_IP: ${{ github.event.inputs.client_ips }}
           SKIP_NFS: ${{ github.event.inputs.skip_nfs || 'false' }}
           RUN_DIR_FILE: ${{ env.RUN_DIR_FILE }}
+          # Read by stress.py directly. Empty means a normal run.
+          RESUME: ${{ github.event.inputs.resume == 'true' && '1' || '' }}
+          TEST_CASE: ${{ github.event.inputs.test_case }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 

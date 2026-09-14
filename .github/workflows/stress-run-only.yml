@@ -77,6 +77,17 @@ on:
         required: true
         default: "RandomMultiClientMultiFailoverTest"
 
+      RESUME:
+        description: "Continue the previous run on this cluster instead of wiping its lvols/snapshots/clones and starting over. Needs a checkpoint from a prior run of the SAME test class on the SAME cluster; falls back to a fresh run when there is none."
+        required: false
+        type: boolean
+        default: false
+
+      TEST_CASE:
+        description: "Case id for matrix tests (--case), e.g. dual_graceful_shutdown_container_stop_sep0_drain. Leave empty for non-matrix tests."
+        required: false
+        default: ""
+
 concurrency:
   group: simplyblock-lab-stress
   cancel-in-progress: false
@@ -114,6 +125,8 @@ jobs:
       NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
       TEST_CLASS: ${{ inputs.TEST_CLASS }}
+      RESUME: ${{ inputs.RESUME && '1' || '' }}
+      TEST_CASE: ${{ inputs.TEST_CASE }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -383,10 +396,17 @@ jobs:
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
+          # RESUME is read by stress.py directly; --case only when one was given.
+          CASE_ARG=()
+          if [[ -n "${TEST_CASE:-}" ]]; then CASE_ARG=(--case "${TEST_CASE}"); fi
+          if [[ -n "${RESUME:-}" ]]; then
+            echo "RESUME=1: adopting the objects left by the previous run of ${TEST_CLASS} on this cluster"
+          fi
           python3 -u stress.py \
             --testname "${TEST_CLASS}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
+            ${CASE_ARG[@]+"${CASE_ARG[@]}"} \
             --send_debug_notification false \
             2>&1 | tee output.log
 
