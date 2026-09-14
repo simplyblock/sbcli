@@ -381,6 +381,19 @@ commands:
             type: str
             nargs: +
             default: ""
+          - name: "--data-nics"
+            help: "Replace the storage node's data network interface(s) on restart. Provide the new interface name(s); they replace the existing data NIC set. Can be more than one."
+            description: >
+              Replaces the data network interface(s) the storage node advertises its NVMe-oF
+              listeners on. Use this to swap a failed or renamed storage NIC for a different one
+              without re-adding the node: the given interfaces are looked up on the (possibly new)
+              host during the restart and become the node's new data NICs. If omitted, the existing
+              data NICs are kept.
+            dest: data_nics
+            required: false
+            type: str
+            nargs: +
+            default: ""
           - name: "--force-lvol-recreate"
             help: "Force logical volume recreation on node restart even if the logical volume bdev was not recovered. Default: `False`."
             dest: force_lvol_recreate
