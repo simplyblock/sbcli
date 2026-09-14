@@ -199,6 +199,20 @@ LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC = int(
     os.getenv("LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC", "300"))
 
 TASK_EXEC_INTERVAL_SEC = 10
+
+#: Ceiling on how long a node-removal task may sit suspend-and-retrying on one
+#: of its waits (device failure-migration today; volume drain once that lands)
+#: before the removal gives up and the node goes to STATUS_REMOVED_FAILED.
+#: Expressed as wall-clock and converted to a retry count against the runner's
+#: tick, because the meaningful budget is "how long may a removal hang", not
+#: "how many passes". Deliberately generous: these waits legitimately run for
+#: hours on a node holding real data, and a ceiling that fires early would
+#: fail removals that were merely slow.
+#: NOTE: this is a whole-task backstop, not a per-step bound -- the
+#: orchestrator has no persisted step cursor yet, so it cannot attribute
+#: elapsed retries to a particular wait. Per-step budgets arrive with it.
+NODE_REMOVAL_MAX_WAIT_SEC = 6 * 3600
+NODE_REMOVAL_MAX_RETRY = NODE_REMOVAL_MAX_WAIT_SEC // TASK_EXEC_INTERVAL_SEC
 TASK_EXEC_RETRY_COUNT = 8
 # Shorter interval + lower ceiling for node/device restart tasks.  Restart
 # tasks are time-critical (cluster is degraded until the node is back) and

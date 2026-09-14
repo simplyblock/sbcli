@@ -59,8 +59,24 @@ def process_task(task):
         return True
     else:
         # Incomplete: a phase asked us to retry (typically waiting on migration).
-        task.function_result = "removal in progress, retrying"
         task.retry += 1
+        if 0 < task.max_retry <= task.retry:
+            # Give up and say so. Without this the task retried for ever: the
+            # node never reached a terminal state, nothing surfaced the reason,
+            # and the only signal an operator got was the next removal being
+            # refused with "Task found". The node keeps whatever data could not
+            # be migrated off it, so it is REMOVED_FAILED, not REMOVED.
+            msg = (f"removal gave up after {task.retry} retries "
+                   f"(~{constants.NODE_REMOVAL_MAX_WAIT_SEC // 3600}h): "
+                   f"a step never completed")
+            logger.error(f"Node-removal task {task.uuid}: {msg}")
+            storage_node_ops.set_node_status(
+                task.node_id, StorageNode.STATUS_REMOVED_FAILED, caused_by="remove")
+            task.function_result = msg
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db.kv_store)
+            return True
+        task.function_result = "removal in progress, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
         return False
