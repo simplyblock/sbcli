@@ -37,6 +37,7 @@ COMPLETED
 import datetime
 from typing import ClassVar
 
+from simplyblock_core import constants
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
@@ -119,6 +120,32 @@ class LVolMigrationGroup(BaseModel):
     phase: str = PHASE_PRE_CREATED
 
     error_message: str = ""
+
+    # Set alongside `status` at either terminal point (STATUS_DONE or
+    # STATUS_FAILED). Needed so a retry_on_failure restart knows how long
+    # this group has been sitting in STATUS_FAILED.
+    completed_at: int = 0
+
+    # Duration `deadline` (on each member LVolMigration) was computed from,
+    # at start_batch_migration() time. Persisted here (the group has no
+    # single absolute deadline of its own) so a retry_on_failure restart can
+    # recompute a fresh deadline of the same length.
+    deadline_seconds: int = constants.LVOL_MIG_DEADLINE_SEC
+
+    # CLI: `migrate-continue --batch --retry-on-failure`. When True and this
+    # group ends in STATUS_FAILED (not cancelled), the task runner
+    # automatically starts a brand-new batch migration (full precreate +
+    # start) for the same shared-namespace subsystem/target once
+    # LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC has passed, provided preconditions
+    # hold again -- see task_runner's terminal-FAILED handling in
+    # tasks_runner_batch_migration.py.
+    retry_on_failure: bool = False
+
+    # Connect-string parameters from the original `migrate --batch` call,
+    # persisted so a retry_on_failure restart recreates the target with
+    # identical settings instead of silently reverting to defaults.
+    ctrl_loss_tmo: int = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
+    host_nqn: str = ""
 
     # --- Helpers ---
 
