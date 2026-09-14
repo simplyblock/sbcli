@@ -5,7 +5,7 @@ import os
 import time
 import subprocess
 import shutil
-from __init__ import get_stress_tests
+from __init__ import get_stress_tests, get_backup_stress_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -50,7 +50,7 @@ def main():
                         default=False)
     args = parser.parse_args()
     
-    tests = get_stress_tests()
+    tests = get_stress_tests() + get_backup_stress_tests()
 
     test_class_run = []
     if args.testname is None or len(args.testname.strip()) == 0:
@@ -120,6 +120,16 @@ def main():
                         preserve_resources_on_failure=args.preserve_resources_on_failure)
         try:
             test_obj.setup()
+            # After setup(), not inside it: eleven test classes replace
+            # setup() wholesale without calling super(), so anything wired
+            # into the base setup silently does not run for them. Guarded
+            # because a diagnostic collector must never fail the test it
+            # is only there to observe.
+            try:
+                test_obj.start_alert_collection()
+            except Exception:
+                logger.error("Error starting alert collection")
+                logger.error(traceback.format_exc())
             if i == 0:
                 test_obj.cleanup_logs()
                 test_obj.configure_sysctl_settings()
@@ -151,6 +161,13 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            # In finally, so the samples and summary survive a teardown that
+            # threw before reaching its own stop call.
+            try:
+                test_obj.stop_alert_collection()
+            except Exception:
+                logger.error("Error stopping alert collection")
+                logger.error(traceback.format_exc())
             if log_path:
                 logger.info(f"Test logs saved at: {log_path}")
             # Copy e2e/logs/ folder to NFS share so automation logs are accessible post-run

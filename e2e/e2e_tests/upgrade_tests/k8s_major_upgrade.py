@@ -24,6 +24,94 @@ Supports two upgrade paths:
   FIO runs continuously throughout the entire upgrade.
 
 No SSH to worker nodes required (Talos-compatible).
+
+
+ROLLING UPGRADE PROCEDURE (R26.x -> R26.y)
+==========================================
+The exact sequence _run_rolling_upgrade performs, recorded here so it can be
+handed to an operator without re-reading the code. This is the R26-to-R26
+rolling path only; the R25 -> R26 maintenance-window path is a different
+flow (_run_maintenance_upgrade) and is not covered here.
+
+Workloads stay online throughout -- FIO keeps running across every step.
+
+Preconditions
+-------------
+  * cluster status ACTIVE, every storage node "online"
+  * the operator Helm chart checked out at the target version
+  * BOTH container image tags known (SPDK and SPDK-proxy are separate images)
+
+Steps
+-----
+  1. Upgrade the control plane with Helm:
+
+         helm upgrade --install spdk-csi <chart-path> \
+             --namespace simplyblock \
+             --set image.simplyblock.repository=<repo> \
+             --set image.simplyblock.tag=<target-tag> \
+             --set image.operator.repository=<operator-repo> \
+             --set image.operator.tag=<operator-tag> \
+             --set controlplane.enabled=true \
+             --set operator.enabled=true
+
+     Add --set image.csi.repository=<repo> and --set image.csi.tag=<tag> to
+     override the CSI driver image. NOTE the repository and the tag are
+     SEPARATE settings: passing a bare tag as the repository yields an image
+     like "release-26.3.0:v26.2.6", which fails with "pull access denied"
+     because Docker resolves it as docker.io/library/release-26.3.0.
+
+     Then wait for the control-plane pods to be Ready.
+
+  2. Rolling storage-node restart, ONE NODE AT A TIME.
+
+     Unlike docker there is no suspend/shutdown/deploy sequence -- the
+     operator drives it. New images are set-level fields on the
+     StorageNodeSet, so patch the SET first, then create a StorageNodeOps CR
+     to trigger the restart:
+
+         kubectl patch storagenodesets.storage.simplyblock.io <SET_NAME> \
+             -n simplyblock --type=merge \
+             -p '{"spec":{"spdkImage":"<SPDK_IMAGE>","spdkProxyImage":"<PROXY_IMAGE>"}}'
+
+         # then a StorageNodeOps CR with action=restart, referencing the
+         # StorageNode CR for this node
+
+     For each node, wait in this order before moving to the next:
+       a. the StorageNodeOps CR reaches Succeeded
+       b. all SPDK pods are Ready
+       c. the node reports "online"
+       d. its migration tasks have finished
+
+  3. Activate v2 write protection, then restart every node AGAIN.
+
+     An upgraded cluster's existing distribs stay on v1 write protection --
+     only freshly created clusters start on v2. Run this only once every node
+     is back online: the switch sends the runtime RPC to all online nodes and
+     records v2 only when every one of them accepts it.
+
+         sbctl -d cluster switch-write-protection <CLUSTER_ID>
+
+     then, one node at a time:
+
+         sbctl -d --dev sn restart <NODE_ID> --force
+
+     --force is REQUIRED: the nodes are already online and healthy, so a plain
+     restart is refused as unnecessary. No image flags -- the node is already
+     on the target images. See _switch_write_protection_and_restart.
+
+  4. Post-upgrade validation: all nodes healthy, cluster ACTIVE, pre-upgrade
+     FIO still running and clean, old data checksums intact, new PVC +
+     snapshot + clone provisioning works, node-outage test, final checklist.
+
+Gotchas worth knowing
+---------------------
+  * Two images, not one: spdkImage and spdkProxyImage are different
+    repositories with different tag shapes; neither can be inferred from the
+    other.
+  * Node labels are sticky. io.simplyblock.node-type=simplyblock-storage-plane
+    is what the storage-node DaemonSet selects on, and nothing removes it on
+    teardown unless cleanup walks EVERY node -- a control-plane node left
+    carrying it silently rejoins the storage plane on the next deploy.
 """
 
 from __future__ import annotations
@@ -40,6 +128,18 @@ from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
+
+
+# Selects every node that is NOT a control-plane node.
+#
+# Do not use ``-l node-role.kubernetes.io/worker`` here: Talos does not put a
+# role label on workers at all (verified -- worker-1..4 have no
+# node-role.kubernetes.io/* label, only control-plane does), so that selector
+# matches nothing, exits 0, and silently yields an EMPTY worker list. The
+# previous "|| kubectl get nodes" fallback was worse: it returned every node,
+# control-plane included, which is exactly how a control-plane node can end up
+# in the storage plane.
+_NON_CP_SELECTOR = "node-role.kubernetes.io/control-plane!="
 
 
 def _rand_seq(length: int = 6) -> str:
@@ -628,10 +728,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                            if n.strip()]
         else:
             out, _ = self.k8s_utils._exec_kubectl(
-                "kubectl get nodes -l node-role.kubernetes.io/worker "
-                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
-                "kubectl get nodes --no-headers "
-                "-o custom-columns=NAME:.metadata.name",
+                "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true",
                 supress_logs=True,
             )
             worker_names = [n.strip() for n in (out or "").replace("'", "").split()
@@ -900,10 +998,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                            if n.strip()]
         else:
             out, _ = self.k8s_utils._exec_kubectl(
-                "kubectl get nodes -l node-role.kubernetes.io/worker "
-                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
-                "kubectl get nodes --no-headers "
-                "-o custom-columns=NAME:.metadata.name",
+                "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true",
                 supress_logs=True,
             )
             worker_names = [n.strip() for n in (out or "").replace("'", "").split()
@@ -1389,6 +1485,30 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
 
         # 4.3 — New snapshots + clones on old PVCs
+        #
+        # The CSI controller pod was (re)created during Step 6 of the
+        # maintenance window.  By the time we reach Phase 4.3 the
+        # external-provisioner sidecar's Kubernetes watches may have gone
+        # stale (observed as "Watch close" events followed by zero
+        # provisioning activity).  Bouncing the pod gives it fresh watches
+        # so clone PVC provisioning actually triggers.
+        self.logger.info(
+            "Phase 4.3 prep: Restarting CSI controller pod to refresh "
+            "provisioner watches"
+        )
+        try:
+            self.k8s_utils.delete_pod(
+                "simplyblock-csi-controller-0", wait=True,
+            )
+            self.k8s_utils.wait_pod_ready(
+                "simplyblock-csi-controller", timeout=300,
+            )
+            sleep_n_sec(15)  # let provisioner establish new watches
+        except Exception as exc:
+            self.logger.warning(
+                f"CSI controller restart failed (continuing): {exc}"
+            )
+
         self.logger.info(
             "Post-upgrade Phase 4.3: New snapshots and clones on old PVCs"
         )
@@ -1748,6 +1868,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.logger.info("All storage nodes restarted successfully")
         self.runner_k8s_log.restart_logging()
 
+        # Step 7b/7c: activate v2 write protection, then restart again
+        self._switch_write_protection_and_restart(
+            storage_node_list, label="Step 7b")
+
         # Post-upgrade validation
         self.logger.info("Step 8: Post-upgrade validation")
         self._assert_all_nodes_healthy()
@@ -1941,18 +2065,28 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self.logger.warning(f"Failed to inject keep annotations via helm upgrade: {e}")
             return False
 
-    def _patch_helm_release_keep_annotations(self, release_name: str):
+    def _patch_helm_release_keep_annotations(
+        self, release_name: str, resource_names: set[str] | None = None,
+    ):
         """Patch the Helm release secret to inject resource-policy: keep.
 
         Helm stores release data in secrets named sh.helm.release.v1.<name>.v<N>.
         The data is: base64 → base64 → gzip → JSON. We decode, inject the keep
-        annotation into matching FDB resource manifests, and re-encode.
+        annotation into matching resource manifests, and re-encode.
+
+        *resource_names* overrides the default FDB resource list when provided,
+        allowing this method to be reused for other charts (e.g. spdk-csi
+        StorageClasses).
         """
         if not release_name:
             self.logger.warning("No Helm release name provided, skipping secret patch")
             return
 
-        fdb_resource_names = {name for _, name in _get_keep_resources(release_name)}
+        fdb_resource_names = (
+            resource_names
+            if resource_names is not None
+            else {name for _, name in _get_keep_resources(release_name)}
+        )
 
         # Find the latest Helm release secret
         cmd = (
@@ -2078,6 +2212,29 @@ class K8sNativeMajorUpgrade(TestClusterBase):
     def _uninstall_helm_releases(self):
         """Steps 3-4: Uninstall old Helm charts."""
         if self.helm_release_spdk_csi:
+            # Preserve StorageClasses across helm uninstall so existing
+            # SC references (in PVCs, snapshots, clones) remain valid
+            # after the upgrade.  The new operator chart may create its
+            # own SCs, but we keep the old ones for backward compat.
+            self.logger.info(
+                "Preserving StorageClasses: patching spdk-csi Helm release "
+                "manifest + annotating live resources"
+            )
+            self._patch_helm_release_keep_annotations(
+                self.helm_release_spdk_csi,
+                resource_names={self.STORAGE_CLASS_NAME},
+            )
+            # Belt-and-suspenders: also annotate live resources directly
+            self.k8s_utils._exec_kubectl(
+                f"kubectl annotate storageclass "
+                f"--selector=app.kubernetes.io/instance={self.helm_release_spdk_csi} "
+                f"helm.sh/resource-policy=keep --overwrite 2>/dev/null || true"
+            )
+            self.k8s_utils._exec_kubectl(
+                f"kubectl annotate storageclass {self.STORAGE_CLASS_NAME} "
+                f"helm.sh/resource-policy=keep --overwrite 2>/dev/null || true"
+            )
+
             self.logger.info(
                 f"Migration Step 3: Uninstalling helm release '{self.helm_release_spdk_csi}'"
             )
@@ -2418,6 +2575,48 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.k8s_utils.get_admin_pod(refresh=True)
         self.logger.info("Operator chart installed")
 
+    def _get_vcpu_count(self):
+        """Compute vcpuCount for StorageCluster CR.
+
+        Reads VCPU_COUNT env var if set; otherwise queries the first
+        worker node's CPU count and applies CORE_PERCENTAGE (50% for
+        OpenShift, 30% otherwise).  Falls back to 4 if detection fails.
+        """
+        vcpu_env = os.environ.get("VCPU_COUNT", "").strip()
+        if vcpu_env:
+            self.logger.info(f"Using VCPU_COUNT from env: {vcpu_env}")
+            return int(vcpu_env)
+
+        core_pct = 50 if self.k8s_utils.detect_openshift() else 30
+        try:
+            worker_nodes_env = os.environ.get("WORKER_NODES", "")
+            if worker_nodes_env:
+                first_worker = worker_nodes_env.split(",")[0].strip()
+            else:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                    "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true"
+                )
+                first_worker = (out or "").replace("'", "").strip()
+
+            if first_worker:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get node {first_worker} "
+                    f"-o jsonpath='{{.status.capacity.cpu}}'"
+                )
+                total_cpus = int((out or "").replace("'", "").strip())
+                vcpu = max(6, total_cpus * core_pct // 100)
+                self.logger.info(
+                    f"Computed vcpuCount={vcpu} "
+                    f"({total_cpus} CPUs * {core_pct}%)"
+                )
+                return vcpu
+        except Exception as e:
+            self.logger.warning(f"Failed to detect CPU count: {e}")
+
+        self.logger.warning("Could not determine CPU count, defaulting vcpuCount to 6")
+        return 6
+
     def _apply_custom_resources(self, storage_node_list: list[dict]):
         """Step 7: Apply StorageCluster, Pool, StorageNode CRs."""
         self.logger.info("Migration Step 7: Applying custom resources")
@@ -2449,9 +2648,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         else:
             self.logger.warning("WORKER_NODES env not set, attempting to derive from K8s")
             out, _ = self.k8s_utils._exec_kubectl(
-                "kubectl get nodes -l node-role.kubernetes.io/worker "
-                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
-                "kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name"
+                "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true"
             )
             for node_name in (out or "").replace("'", "").split():
                 node_name = node_name.strip()
@@ -2464,6 +2662,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         mgmt_ifc = os.environ.get("MGMT_IFC", "ens18")
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
+        vcpu_count = self._get_vcpu_count()
+        is_talos = self.k8s_utils.detect_talos()
+        enable_cpu_topo = "false" if is_talos else "true"
+        enable_cpu_topo_skip = "true" if is_talos else "false"
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -2473,9 +2675,7 @@ metadata:
   namespace: {_NAMESPACE}
 spec:
   fabricType: tcp
-  isSingleNode: false
   enableNodeAffinity: true
-  strictNodeAntiAffinity: false
   stripe:
     dataChunks: {self.ndcs}
     parityChunks: {self.npcs}
@@ -2485,6 +2685,8 @@ spec:
   criticalThreshold:
     capacity: 96
     provisionedCapacity: 98
+  maxSubsystemCount: {max_lvol}
+  vcpuCount: {vcpu_count}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -2507,8 +2709,8 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  maxSubsystemCount: {max_lvol}
-  enableCpuTopology: true
+  skipKubeletConfiguration: {enable_cpu_topo_skip}
+  enableCpuTopology: {enable_cpu_topo}
   workerNodes:
 {worker_yaml}"""
 
@@ -2516,20 +2718,34 @@ spec:
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
         self.logger.info(f"CRs applied (stdout): {out}")
         if err and err.strip():
-            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+            # Fail fast if critical CRs were rejected by the API server
+            err_stripped = err.strip()
+            if any(kw in err_stripped for kw in (
+                "BadRequest", "strict decoding error", "NotFound",
+                "could not find the requested resource",
+                "is invalid", "Required value",
+            )):
+                raise RuntimeError(
+                    f"CRs rejected by API server: {err_stripped}"
+                )
+            self.logger.warning(f"CRs apply stderr: {err_stripped}")
         # Verify critical CRs were actually created — fail early instead
         # of discovering a missing CR much later during node restart.
         for cr_kind, cr_name in [
             ("storagecluster", self.cluster_cr_name),
+            ("storagepool", self.pool_cr_name),
             ("storagenodeset", self.node_cr_name),
         ]:
-            chk_out, _ = self.k8s_utils._exec_kubectl(
+            chk_out, chk_err = self.k8s_utils._exec_kubectl(
                 f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
-                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+                f"-o jsonpath='{{.metadata.name}}'"
             )
-            if cr_name not in (chk_out or ""):
+            not_found = "not found" in (chk_err or "").lower()
+            no_resource = "could not find the requested resource" in (chk_err or "").lower()
+            if not_found or no_resource or cr_name not in (chk_out or ""):
                 raise RuntimeError(
                     f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl get stderr: {chk_err}, "
                     f"kubectl apply stderr: {err}"
                 )
             self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")
@@ -2710,6 +2926,80 @@ spec:
 
         self.logger.info("All storage nodes restarted successfully")
 
+    def _switch_write_protection_and_restart(self, storage_node_list,
+                                             label="Post-upgrade"):
+        """Activate v2 distrib write protection cluster-wide, then restart
+        every storage node again with ``--force``.
+
+        An upgraded cluster's existing distribs stay on **v1** write
+        protection -- only freshly created clusters start on v2. ``sbctl
+        cluster switch-write-protection`` sends the runtime RPC to every
+        online node and records v2 only once they all accept it, so it has to
+        run after the upgrade and after every node is back online. The second
+        round of restarts then verifies the v2 generation was persisted and
+        that nodes come back cleanly under it.
+
+        ``--force`` is required on this second restart: the nodes are already
+        online and healthy, so a plain restart is refused as unnecessary.
+
+        Mirrors TEMP Step 11b/11c in the docker upgrade
+        (``e2e_tests/upgrade_tests/major_upgrade.py``).
+        """
+        sbcli = "sbctl"
+        self.logger.info(
+            f"{label} Step A: sbctl cluster switch-write-protection "
+            f"{self.cluster_id}"
+        )
+        out, err = self.k8s_utils.exec_sbcli(
+            f"{sbcli} -d cluster switch-write-protection {self.cluster_id}"
+        )
+        blob = f"{out or ''}{err or ''}"
+        assert "Error" not in blob and "Traceback" not in blob, (
+            f"switch-write-protection failed: out={out!r} err={err!r}"
+        )
+        self.logger.info(f"  switch-write-protection: {(out or '').strip()}")
+        sleep_n_sec(30)
+
+        self.logger.info(
+            f"{label} Step B: restarting all {len(storage_node_list)} storage "
+            f"nodes again post-switch (--force)"
+        )
+        for idx, node in enumerate(storage_node_list):
+            node_id = node["id"]
+            self.logger.info(
+                f"  Post-switch restart of node {node_id} "
+                f"({idx + 1}/{len(storage_node_list)})"
+            )
+            restart_ts = int(datetime.now().timestamp()) - 120
+
+            self.k8s_utils.exec_sbcli(
+                f"{sbcli} -d --dev sn restart {node_id} --force"
+            )
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_id=node_id, status="online", timeout=1000,
+            )
+            self.k8s_utils.wait_spdk_pods_ready(
+                expected_count=len(storage_node_list), timeout=600,
+            )
+            self.logger.info(f"  Node {node_id} back online post-switch")
+
+            try:
+                self.validate_migration_for_node(
+                    restart_ts, 1800, None, 60, no_task_ok=True
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"  Post-switch migration validation for {node_id}: {exc}"
+                )
+
+            if idx < len(storage_node_list) - 1:
+                sleep_n_sec(30)
+
+        self.logger.info(
+            f"{label}: write-protection switched to v2 and all nodes "
+            f"restarted successfully"
+        )
+
     def _run_maintenance_upgrade(self, storage_node_list: list[dict]):
         """Full R25→R26 maintenance window upgrade path."""
         self.logger.info(
@@ -2883,6 +3173,11 @@ spec:
                 node_id=node["id"], status="online", timeout=600,
             )
 
+        # Step 10b/10c: activate v2 write protection cluster-wide, then
+        # restart every node again to verify it persists.
+        self._switch_write_protection_and_restart(
+            storage_node_list, label="Step 10b")
+
         # ── End maintenance window ──
         self.logger.info("=" * 40 + " MAINTENANCE WINDOW END " + "=" * 40)
 
@@ -3017,10 +3312,8 @@ class K8sNativeMajorUpgradeDualNode(K8sNativeMajorUpgrade):
                 "WORKER_NODES env not set, attempting to derive from K8s"
             )
             out, _ = self.k8s_utils._exec_kubectl(
-                "kubectl get nodes -l node-role.kubernetes.io/worker "
-                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
-                "kubectl get nodes --no-headers "
-                "-o custom-columns=NAME:.metadata.name"
+                "kubectl get nodes -l " + _NON_CP_SELECTOR + " "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true"
             )
             for node_name in (out or "").replace("'", "").split():
                 node_name = node_name.strip()
@@ -3033,6 +3326,10 @@ class K8sNativeMajorUpgradeDualNode(K8sNativeMajorUpgrade):
         mgmt_ifc = os.environ.get("MGMT_IFC", "ens18")
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
+        vcpu_count = self._get_vcpu_count()
+        is_talos = self.k8s_utils.detect_talos()
+        enable_cpu_topo = "false" if is_talos else "true"
+        enable_cpu_topo_skip = "true" if is_talos else "false"
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -3042,9 +3339,7 @@ metadata:
   namespace: {_NAMESPACE}
 spec:
   fabricType: tcp
-  isSingleNode: false
   enableNodeAffinity: true
-  strictNodeAntiAffinity: false
   stripe:
     dataChunks: {self.ndcs}
     parityChunks: {self.npcs}
@@ -3054,6 +3349,8 @@ spec:
   criticalThreshold:
     capacity: 96
     provisionedCapacity: 98
+  maxSubsystemCount: {max_lvol}
+  vcpuCount: {vcpu_count}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -3076,8 +3373,8 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  maxSubsystemCount: {max_lvol}
-  enableCpuTopology: true
+  skipKubeletConfiguration: {enable_cpu_topo_skip}
+  enableCpuTopology: {enable_cpu_topo}
   nodesPerSocket: {self.nodes_per_socket}
   workerNodes:
 {worker_yaml}"""
@@ -3086,18 +3383,31 @@ spec:
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
         self.logger.info(f"CRs applied (stdout): {out}")
         if err and err.strip():
-            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+            err_stripped = err.strip()
+            if any(kw in err_stripped for kw in (
+                "BadRequest", "strict decoding error", "NotFound",
+                "could not find the requested resource",
+                "is invalid", "Required value",
+            )):
+                raise RuntimeError(
+                    f"CRs rejected by API server: {err_stripped}"
+                )
+            self.logger.warning(f"CRs apply stderr: {err_stripped}")
         for cr_kind, cr_name in [
             ("storagecluster", self.cluster_cr_name),
+            ("storagepool", self.pool_cr_name),
             ("storagenodeset", self.node_cr_name),
         ]:
-            chk_out, _ = self.k8s_utils._exec_kubectl(
+            chk_out, chk_err = self.k8s_utils._exec_kubectl(
                 f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
-                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+                f"-o jsonpath='{{.metadata.name}}'"
             )
-            if cr_name not in (chk_out or ""):
+            not_found = "not found" in (chk_err or "").lower()
+            no_resource = "could not find the requested resource" in (chk_err or "").lower()
+            if not_found or no_resource or cr_name not in (chk_out or ""):
                 raise RuntimeError(
                     f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl get stderr: {chk_err}, "
                     f"kubectl apply stderr: {err}"
                 )
             self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")

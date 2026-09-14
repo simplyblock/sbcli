@@ -2,13 +2,14 @@ from utils.common_utils import sleep_n_sec
 from datetime import datetime
 from collections import defaultdict
 from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
-from exceptions.custom_exception import LvolNotConnectException
+from exceptions.custom_exception import LvolNotConnectException, NodeUnreachableTimeout
 import threading
 import string
 import random
 import os
 import re
 import time
+from utils.ssh_utils import get_parent_device
 
 
 generated_sequences = set()
@@ -71,6 +72,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.spdk_mem_thread = None
         self.blocked_ports = None
         self.dump_validation_errors = []
+        # Namespaced (shared-subsystem) volume bookkeeping.
+        self.parent_to_children = {}      # parent lvol name -> [child names]
+        self._nqn_to_parent = {}          # subsystem nqn -> parent lvol name
+        self.NAMESPACED_PARENTS = 4       # about a quarter of the standing set
+        self.CHILDREN_PER_PARENT = 2
+        self._namespaced_seeded = False   # children are seeded once, at bootstrap
         self.multipath_outage_types = ["container_stop", "graceful_shutdown"]
         self.multipath_nic_disabled = False
         self.multipath_disconnected_nics = []  # [(mgmt_ip, iface, nic_ip), ...]
@@ -240,6 +247,211 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.multipath_disconnected_nics = []
         self.multipath_nic_disabled = False
 
+    # ── namespaced (shared-subsystem) volumes ────────────────────────────────
+    #
+    # NOTE: RandomRapidFailoverNoGapV2WithMigration
+    # (continuous_failover_ha_multi_client_quick_outage.py) has its own copy of
+    # this logic for its own bootstrap. Keep the three guards below identical in
+    # both: refuse a falsy/1 ns_id, refuse an already-claimed device, and
+    # attribute a child to the NQN it actually joined.
+
+    def _resolve_device_by_ns(self, client, lvol_id, lvol_name, retries=4, delay=3,
+                              min_ns_id=1):
+        """Resolve an lvol's block device by (NQN, ns_id) on *client*.
+
+        Used when a volume shares a subsystem, so the usual before/after device
+        diff finds nothing new. Bounded retry rather than one attempt plus a
+        fixed sleep, because the child only appears once the controller rescan
+        has landed.
+
+        *min_ns_id* only rejects a missing or non-positive NSID. It deliberately
+        does NOT reject 1 for a child: NSIDs are **recycled**, so once the volume
+        that held NSID 1 in a subsystem is deleted, the next child or clone to
+        join can legitimately be given NSID 1. That recycling is the defect
+        behind `n_plus_k_failover_multi_client_ha_all_nodes-20260907-090440`
+        ("IDs don't match for shared namespace N"), so refusing NSID 1 here would
+        both skip a valid volume and hide the case we most want to exercise.
+
+        The real protection is the claimed-device check below, which is correct
+        either way: if the previous NSID-1 holder is gone its device is no longer
+        registered and we proceed; if it is still live we refuse, because
+        resolving would hand back its device and the caller formats what it gets.
+        """
+        try:
+            details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)[0]
+        except Exception as exc:
+            self.logger.warning(f"[namespace] no details for {lvol_name}: {exc}")
+            return None, None
+        nqn, ns_id = details.get("nqn"), details.get("ns_id")
+
+        # Resolving without a usable NSID falls back to "any head on this NQN",
+        # which on a shared subsystem is very likely a sibling's device -- and
+        # the caller's next step is mkfs. ns_id 1 is the subsystem's first
+        # volume, never a child.
+        if not isinstance(ns_id, int) or ns_id < min_ns_id:
+            self.logger.warning(
+                f"[namespace] {lvol_name} reports ns_id={ns_id!r}, not a usable NSID "
+                f"(minimum {min_ns_id}); refusing to resolve its device"
+            )
+            return None, None
+
+        # A child is pinned to the parent's NODE, but the backend groups it into
+        # any subsystem on that node with free slots -- which may belong to a
+        # different lvol that is connected on a different client. So try the
+        # parent's client first and then every other one, the same way the clone
+        # path scans all clients. Returns (device, client).
+        others = [c for c in (self.fio_node or []) if c != client]
+        for attempt in range(retries):
+            for cand in [client] + others:
+                self.ssh_obj.rescan_live_nvme_controllers(cand)
+                device = self.ssh_obj.get_nvme_device_for_nqn(cand, nqn, ns_id=ns_id)
+                if not device:
+                    continue
+                if device in self._claimed_devices():
+                    self.logger.warning(
+                        f"[namespace] resolved {device} for {lvol_name} on {cand}, but "
+                        f"that device is already in use; refusing it"
+                    )
+                    return None, None
+                if cand != client:
+                    self.logger.info(
+                        f"[namespace] {lvol_name} surfaced on {cand}, not the parent's "
+                        f"client {client}; its subsystem is held there"
+                    )
+                self.logger.info(
+                    f"[namespace] {lvol_name} nsid={ns_id} -> {device} on {cand} "
+                    f"(nqn {nqn[-24:]})")
+                return device, cand
+            if attempt < retries - 1:
+                sleep_n_sec(delay)
+        self.logger.warning(
+            f"[namespace] no device surfaced for {lvol_name} "
+            f"(nqn={nqn} nsid={ns_id}) on any client after {retries} rescans")
+        return None, None
+
+    def _claimed_devices(self):
+        """Every block device already registered to a volume or clone."""
+        claimed = {d.get("Device") for d in self.lvol_mount_details.values()}
+        claimed |= {d.get("Device") for d in self.clone_mount_details.values()}
+        return {c for c in claimed if c}
+
+    def _create_namespaced_children(self, parent_names, children_per_parent=2):
+        """Add child lvols into the subsystems of already-mounted parents.
+
+        Every lvol this suite creates carries max_namespace_per_subsys=30, so a
+        parent already has free namespace slots -- no new parent is needed. The
+        child joins the parent's existing subsystem and therefore must NOT be
+        `nvme connect`-ed: it has no controller of its own. It is surfaced with a
+        controller rescan and located by (NQN, ns_id).
+        """
+        created = 0
+        for parent in parent_names:
+            pdet = self.lvol_mount_details.get(parent)
+            if not pdet or not pdet.get("Device"):
+                self.logger.warning(f"[namespace] parent {parent} not mounted; skipping")
+                continue
+            if pdet.get("sec_type") == "dhchap":
+                # create_sec_lvol has no --namespaced flag, so a DHCHAP child
+                # cannot be created through the CLI path at all.
+                self.logger.info(f"[namespace] {parent} is dhchap; cannot take children")
+                continue
+
+            client = pdet["Client"]
+            fs_type = pdet["FS"]
+            try:
+                pd = self.sbcli_utils.get_lvol_details(lvol_id=pdet["ID"])[0]
+            except Exception as exc:
+                self.logger.warning(f"[namespace] no details for parent {parent}: {exc}")
+                continue
+            parent_nqn, parent_node = pd.get("nqn"), pd.get("node_id")
+            ctrl_dev = get_parent_device(pdet["Device"])
+
+            pdet["is_parent"] = True
+            pdet["ctrl_dev"] = ctrl_dev
+            self.parent_to_children.setdefault(parent, [])
+            self._nqn_to_parent[parent_nqn] = parent
+            self.logger.info(
+                f"[namespace] {parent} nqn={parent_nqn[-24:]} ctrl={ctrl_dev} "
+                f"client={client}; adding {children_per_parent} child(ren)")
+
+            for idx in range(children_per_parent):
+                child = f"{parent}_ns{idx + 2}"
+                try:
+                    self.sbcli_utils.add_lvol(
+                        lvol_name=child,
+                        pool_name=self.pool_name,
+                        size=self.lvol_size,
+                        # Pin to the parent's node: a subsystem is per-node, so
+                        # an unpinned child can land elsewhere and open its own.
+                        host_id=parent_node,
+                        namespace=True,
+                    )
+                    child_id = self.sbcli_utils.get_lvol_id(child)
+                except Exception as exc:
+                    self.logger.warning(f"[namespace] child create failed ({child}): {exc}")
+                    continue
+                if not child_id:
+                    self.logger.warning(f"[namespace] {child} created but no id resolved")
+                    continue
+
+                cdet = self.sbcli_utils.get_lvol_details(lvol_id=child_id)[0]
+                child_nqn = cdet.get("nqn")
+                if child_nqn != parent_nqn:
+                    # `namespace=` is truthiness-only in add_lvol: the backend
+                    # picks any subsystem with room, so a child can join an
+                    # earlier parent. Record where it actually landed.
+                    self.logger.warning(
+                        f"[namespace] {child} joined {child_nqn} rather than "
+                        f"{parent}'s subsystem")
+
+                # No min_ns_id: a child can hold NSID 1 after recycling.
+                device, child_client = self._resolve_device_by_ns(
+                    client, child_id, child)
+                if not device:
+                    continue
+
+                log_file = f"{self.log_path}/{child}.log"
+                self.lvol_mount_details[child] = {
+                    "ID": child_id,
+                    "Command": None,        # children are never connected
+                    "Mount": None,
+                    "Device": device,
+                    "MD5": None,
+                    "FS": fs_type,
+                    "Log": log_file,
+                    "snapshots": [],
+                    "sec_type": pdet.get("sec_type"),
+                    "host_nqn": pdet.get("host_nqn"),
+                    "Client": child_client,
+                    "iolog_base_path": f"{self.log_path}/{child}_fio_iolog",
+                    "is_parent": False,
+                    "parent": self._nqn_to_parent.get(child_nqn, parent),
+                    "ctrl_dev": ctrl_dev,
+                }
+                self._assert_device_unclaimed(child_client, device, child,
+                                              expected_ns_id=cdet.get("ns_id"))
+                self.ssh_obj.format_disk(node=child_client, device=device, fs_type=fs_type)
+                mount_point = f"{self.mount_path}/{child}"
+                self.ssh_obj.mount_path(node=child_client, device=device, mount_path=mount_point)
+                if not self.ssh_obj.is_mountpoint(child_client, mount_point):
+                    self.logger.warning(f"[namespace] {child} failed to mount; no FIO")
+                    self.lvol_mount_details[child]["Mount"] = None
+                    continue
+                self.lvol_mount_details[child]["Mount"] = mount_point
+                self.ssh_obj.delete_files(child_client, [
+                    f"{mount_point}/*fio*",
+                    f"{self.log_path}/local-{child}_fio*",
+                    f"{self.log_path}/{child}_fio_iolog*",
+                ])
+                owner = self._nqn_to_parent.get(child_nqn, parent)
+                self.parent_to_children.setdefault(owner, []).append(child)
+                created += 1
+
+        self.logger.info(
+            f"[namespace] created {created} child namespace(s); "
+            f"topology: {self.parent_to_children}")
+        return created
+
     def perform_n_plus_k_outages(self):
         """
         Select K outage nodes such that no two are in a primary/secondary
@@ -305,6 +517,10 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             node_rpc_port = node_details[0]["rpc_port"]
 
             self.logger.info(f"Performing {outage_type} on primary node {node}.")
+
+            # About to make this node unreachable on purpose: reset its SSH
+            # unreachable clock so a planned outage cannot trip the 2h rule.
+            self.ssh_obj.notify_outage_started([node_ip])
 
             node_outage_dur = 0
             effective_type = outage_type
@@ -453,13 +669,26 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                             sleep_n_sec(10)
 
                         sleep_n_sec(10)
-                        self.disconnect_lvol(clone_details['ID'])
+                        # Capture the subsystem identity BEFORE the delete: once
+                        # the record is gone the NQN and ns_id cannot be read.
+                        _cd = self.sbcli_utils.get_lvol_details(lvol_id=clone_details['ID'])
+                        _nqn = _cd[0].get("nqn") if _cd else None
+                        _nsid = _cd[0].get("ns_id") if _cd else None
+                        # Unmount BEFORE disconnect. The old order disconnected
+                        # first, which yanks the block device out from under a
+                        # mounted filesystem whenever the subsystem holds only
+                        # this one namespace (the case where the disconnect is
+                        # not skipped). Unmounting first also drops the fs
+                        # reference so the kernel can free the ns_head later.
                         self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
+                        self.disconnect_lvol(clone_details['ID'])
                         self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
                         deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=120, skip_error=True)
                         if not deleted:
                             self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         sleep_n_sec(30)
+                        self._cleanup_client_namespace(
+                            clone_details["Client"], _nqn, _nsid, clone_name)
                         if clone_name in self.lvols_without_sec_connect:
                             self.lvols_without_sec_connect.remove(clone_name)
                         to_delete.append(clone_name)
@@ -500,18 +729,44 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                         f"FIO still running on lvol '{lvol}' after 5 min; "
                         f"disconnecting lvol to force exit (remaining pids: {fio_pids})."
                     )
-                    self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
+                    if self._is_namespaced_lvol(lvol):
+                        # Disconnecting would drop the whole subsystem and take
+                        # every sibling namespace with it.
+                        self.logger.warning(
+                            f"[namespace] not disconnecting {lvol} to force FIO exit; "
+                            f"it shares a subsystem"
+                        )
+                    else:
+                        self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
                     break
                 attempt += 1
                 sleep_n_sec(10)
 
             sleep_n_sec(10)
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
-            self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
-            self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
+            # Read the subsystem identity before the record disappears.
+            _ld = self.sbcli_utils.get_lvol_details(
+                lvol_id=self.lvol_mount_details[lvol]['ID'])
+            _nqn = _ld[0].get("nqn") if _ld else None
+            _nsid = _ld[0].get("ns_id") if _ld else None
+            _client = self.lvol_mount_details[lvol]["Client"]
+            # Unmount before disconnect; see _cleanup_client_namespace.
+            self.ssh_obj.unmount_path(_client, f"/mnt/{lvol}")
+            # A namespaced lvol shares its controller, so disconnecting here
+            # would tear down its siblings. The namespace itself is cleaned up
+            # below by _cleanup_client_namespace, and the controller only goes
+            # once it holds nothing else.
+            if self._is_namespaced_lvol(lvol):
+                self.logger.info(
+                    f"[namespace] skipping disconnect for {lvol}; siblings share "
+                    f"its subsystem"
+                )
+            else:
+                self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
+            self.ssh_obj.remove_dir(_client, dir_path=f"/mnt/{lvol}")
             deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=120, skip_error=True)
             if not deleted:
                 self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
+            self._cleanup_client_namespace(_client, _nqn, _nsid, lvol)
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])
@@ -524,6 +779,41 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     lvols.remove(lvol)
                     break
         sleep_n_sec(60)
+
+    def _cleanup_client_namespace(self, client, nqn, ns_id, obj_name):
+        """Make the client forget a namespace after its volume was deleted.
+
+        Nothing else does this. ``safe_disconnect_nvme`` deliberately SKIPS a
+        shared subsystem (disconnecting it would tear down every sibling lvol on
+        that NQN), and the server-side DELETE only removes the namespace from the
+        target, so on the namespaced-clone path there is no client-side step at
+        all and the kernel keeps its ns_head for that NSID.
+
+        That residue is what made
+        n_plus_k_failover_multi_client_ha_all_nodes-20260907-090440 fail: NSID 2
+        of one subsystem was freed at 17:42:41, reissued to a different volume at
+        17:55:24 with a different uuid/nguid, and the client refused it with
+        "IDs don't match for shared namespace 2", leaving a volume the control
+        plane called `online` with no block device anywhere.
+
+        A lingering namespace is WARNED about, not swallowed: it is the visible
+        symptom of the NSID-reuse defect, so silently cleaning up would hide the
+        bug. It also cannot be fixed client-side when a peer still advertises a
+        conflicting identity for that NSID.
+        """
+        if not client or not nqn:
+            return
+        try:
+            if not self.ssh_obj.rescan_and_verify_ns_gone(client, nqn, ns_id=ns_id):
+                self.logger.warning(
+                    f"[ns_cleanup] {obj_name}: namespace ns_id={ns_id} of {nqn} "
+                    f"still present on {client} after delete + rescan. If this "
+                    f"NSID is reused the client will reject the new volume."
+                )
+        except Exception as exc:
+            self.logger.warning(
+                f"[ns_cleanup] {obj_name}: namespace cleanup on {client} "
+                f"failed: {exc}")
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage, avoiding lvols on outage nodes."""
@@ -559,6 +849,21 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                         raise Exception(output)
                     if "(False," in error:
                         raise Exception(error)
+                    # The CLI declines snapshot creation while a node is
+                    # restarting, and says so plainly. add_snapshot already
+                    # retried the transient case; if it is still refused the
+                    # cluster is busy for longer than we are willing to wait.
+                    # Skip this cycle rather than register a snapshot that does
+                    # not exist and then clone from an empty id -- which is what
+                    # burned 24 minutes and failed the run in
+                    # n_plus_k_failover_multi_client_ha_all_nodes-20260912-084155.
+                    if self.ssh_obj._cli_refused(output, error):
+                        self.logger.warning(
+                            f"[create_snapshots] {snapshot_name} refused by the "
+                            f"CLI; skipping this snapshot/clone cycle: "
+                            f"{(output or error).strip()[:160]}"
+                        )
+                        continue
             except Exception as e:
                 self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
                 try:
@@ -583,6 +888,17 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 snapshot_id = self.sbcli_utils.get_snapshot_id(snapshot_name)
             else:
                 snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
+
+            # No id means the snapshot never materialised. Cloning from it emits
+            # `snapshot clone  <name>`, which the CLI can only answer with its
+            # usage text, and the retry loop below would repeat that five times
+            # before failing the run for the wrong reason.
+            if not (snapshot_id or "").strip():
+                self.logger.warning(
+                    f"[create_snapshots] {snapshot_name} has no id after "
+                    f"creation; skipping its clone this cycle"
+                )
+                continue
 
             clone_name = f"clone_{generate_random_sequence(15)}"
             if clone_name in list(self.clone_mount_details):
@@ -673,12 +989,34 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                           command=f"{self.base_cmd} lvol list")
 
-            # Get clone's NS ID to decide connect vs rescan.
-            # NS ID == 1: clone got a NEW subsystem → need nvme connect
-            # NS ID > 1: clone joined an existing subsystem → just rescan
+            # Decide connect vs rescan.
+            #
+            # NS ID alone is NOT a reliable discriminator. A clone can report
+            # ns_id == 1 while its subsystem NQN names a DIFFERENT lvol, i.e.
+            # it is namespace 1 of a subsystem the host is already attached to.
+            # That is exactly what happened in
+            # n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656:
+            #   'lvol_name': 'clone_B289OXX3BQG5C2C'
+            #   'uuid':      '12381b49-c5f8-4508-9dd5-a847f5596911'
+            #   'nqn':       '...:lvol:4d0c3986-f19e-4615-ac3d-327793bf7422'
+            #   'ns_id': 1, 'max_namespace_per_subsys': 30
+            # With up to 30 namespaces per subsystem this is normal placement,
+            # so we compare the NQN against the clone's own id first and only
+            # fall back to ns_id when the NQN is unavailable.
             clone_id = self.clone_mount_details[clone_name]["ID"]
             clone_details = self.sbcli_utils.get_lvol_details(lvol_id=clone_id)
             clone_ns_id = clone_details[0].get("ns_id", 1) if clone_details else 1
+            reported_nqn = clone_details[0].get("nqn") if clone_details else None
+            shares_subsystem = bool(
+                reported_nqn and clone_id and clone_id not in reported_nqn
+            )
+            if shares_subsystem:
+                self.logger.info(
+                    f"[clone_connect] {clone_name} (id={clone_id}) reports "
+                    f"ns_id={clone_ns_id} but its subsystem NQN belongs to "
+                    f"another lvol ({reported_nqn}); treating as an EXISTING "
+                    f"subsystem and rescanning instead of connecting"
+                )
 
             # Fetch connect string — needed for NQN extraction and
             # stored in clone_mount_details for teardown/disconnect.
@@ -709,80 +1047,112 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
             lvol_device = None
 
-            if clone_ns_id == 1:
-                # ── NS ID 1: new subsystem — need nvme connect ──────
-                self.logger.info(
-                    f"[clone_connect] {clone_name} has NS ID 1 (new "
-                    f"subsystem); running nvme connect on {client}"
+            # ── Always connect, then rescan. Do not branch on ns_id. ──
+            #
+            # The old code ran nvme connect only when
+            # `ns_id == 1 and not shares_subsystem`, and otherwise only
+            # rescanned. Both halves of that guess are unreliable:
+            #
+            #   * ns_id == 1 does NOT prove a fresh subsystem. NSIDs are
+            #     recycled: when the lvol holding nsid 1 is deleted, the next
+            #     volume placed in that subsystem can be handed nsid 1 while
+            #     the subsystem still belongs to another lvol. Seen as
+            #     clone_B289OXX3BQG5C2C in
+            #     n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656:
+            #       'uuid': '12381b49-...', 'nqn': '...:lvol:4d0c3986-...',
+            #       'ns_id': 1
+            #   * a foreign NQN does NOT prove the host is already connected.
+            #     The clone can be namespaced into a subsystem this client has
+            #     never attached.
+            #
+            # Guessing "already connected" when it is not means the connect is
+            # never issued, there is no controller to rescan, and the volume
+            # can never attach — a test failure indistinguishable from the
+            # product bug this is meant to detect.
+            #
+            # Doing both is safe and cheap: `nvme connect` on a subsystem+path
+            # already up returns "already connected", which nvme_connect_ok()
+            # classifies as success, and `nvme ns-rescan` on a live controller
+            # is a no-op when nothing changed.
+            self.logger.info(
+                f"[clone_connect] {clone_name} ns_id={clone_ns_id} "
+                f"shares_subsystem={shares_subsystem}; connecting then "
+                f"rescanning on {client}"
+            )
+            for connect_str in connect_ls:
+                _, error = self.ssh_obj.exec_command(
+                    node=client, command=connect_str
                 )
-                for connect_str in connect_ls:
-                    _, error = self.ssh_obj.exec_command(
-                        node=client, command=connect_str
+                if not self.nvme_connect_ok(error):
+                    self.record_failed_nvme_connect(
+                        clone_name, connect_str, client=client, error=error
                     )
-                    if error:
-                        self.record_failed_nvme_connect(
-                            clone_name, connect_str, client=client
-                        )
+                elif error:
+                    # "already connected": the path is up. No NEW device will
+                    # show in the diff below; the NQN + ns_id lookup at Step 2
+                    # resolves it.
+                    self.logger.info(
+                        f"[clone_connect] {clone_name}: {error.strip()}"
+                        f" — path already up, not a failure"
+                    )
 
-                # Check ALL clients for the new device
-                sleep_n_sec(3)
-                for chk_client in all_clients:
-                    chk_devs = set(self.ssh_obj.get_devices(node=chk_client))
-                    new_devs = list(
-                        chk_devs - initial_devices_per_client[chk_client]
-                    )
-                    if new_devs:
-                        lvol_device = f"/dev/{new_devs[0].strip()}"
-                        if chk_client != client:
-                            self.logger.info(
-                                f"[clone_connect] {clone_name} appeared on "
-                                f"{chk_client} after connect (not {client})"
-                            )
-                            client = chk_client
-                            self.clone_mount_details[clone_name]["Client"] = client
-                        self.logger.info(
-                            f"[clone_connect] Located {clone_name} device "
-                            f"after nvme connect: {lvol_device}"
-                        )
-                        break
-            else:
-                # ── NS ID > 1: existing subsystem — just rescan ─────
+            # Rescan live controllers on ALL clients — a namespaced clone can
+            # land on any lvol's subsystem, so it may surface on a different
+            # client than the one we connected from.
+            sleep_n_sec(3)
+            for chk_client in all_clients:
+                self.ssh_obj.rescan_live_nvme_controllers(chk_client)
+            sleep_n_sec(3)
+
+            # Step 1: device diff.
+            #
+            # ONLY trustworthy when the clone owns its subsystem. Connecting a
+            # SHARED subsystem for the first time attaches every namespace in it
+            # at once, so the diff holds one device per sibling lvol and
+            # new_devs[0] is whichever the kernel enumerated first. That is how
+            # n_plus_k_failover_multi_client_ha_all_nodes-20260911-162931
+            # corrupted data: clone_E7CWM54D1MMCB4Q (ns_id=2) resolved to
+            # /dev/nvme76n1, NSID 1, which is its parent crlvlATZOONSXI89TBVR_0
+            # already mounted and under FIO on the other client. Two hosts then
+            # ran XFS on the same namespace and fio's md5 verify caught it ten
+            # minutes later. The very next step here is mkfs + mount, so a wrong
+            # pick is destructive, not merely wrong.
+            #
+            # When the subsystem is shared we skip the diff entirely and let the
+            # (NQN, ns_id) lookup below do it, which is exact.
+            trust_device_diff = not (shares_subsystem and clone_nqn and clone_ns_id)
+            if not trust_device_diff:
                 self.logger.info(
-                    f"[clone_connect] {clone_name} has NS ID {clone_ns_id} "
-                    f"(existing subsystem); rescanning live controllers"
+                    f"[clone_connect] {clone_name} is on a shared subsystem; "
+                    f"skipping the device diff and resolving by "
+                    f"(NQN, ns_id={clone_ns_id}) instead"
                 )
-                # Rescan live controllers on ALL clients — the clone
-                # can land on any lvol's subsystem, so it may appear
-                # on a different client than the parent's.
-                sleep_n_sec(3)
-                for chk_client in all_clients:
-                    self.ssh_obj.rescan_live_nvme_controllers(chk_client)
-                sleep_n_sec(3)
-                for chk_client in all_clients:
-                    chk_devs = set(self.ssh_obj.get_devices(node=chk_client))
-                    new_devs = list(
-                        chk_devs - initial_devices_per_client[chk_client]
-                    )
-                    if new_devs:
-                        lvol_device = f"/dev/{new_devs[0].strip()}"
-                        if chk_client != client:
-                            self.logger.info(
-                                f"[clone_connect] {clone_name} appeared on "
-                                f"{chk_client} after rescan (not {client})"
-                            )
-                            client = chk_client
-                            self.clone_mount_details[clone_name]["Client"] = client
+
+            for chk_client in all_clients if trust_device_diff else []:
+                chk_devs = set(self.ssh_obj.get_devices(node=chk_client))
+                new_devs = list(
+                    chk_devs - initial_devices_per_client[chk_client]
+                )
+                if new_devs:
+                    lvol_device = f"/dev/{new_devs[0].strip()}"
+                    if chk_client != client:
                         self.logger.info(
-                            f"[clone_connect] Located {clone_name} device "
-                            f"after live-controller rescan: {lvol_device}"
+                            f"[clone_connect] {clone_name} appeared on "
+                            f"{chk_client} (not {client})"
                         )
-                        break
+                        client = chk_client
+                        self.clone_mount_details[clone_name]["Client"] = client
+                    self.logger.info(
+                        f"[clone_connect] Located {clone_name} device after "
+                        f"connect + rescan: {lvol_device}"
+                    )
+                    break
 
             # Step 2: Still nothing — NQN-based lookup on all clients
             if not lvol_device and clone_nqn:
                 for chk_client in all_clients:
                     found_dev = self.ssh_obj.get_nvme_device_for_nqn(
-                        chk_client, clone_nqn
+                        chk_client, clone_nqn, ns_id=clone_ns_id
                     )
                     if found_dev and self.ssh_obj.is_block_device(
                         chk_client, found_dev
@@ -807,6 +1177,15 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     f"after rescan + NQN lookup"
                 )
 
+            # Last line of defence before mkfs. Whatever path resolved the
+            # device, refuse it if it is not the namespace we asked for, or if
+            # another volume in this run already holds it. Formatting a sibling
+            # namespace destroys live data on a volume another client is writing
+            # (see the shared-subsystem note on Step 1), and that is not
+            # recoverable, so this fails the clone rather than guessing.
+            self._assert_device_unclaimed(client, lvol_device, clone_name,
+                                          expected_ns_id=clone_ns_id)
+
             # Step 3: Verify the block device actually exists and is
             # reachable.  During failovers the kernel may register a
             # namespace briefly then remove it when the primary
@@ -827,7 +1206,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     alt_device = None
                     if clone_nqn:
                         alt_device = self.ssh_obj.get_nvme_device_for_nqn(
-                            client, clone_nqn
+                            client, clone_nqn, ns_id=clone_ns_id
                         )
                     if alt_device and self.ssh_obj.is_block_device(
                         client, alt_device
@@ -1017,6 +1396,21 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     f"Placement dump validation failed: {self.dump_validation_errors}"
                 )
 
+            # A node that never came back. exec_command raises this itself when
+            # it is the one talking to the dead node, but nothing guarantees we
+            # keep issuing commands against it — so poll here too, where the
+            # loop is guaranteed to run. Same idiom as dump_validation_errors.
+            unreachable = self.ssh_obj.get_unreachable_nodes()
+            if unreachable:
+                detail = "; ".join(
+                    f"{ip} down {secs/3600:.2f}h ({fails} failed cmds, last: {err})"
+                    for ip, secs, fails, err in unreachable
+                )
+                raise NodeUnreachableTimeout(
+                    f"{len(unreachable)} node(s) SSH-unreachable past the "
+                    f"threshold: {detail}"
+                )
+
             if iteration > 1:
                 self._compute_fio_size()
                 self.restart_fio(iteration=iteration)
@@ -1087,12 +1481,24 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     # Connect failed after outage — no FIO was started; skip validation
                     self.logger.warning(f"[pending_connect] Skipping FIO validation for unconnected clone '{clone}'.")
                     continue
-                self.common_utils.validate_fio_test(clone_details["Client"], clone_details["Log"])
+                try:
+                    self.common_utils.validate_fio_test(
+                        clone_details["Client"], clone_details["Log"])
+                except RuntimeError:
+                    # Preserve the verify dumps before anything else can clear
+                    # them; they are the only record of the bytes returned.
+                    self.collect_fio_hdr_dumps("clone_validate_failure")
+                    raise
                 self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
                 self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone}_fio_iolog*"])
 
             for lvol, lvol_details in self.lvol_mount_details.items():
-                self.common_utils.validate_fio_test(lvol_details["Client"], lvol_details["Log"])
+                try:
+                    self.common_utils.validate_fio_test(
+                        lvol_details["Client"], lvol_details["Log"])
+                except RuntimeError:
+                    self.collect_fio_hdr_dumps("lvol_validate_failure")
+                    raise
                 self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
                 self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
 

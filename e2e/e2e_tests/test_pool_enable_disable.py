@@ -38,7 +38,7 @@ class TestPoolEnableDisable(TestClusterBase):
 
         # ── Disable pool ───────────────────────────────────────────
         self.logger.info("Disabling pool...")
-        self.sbcli_utils.disable_storage_pool(self.pool_name)
+        self._disable_pool_dual(self.pool_name)
         sleep_n_sec(5)
         self.logger.info(f"Pool {self.pool_name} disabled")
 
@@ -60,7 +60,7 @@ class TestPoolEnableDisable(TestClusterBase):
 
         # ── Re-enable pool ─────────────────────────────────────────
         self.logger.info("Enabling pool...")
-        self.sbcli_utils.enable_storage_pool(self.pool_name)
+        self._enable_pool_dual(self.pool_name)
         sleep_n_sec(5)
         self.logger.info(f"Pool {self.pool_name} enabled")
 
@@ -69,17 +69,11 @@ class TestPoolEnableDisable(TestClusterBase):
         self._create_lvol_dual(
             lvol_name=lvol_name_3, pool_name=self.pool_name, size="1G",
         )
-        lvols = self.sbcli_utils.list_lvols()
-        assert lvol_name_3 in lvols, (
-            f"LVOL {lvol_name_3} not created on re-enabled pool"
-        )
+        self._verify_lvol_exists_dual(lvol_name_3)
         self.logger.info(f"LVOL {lvol_name_3} created on re-enabled pool")
 
         # ── Cleanup ────────────────────────────────────────────────
         for name in [lvol_name_1, lvol_name_2, lvol_name_3]:
-            try:
-                self.sbcli_utils.delete_lvol(name)
-            except Exception:
-                pass
+            self._delete_lvol_dual(name)
 
         self.logger.info("=== TC-POOL-003: Pool Enable / Disable — PASS ===")

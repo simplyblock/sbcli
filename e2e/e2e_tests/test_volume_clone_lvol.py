@@ -46,40 +46,31 @@ class TestVolumeCloneLvol(TestClusterBase):
         )
         self._wait_fio_dual([fio_handle], timeout=60)
 
-        # ── Snapshot + clone via snapshot then clone ────────────────
-        src_id = self.sbcli_utils.get_lvol_id(src_name)
+        # ── Snapshot + clone via dual helpers ───────────────────────
+        src_id = self._get_lvol_id_dual(src_name)
         assert src_id, f"Could not get lvol_id for {src_name}"
 
         snap_name = f"{src_name}_snap"
-        self.sbcli_utils.add_snapshot(src_id, snap_name)
+        # snap_ref is the mode-appropriate clone source (Docker: backend snap
+        # UUID, K8s: VolumeSnapshot name). Using the dual helpers keeps the
+        # clone as a real PVC in K8s so FIO can mount it.
+        snap_ref = self._create_snapshot_dual(src_name, snap_name)
         sleep_n_sec(5)
-        snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
-        assert snap_id, f"Snapshot {snap_name} not created"
+        self._verify_snapshot_exists_dual(snap_name)
+        self.logger.info(f"Intermediate snapshot {snap_name} exists")
 
         clone_name = f"{src_name}_clone"
-        self.sbcli_utils.add_clone(snap_id, clone_name)
+        clone_device, clone_mount = self._create_clone_dual(
+            snap_ref, clone_name, size="2Gi",
+            mount_path=f"{self.mount_path}_clone", format_disk=False,
+        )
         sleep_n_sec(5)
 
         # ── Verify clone in list ───────────────────────────────────
-        lvols = self.sbcli_utils.list_lvols()
-        assert clone_name in lvols, (
-            f"Clone {clone_name} not in lvol list: {list(lvols.keys())}"
-        )
+        self._verify_lvol_exists_dual(clone_name)
         self.logger.info(f"Clone {clone_name} exists in lvol list")
 
-        # ── Verify snapshot exists ─────────────────────────────────
-        snaps = self.sbcli_utils.list_snapshots()
-        assert snap_name in snaps, (
-            f"Snapshot {snap_name} not in snapshot list"
-        )
-        self.logger.info(f"Intermediate snapshot {snap_name} exists")
-
-        # ── Connect clone and verify I/O works ─────────────────────
-        clone_device, clone_mount = self._connect_and_mount_dual(
-            clone_name,
-            mount_path=f"{self.mount_path}_clone",
-            format_disk=False,
-        )
+        # ── Verify I/O works on clone ──────────────────────────────
         fio_clone = self._run_fio_dual(
             lvol_name=clone_name,
             mount_path=clone_mount if not self.k8s_test else None,
@@ -99,14 +90,8 @@ class TestVolumeCloneLvol(TestClusterBase):
                     self._disconnect_and_cleanup_dual(name)
                 except Exception:
                     pass
-            try:
-                self.sbcli_utils.delete_lvol(name)
-            except Exception:
-                pass
+            self._delete_lvol_dual(name)
             sleep_n_sec(2)
-        try:
-            self.sbcli_utils.delete_snapshot(snap_name=snap_name)
-        except Exception:
-            pass
+        self._delete_snapshot_dual(snap_name)
 
         self.logger.info("=== TC-VOL-ADV-002: Volume Clone-Lvol — PASS ===")

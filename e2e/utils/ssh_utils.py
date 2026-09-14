@@ -20,6 +20,7 @@ from collections import defaultdict
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
+from exceptions.custom_exception import NodeUnreachableTimeout
 # import importlib
 # from glob import glob
 
@@ -90,9 +91,124 @@ class SshUtils:
         self.log_monitor_stop_flags = {}
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
         self._bastion_client = None
-        self._reconnect_locks = defaultdict(threading.Lock)   
+        self._reconnect_locks = defaultdict(threading.Lock)
         self.ssh_pass = None
         self.distrib_dump_paths = {}
+
+        # Per-node SSH health, so a node that never comes back fails the run
+        # instead of letting it grind on for hours. Keyed by node IP, like
+        # ssh_connections / _reconnect_locks above.
+        #   first_fail : when the current unhealthy stretch began (None = healthy)
+        #   consec_ok  : successes since the last retry-exhausted failure
+        #   fails      : retry-exhausted failures in the current stretch
+        #   last_err   : last error text, used in the failure message
+        self._node_ssh_health = {}
+        self._node_health_lock = threading.Lock()
+        # 2h. The longest *intentional* outage across the last 12 runs was
+        # 56 min, so this has ~2x headroom and cannot fire on a planned outage.
+        self._ssh_down_sec = int(os.getenv("SSH_NODE_DOWN_SEC", "7200"))
+        # A single success must NOT clear the clock. A dying node keeps
+        # answering trivial commands (echo, a log redirect) while anything
+        # touching the wedged IO path hangs, so one lucky success would reset
+        # the timer forever and the rule would never fire. Require a run of
+        # consecutive successes before calling a node healed.
+        self._ssh_heal_ok = int(os.getenv("SSH_HEAL_OK_COUNT", "3"))
+
+    # ------------------------------------------------------------------
+    # Per-node SSH health tracking
+    # ------------------------------------------------------------------
+    def _health_entry(self, node):
+        return self._node_ssh_health.setdefault(
+            node, {"first_fail": None, "consec_ok": 0, "fails": 0, "last_err": ""}
+        )
+
+    def _record_ssh_ok(self, node):
+        """One successful command. Only heals after _ssh_heal_ok in a row."""
+        with self._node_health_lock:
+            h = self._health_entry(node)
+            h["consec_ok"] += 1
+            if h["first_fail"] is not None and h["consec_ok"] >= self._ssh_heal_ok:
+                down_for = time.time() - h["first_fail"]
+                self.logger.info(
+                    f"[ssh-health] {node} recovered after {down_for/60:.1f} min "
+                    f"and {h['consec_ok']} consecutive successes"
+                )
+                h["first_fail"] = None
+                h["fails"] = 0
+                h["last_err"] = ""
+
+    def _record_ssh_failure(self, node, err_text=""):
+        """One retry-exhausted failure. Returns seconds unhealthy so far."""
+        with self._node_health_lock:
+            h = self._health_entry(node)
+            h["consec_ok"] = 0
+            h["fails"] += 1
+            h["last_err"] = (err_text or "")[:500]
+            if h["first_fail"] is None:
+                h["first_fail"] = time.time()
+            return time.time() - h["first_fail"], h["fails"]
+
+    def notify_outage_started(self, node_ips):
+        """Reset the unreachable clock for nodes we are deliberately downing.
+
+        The tests reboot nodes, stop containers and cut NICs on purpose, so SSH
+        failure is expected. Resetting here (rather than exempting the node
+        outright) means a planned outage never trips the threshold, while a node
+        that never comes back still does — an outright exemption would suppress
+        the alert forever, because ``current_outage_nodes`` is not cleared until
+        the *next* outage cycle begins.
+        """
+        if isinstance(node_ips, str):
+            node_ips = [node_ips]
+        with self._node_health_lock:
+            for ip in node_ips or []:
+                if not ip:
+                    continue
+                self._node_ssh_health[ip] = {
+                    "first_fail": None, "consec_ok": 0, "fails": 0, "last_err": ""
+                }
+        self.logger.info(
+            f"[ssh-health] cleared unreachable clock for planned outage on {node_ips}"
+        )
+
+    def get_unreachable_nodes(self, threshold_sec=None):
+        """Nodes unhealthy for longer than the threshold.
+
+        Returns ``[(node, seconds_down, fail_count, last_err), ...]``. Intended
+        to be polled from the stress ``run()`` loop, which catches the case
+        where nothing happens to issue another command against the dead node.
+        """
+        limit = self._ssh_down_sec if threshold_sec is None else threshold_sec
+        now = time.time()
+        out = []
+        with self._node_health_lock:
+            for node, h in self._node_ssh_health.items():
+                if h["first_fail"] is None:
+                    continue
+                down = now - h["first_fail"]
+                if down >= limit:
+                    out.append((node, down, h["fails"], h["last_err"]))
+        return out
+
+    def _probe_node_alive(self, node):
+        """Cheap liveness check used as the final gate before failing a node.
+
+        Stops a node being failed on thin evidence — e.g. one failure two hours
+        ago and very little traffic since. Deliberately bypasses the health
+        bookkeeping so it cannot recurse.
+        """
+        try:
+            ssh = self.ssh_connections.get(node)
+            if not ssh or not ssh.get_transport() or not ssh.get_transport().is_active():
+                self.connect(node, is_bastion_server=(node == self.bastion_server))
+                ssh = self.ssh_connections.get(node)
+            if not ssh:
+                return False
+            _, stdout, _ = ssh.exec_command("echo __sb_alive__", timeout=20)
+            return "__sb_alive__" in stdout.read().decode(errors="replace")
+        except Exception as exc:
+            self.logger.warning(f"[ssh-health] liveness probe failed for {node}: {exc}")
+            return False
 
     def _candidate_usernames(self, explicit_user) -> list[str]:
         if explicit_user:
@@ -726,6 +842,32 @@ class SshUtils:
     #     self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
     #     return "", "Command failed after max retries"
 
+    @staticmethod
+    def _recv_exit_status_bounded(channel, timeout):
+        """``recv_exit_status()`` with a bound.
+
+        paramiko's ``recv_exit_status()`` waits on an event with no timeout of
+        its own — the ``timeout`` passed to ``exec_command`` only bounds the
+        reads. When the remote host disappears *during* a command (``sudo
+        reboot``, a forced shutdown, a NIC going down) the exit-status message
+        never arrives, the event never fires, and the call blocks forever.
+
+        That is what wedged a docker stress run for six hours: a
+        ``storage_node_reboot`` outage ran ``sudo reboot`` through
+        ``exec_command`` and the thread parked in ``recv_exit_status()`` while
+        four nodes sat unreachable.
+
+        Raising ``TimeoutError`` here lands in the existing retry handler (it
+        is an ``OSError``, which that handler catches), so
+        the call fails cleanly after ``max_retries`` instead of hanging.
+        """
+        if channel.status_event.wait(timeout=timeout):
+            return channel.recv_exit_status()
+        raise TimeoutError(
+            f"timed out after {timeout}s waiting for command exit status "
+            f"(remote host likely went away mid-command)"
+        )
+
     def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False, raise_on_error=False):
         '''
         Execute a command with auto-reconnect (serialized per node), optional streaming,
@@ -774,13 +916,13 @@ class SshUtils:
                             error_chunks.append(chunk)
                             stream_callback(chunk, is_error=True)
 
-                        exit_status = stdout.channel.recv_exit_status()
+                        exit_status = self._recv_exit_status_bounded(stdout.channel, timeout)
                         out = "".join(output_chunks)
                         err = "".join(error_chunks)
                     else:
                         out = stdout.read().decode(errors="replace")
                         err = stderr.read().decode(errors="replace")
-                        exit_status = stdout.channel.recv_exit_status()
+                        exit_status = self._recv_exit_status_bounded(stdout.channel, timeout)
 
                     if (not supress_logs) and out:
                         self.logger.info(f"Command output [{node}]: {out.strip()}")
@@ -800,6 +942,7 @@ class SshUtils:
                             f"Command failed on {node} (exit {exit_status}): {command}\n{err.strip()}"
                         )
 
+                    self._record_ssh_ok(node)
                     return out, err
 
                 except (OSError, EOFError, paramiko.SSHException, paramiko.buffered_pipe.PipeTimeout) as e:
@@ -812,7 +955,35 @@ class SshUtils:
                     self.logger.error(f"SSH command failed (General): {e}. Retrying ({retry}/{max_retries})...")
                     time.sleep(min(2 * retry, 5))
 
+        # Retries exhausted. Note this is OUTSIDE the while loop on purpose: the
+        # `except Exception` inside it catches everything and retries, so a raise
+        # in there would be swallowed by the very handler we need to escape.
         self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
+        down_for, fail_count = self._record_ssh_failure(
+            node, f"last command: {command}"
+        )
+        if down_for >= self._ssh_down_sec:
+            # Final gate: confirm the node really is gone before failing the run.
+            if self._probe_node_alive(node):
+                self.logger.warning(
+                    f"[ssh-health] {node} unhealthy for {down_for/60:.1f} min but "
+                    f"liveness probe succeeded; clearing and continuing"
+                )
+                self._record_ssh_ok(node)
+                with self._node_health_lock:
+                    self._node_ssh_health[node] = {
+                        "first_fail": None, "consec_ok": self._ssh_heal_ok,
+                        "fails": 0, "last_err": ""
+                    }
+            else:
+                raise NodeUnreachableTimeout(
+                    f"Node {node} has been SSH-unreachable for "
+                    f"{down_for/3600:.2f}h ({fail_count} failed commands, "
+                    f"threshold {self._ssh_down_sec/3600:.2f}h) and a liveness "
+                    f"probe also failed. Last command: {command}"
+                )
+        # Historic behaviour for everything below the threshold: no caller
+        # checks this sentinel, which is why the threshold check above exists.
         return "", "Command failed after max retries"
 
 
@@ -1354,42 +1525,120 @@ class SshUtils:
             return output, error
         return None, None
 
-    def get_nvme_device_for_nqn(self, node, nqn):
-        """Return the block-device path (e.g. /dev/nvme2n2) already connected for *nqn*.
+    # nvmeXcYnZ is the per-controller view of a namespace. Under native NVMe
+    # multipath it is NOT a block device -- only the subsystem-level head
+    # nvmeXnZ is. Returning one of these looks like a located device and then
+    # fails `test -b`, which is how a healthy NSID-2 clone was reported missing
+    # in n_plus_k_failover_multi_client_ha_all_nodes-20260907-090440:
+    #   sysfs lookup -> nvme18c18n1
+    #   test -b /dev/nvme18c18n1 -> MISSING
+    _CONTROLLER_SCOPED_NS = re.compile(r"^nvme\d+c\d+n\d+$")
+    _HEAD_NS = re.compile(r"^nvme(\d+)n(\d+)$")
 
-        Tries two methods:
-        1. ``nvme list -o json`` (works when the namespace block device is visible)
-        2. sysfs scan via /sys/class/nvme-subsystem (fallback when nvme list misses it)
-        Returns the path string, or None if not found.
+    @classmethod
+    def _pick_ns_device(cls, names, ns_id=None):
+        """Choose the head namespace device for *ns_id* out of *names*.
+
+        Drops controller-scoped nvmeXcYnZ entries. When *ns_id* is given, only
+        a device whose trailing nZ matches it is acceptable -- a subsystem can
+        hold many namespaces and returning the wrong one is worse than
+        returning nothing, because the caller then mounts another volume's
+        device. Without *ns_id* the first head device wins (legacy behaviour).
         """
-        cmd = (
-            "sudo nvme list -o json 2>/dev/null | "
-            "python3 -c \""
-            "import sys,json; "
-            "d=json.load(sys.stdin); "
-            "[print(x['DevicePath']) for x in d.get('Devices',[]) "
-            f"if x.get('SubsystemNQN','').strip()=='{nqn}']\""
-        )
-        out, _ = self.exec_command(node=node, command=cmd)
-        lines = [ln.strip() for ln in out.strip().split('\n') if ln.strip()]
-        if lines:
-            return lines[0]
+        heads = []
+        for raw in names:
+            name = (raw or "").strip().rstrip(':').lstrip('/').removeprefix('dev/')
+            if not name or cls._CONTROLLER_SCOPED_NS.match(name):
+                continue
+            m = cls._HEAD_NS.match(name)
+            if m:
+                heads.append((name, int(m.group(2))))
+        if ns_id is not None:
+            for name, nsid in heads:
+                if nsid == int(ns_id):
+                    return name
+            return None
+        return heads[0][0] if heads else None
 
-        # Fallback: scan sysfs — subsystem may be connected but not in nvme list
-        # Extract just the block device name (e.g. nvme0n1) and return as /dev/ path
-        sysfs_cmd = (
-            f"for f in /sys/class/nvme-subsystem/*/subsysnqn; do "
-            f"  if [ \"$(cat $f 2>/dev/null)\" = \"{nqn}\" ]; then "
-            f"    ls -d $(dirname $f)/nvme*/nvme*n* 2>/dev/null | head -1 | xargs -I{{}} basename {{}}; "
-            f"    break; "
-            f"  fi; "
-            f"done"
-        )
-        out2, _ = self.exec_command(node=node, command=sysfs_cmd)
-        lines2 = [ln.strip() for ln in out2.strip().split('\n') if ln.strip()]
-        if lines2:
-            dev_name = lines2[0].rstrip(':')
-            return f"/dev/{dev_name}"
+    @staticmethod
+    def _parse_nvme_list_json(raw, nqn):
+        """Namespace device names for *nqn* from ``nvme list -o json`` output.
+
+        Handles both nvme-cli schemas. The old flat one carries the NQN on each
+        device; the 2.x one nests Subsystems -> Namespaces (or
+        Subsystems -> Controllers -> Namespaces). Assuming only the flat schema
+        made this lookup return nothing on a host that plainly had the
+        subsystem connected (same run as above), which pushed every caller onto
+        the broken sysfs fallback.
+        """
+        try:
+            data = json.loads(raw or "")
+        except (ValueError, TypeError):
+            return []
+
+        want = (nqn or "").strip()
+        found = []
+
+        def _ns_names(container):
+            out = []
+            for ns in container.get("Namespaces") or []:
+                if isinstance(ns, dict):
+                    out.append(ns.get("NameSpace") or ns.get("DevicePath") or "")
+            return out
+
+        for dev in (data.get("Devices") or []):
+            if not isinstance(dev, dict):
+                continue
+            # Flat schema: NQN and device path on the same object.
+            if (dev.get("SubsystemNQN") or "").strip() == want:
+                if dev.get("DevicePath"):
+                    found.append(dev["DevicePath"])
+                found.extend(_ns_names(dev))
+            for subsys in (dev.get("Subsystems") or []):
+                if not isinstance(subsys, dict):
+                    continue
+                if (subsys.get("SubsystemNQN") or "").strip() != want:
+                    continue
+                found.extend(_ns_names(subsys))
+                for ctrl in (subsys.get("Controllers") or []):
+                    if isinstance(ctrl, dict):
+                        found.extend(_ns_names(ctrl))
+        return [f for f in found if f]
+
+    def get_nvme_device_for_nqn(self, node, nqn, ns_id=None):
+        """Return the block-device path (e.g. /dev/nvme2n2) connected for *nqn*.
+
+        *ns_id* is the namespace this volume occupies in the subsystem. Pass it
+        whenever it is known: a shared subsystem holds one namespace per lvol,
+        so without it this can hand back a sibling volume's device.
+
+        Only subsystem-level head devices (nvmeXnZ) that pass ``test -b`` are
+        returned. Returns the path string, or None.
+        """
+        candidates = []
+
+        raw, _ = self.exec_command(
+            node=node, command="sudo nvme list -o json 2>/dev/null",
+            supress_logs=True)
+        candidates.extend(self._parse_nvme_list_json(raw, nqn))
+
+        # sysfs is the version-independent source, and the only one that sees a
+        # subsystem whose namespace nvme-cli has not picked up.
+        heads, _scan_ok = self.get_ns_heads_for_nqn(node, nqn)
+        candidates.extend(name for _nsid, name in heads)
+
+        # Prefer the requested nsid; only fall back to "any head" when the
+        # caller did not tell us which namespace it wants.
+        for want_ns in ([ns_id] if ns_id is not None else [None]):
+            name = self._pick_ns_device(candidates, want_ns)
+            if name and self.is_block_device(node, f"/dev/{name}"):
+                return f"/dev/{name}"
+
+        if candidates:
+            self.logger.info(
+                "[nqn_lookup] %s: subsystem %s present but no usable block "
+                "device for ns_id=%s; candidates=%s",
+                node, nqn, ns_id, sorted(set(candidates)))
         return None
 
     def disconnect_nvme(self, node, nqn_grep):
@@ -1415,37 +1664,120 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
 
-    def get_namespace_count_for_nqn(self, node, nqn):
-        """Count namespaces in the given NVMe subsystem on the client.
+    # Marker the sysfs probe prints last, so an empty result can be told apart
+    # from a probe that never ran (ssh hiccup, sudo denied, shell error). That
+    # distinction is what lets safe_disconnect_nvme fail CLOSED.
+    _NS_SCAN_OK = "__NS_SCAN_OK__"
 
-        Returns the number of namespaces visible on the client for the
-        subsystem identified by *nqn*.  Returns -1 if the count cannot
-        be determined (caller should fall back to normal disconnect).
+    def get_ns_heads_for_nqn(self, node, nqn):
+        """Head namespaces of *nqn* on *node*, read from sysfs.
+
+        Returns ``(heads, ok)`` where *heads* is a list of ``(nsid, device)``
+        tuples for subsystem-level head devices only, and *ok* is False when the
+        probe itself did not complete (so the caller must not read an empty list
+        as "no namespaces").
+
+        sysfs rather than ``nvme list`` on purpose. The JSON schema moved between
+        nvme-cli versions (flat ``Devices[*].SubsystemNQN`` vs nested
+        ``Devices[*].Subsystems[*].Namespaces[*]``), and a parser written for one
+        silently finds nothing in the other -- which is how a namespace-count
+        guard can report 0 for a subsystem holding three namespaces. sysfs has no
+        such versioning.
+
+        BOTH loops are needed; do not "simplify" this to one:
+          loop 1: kernels that expose head namespaces directly under the
+            subsystem dir have them at depth 1. The nvmeXcYnZ entries one level
+            further down (inside the controller dir) are the per-controller view
+            and are NOT block devices under native multipath.
+          loop 2: other kernels expose nothing under the subsystem dir at all --
+            verified on RHCOS 2026-09-08, where
+            /sys/class/nvme-subsystem/nvme-subsys0 has no nvme*n* children and
+            only /sys/block/nvme0n1 resolves. /sys/block also cannot contain a
+            controller-scoped name, so this loop is the safe one.
         """
-        command = "sudo nvme list --output-format=json"
-        output, _ = self.exec_command(node=node, command=command, supress_logs=True)
-        try:
-            data = json.loads(output)
-            for device in data.get('Devices', []):
-                for subsystem in device.get('Subsystems', []):
-                    if subsystem.get('SubsystemNQN', '') == nqn:
-                        return len(subsystem.get('Namespaces', []))
-            return 0
-        except Exception as e:
-            self.logger.warning(f"Failed to count namespaces for NQN {nqn}: {e}")
-            return -1
+        cmd = (
+            'for d in /sys/class/nvme-subsystem/*; do '
+            '  [ -r "$d/subsysnqn" ] || continue; '
+            f'  [ "$(cat "$d/subsysnqn" 2>/dev/null)" = "{nqn}" ] || continue; '
+            '  for n in "$d"/nvme*n*; do '
+            '    [ -e "$n" ] || continue; '
+            '    nm=$(basename "$n"); '
+            '    echo "$(cat "$n/nsid" 2>/dev/null):$nm"; '
+            '  done; '
+            'done; '
+            'for b in /sys/block/nvme*n*; do '
+            '  [ -e "$b" ] || continue; '
+            '  nm=$(basename "$b"); q=""; '
+            '  [ -r "$b/device/subsysnqn" ] && q=$(cat "$b/device/subsysnqn" 2>/dev/null); '
+            # /sys/block/<dev> is a symlink, so "$b/.." resolves lexically to
+            # /sys/block and never to the subsystem. Resolve it first.
+            '  if [ -z "$q" ]; then '
+            '    p=$(readlink -f "$b" 2>/dev/null); '
+            '    [ -n "$p" ] && [ -r "${p%/*}/subsysnqn" ] && q=$(cat "${p%/*}/subsysnqn" 2>/dev/null); '
+            '  fi; '
+            f'  [ "$q" = "{nqn}" ] && echo "$(cat "$b/nsid" 2>/dev/null):$nm"; '
+            'done; '
+            f'echo {self._NS_SCAN_OK}'
+        )
+        out, _ = self.exec_command(node=node, command=cmd, supress_logs=True)
+        text = out or ""
+        ok = self._NS_SCAN_OK in text
+        heads = {}
+        for tok in text.split():
+            if tok == self._NS_SCAN_OK or ":" not in tok:
+                continue
+            nsid, _, name = tok.partition(":")
+            if not name or self._CONTROLLER_SCOPED_NS.match(name):
+                continue
+            if not self._HEAD_NS.match(name):
+                continue
+            heads[name] = nsid  # dedupe: both loops can report the same head
+        return sorted(((v, k) for k, v in heads.items()),
+                      key=lambda t: (t[0] == "", t[0])), ok
+
+    def get_namespace_count_for_nqn(self, node, nqn):
+        """Namespaces visible on *node* for subsystem *nqn*.
+
+        Returns an int, or **None** when it could not be determined. Callers
+        must treat None as "unknown" and take the conservative branch; the old
+        contract returned -1 here and every caller read that as "go ahead".
+        """
+        heads, ok = self.get_ns_heads_for_nqn(node, nqn)
+        if not ok:
+            self.logger.warning(
+                f"Namespace count for NQN {nqn} on {node} is UNKNOWN "
+                f"(sysfs probe did not complete)")
+            return None
+        return len(heads)
 
     def safe_disconnect_nvme(self, node, nqn):
-        """Disconnect NVMe subsystem only if no other namespaces share it.
+        """Disconnect an NVMe subsystem only when it is safe to do so.
 
-        When clone volumes are placed in unrelated lvols' subsystems
-        (due to server-side random assignment), disconnecting the
-        subsystem would destroy the clone's IO.  This method checks
-        first and skips if ns_count > 1.
+        A namespaced clone lives in some other lvol's subsystem, so
+        disconnecting the subsystem to clean up ONE volume tears down every
+        sibling on that NQN and kills their IO. So this only disconnects when
+        the subsystem is known to hold at most one namespace.
+
+        FAILS CLOSED. The previous version disconnected whenever the count was
+        <= 1 *or* unknown (-1), and the count came from an nvme-cli JSON parser
+        written against one of the two possible schemas -- so on a client whose
+        nvme-cli emits the other shape it returned 0, 0 <= 1 passed, and
+        deleting a master lvol would disconnect all of its clones. Silently.
+        The asymmetry is stark: skipping leaves a namespace-less subsystem
+        attached, which is harmless and cleared at teardown, while disconnecting
+        wrongly destroys live IO. So anything other than a confident count of
+        <= 1 now skips.
 
         Returns True if disconnect was performed, False if skipped.
         """
         ns_count = self.get_namespace_count_for_nqn(node=node, nqn=nqn)
+        if ns_count is None:
+            self.logger.warning(
+                f"Skipping NVMe disconnect of {nqn} on {node}: namespace count "
+                f"unknown, and disconnecting a shared subsystem would disrupt "
+                f"sibling volumes. Server-side DELETE still removes the namespace."
+            )
+            return False
         if ns_count > 1:
             self.logger.warning(
                 f"Subsystem {nqn} has {ns_count} namespaces on {node}; "
@@ -1453,10 +1785,67 @@ class SshUtils:
                 f"Server-side DELETE will remove the namespace."
             )
             return False
-        # ns_count <= 1 or -1 (error -> proceed with disconnect to preserve existing behavior)
-        self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
+        self.logger.info(
+            f"Disconnecting NVMe subsystem: {nqn} (namespaces on {node}: {ns_count})")
         self.disconnect_nvme(node=node, nqn_grep=nqn)
         return True
+
+    def rescan_and_verify_ns_gone(self, node, nqn, ns_id=None, retries=3,
+                                  interval=3):
+        """After a server-side volume delete, make the client forget the namespace.
+
+        Nothing else does this today. ``safe_disconnect_nvme`` correctly SKIPS a
+        shared subsystem, and the server-side DELETE only removes the namespace
+        from the target, so on the clone path there is no client-side step at
+        all: the kernel keeps its ``nvme_ns_head`` for that NSID until something
+        happens to trigger a scan.
+
+        That residue is not cosmetic. NSIDs are recycled -- in
+        n_plus_k_failover_multi_client_ha_all_nodes-20260907-090440, NSID 2 of one
+        subsystem was freed at 17:42:41 and reissued to a different volume at
+        17:55:24 with a different uuid/nguid. The client still held the retired
+        identity (/dev/nvme18n2 was listed 13 minutes after the removal) and the
+        kernel refused the new namespace outright:
+            nvme nvme18: IDs don't match for shared namespace 2
+        leaving a volume that the control plane called `online` with no block
+        device anywhere.
+
+        ``nvme ns-rescan`` makes the kernel re-read the controller's active NSID
+        list and drop namespaces no longer advertised, releasing the head once
+        nothing references it (the delete path unmounts first, so nothing does).
+
+        Returns True if the namespace is gone, False if it lingers. A lingering
+        namespace is reported rather than swallowed: it is the visible symptom of
+        the NSID-reuse defect, so quietly cleaning up would hide the bug this
+        exists to surface. It cannot be fixed client-side when a peer still
+        advertises a conflicting identity for that NSID -- there the rescan keeps
+        the stale head and logs the mismatch instead of removing it.
+        """
+        for attempt in range(1, retries + 1):
+            self.rescan_live_nvme_controllers(node)
+            heads, ok = self.get_ns_heads_for_nqn(node, nqn)
+            if not ok:
+                self.logger.warning(
+                    f"[ns_cleanup] {node}: could not verify namespace removal "
+                    f"for {nqn} (sysfs probe did not complete)")
+                return False
+            if ns_id is None:
+                if not heads:
+                    return True
+                stale = heads
+            else:
+                stale = [(n, d) for n, d in heads if n == str(ns_id)]
+                if not stale:
+                    return True
+            if attempt < retries:
+                time.sleep(interval)
+        self.logger.warning(
+            f"[ns_cleanup] {node}: namespace ns_id={ns_id} of {nqn} is STILL "
+            f"present after {retries} rescans: {stale}. The kernel is holding a "
+            f"stale ns_head. If this NSID is reused by another volume the client "
+            f"will reject it with \"IDs don't match for shared namespace\"."
+        )
+        return False
     
     def get_nvme_device_subsystems(self, node):
         """Get json for nvme device wise
@@ -1563,21 +1952,113 @@ class SshUtils:
         return output.strip()
 
 
+    # A refusal from the CLI is conclusive: the object was not created, so
+    # polling for it is pure waste. In
+    # n_plus_k_failover_multi_client_ha_all_nodes-20260912-084155 `snapshot add`
+    # answered "Cannot create snapshot: node LVStore restart in progress" on
+    # both stdout and stderr, the caller ignored it, polled for ten minutes,
+    # then issued `snapshot clone <empty> <name>` five times and failed the run
+    # 24 minutes later with a message about the clone.
+    # Deliberately narrow. These commands run with -d, so the output carries
+    # unrelated debug lines that can contain "error" or "in progress"; matching
+    # those would make a successful create look refused. Only phrases that mean
+    # "the CLI did not perform the operation" belong here.
+    CLI_REFUSAL_MARKERS = ("cannot create snapshot", "cannot create clone",
+                           "cannot create lvol", "cannot delete snapshot",
+                           "usage: sbctl", "usage: sbcli")
+
+    # Of the refusals, these clear on their own: the cluster is mid-restart or
+    # mid-migration and the same request will succeed once it settles. Worth
+    # retrying. Anything else (a malformed command, a duplicate name) will fail
+    # identically forever, so retrying only wastes the run's time.
+    CLI_TRANSIENT_MARKERS = ("restart in progress", "is restarting",
+                             "in_restart", "in_shutdown", "not ready",
+                             "try again", "temporarily unavailable")
+
+    @classmethod
+    def _cli_refused(cls, output, error):
+        """True when the CLI conclusively rejected the request."""
+        blob = (str(output or "") + " " + str(error or "")).lower()
+        return any(m in blob for m in cls.CLI_REFUSAL_MARKERS)
+
+    @classmethod
+    def _cli_refusal_is_transient(cls, output, error):
+        """True when the refusal is one that clears on its own."""
+        blob = (str(output or "") + " " + str(error or "")).lower()
+        return any(m in blob for m in cls.CLI_TRANSIENT_MARKERS)
+
+    def _run_with_transient_retry(self, node, cmd, what,
+                                  retries=6, delay=20):
+        """Run a create command, retrying only while the CLI refuses for a
+        reason that clears on its own.
+
+        Returns (output, error, refused). `refused` is True when the command was
+        still being declined after the last attempt, which lets the caller skip
+        the object instead of proceeding as though it exists. During a
+        deliberate outage that is the correct outcome: the run should not fail
+        because the cluster was legitimately busy, it should move on.
+        """
+        output = error = ""
+        for attempt in range(1, retries + 1):
+            output, error = self.exec_command(node=node, command=cmd)
+            if not self._cli_refused(output, error):
+                return output, error, False
+
+            msg = (str(output or "") or str(error or "")).strip()[:180]
+            if not self._cli_refusal_is_transient(output, error):
+                if hasattr(self, "logger"):
+                    self.logger.warning(
+                        f"[{what}] refused permanently, not retrying: {msg}"
+                    )
+                return output, error, True
+
+            if attempt == retries:
+                if hasattr(self, "logger"):
+                    self.logger.warning(
+                        f"[{what}] still refused after {retries} attempts over "
+                        f"~{retries * delay}s: {msg}"
+                    )
+                return output, error, True
+
+            if hasattr(self, "logger"):
+                self.logger.info(
+                    f"[{what}] transient refusal ({attempt}/{retries}), "
+                    f"retrying in {delay}s: {msg}"
+                )
+            time.sleep(delay)
+        return output, error, True
+
     def add_snapshot(self, node, lvol_id, snapshot_name):
         cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
-        output, error = self.exec_command(node=node, command=cmd)
+        output, error, refused = self._run_with_transient_retry(
+            node, cmd, f"snapshot {snapshot_name}")
+
+        # Still refused, e.g. the LVStore restart outlasted our retries. Do not
+        # spend ten more minutes polling for something that was never created;
+        # hand the message back so the caller can skip it.
+        if refused:
+            return output, error
 
         snapshot_id = self.get_snapshot_id(node=node, snapshot_name=snapshot_name)
 
         if not snapshot_id:
             if hasattr(self, "logger"):
                 self.logger.error(f"Timed out waiting for snapshot '{snapshot_name}' to appear within 10 minutes.")
-        
+
         return output, error
- 
+
     def add_clone(self, node, snapshot_id, clone_name):
+        # Without this, an empty id produces `snapshot clone  <name>`, which the
+        # CLI answers with its usage text. That is what the caller then retried
+        # five times in 20260912-084155.
+        if not (snapshot_id or "").strip():
+            raise ValueError(
+                f"[clone] refusing to clone '{clone_name}' with an empty "
+                f"snapshot id; the snapshot was never created"
+            )
         cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
-        output, error = self.exec_command(node=node, command=cmd)
+        output, error, _refused = self._run_with_transient_retry(
+            node, cmd, f"clone {clone_name}")
         return output, error
 
     def delete_snapshot(self, node, snapshot_id, timeout=600, interval=30, skip_error=False):
@@ -1588,14 +2069,17 @@ class SshUtils:
         :param snapshot_id: UUID of the snapshot
         :param timeout: Total time in seconds to wait for deletion (default 600s)
         :param interval: Time between each check (default 5s)
-        :return: Tuple (status message, last output from snapshot list)
+        :return: True if the snapshot is confirmed gone, False if it is still
+                 present after *timeout* (only reachable with skip_error=True;
+                 otherwise this raises). Callers deciding whether to defer a
+                 retry must branch on this rather than assume failure.
         """
         # Pre-check if snapshot exists
         check_cmd = f"{self.base_cmd} snapshot list | grep -i '{snapshot_id}'"
         output, error = self.exec_command(node=node, command=check_cmd)
         if not output.strip():
             self.logger.warning(f"[Pre-check] Snapshot {snapshot_id} not found.")
-            return "Snapshot not found before deletion", None
+            return True
 
         self.logger.info(f"[Delete] Deleting snapshot {snapshot_id}")
         del_cmd = f"{self.base_cmd} -d snapshot delete {snapshot_id} --force"
@@ -1610,7 +2094,7 @@ class SshUtils:
 
             if not poll_output.strip():
                 self.logger.info(f"[Check] Snapshot {snapshot_id} successfully deleted.")
-                return "Deleted", None
+                return True
 
             self.logger.debug(f"[Check] Snapshot still exists. Retrying in {interval} seconds...")
             time.sleep(interval)
@@ -1618,8 +2102,8 @@ class SshUtils:
         if not skip_error:
             self.logger.error(f"[Failure] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
             raise Exception(f"Snapshot {snapshot_id} deletion failed after {timeout} seconds.")
-        self.logger.error(f"[DEFFERED] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
-        return
+        self.logger.error(f"[DEFERRED] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
+        return False
 
     def delete_all_snapshots(self, node):
         patterns = ["snap", "ss", "snapshot"]
@@ -1642,8 +2126,26 @@ class SshUtils:
         for file in files:
             command = f"md5sum {file}"
             stdout, _ = self.exec_command(node, command)
-            checksum, _ = stdout.split()
-            checksums[file] = checksum
+            parts = stdout.split()
+            if len(parts) >= 2:
+                checksums[file] = parts[0]
+            elif len(parts) == 1:
+                checksums[file] = parts[0]
+            else:
+                # Retry once — SSH under heavy concurrent load can return
+                # empty output.
+                self.logger.warning(
+                    f"md5sum returned empty output for {file} on {node}, "
+                    f"retrying …")
+                time.sleep(1)
+                stdout, _ = self.exec_command(node, command)
+                parts = stdout.split()
+                if len(parts) >= 2:
+                    checksums[file] = parts[0]
+                else:
+                    raise RuntimeError(
+                        f"md5sum failed for {file} on {node}: "
+                        f"stdout={stdout!r}")
         return checksums
 
     def verify_checksums(self, node, files, checksums, clone_base=False, message=None, by_name=False):
@@ -1914,7 +2416,7 @@ class SshUtils:
 
         time.sleep(10)
 
-        configure_cmd = f"{self.base_cmd} -d sn configure --max-subsys {max_lvol} --nodes-per-socket {nodes_per_socket}"
+        configure_cmd = f"{self.base_cmd} -d sn configure --nodes-per-socket {nodes_per_socket}"
         deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname}"
         
         self.logger.info(f"Deploying storage node: {node}")
@@ -2484,9 +2986,13 @@ class SshUtils:
         """
         try:
             self.logger.info(f"Initiating reboot for node: {node_ip}")
-            # Execute the reboot command
+            # `sudo reboot` never returns an exit status: the host is gone
+            # before it can be sent. Use a short timeout and a single attempt
+            # so we do not burn max_retries * timeout discovering that.
             reboot_command = "sudo reboot"
-            self.exec_command(node=node_ip, command=reboot_command)
+            self.exec_command(
+                node=node_ip, command=reboot_command, timeout=15, max_retries=1
+            )
             self.logger.info(f"Reboot command executed for node: {node_ip}")
             
             # Disconnect the current SSH connection

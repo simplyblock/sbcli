@@ -35,7 +35,7 @@ class TestConcurrentOperations(TestClusterBase):
     def _delete_lvol_thread(self, name, results, index):
         """Thread target for parallel lvol deletion."""
         try:
-            self.sbcli_utils.delete_lvol(name)
+            self._delete_lvol_dual(name, skip_error=False)
             results[index] = ("ok", name)
         except Exception as exc:
             results[index] = ("error", str(exc))
@@ -81,9 +81,8 @@ class TestConcurrentOperations(TestClusterBase):
         )
 
         # Verify all in list
-        lvols = self.sbcli_utils.list_lvols()
         for name in names:
-            assert name in lvols, f"Parallel-created {name} not in lvol list"
+            self._verify_lvol_exists_dual(name)
         self.logger.info("All parallel-created lvols verified in list")
         self.logger.info("TC-CONC-001: Parallel LVOL Creates — PASS")
 
@@ -136,9 +135,8 @@ class TestConcurrentOperations(TestClusterBase):
         )
 
         # Verify all snapshots exist
-        snapshots = self.sbcli_utils.list_snapshots()
         for sname in snap_names:
-            assert sname in snapshots, f"Parallel snapshot {sname} not in list"
+            self._verify_snapshot_exists_dual(sname)
         self.logger.info("TC-CONC-002: Parallel Snapshots — PASS")
 
         # -- TC-CONC-003: Parallel FIO on multiple lvols ----------------
@@ -170,10 +168,7 @@ class TestConcurrentOperations(TestClusterBase):
 
         # Clean up snapshots first
         for sname in snap_names:
-            try:
-                self.sbcli_utils.delete_snapshot(sname)
-            except Exception:
-                pass
+            self._delete_snapshot_dual(sname)
         sleep_n_sec(5)
 
         # Disconnect before deleting
@@ -210,14 +205,10 @@ class TestConcurrentOperations(TestClusterBase):
         sleep_n_sec(10)
 
         # Verify all deleted
-        final_lvols = self.sbcli_utils.list_lvols()
         for name in names:
-            if name in final_lvols:
-                self.logger.warning(f"  {name} still in list after parallel delete")
-                try:
-                    self.sbcli_utils.delete_lvol(name)
-                except Exception:
-                    pass
+            if name in self._volume_registry:
+                self.logger.warning(f"  {name} still tracked after parallel delete")
+                self._delete_lvol_dual(name)
 
         self.logger.info("TC-CONC-004: Concurrent Delete + List — PASS")
 

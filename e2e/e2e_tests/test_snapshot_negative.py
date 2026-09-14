@@ -33,6 +33,13 @@ class TestSnapshotNegativeCases(TestClusterBase):
     def run(self):
         self.logger.info("=== TC-SNAP-006: Snapshot Negative Cases ===")
 
+        if self.k8s_test:
+            self.logger.info(
+                "TC-SNAP-006: Skipping — snapshot negative tests use "
+                "backend-level APIs not applicable through CSI"
+            )
+            return
+
         self._add_pool_dual(pool_name=self.pool_name)
         if self.k8s_test:
             self._k8s_ensure_storage_class()
@@ -44,7 +51,7 @@ class TestSnapshotNegativeCases(TestClusterBase):
         self._create_lvol_dual(
             lvol_name=lvol_name, pool_name=self.pool_name, size="2G",
         )
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        lvol_id = self._get_lvol_id_dual(lvol_name)
         assert lvol_id, f"Could not get lvol_id for {lvol_name}"
 
         # ── 1. Create snapshot → success ───────────────────────────
@@ -67,7 +74,7 @@ class TestSnapshotNegativeCases(TestClusterBase):
         clone_name = "clone_neg_1"
         self.sbcli_utils.add_clone(snap_id, clone_name)
         sleep_n_sec(5)
-        clone_id = self.sbcli_utils.get_lvol_id(clone_name)
+        clone_id = self._get_lvol_id_dual(clone_name)
         assert clone_id, f"Clone {clone_name} not created"
         self.logger.info(f"Clone {clone_name} created — id={clone_id}")
 
@@ -108,10 +115,7 @@ class TestSnapshotNegativeCases(TestClusterBase):
             failures.append("clone_nonexistent_snapshot: should have failed")
 
         # ── Cleanup ────────────────────────────────────────────────
-        try:
-            self.sbcli_utils.delete_lvol(lvol_name)
-        except Exception:
-            pass
+        self._delete_lvol_dual(lvol_name)
 
         if failures:
             raise AssertionError(

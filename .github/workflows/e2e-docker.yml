@@ -516,6 +516,48 @@ jobs:
           PYEOF
 
 
+
+      - name: Analyze SPDK core dumps (gdb backtraces)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 30
+        shell: bash
+        env:
+          STORAGE_PRIVATE_IPS: "${{ needs.deploy.outputs.storage_private_ips }}"
+        run: |
+          set -uo pipefail
+          # For every SPDK core left on a storage host, copy it into that host's
+          # SPDK container (same host = same image = symbols resolve), run
+          # `bt` and `thread apply all bt full`, and pull all three artifacts
+          # back. Script and rationale: e2e/scripts/analyze_core_dumps_docker.sh
+          #
+          # Unlike the stress workflows, e2e writes its logs under the
+          # workspace rather than to an NFS run dir that the storage hosts can
+          # see, so the script stages on the host and we scp the results back.
+          CORE_SCRIPT="${GITHUB_WORKSPACE}/e2e/scripts/analyze_core_dumps_docker.sh"
+          if [[ ! -f "${CORE_SCRIPT}" ]]; then
+            echo "WARN: ${CORE_SCRIPT} not found; skipping core-dump analysis"
+            exit 0
+          fi
+          if [[ -z "${STORAGE_PRIVATE_IPS:-}" ]]; then
+            echo "WARN: STORAGE_PRIVATE_IPS empty; skipping core-dump analysis"
+            exit 0
+          fi
+          KEY_PATH="${HOME}/.ssh/simplyblock-us-east-2.pem"
+          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15)
+          LOCAL_OUT="${GITHUB_WORKSPACE}/e2e/logs/core_backtraces"
+          STAGE="/tmp/core_bt_${GITHUB_RUN_ID}"
+          mkdir -p "${LOCAL_OUT}"
+          for ip in $(echo "${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
+            echo "---- core-dump analysis: ${ip} ----"
+            ssh "${SSH_OPTS[@]}" "root@${ip}" 'bash -s' -- "${STAGE}" < "${CORE_SCRIPT}" || { echo "WARN: analysis failed on ${ip}"; continue; }
+            if ssh "${SSH_OPTS[@]}" "root@${ip}" "test -d ${STAGE}/core_backtraces" 2>/dev/null; then
+              scp "${SSH_OPTS[@]}" -r "root@${ip}:${STAGE}/core_backtraces/." "${LOCAL_OUT}/" || echo "WARN: scp back failed for ${ip}"
+              ssh "${SSH_OPTS[@]}" "root@${ip}" "sudo rm -rf ${STAGE}" || true
+            fi
+          done
+          find "${LOCAL_OUT}" -mindepth 1 -maxdepth 2 2>/dev/null | head -20 || true
+
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
         timeout-minutes: 480

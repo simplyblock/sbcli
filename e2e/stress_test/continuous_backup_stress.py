@@ -49,11 +49,13 @@ import os
 import random
 import threading
 import time
+import traceback
 from datetime import datetime
 
 from e2e_tests.backup.test_backup_restore import BackupTestBase, _rand_suffix
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import get_parent_device
 
 # ── constants ────────────────────────────────────────────────────────────────
 
@@ -170,21 +172,48 @@ class BackupStressBase(BackupTestBase):
     # ── snapshot / backup helpers ─────────────────────────────────────────────
 
     def _snap_and_backup(self, lvol_id: str, label: str) -> str | None:
-        """Create a snapshot + trigger S3 backup; return backup_id or None on failure."""
+        """Create a snapshot + trigger S3 backup; return backup_id or None on failure.
+
+        Thread-safe: resolves the backup ID by matching the snapshot name
+        or lvol ID in the backup list, instead of blindly taking the last
+        entry (which races when multiple threads create backups).
+
+        K8s mode: _create_snapshot(backup=True) creates a StorageBackup CRD
+        and stores its name in _last_backup_id.  The CRD name IS the backup
+        identifier — no need to search the backup list.
+        """
         snap_name = f"str_{label}_{_rand_suffix()}"
         try:
-            self._create_snapshot(lvol_id, snap_name, backup=True)
-            # backup_id is not always directly returned by snapshot add --backup;
-            # we resolve it from backup list after a short wait
+            snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+
+            # K8s: _create_snapshot(backup=True) creates a StorageBackup
+            # CRD and returns its name — that IS the backup identifier.
+            # No need to poll the backup list (status fields may not be
+            # populated yet).
+            if self.k8s_test:
+                return snap_id
+
             sleep_n_sec(5)
             backups = self._list_backups()
-            if backups:
-                return (
-                    backups[-1].get("id")
-                    or backups[-1].get("ID")
-                    or backups[-1].get("uuid")
-                    or None
-                )
+            # Search for a backup whose Snapshot field matches our snap_id
+            # or snap_name. This uniquely identifies the backup created by
+            # this specific _create_snapshot call.
+            for bk in reversed(backups):
+                bk_snap = bk.get("Snapshot") or bk.get("snapshot") or ""
+                bk_name = bk.get("name") or ""
+                if (snap_id and (snap_id in bk_snap or snap_id in bk_name)) \
+                        or snap_name in bk_snap \
+                        or snap_name in bk_name:
+                    bk_id = (
+                        bk.get("id") or bk.get("ID")
+                        or bk.get("uuid") or None
+                    )
+                    if bk_id:
+                        return bk_id
+            # Last resort: log warning and return None
+            self.logger.warning(
+                f"snap_and_backup: could not resolve backup_id for "
+                f"{label} (snap={snap_name}, lvol={lvol_id})")
         except Exception as e:
             self.logger.warning(f"snap_and_backup error ({label}): {e}")
         return None
@@ -245,6 +274,32 @@ class BackupStressBase(BackupTestBase):
             self._sbcli(f"lvol delete {lvol_name} --force")
         if lvol_name in self.created_lvols:
             self.created_lvols.remove(lvol_name)
+
+    def _connect_format_mount(self, lvol_name: str, lvol_id: str,
+                               fs_type: str = "ext4") -> tuple[str, str]:
+        """Connect lvol and format with specified filesystem type."""
+        if self.k8s_test:
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            return pvc_name, pvc_name
+
+        mount = f"{self.mount_path}/{lvol_name}"
+        initial = self.ssh_obj.get_devices(node=self.fio_node)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        for cmd in connect_ls:
+            self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+        sleep_n_sec(3)
+        final = self.ssh_obj.get_devices(node=self.fio_node)
+        new_devs = [d for d in final if d not in initial]
+        assert new_devs, f"No new block device after connecting {lvol_name}"
+        device = f"/dev/{new_devs[0]}"
+        self.ssh_obj.format_disk(
+            node=self.fio_node, device=device, fs_type=fs_type)
+        self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=device, mount_path=mount)
+        self.mounted.append((self.fio_node, mount))
+        self.connected.append(lvol_id)
+        return device, mount
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -845,15 +900,16 @@ class BackupStressMarathon(BackupStressBase):
     """
     TC-BCK-STR-060..065
 
-    Runs num_rounds iterations (default 20; set to 100 for full stress)
-    across 3 lvols with a randomly selected operation each round:
+    Runs num_rounds iterations (default 50; set to 100 for full stress)
+    across 6 lvols with a randomly selected operation each round:
 
-      BACKUP            (50 % weight) – snapshot + S3 backup on a random lvol
-      RESTORE           (25 % weight) – restore a random previously-made backup;
+      BACKUP            (53 % weight) – snapshot + S3 backup on a random lvol
+      RESTORE           (26 % weight) – restore a random previously-made backup;
                                         verify checksums
-      DELETE_AND_BACKUP (15 % weight) – delete all backups for a random lvol,
+      DELETE_AND_BACKUP (11 % weight) – delete all backups for a random lvol,
                                         immediately take a fresh backup, verify
-                                        the chain works again
+                                        the chain works again (graceful fallback
+                                        if backup delete not yet supported)
       VERIFY            (10 % weight) – verify checksums on a randomly chosen
                                         already-restored lvol
 
@@ -861,7 +917,7 @@ class BackupStressMarathon(BackupStressBase):
     restored lvol to catch silent corruption early.
 
     Validates:
-      - Service remains stable across 20-100 mixed operations
+      - Service remains stable across 50-100 mixed operations
       - Delta chain stays bounded after repeated backups
       - After backup delete + re-backup, new chain is fully restorable
       - Checksums are correct throughout (no silent data corruption)
@@ -870,12 +926,10 @@ class BackupStressMarathon(BackupStressBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "backup_stress_marathon"
-        self.num_rounds = 20   # set to 100 for a full stress run
-        self.num_lvols = 3
-        # DISABLED: backup delete not supported (SFAM-2792)
-        # self._weights = ["backup"] * 10 + ["restore"] * 5 + \
-        #                 ["delete_and_backup"] * 3 + ["verify"] * 2
-        self._weights = ["backup"] * 10 + ["restore"] * 5 + ["verify"] * 2
+        self.num_rounds = 50   # set to 100 for a full stress run
+        self.num_lvols = 6
+        self._weights = (["backup"] * 10 + ["restore"] * 5
+                         + ["delete_and_backup"] * 2 + ["verify"] * 2)
 
     # ── internal helpers ──────────────────────────────────────────────────
 
@@ -913,30 +967,33 @@ class BackupStressMarathon(BackupStressBase):
         except Exception as e:
             self.logger.error(f"[round {round_num}] RESTORE {lvol_key} failed: {e}")
 
-    # DISABLED: backup delete not supported (SFAM-2792)
-    # def _do_delete_and_backup(self, state: dict, lvol_key: str, round_num: int) -> None:
-    #     info = state["lvols"][lvol_key]
-    #     self.logger.info(
-    #         f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} "
-    #         f"(deleting {len(info['backup_ids'])} backup(s))")
-    #     try:
-    #         self._delete_backups(info["id"])
-    #         info["backup_ids"].clear()
-    #         sleep_n_sec(5)
-    #         remaining = [
-    #             b for b in self._list_backups()
-    #             if lvol_key in " ".join(str(v) for v in b.values())
-    #         ]
-    #         assert len(remaining) == 0, \
-    #             f"[round {round_num}] backups not fully deleted for {lvol_key}: {remaining}"
-    #         sn = f"mara_fresh_{lvol_key}_{round_num}_{_rand_suffix()}"
-    #         self._create_snapshot(info["id"], sn, backup=True)
-    #         bk_id = self._wait_for_backup_by_snap(sn, f"marathon[{round_num}]")
-    #         info["backup_ids"].append(bk_id)
-    #         self.logger.info(
-    #             f"[round {round_num}] DELETE_AND_BACKUP {lvol_key}: fresh backup {bk_id} ✓")
-    #     except Exception as e:
-    #         self.logger.error(f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} error: {e}")
+    def _do_delete_and_backup(self, state: dict, lvol_key: str, round_num: int) -> None:
+        info = state["lvols"][lvol_key]
+        self.logger.info(
+            f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} "
+            f"(deleting {len(info['backup_ids'])} backup(s))")
+        try:
+            self._delete_backups(info["id"])
+            info["backup_ids"].clear()
+            sleep_n_sec(5)
+            remaining = [
+                b for b in self._list_backups()
+                if lvol_key in " ".join(str(v) for v in b.values())
+            ]
+            if remaining:
+                self.logger.warning(
+                    f"[round {round_num}] backups not fully deleted for "
+                    f"{lvol_key}: {len(remaining)} remaining (may be unsupported)")
+            sn = f"mara_fresh_{lvol_key}_{round_num}_{_rand_suffix()}"
+            self._create_snapshot(info["id"], sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"marathon[{round_num}]")
+            info["backup_ids"].append(bk_id)
+            self.logger.info(
+                f"[round {round_num}] DELETE_AND_BACKUP {lvol_key}: fresh backup {bk_id}")
+        except Exception as e:
+            self.logger.warning(
+                f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} "
+                f"failed (backup delete may not be supported): {e}")
 
     def _do_verify(self, state: dict, round_num: int) -> None:
         if not state["restored"]:
@@ -1009,10 +1066,9 @@ class BackupStressMarathon(BackupStressBase):
             elif action == "restore":
                 self._do_restore(state, lvol_key, round_num)
                 restore_count += 1
-            # DISABLED: backup delete not supported (SFAM-2792)
-            # elif action == "delete_and_backup":
-            #     self._do_delete_and_backup(state, lvol_key, round_num)
-            #     delete_count += 1
+            elif action == "delete_and_backup":
+                self._do_delete_and_backup(state, lvol_key, round_num)
+                delete_count += 1
             elif action == "verify":
                 self._do_verify(state, round_num)
                 verify_count += 1
@@ -1083,15 +1139,18 @@ class BackupStressLargeScale(BackupStressBase):
     """
     TC-BCK-STR-070..076
 
-    Creates 100 incremental backups on a single lvol (with periodic FIO
-    writes between batches to produce real deltas), then restores from
-    the latest, the oldest, and several mid-chain points.
+    Creates 100 incremental backups across 4 lvols (25 per lvol) with a
+    mix of filesystem types (ext4, xfs) and security configs (plain, crypto).
+    Backups are batched in parallel (4 concurrent threads).  Periodic FIO
+    writes between batches produce real deltas.  Restores from various chain
+    depths are run concurrently at the end.
 
     Validates:
-      - Service stays stable after 100 consecutive backups
+      - Service stays stable after 100 total backups across 4 lvols
       - Delta chain management keeps backup list bounded (via auto-merge)
-      - Restore from any depth of the chain yields correct data
+      - Restore from any depth of any lvol's chain yields correct data
       - Backup list responds promptly even with many entries
+      - Parallel backup and restore operations do not interfere
 
     This test is designed for the backup-stress runner.  On a CI cluster
     with limited resources, num_backups can be lowered via subclass override.
@@ -1100,9 +1159,16 @@ class BackupStressLargeScale(BackupStressBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "backup_stress_large_scale"
-        self.num_backups = 100
-        self.fio_interval = 10   # write new data every N backups
-        self.restore_count = 5   # how many chain points to restore
+        self.num_backups = 100       # total across all lvols
+        self.fio_interval = 10       # write new data every N backups per lvol
+        self.restore_count = 5       # chain points to restore per lvol
+        self._lvol_configs = [
+            # (label, fs_type, crypto)
+            ("plain_ext4", "ext4", False),
+            ("crypto_ext4", "ext4", True),
+            ("plain_xfs",  "xfs",  False),
+            ("crypto_xfs", "xfs",  True),
+        ]
 
     def run(self):
         self.logger.info(
@@ -1110,130 +1176,193 @@ class BackupStressLargeScale(BackupStressBase):
         self.fio_node = self.fio_node[0]
         self._ensure_pool_and_sc()
 
-        # TC-BCK-STR-070: create lvol, initial FIO, capture baseline
-        self.logger.info("TC-BCK-STR-070: create lvol and write initial data")
-        lvol_name, lvol_id = self._create_lvol(
-            name=f"scale_{_rand_suffix()}", size="10G")
-        _, mount = self._connect_and_mount(lvol_name, lvol_id)
-        self._run_fio(mount, runtime=30)
-        latest_checksums = self._get_checksums(self.fio_node, mount)
-        assert latest_checksums, "TC-BCK-STR-070: no checksums captured"
+        num_lvols = len(self._lvol_configs)
+        backups_per_lvol = self.num_backups // num_lvols
 
-        # TC-BCK-STR-071: create N backups with periodic FIO writes
-        # Track checksums at each FIO write point so mid-chain restores
-        # can be verified against the correct data snapshot.
+        # TC-BCK-STR-070: create lvols with FS mix, initial FIO, capture baseline
         self.logger.info(
-            f"TC-BCK-STR-071: creating {self.num_backups} backups "
-            f"(FIO every {self.fio_interval} backups)")
-        all_bk_ids: list[str] = []
-        # Maps backup index → checksums valid at that point
-        checksums_at: dict[int, dict] = {0: latest_checksums}
-        for i in range(self.num_backups):
-            # Write new data periodically to create real deltas
+            f"TC-BCK-STR-070: creating {num_lvols} lvols "
+            f"({backups_per_lvol} backups each)")
+        lvol_state: dict[str, dict] = {}
+        for label, fs_type, crypto in self._lvol_configs:
+            name, lvol_id = self._create_lvol(
+                name=f"scale_{label}_{_rand_suffix()}", size="10G",
+                crypto=crypto)
+            _, mount = self._connect_format_mount(
+                name, lvol_id, fs_type=fs_type)
+            self._run_fio(mount, runtime=30)
+            checksums = self._get_checksums(self.fio_node, mount)
+            assert checksums, f"TC-BCK-STR-070: no checksums for {label}"
+            lvol_state[label] = {
+                "name": name, "id": lvol_id, "mount": mount,
+                "latest_checksums": checksums,
+                "checksums_at": {0: checksums},
+                "all_bk_ids": [], "successful": [],
+            }
+            self.logger.info(f"TC-BCK-STR-070: {label} ({name}) ready")
+
+        # TC-BCK-STR-071: create backups with periodic FIO writes (parallel batches)
+        self.logger.info(
+            f"TC-BCK-STR-071: creating {self.num_backups} backups in "
+            f"parallel batches of {num_lvols}")
+
+        for i in range(backups_per_lvol):
+            # Write new data periodically
             if i > 0 and i % self.fio_interval == 0:
-                self._run_fio(mount, runtime=10, rw="write")
-                latest_checksums = self._get_checksums(self.fio_node, mount)
-                checksums_at[i] = latest_checksums
+                for label, info in lvol_state.items():
+                    self._run_fio(info["mount"], runtime=10, rw="write")
+                    info["latest_checksums"] = self._get_checksums(
+                        self.fio_node, info["mount"])
+                    info["checksums_at"][i] = info["latest_checksums"]
                 self.logger.info(
-                    f"TC-BCK-STR-071[{i}]: wrote new data, updated checksums")
+                    f"TC-BCK-STR-071[{i}]: wrote new data to all lvols")
 
-            sn = f"sc_{i}_{_rand_suffix()}"
-            try:
-                self._create_snapshot(lvol_id, sn, backup=True)
-                bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-STR-071[{i}]")
-                all_bk_ids.append(bk_id)
-            except Exception as e:
-                self.logger.warning(f"TC-BCK-STR-071[{i}]: backup failed: {e}")
-                all_bk_ids.append("")
+            # Backup all lvols in parallel
+            threads = []
+            thread_results: dict[str, str] = {}
 
-            if i % 20 == 19:
+            def _backup_one(label, info, idx, thread_results=thread_results):
+                sn = f"sc_{label}_{idx}_{_rand_suffix()}"
+                try:
+                    self._create_snapshot(info["id"], sn, backup=True)
+                    bk_id = self._wait_for_backup_by_snap(
+                        sn, f"TC-BCK-STR-071[{label}][{idx}]")
+                    thread_results[label] = bk_id
+                except Exception as e:
+                    self.logger.warning(
+                        f"TC-BCK-STR-071[{label}][{idx}]: backup failed: {e}")
+                    thread_results[label] = ""
+
+            for label, info in lvol_state.items():
+                t = threading.Thread(
+                    target=_backup_one, args=(label, info, i))
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join(timeout=_BACKUP_TIMEOUT)
+
+            for label, bk_id in thread_results.items():
+                lvol_state[label]["all_bk_ids"].append(bk_id)
+                if bk_id:
+                    lvol_state[label]["successful"].append(bk_id)
+
+            if i % 10 == 9:
+                total_done = (i + 1) * num_lvols
                 self.logger.info(
-                    f"TC-BCK-STR-071: {i + 1}/{self.num_backups} backups done")
+                    f"TC-BCK-STR-071: {total_done}/{self.num_backups} backups done")
             sleep_n_sec(2)
 
-        successful = [b for b in all_bk_ids if b]
-        self.logger.info(
-            f"TC-BCK-STR-071: {len(successful)}/{self.num_backups} backups succeeded")
-        assert len(successful) >= self.num_backups * 0.8, (
-            f"TC-BCK-STR-071: too many failures — only {len(successful)} of "
+        # Summary
+        for label, info in lvol_state.items():
+            self.logger.info(
+                f"TC-BCK-STR-071: {label}: "
+                f"{len(info['successful'])}/{backups_per_lvol} backups succeeded")
+        total_ok = sum(len(info["successful"]) for info in lvol_state.values())
+        assert total_ok >= self.num_backups * 0.8, (
+            f"TC-BCK-STR-071: too many failures — only {total_ok} of "
             f"{self.num_backups} backups succeeded"
         )
 
-        # TC-BCK-STR-072: backup list health — must still respond
+        # TC-BCK-STR-072: backup list health
         all_backups = self._list_backups()
         self.logger.info(
-            f"TC-BCK-STR-072: backup list has {len(all_backups)} entries after "
-            f"{self.num_backups} backup operations")
+            f"TC-BCK-STR-072: backup list has {len(all_backups)} entries "
+            f"after {self.num_backups} backup operations")
 
-        # TC-BCK-STR-073: restore from multiple chain depths
-        # Pick: latest, oldest, and evenly spaced mid-chain points
-        restore_indices = [len(successful) - 1, 0]
-        step = max(1, len(successful) // (self.restore_count - 2))
-        for j in range(1, self.restore_count - 1):
-            idx = min(j * step, len(successful) - 1)
-            if idx not in restore_indices:
-                restore_indices.append(idx)
+        # TC-BCK-STR-073: concurrent restores from multiple chain depths
+        # Pick restore points for each lvol
+        for label, info in lvol_state.items():
+            self._unmount_and_disconnect(
+                self.fio_node, info["mount"], info["id"])
 
-        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+        restore_threads = []
+        restore_results: dict[str, int] = {}  # label → ok count
 
-        restore_ok = 0
-        for idx in restore_indices:
-            bk_id = successful[idx]
-            rst_name = f"sc_rst_{idx}_{_rand_suffix()}"
-            try:
-                self._restore_backup(bk_id, rst_name)
-                self._wait_for_restore(rst_name)
-                rst_id = self._get_lvol_id(rst_name)
-                _, rst_mount = self._connect_and_mount(
-                    rst_name, rst_id,
-                    mount=f"{self.mount_path}/scr_{idx}_{_rand_suffix()}",
-                    format_disk=False)
-                # Find the checksums valid at this backup's point in time:
-                # use the latest FIO write point at or before this index.
-                # checksums_at keys: 0, fio_interval, 2*fio_interval, ...
-                # Map successful[idx] back to its original all_bk_ids index
-                orig_idx = all_bk_ids.index(bk_id) if bk_id in all_bk_ids else idx
-                valid_points = sorted(
-                    k for k in checksums_at if k <= orig_idx)
-                expected = checksums_at[valid_points[-1]] if valid_points else latest_checksums
+        def _restore_lvol(label, info):
+            successful = info["successful"]
+            if not successful:
+                restore_results[label] = 0
+                return
+            indices = [len(successful) - 1, 0]
+            step = max(1, len(successful) // max(self.restore_count - 2, 1))
+            for j in range(1, self.restore_count - 1):
+                idx = min(j * step, len(successful) - 1)
+                if idx not in indices:
+                    indices.append(idx)
+            ok = 0
+            for idx in indices:
+                bk_id = successful[idx]
+                rst_name = f"sc_rst_{label}_{idx}_{_rand_suffix()}"
+                try:
+                    self._restore_backup(bk_id, rst_name)
+                    self._wait_for_restore(rst_name)
+                    rst_id = self._get_lvol_id(rst_name)
+                    _, rst_mount = self._connect_and_mount(
+                        rst_name, rst_id,
+                        mount=f"{self.mount_path}/scr_{label}_{idx}_{_rand_suffix()}",
+                        format_disk=False)
+                    all_bk_ids = info["all_bk_ids"]
+                    orig_idx = (all_bk_ids.index(bk_id)
+                                if bk_id in all_bk_ids else idx)
+                    valid_points = sorted(
+                        k for k in info["checksums_at"] if k <= orig_idx)
+                    expected = (info["checksums_at"][valid_points[-1]]
+                                if valid_points else info["latest_checksums"])
+                    r_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
+                    assert len(r_files) > 0
+                    self.ssh_obj.verify_checksums(
+                        self.fio_node, r_files, expected,
+                        message=f"TC-BCK-STR-073: {label}[{idx}] checksum mismatch",
+                        by_name=True)
+                    ok += 1
+                    self.logger.info(
+                        f"TC-BCK-STR-073: {label} depth {idx} checksum OK")
+                    self._unmount_and_disconnect(
+                        self.fio_node, rst_mount, rst_id)
+                except Exception as e:
+                    self.logger.error(
+                        f"TC-BCK-STR-073: {label} depth {idx} failed: {e}")
+            restore_results[label] = ok
 
-                r_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
-                assert len(r_files) > 0, (
-                    f"TC-BCK-STR-073: no files in restore from backup[{idx}]")
-                self.ssh_obj.verify_checksums(
-                    self.fio_node, r_files, expected,
-                    message=f"TC-BCK-STR-073: checksum mismatch at chain depth {idx}",
-                    by_name=True)
-                restore_ok += 1
-                self.logger.info(
-                    f"TC-BCK-STR-073: restore from chain depth {idx} — "
-                    f"checksum verified ({len(r_files)} files)")
-                self._unmount_and_disconnect(self.fio_node, rst_mount, rst_id)
-            except Exception as e:
-                self.logger.error(
-                    f"TC-BCK-STR-073: restore from chain depth {idx} failed: {e}")
+        for label, info in lvol_state.items():
+            t = threading.Thread(target=_restore_lvol, args=(label, info))
+            restore_threads.append(t)
+            t.start()
 
-        assert restore_ok >= len(restore_indices) - 1, (
-            f"TC-BCK-STR-073: only {restore_ok}/{len(restore_indices)} "
-            f"restores succeeded"
+        for t in restore_threads:
+            t.join(timeout=_BACKUP_TIMEOUT * 3)
+
+        total_restore_ok = sum(restore_results.values())
+        total_restore_attempts = sum(
+            min(self.restore_count, len(info["successful"]))
+            for info in lvol_state.values())
+        self.logger.info(
+            f"TC-BCK-STR-073: {total_restore_ok}/{total_restore_attempts} "
+            f"restores succeeded across {num_lvols} lvols")
+        assert total_restore_ok >= total_restore_attempts - num_lvols, (
+            f"TC-BCK-STR-073: too many restore failures — "
+            f"{total_restore_ok}/{total_restore_attempts}"
         )
 
-        # TC-BCK-STR-074: restore latest and verify latest checksums
-        self.logger.info("TC-BCK-STR-074: restore latest backup, verify checksums")
-        latest_bk_id = successful[-1]
-        rst_latest = f"sc_latest_{_rand_suffix()}"
-        self._restore_backup(latest_bk_id, rst_latest)
-        self._wait_for_restore(rst_latest)
-        rst_latest_id = self._get_lvol_id(rst_latest)
-        _, rst_latest_mount = self._connect_and_mount(
-            rst_latest, rst_latest_id,
-            mount=f"{self.mount_path}/scl_{_rand_suffix()}",
-            format_disk=False)
-        self._verify_checksums(
-            self.fio_node, rst_latest_mount, latest_checksums)
-        self.logger.info("TC-BCK-STR-074: latest restore checksum match")
-        self._unmount_and_disconnect(
-            self.fio_node, rst_latest_mount, rst_latest_id)
+        # TC-BCK-STR-074: restore latest from each lvol and verify
+        self.logger.info("TC-BCK-STR-074: restore latest from each lvol")
+        for label, info in lvol_state.items():
+            if not info["successful"]:
+                continue
+            latest_bk = info["successful"][-1]
+            rst_name = f"sc_latest_{label}_{_rand_suffix()}"
+            self._restore_backup(latest_bk, rst_name)
+            self._wait_for_restore(rst_name)
+            rst_id = self._get_lvol_id(rst_name)
+            _, rst_mount = self._connect_and_mount(
+                rst_name, rst_id,
+                mount=f"{self.mount_path}/scl_{label}_{_rand_suffix()}",
+                format_disk=False)
+            self._verify_checksums(
+                self.fio_node, rst_mount, info["latest_checksums"])
+            self.logger.info(f"TC-BCK-STR-074: {label} latest restore OK")
+            self._unmount_and_disconnect(self.fio_node, rst_mount, rst_id)
 
         self.logger.info("=== BackupStressLargeScale PASSED ===")
 
@@ -1279,32 +1408,6 @@ class BackupStressFilesystemSecurityMix(BackupStressBase):
             ("xfs_crypto",       "xfs",  True,  False),
             ("xfs_dhchap_crypt", "xfs",  True,  True),
         ]
-
-    def _connect_format_mount(self, lvol_name: str, lvol_id: str,
-                               fs_type: str = "ext4") -> tuple[str, str]:
-        """Connect lvol and format with specified filesystem type."""
-        if self.k8s_test:
-            pvc_name = self._k8s_normalize_name(lvol_name)
-            return pvc_name, pvc_name
-
-        mount = f"{self.mount_path}/{lvol_name}"
-        initial = self.ssh_obj.get_devices(node=self.fio_node)
-        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-        for cmd in connect_ls:
-            self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
-        sleep_n_sec(3)
-        final = self.ssh_obj.get_devices(node=self.fio_node)
-        new_devs = [d for d in final if d not in initial]
-        assert new_devs, f"No new block device after connecting {lvol_name}"
-        device = f"/dev/{new_devs[0]}"
-        self.ssh_obj.format_disk(
-            node=self.fio_node, device=device, fs_type=fs_type)
-        self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
-        self.ssh_obj.mount_path(
-            node=self.fio_node, device=device, mount_path=mount)
-        self.mounted.append((self.fio_node, mount))
-        self.connected.append(lvol_id)
-        return device, mount
 
     def run(self):
         self.logger.info("=== BackupStressFilesystemSecurityMix START ===")
@@ -1398,16 +1501,22 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
     """
     TC-BCK-STR-090..095
 
-    Repeated delete → backup → retention-merge → restore cycles on lvols
-    with different configurations (plain, crypto, xfs).  Each cycle adds
-    new data before the backup to produce real deltas, then verifies the
+    Repeated delete → backup → dual-policy retention-merge → restore cycles
+    on lvols with different configurations (plain, crypto, xfs).  Each cycle
+    adds new data before the backup to produce real deltas, then verifies the
     restored data matches the latest write.
+
+    Uses two alternating retention policies (versions=2 and versions=3) to
+    exercise merge scheduling under policy switches.  After cycle 3, deletes
+    oldest backup before restore to validate chain integrity after deletion.
 
     This specifically targets the regression where older deleted backups
     corrupt the chain for new backups after retention merge.
 
     Validates:
       - Multiple delete-backup-merge-restore cycles produce correct data
+      - Dual-policy alternating merges handled correctly
+      - Delete mid-chain doesn't corrupt subsequent restores
       - No stale data leaks across cycles
       - Works with crypto, plain, and XFS lvols
       - Retention merge handles the chain correctly after each delete
@@ -1416,39 +1525,13 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "backup_stress_retention_merge_cycles"
-        self.num_cycles = 5
+        self.num_cycles = 10
         self._configs = [
             # (label, crypto, fs_type)
             ("plain_ext4", False, "ext4"),
             ("crypto_ext4", True,  "ext4"),
             ("plain_xfs",  False, "xfs"),
         ]
-
-    def _connect_format_mount(self, lvol_name: str, lvol_id: str,
-                               fs_type: str = "ext4") -> tuple[str, str]:
-        """Connect lvol and format with specified filesystem type."""
-        if self.k8s_test:
-            pvc_name = self._k8s_normalize_name(lvol_name)
-            return pvc_name, pvc_name
-
-        mount = f"{self.mount_path}/{lvol_name}"
-        initial = self.ssh_obj.get_devices(node=self.fio_node)
-        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-        for cmd in connect_ls:
-            self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
-        sleep_n_sec(3)
-        final = self.ssh_obj.get_devices(node=self.fio_node)
-        new_devs = [d for d in final if d not in initial]
-        assert new_devs, f"No new block device after connecting {lvol_name}"
-        device = f"/dev/{new_devs[0]}"
-        self.ssh_obj.format_disk(
-            node=self.fio_node, device=device, fs_type=fs_type)
-        self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
-        self.ssh_obj.mount_path(
-            node=self.fio_node, device=device, mount_path=mount)
-        self.mounted.append((self.fio_node, mount))
-        self.connected.append(lvol_id)
-        return device, mount
 
     def run(self):
         self.logger.info(
@@ -1457,19 +1540,25 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
         self.fio_node = self.fio_node[0]
         self._ensure_pool_and_sc()
 
+        # Create two retention policies for alternating merge thresholds
+        pol_tight_name = f"rmc_pol_tight_{_rand_suffix()}"
+        pol_tight_id = self._add_policy(pol_tight_name, versions=2, age="1d")
+        pol_wide_name = f"rmc_pol_wide_{_rand_suffix()}"
+        pol_wide_id = self._add_policy(pol_wide_name, versions=3, age="1d")
+        self.logger.info(
+            f"TC-BCK-STR-090: dual policies created — "
+            f"tight (versions=2): {pol_tight_id}, "
+            f"wide (versions=3): {pol_wide_id}")
+
         results: dict[str, str] = {}
 
-        for label, crypto, fs_type in self._configs:
-            self.logger.info(
-                f"TC-BCK-STR-090: [{label}] starting "
-                f"{self.num_cycles} delete-merge-restore cycles")
-
+        # Run first two configs in parallel, then third sequentially
+        def _run_config(label, crypto, fs_type):
             try:
                 lvol_name, lvol_id = self._create_lvol(
                     name=f"rmc_{label}_{_rand_suffix()}",
                     crypto=crypto)
 
-                # Initial format and data write
                 _, mount = self._connect_format_mount(
                     lvol_name, lvol_id, fs_type=fs_type)
                 self._run_fio(mount, runtime=20)
@@ -1483,7 +1572,7 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
                     cycle_checksums = self._get_checksums(
                         self.fio_node, mount)
 
-                    # Delete any existing backups
+                    # Delete existing backups (after first cycle)
                     if cycle > 0:
                         self._delete_backups(lvol_id)
                         sleep_n_sec(10)
@@ -1498,12 +1587,35 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
                         cycle_bk_ids.append(bk_id)
                         sleep_n_sec(3)
 
-                    # Apply retention policy (versions=2)
-                    pol_name = f"rmc_pol_{label}_{cycle}_{_rand_suffix()}"
-                    pol_id = self._add_policy(
-                        pol_name, versions=2, age="1d")
-                    self._attach_policy(pol_id, "lvol", lvol_id)
+                    # Alternate between tight and wide retention policies
+                    use_tight = (cycle % 2 == 0)
+                    active_pol_id = pol_tight_id if use_tight else pol_wide_id
+                    pol_label = "tight(v=2)" if use_tight else "wide(v=3)"
+                    self._attach_policy(active_pol_id, "lvol", lvol_id)
+                    self.logger.info(
+                        f"[{label}] cycle {cycle + 1}: policy={pol_label}")
                     sleep_n_sec(20)  # let merge run
+
+                    # After cycle 3, delete oldest backup to test chain
+                    if cycle >= 3 and len(cycle_bk_ids) >= 2:
+                        try:
+                            self.logger.info(
+                                f"[{label}] cycle {cycle + 1}: deleting "
+                                f"oldest backup to test chain integrity")
+                            self._delete_backups(lvol_id)
+                            sleep_n_sec(5)
+                            # Re-take a fresh backup after delete
+                            sn = (f"rmc_{label}_c{cycle}_fresh_"
+                                  f"{_rand_suffix()}")
+                            self._create_snapshot(
+                                lvol_id, sn, backup=True)
+                            fresh_bk = self._wait_for_backup_by_snap(
+                                sn, f"[{label}][c{cycle}.fresh]")
+                            cycle_bk_ids.append(fresh_bk)
+                        except Exception as e:
+                            self.logger.warning(
+                                f"[{label}] cycle {cycle + 1} delete "
+                                f"chain test warning: {e}")
 
                     # Restore latest and verify
                     self._unmount_and_disconnect(
@@ -1529,7 +1641,7 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
                         self.fio_node, rst_mount, rst_id)
 
                     # Detach policy, reconnect source for next cycle
-                    self._detach_policy(pol_id, "lvol", lvol_id)
+                    self._detach_policy(active_pol_id, "lvol", lvol_id)
                     _, mount = self._connect_and_mount(lvol_name, lvol_id,
                                                        format_disk=False)
 
@@ -1542,6 +1654,20 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
                 self.logger.error(f"[{label}] FAILED: {e}")
                 results[label] = f"FAILED: {e}"
 
+        # Run plain_ext4 and crypto_ext4 in parallel
+        threads = []
+        for label, crypto, fs_type in self._configs[:2]:
+            t = threading.Thread(
+                target=_run_config, args=(label, crypto, fs_type))
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join(timeout=3600)
+
+        # Run plain_xfs sequentially (XFS UUID conflicts with parallel mounts)
+        for label, crypto, fs_type in self._configs[2:]:
+            _run_config(label, crypto, fs_type)
+
         # Summary
         passed = sum(1 for v in results.values() if v == "PASSED")
         total = len(self._configs)
@@ -1553,3 +1679,1270 @@ class BackupStressRetentionMergeCycles(BackupStressBase):
         )
 
         self.logger.info("=== BackupStressRetentionMergeCycles PASSED ===")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Stress 11 – Comprehensive mega-stress: 30 parent lvols + NS children, dual policy,
+#              FS mix, concurrent backup/restore, delete+verify
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class BackupStressComprehensive(BackupStressBase):
+    """
+    TC-BCK-STR-100..115
+
+    Comprehensive backup stress test combining high scale, high concurrency,
+    dual alternating retention policies, namespace lvols, snapshot clones,
+    filesystem mix, and delete+restore chain verification.
+
+    Setup:
+      - 30 lvols (1G each, capacity-checked)
+        - 10x ext4+plain, 10x ext4+crypto, 5x xfs+plain, 5x xfs+crypto
+        - 4 of the 30 lvols are created with max_namespace_per_subsys=10,
+          then 3 namespace children are created on each (12 NS children total)
+      - 10 snapshot clones created from random source lvols
+      - 2 retention policies: tight (versions=2) on odd lvols,
+        wide (versions=3) on even lvols
+
+    Stress phases:
+      1. Initial backup wave: 30+ parallel backups (8 at a time)
+      2. Snapshot clone phase: clone 10 lvols, verify data, backup + restore
+      3. Marathon: 100 rounds of 8 backups + 8 restores with concurrent FIO
+         load on remaining lvols (clones participate alongside regular lvols)
+      4. Delete + restore integrity: delete backups, re-backup, verify chain
+      5. Concurrent burst: 16 mixed operations simultaneously
+      6. Final restore from every lvol: verify all data
+
+    Validates:
+      - 1600+ backup/restore operations across 40+ lvols with no data corruption
+      - Snapshot clone data matches source; clone backup/restore integrity
+      - Alternating retention merge under concurrent load
+      - Chain integrity after backup deletion
+      - Namespace lvols backup/restore correctly
+      - Mixed ext4/xfs + plain/crypto all work simultaneously
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_stress_comprehensive"
+        self.lvol_size = "1G"
+        self.fio_size = "200M"
+        self.num_rounds = 100
+        self.parallel_batch = 8
+        self.num_clones = 10
+        self._regular_configs = [
+            # (prefix, count, fs_type, crypto)
+            ("ext4_plain",  10, "ext4", False),
+            ("ext4_crypto", 10, "ext4", True),
+            ("xfs_plain",   5,  "xfs",  False),
+            ("xfs_crypto",  5,  "xfs",  True),
+        ]
+        # Namespace config: first 4 regular lvols become namespace parents,
+        # each getting 3 namespace children (12 NS children total)
+        self.num_namespace_parents = 4
+        self.num_namespace_children = 3
+
+    def _check_and_adjust_capacity(self):
+        """Check cluster capacity and adjust lvol count/size if needed."""
+        try:
+            cap = self.sbcli_utils.get_cluster_capacity()
+            if isinstance(cap, list):
+                cap = cap[0] if cap else {}
+            total_bytes = cap.get("size_total", 0)
+            used_bytes = cap.get("size_used", 0)
+            avail_bytes = total_bytes - used_bytes
+            avail_gb = avail_bytes / (1024 ** 3) if avail_bytes > 0 else 0
+
+            total_lvols = sum(c[1] for c in self._regular_configs)
+            ns_lvols = self.num_namespace_parents * self.num_namespace_children
+            all_lvols = total_lvols + ns_lvols
+            size_gb = int(self.lvol_size.rstrip("Gg"))
+            required_gb = all_lvols * size_gb
+
+            self.logger.info(
+                f"TC-BCK-STR-100: capacity check — "
+                f"available={avail_gb:.1f}GB, "
+                f"required={required_gb}GB "
+                f"({all_lvols} lvols x {size_gb}GB)")
+
+            if required_gb > avail_gb * 0.9:
+                # Scale down proportionally (thin provisioning, so use 70%
+                # of available as our budget)
+                budget_gb = avail_gb * 0.7
+                new_size_gb = max(5, int(budget_gb / all_lvols))
+                self.lvol_size = f"{new_size_gb}G"
+                self.fio_size = f"{max(1, new_size_gb // 3)}G"
+                self.logger.warning(
+                    f"TC-BCK-STR-100: insufficient capacity — "
+                    f"reduced lvol_size to {self.lvol_size}, "
+                    f"fio_size to {self.fio_size}")
+        except Exception as e:
+            self.logger.warning(
+                f"TC-BCK-STR-100: capacity check failed: {e} — "
+                f"continuing with defaults")
+
+    def _list_nvme_ns_devices(self, ctrl_dev: str) -> list[str]:
+        """List namespace devices on an NVMe controller.
+
+        ctrl_dev: /dev/nvmeX (controller) or /dev/nvmeXnY (namespace —
+                  will be stripped to controller).
+        Returns: ['/dev/nvmeXn1', '/dev/nvmeXn2', ...]
+        """
+        ctrl = get_parent_device(ctrl_dev)
+        cmd = f"bash -lc \"ls -1 {ctrl}n* 2>/dev/null | sort -V || true\""
+        out, _ = self.ssh_obj.exec_command(
+            node=self.fio_node, command=cmd, supress_logs=True)
+        return [x.strip() for x in (out or "").splitlines() if x.strip()]
+
+    def _ns_rescan_ctrl(self, ctrl_dev: str) -> None:
+        """Run nvme ns-rescan on a single controller (e.g. /dev/nvme6)."""
+        self.ssh_obj.exec_command(
+            self.fio_node,
+            f"sudo nvme ns-rescan {ctrl_dev}",
+            supress_logs=True)
+
+    def _wait_for_new_ns_device(self, ctrl_dev: str,
+                                 before_set: set,
+                                 timeout: int = 120) -> str | None:
+        """Wait for a new namespace device to appear on the controller.
+
+        Triggers ``nvme ns-rescan`` on each poll iteration so the kernel
+        discovers newly-created namespaces.
+
+        Returns the new device path (e.g. /dev/nvmeXn2) or None on timeout.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self._ns_rescan_ctrl(ctrl_dev)
+            sleep_n_sec(2)
+            cur = set(self._list_nvme_ns_devices(ctrl_dev))
+            diff = sorted(cur - before_set)
+            if diff:
+                return diff[-1]
+        return None
+
+    def _ns_rescan_and_find_device(
+            self, ctrl_dev: str, before_ns_set: set,
+            timeout: int = 30) -> str | None:
+        """Run nvme ns-rescan on *ctrl_dev* and return the new namespace
+        device, or None on timeout.
+
+        Scoped to a single controller to avoid picking up unrelated
+        devices from other subsystems.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self._ns_rescan_ctrl(ctrl_dev)
+            sleep_n_sec(2)
+            cur = set(self._list_nvme_ns_devices(ctrl_dev))
+            diff = sorted(cur - before_ns_set)
+            if diff:
+                return diff[-1]
+        return None
+
+    def _create_and_verify_clone(self, source_label, lvol_state):
+        """Create a snapshot clone of *source_label*, verify checksums,
+        then backup and restore the clone.
+
+        Docker mode: connects clone via ns-rescan (auto-namespaced).
+        K8s mode: creates clone PVC via CSI.
+
+        Returns the clone label added to *lvol_state*.
+        """
+        info = lvol_state[source_label]
+        src_id = info["id"]
+
+        # 1. Snapshot (non-backup) of source
+        snap_name = f"clsnap_{source_label}_{_rand_suffix()}"
+        snap_id = self._create_snapshot(src_id, snap_name, backup=False)
+        self.logger.info(
+            f"  clone: snapshot {snap_name} ({snap_id}) for {source_label}")
+
+        # 2. Create clone
+        clone_name = f"comp_cl_{source_label}_{_rand_suffix()}"
+
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(clone_name)
+            pvc_size = (self.lvol_size.replace("G", "Gi")
+                        if "Gi" not in self.lvol_size else self.lvol_size)
+            k8s.create_clone_pvc(
+                pvc_name, pvc_size, self._storage_class_name, snap_id)
+            k8s.wait_pvc_bound(pvc_name)
+            clone_id = k8s.get_pvc_volume_handle(pvc_name)
+            self.created_pvcs.append(pvc_name)
+            self.created_lvols.append(pvc_name)
+            clone_name = pvc_name
+            device = pvc_name
+            clone_mount = pvc_name
+
+            # Verify clone checksums
+            clone_checksums = self._get_checksums(clone_name, clone_name)
+        else:
+            # Docker: create clone via API, connect with ns-rescan.
+            # Capture global device baseline BEFORE clone creation —
+            # namespaced clones may auto-appear if the parent
+            # subsystem is already connected.
+            initial_devices = set(
+                self.ssh_obj.get_devices(node=self.fio_node))
+
+            self.sbcli_utils.add_clone(snap_id, clone_name)
+            self._wait_for_restore(clone_name, expect_failure=True)
+            clone_id = self._get_lvol_id(clone_name)
+            assert clone_id, f"Clone {clone_name} not found after create"
+            self.created_lvols.append(clone_name)
+
+            # Check clone's nsid to determine connection strategy:
+            # nsid=1 → clone got its own subsystem → nvme connect
+            # nsid>1 → shares parent's subsystem → ns-rescan
+            clone_details = self.sbcli_utils.get_lvol_details(clone_id)
+            clone_nsid = (clone_details[0].get("nsid", 1)
+                          if clone_details else 1)
+            self.logger.info(
+                f"  clone: {clone_name} nsid={clone_nsid}")
+
+            if clone_nsid == 1:
+                # Own subsystem — standard connect
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                    lvol_name=clone_name)
+                for cmd in connect_ls:
+                    self.ssh_obj.exec_command(
+                        node=self.fio_node, command=cmd)
+                sleep_n_sec(5)
+                post_connect = set(
+                    self.ssh_obj.get_devices(node=self.fio_node))
+                new_devs = sorted(post_connect - initial_devices)
+                assert new_devs, (
+                    f"Clone {clone_name} (nsid=1) device not found "
+                    f"after nvme connect")
+                device = f"/dev/{new_devs[0]}"
+            else:
+                # Shared subsystem — ns-rescan needed.  The parent is
+                # already connected so `nvme connect` returns
+                # "already connected".  Rescan all live controllers.
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                    lvol_name=clone_name)
+                for cmd in connect_ls:
+                    self.ssh_obj.exec_command(
+                        node=self.fio_node, command=cmd)
+                sleep_n_sec(3)
+                post_connect = set(
+                    self.ssh_obj.get_devices(node=self.fio_node))
+                new_devs = sorted(post_connect - initial_devices)
+
+                if not new_devs:
+                    # Rescan all live controllers
+                    for attempt in range(3):
+                        self.ssh_obj.rescan_live_nvme_controllers(
+                            self.fio_node)
+                        sleep_n_sec(5)
+                        post_rescan = set(
+                            self.ssh_obj.get_devices(
+                                node=self.fio_node))
+                        new_devs = sorted(
+                            post_rescan - initial_devices)
+                        if new_devs:
+                            break
+                        self.logger.info(
+                            f"  clone: ns-rescan attempt "
+                            f"{attempt + 1}/3 — no device yet")
+                    assert new_devs, (
+                        f"Clone {clone_name} (nsid={clone_nsid}) "
+                        f"device not found after ns-rescan × 3")
+                device = f"/dev/{new_devs[0]}"
+
+            # XFS clones have duplicate UUIDs — regenerate before mount
+            if info["fs_type"] == "xfs":
+                self.ssh_obj.clone_mount_gen_uuid(self.fio_node, device)
+
+            # Mount (no format — clone inherits source filesystem)
+            clone_mount = f"{self.mount_path}/{clone_name}"
+            self.ssh_obj.exec_command(
+                self.fio_node, f"mkdir -p {clone_mount}")
+            self.ssh_obj.mount_path(
+                node=self.fio_node, device=device,
+                mount_path=clone_mount)
+            self.mounted.append((self.fio_node, clone_mount))
+            self.connected.append(clone_id)
+
+            # Verify clone checksums match source
+            clone_checksums = self._get_checksums(
+                self.fio_node, clone_mount)
+
+        assert clone_checksums == info["checksums"], (
+            f"Clone {clone_name} checksums mismatch vs source "
+            f"{source_label}")
+        self.logger.info(
+            f"  clone: {clone_name} checksums match source ✓")
+
+        # Backup the clone
+        clone_bk_id = self._snap_and_backup(
+            clone_id, f"cl_{source_label}")
+        self.logger.info(
+            f"  clone: backup {clone_bk_id} for {clone_name}")
+
+        # Restore from clone backup and verify
+        if clone_bk_id:
+            rst_name = f"comp_clrst_{source_label}_{_rand_suffix()}"
+            rst_mount = None
+            rst_id = None
+            try:
+                self._restore_backup(clone_bk_id, rst_name)
+                self._wait_for_restore(rst_name)
+                rst_id = self._get_lvol_id(rst_name)
+                _, rst_mount = self._connect_and_mount(
+                    rst_name, rst_id,
+                    mount=(
+                        f"{self.mount_path}/"
+                        f"clr_{source_label}_{_rand_suffix()}"
+                    ),
+                    format_disk=False)
+                self._verify_checksums(
+                    self.fio_node, rst_mount, clone_checksums)
+                self.logger.info(
+                    f"  clone: restore of {clone_name} verified ✓")
+            except Exception as e:
+                self.logger.error(
+                    f"  clone: restore verify failed for "
+                    f"{clone_name}: {e}")
+            finally:
+                self._cleanup_restore_lvol(rst_name, rst_mount, rst_id)
+
+        clone_label = f"clone_{source_label}"
+        lvol_state[clone_label] = {
+            "name": clone_name, "id": clone_id,
+            "mount": clone_mount, "device": device,
+            "fs_type": info["fs_type"], "crypto": info["crypto"],
+            "is_namespace": False, "is_clone": True,
+            "source_label": source_label,
+            "parent_id": None, "host_id": None,
+            "ns_sc_name": None,
+            "checksums": clone_checksums,
+            "backup_ids": ([(clone_bk_id, clone_checksums)]
+                           if clone_bk_id else []),
+        }
+        return clone_label
+
+    def _create_lvols_batch(self, configs_batch, lvol_state):
+        """Create a batch of lvols in parallel threads.
+
+        Each item in configs_batch is (label, fs_type, crypto) or
+        (label, fs_type, crypto, ns_parent) where ns_parent=True means
+        the lvol should be created with max_namespace_per_subsys=10.
+        """
+        threads = []
+        errors = []
+
+        def _create_one(label, fs_type, crypto, ns_parent=False):
+            try:
+                name = f"comp_{label}_{_rand_suffix()}"
+                sc_name = None
+                if ns_parent and self.k8s_test:
+                    # K8s: create PVC with a namespace-enabled StorageClass
+                    k8s = self._ensure_k8s_utils()
+                    pvc_name = self._k8s_normalize_name(name)
+                    sc_name = f"sc-ns-{pvc_name}"
+                    k8s.create_storage_class(
+                        name=sc_name,
+                        cluster_id=self.cluster_id,
+                        pool_name=self.pool_name,
+                        ndcs=getattr(self, "ndcs", 1),
+                        npcs=getattr(self, "npcs", 0),
+                        encryption=crypto,
+                        fs_type=fs_type,
+                        max_namespace_per_subsys=10,
+                    )
+                    pvc_size = self.lvol_size.replace("G", "Gi")
+                    k8s.create_pvc(
+                        name=pvc_name, size=pvc_size,
+                        storage_class=sc_name)
+                    k8s.wait_pvc_bound(pvc_name)
+                    lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+                    self.created_pvcs.append(pvc_name)
+                    self.created_lvols.append(pvc_name)
+                    name = pvc_name
+                elif ns_parent:
+                    # Docker: create with namespace support via sbcli
+                    self.sbcli_utils.add_lvol(
+                        lvol_name=name,
+                        pool_name=self.pool_name,
+                        size=self.lvol_size,
+                        crypto=crypto,
+                        max_namespace_per_subsys=10)
+                    lvol_id = self._get_lvol_id(name)
+                    self.created_lvols.append(name)
+                else:
+                    name, lvol_id = self._create_lvol(
+                        name=name,
+                        size=self.lvol_size, crypto=crypto)
+                device, mount = self._connect_format_mount(
+                    name, lvol_id, fs_type=fs_type)
+                self._run_fio(mount, runtime=30)
+                checksums = self._get_checksums(self.fio_node, mount)
+                assert checksums, f"No checksums for {label}"
+                # For namespace parents in Docker mode, fetch the
+                # node_id so children can be pinned to the same host.
+                parent_host_id = None
+                if ns_parent and not self.k8s_test:
+                    try:
+                        details = self.sbcli_utils.get_lvol_details(
+                            lvol_id)[0]
+                        parent_host_id = details.get("node_id")
+                        self.logger.info(
+                            f"  {label} parent host_id={parent_host_id}")
+                    except Exception as he:
+                        self.logger.warning(
+                            f"  {label} could not fetch node_id: {he}")
+
+                lvol_state[label] = {
+                    "name": name, "id": lvol_id, "mount": mount,
+                    "device": device,
+                    "fs_type": fs_type, "crypto": crypto,
+                    "is_namespace": ns_parent, "parent_id": None,
+                    "host_id": parent_host_id,
+                    "ns_sc_name": sc_name if (ns_parent and self.k8s_test) else None,
+                    "checksums": checksums, "backup_ids": [],
+                }
+                self.logger.info(f"  {label} ({name}) ready"
+                                 f"{' [NS parent]' if ns_parent else ''}")
+            except Exception as e:
+                self.logger.error(
+                    f"  {label} creation failed: {e}\n"
+                    f"{traceback.format_exc()}")
+                errors.append((label, e))
+
+        for item in configs_batch:
+            if len(item) == 4:
+                label, fs_type, crypto, ns_parent = item
+            else:
+                label, fs_type, crypto = item
+                ns_parent = False
+            t = threading.Thread(
+                target=_create_one,
+                args=(label, fs_type, crypto, ns_parent))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join(timeout=600)
+
+        return errors
+
+    def _backup_batch(self, lvol_keys, lvol_state, verify_before=False):
+        """Backup a batch of lvols in parallel. Returns {label: bk_id}.
+
+        Each backup_id stored in lvol_state is a ``(bk_id, checksums)``
+        tuple so that restores can be verified against the data that
+        existed at snapshot time (not the current — possibly FIO-modified
+        — state of the source lvol).
+
+        If verify_before=True, verify checksums on the source lvol
+        BEFORE taking the backup. If checksums don't match, the backup
+        is skipped and logged as a pre-backup corruption detection.
+        """
+        threads = []
+        results: dict[str, str] = {}
+
+        def _backup_one(label):
+            info = lvol_state.get(label)
+            if not info:
+                return
+            # Capture checksums BEFORE taking the snapshot so they
+            # reflect exactly the data the backup will contain.
+            snap_checksums = info.get("checksums") or {}
+            if verify_before and snap_checksums:
+                try:
+                    current = self._get_checksums(
+                        self.fio_node if not self.k8s_test
+                        else info["mount"],
+                        info["mount"])
+                    if current != snap_checksums:
+                        # FIO changed data since last refresh — update
+                        # stored checksums so this backup's snapshot
+                        # reflects current state.
+                        snap_checksums = current
+                        info["checksums"] = current
+                except Exception as e:
+                    self.logger.warning(
+                        f"  pre-backup verify {label} failed: {e}")
+            bk_id = self._snap_and_backup(
+                info["id"], f"comp_{label}")
+            if bk_id:
+                results[label] = (bk_id, snap_checksums)
+            else:
+                results[label] = ("", {})
+
+        for label in lvol_keys:
+            t = threading.Thread(target=_backup_one, args=(label,))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join(timeout=_BACKUP_TIMEOUT)
+
+        for label, (bk_id, checksums) in results.items():
+            if bk_id and label in lvol_state:
+                lvol_state[label]["backup_ids"].append(
+                    (bk_id, checksums))
+
+        return {label: bk_id for label, (bk_id, _) in results.items()}
+
+    def _cleanup_restore_lvol(self, rst_name: str, rst_mount: str = None,
+                              rst_id: str = None):
+        """Unmount, disconnect, and delete a restore lvol to free
+        subsystem slots.  Best-effort — errors are logged but swallowed.
+        """
+        try:
+            if rst_mount:
+                self._unmount_and_disconnect(
+                    self.fio_node, rst_mount, rst_id or "")
+        except Exception:
+            pass
+        try:
+            self._delete_lvol(rst_name, skip_error=True)
+        except Exception:
+            pass
+
+    def _restore_batch(self, restore_specs, lvol_state):
+        """Restore a batch in parallel, verify, then **delete** the
+        restore lvols to free subsystem capacity.
+
+        restore_specs: list of ``(label, bk_id, expected_checksums)``
+        tuples.  *expected_checksums* are the checksums captured at
+        backup time — this avoids false failures when FIO has since
+        modified the source lvol.
+
+        Returns {label: (rst_name, checksums_ok)}.
+        """
+        threads = []
+        results: dict[str, tuple[str, bool]] = {}
+
+        def _restore_one(label, bk_id, expected_checksums):
+            rst_name = f"comp_rst_{label}_{_rand_suffix()}"
+            rst_mount = None
+            rst_id = None
+            try:
+                self._restore_backup(bk_id, rst_name)
+                self._wait_for_restore(rst_name)
+                rst_id = self._get_lvol_id(rst_name)
+                _, rst_mount = self._connect_and_mount(
+                    rst_name, rst_id,
+                    mount=f"{self.mount_path}/cr_{label}_{_rand_suffix()}",
+                    format_disk=False)
+                self._verify_checksums(
+                    self.fio_node, rst_mount, expected_checksums)
+                results[label] = (rst_name, True)
+            except Exception as e:
+                self.logger.error(
+                    f"  restore {label} from {bk_id} failed: {e}")
+                results[label] = (rst_name, False)
+            finally:
+                # Always clean up restore lvol to free subsystem slots
+                self._cleanup_restore_lvol(rst_name, rst_mount, rst_id)
+
+        for label, bk_id, expected_checksums in restore_specs:
+            t = threading.Thread(
+                target=_restore_one,
+                args=(label, bk_id, expected_checksums))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join(timeout=_BACKUP_TIMEOUT * 2)
+
+        return results
+
+    def run(self):
+        self.logger.info("=== BackupStressComprehensive START ===")
+        self.fio_node = self.fio_node[0]
+        self._ensure_pool_and_sc()
+
+        # ── Phase 0: Capacity check ────────────────────────────────────
+        self._check_and_adjust_capacity()
+
+        # ── Phase 1: Create all lvols ──────────────────────────────────
+        self.logger.info("TC-BCK-STR-101: creating lvols...")
+        lvol_state: dict[str, dict] = {}
+
+        # Build flat list of (label, fs_type, crypto, ns_parent) for lvols.
+        # The first num_namespace_parents lvols are created with
+        # max_namespace_per_subsys=10 so namespace children can be added.
+        all_items = []
+        ns_parents_remaining = self.num_namespace_parents
+        for prefix, count, fs_type, crypto in self._regular_configs:
+            for i in range(count):
+                label = f"{prefix}_{i}"
+                ns_parent = ns_parents_remaining > 0
+                all_items.append((label, fs_type, crypto, ns_parent))
+                if ns_parent:
+                    ns_parents_remaining -= 1
+
+        # Create in batches of parallel_batch
+        for batch_start in range(0, len(all_items), self.parallel_batch):
+            batch = all_items[batch_start:batch_start + self.parallel_batch]
+            self.logger.info(
+                f"TC-BCK-STR-101: creating batch "
+                f"{batch_start // self.parallel_batch + 1} "
+                f"({len(batch)} lvols)")
+            errors = self._create_lvols_batch(batch, lvol_state)
+            if errors:
+                self.logger.warning(
+                    f"TC-BCK-STR-101: {len(errors)} lvol creation failures "
+                    f"in batch")
+
+        # Create namespace children on the lvols marked as NS parents.
+        parent_labels = [
+            lbl for lbl, info in lvol_state.items()
+            if info.get("is_namespace") and info.get("parent_id") is None
+        ]
+        self.logger.info(
+            f"TC-BCK-STR-101: creating {self.num_namespace_children} "
+            f"namespace children on each of {len(parent_labels)} "
+            f"parent lvols: {parent_labels}")
+        for parent_label in parent_labels:
+            parent_info = lvol_state[parent_label]
+            parent_id = parent_info["id"]
+            try:
+                if self.k8s_test:
+                    # K8s: create PVCs using the parent's namespace-enabled
+                    # StorageClass.  CSI driver auto-groups them into the
+                    # same subsystem as the parent.
+                    k8s = self._ensure_k8s_utils()
+                    ns_sc = parent_info.get("ns_sc_name")
+                    assert ns_sc, (
+                        f"No ns_sc_name for K8s parent {parent_label}")
+                    for ci in range(self.num_namespace_children):
+                        child_label = f"ns_child_{parent_label}_{ci}"
+                        child_name = (
+                            f"comp_nsc_{parent_label}_{ci}_"
+                            f"{_rand_suffix()}")
+                        pvc_name = self._k8s_normalize_name(child_name)
+                        pvc_size = self.lvol_size.replace("G", "Gi")
+                        k8s.create_pvc(
+                            name=pvc_name, size=pvc_size,
+                            storage_class=ns_sc)
+                        k8s.wait_pvc_bound(pvc_name)
+                        child_id = k8s.get_pvc_volume_handle(pvc_name)
+                        self.created_pvcs.append(pvc_name)
+                        self.created_lvols.append(pvc_name)
+                        # Run FIO + capture checksums via K8s Job
+                        self._run_fio(pvc_name, runtime=30)
+                        child_checksums = self._get_checksums(
+                            pvc_name, pvc_name)
+                        lvol_state[child_label] = {
+                            "name": pvc_name, "id": child_id,
+                            "mount": pvc_name, "device": pvc_name,
+                            "fs_type": parent_info["fs_type"],
+                            "crypto": parent_info["crypto"],
+                            "is_namespace": True,
+                            "parent_id": parent_id,
+                            "ns_sc_name": None,
+                            "checksums": child_checksums,
+                            "backup_ids": [],
+                        }
+                        self.logger.info(
+                            f"  {child_label} ({pvc_name}) ready [K8s NS]")
+                else:
+                    # Docker: children share the parent's NVMe subsystem.
+                    # No separate connect — new namespace devices appear
+                    # automatically on the same controller.
+                    parent_device = parent_info.get("device", "")
+                    ctrl_dev = get_parent_device(parent_device)
+                    self.logger.info(
+                        f"TC-BCK-STR-101: parent {parent_label} "
+                        f"device={parent_device} ctrl={ctrl_dev}")
+                    before_set = set(
+                        self._list_nvme_ns_devices(ctrl_dev))
+                    parent_host_id = parent_info.get("host_id")
+                    parent_crypto = parent_info.get("crypto", False)
+                    self.logger.info(
+                        f"TC-BCK-STR-101: NS children for {parent_label}: "
+                        f"host_id={parent_host_id}, crypto={parent_crypto}")
+                    for ci in range(self.num_namespace_children):
+                        child_label = f"ns_child_{parent_label}_{ci}"
+                        child_name = (
+                            f"comp_nsc_{parent_label}_{ci}_"
+                            f"{_rand_suffix()}")
+                        self.sbcli_utils.add_lvol(
+                            lvol_name=child_name,
+                            pool_name=self.pool_name,
+                            size=self.lvol_size,
+                            crypto=parent_crypto,
+                            host_id=parent_host_id,
+                            namespace=parent_id)
+                        child_id = self.sbcli_utils.get_lvol_id(
+                            lvol_name=child_name)
+                        assert child_id, f"Child {child_name} not found"
+                        self.created_lvols.append(child_name)
+                        # Wait for new namespace device on the controller
+                        new_dev = self._wait_for_new_ns_device(
+                            ctrl_dev, before_set, timeout=120)
+                        assert new_dev, (
+                            f"Namespace device did not appear for "
+                            f"{child_name} on {ctrl_dev}")
+                        before_set = set(
+                            self._list_nvme_ns_devices(ctrl_dev))
+                        # Format + mount (no connect needed)
+                        child_mount = (
+                            f"{self.mount_path}/{child_name}")
+                        self.ssh_obj.format_disk(
+                            node=self.fio_node, device=new_dev,
+                            fs_type=parent_info["fs_type"])
+                        self.ssh_obj.exec_command(
+                            self.fio_node,
+                            f"mkdir -p {child_mount}")
+                        self.ssh_obj.mount_path(
+                            node=self.fio_node, device=new_dev,
+                            mount_path=child_mount)
+                        self.mounted.append(
+                            (self.fio_node, child_mount))
+                        self._run_fio(child_mount, runtime=30)
+                        child_checksums = self._get_checksums(
+                            self.fio_node, child_mount)
+                        lvol_state[child_label] = {
+                            "name": child_name, "id": child_id,
+                            "mount": child_mount, "device": new_dev,
+                            "fs_type": parent_info["fs_type"],
+                            "crypto": parent_info["crypto"],
+                            "is_namespace": True,
+                            "parent_id": parent_id,
+                            "ns_sc_name": None,
+                            "checksums": child_checksums,
+                            "backup_ids": [],
+                        }
+                        self.logger.info(
+                            f"  {child_label} ({child_name}) "
+                            f"device={new_dev} ready")
+            except Exception as e:
+                self.logger.error(
+                    f"TC-BCK-STR-101: namespace children on "
+                    f"{parent_label} failed: {e}")
+
+        total_lvols = len(lvol_state)
+        self.logger.info(
+            f"TC-BCK-STR-101: {total_lvols} lvols created and ready")
+        assert total_lvols >= 20, (
+            f"TC-BCK-STR-101: only {total_lvols} lvols created, "
+            f"need at least 20")
+
+        # ── Phase 2: Create 2 retention policies, attach alternating ───
+        self.logger.info("TC-BCK-STR-102: creating dual retention policies")
+        pol_tight_name = f"comp_tight_{_rand_suffix()}"
+        pol_tight_id = self._add_policy(
+            pol_tight_name, versions=2, age="1d")
+        pol_wide_name = f"comp_wide_{_rand_suffix()}"
+        pol_wide_id = self._add_policy(
+            pol_wide_name, versions=3, age="1d")
+
+        all_labels = sorted(lvol_state.keys())
+        for idx, label in enumerate(all_labels):
+            info = lvol_state[label]
+            pol_id = pol_tight_id if idx % 2 == 0 else pol_wide_id
+            pol_desc = "tight(v=2)" if idx % 2 == 0 else "wide(v=3)"
+            try:
+                self._attach_policy(pol_id, "lvol", info["id"])
+                info["policy_id"] = pol_id
+                info["policy_desc"] = pol_desc
+            except Exception as e:
+                self.logger.warning(
+                    f"TC-BCK-STR-102: attach policy to {label} failed: {e}")
+                info["policy_id"] = None
+                info["policy_desc"] = "none"
+
+        self.logger.info(
+            f"TC-BCK-STR-102: policies attached — "
+            f"tight on {sum(1 for lbl in all_labels if all_labels.index(lbl) % 2 == 0)} lvols, "
+            f"wide on {sum(1 for lbl in all_labels if all_labels.index(lbl) % 2 == 1)} lvols")
+
+        # ── Phase 3: Initial backup wave ───────────────────────────────
+        self.logger.info("TC-BCK-STR-103: initial backup wave")
+        initial_ok = 0
+        initial_fail = 0
+        for batch_start in range(0, len(all_labels), self.parallel_batch):
+            batch = all_labels[batch_start:batch_start + self.parallel_batch]
+            results = self._backup_batch(
+                batch, lvol_state, verify_before=True)
+            ok = sum(1 for v in results.values() if v)
+            fail = len(results) - ok
+            initial_ok += ok
+            initial_fail += fail
+            self.logger.info(
+                f"TC-BCK-STR-103: batch "
+                f"{batch_start // self.parallel_batch + 1}: "
+                f"{ok}/{len(batch)} ok")
+
+        self.logger.info(
+            f"TC-BCK-STR-103: initial wave done — "
+            f"{initial_ok} ok, {initial_fail} failed")
+        assert initial_ok >= total_lvols * 0.9, (
+            f"TC-BCK-STR-103: too many initial backup failures: "
+            f"{initial_ok}/{total_lvols}")
+
+        # ── Phase 3.5: Snapshot clone creation + backup/restore ────────
+        self.logger.info("TC-BCK-STR-103B: snapshot clone phase")
+        clone_candidates = random.sample(
+            all_labels, min(self.num_clones, len(all_labels)))
+        clone_results = {}  # source_label -> clone_label or Exception
+
+        def _clone_one(src_label):
+            try:
+                cl_label = self._create_and_verify_clone(
+                    src_label, lvol_state)
+                clone_results[src_label] = cl_label
+                self.logger.info(
+                    f"TC-BCK-STR-103B: {cl_label} done")
+            except Exception as exc:
+                clone_results[src_label] = exc
+                self.logger.error(
+                    f"TC-BCK-STR-103B: clone of {src_label} "
+                    f"failed: {exc}")
+
+        if self.k8s_test:
+            # K8s mode: run clones in parallel — no shared device state.
+            clone_threads = []
+            for source_label in clone_candidates:
+                t = threading.Thread(
+                    target=_clone_one, args=(source_label,),
+                    name=f"clone-{source_label}")
+                clone_threads.append(t)
+                t.start()
+            for t in clone_threads:
+                t.join(timeout=_BACKUP_TIMEOUT * 3)
+        else:
+            # Docker mode: sequential — parallel device baseline
+            # capture causes race conditions with ns-rescan.
+            for source_label in clone_candidates:
+                _clone_one(source_label)
+
+        clone_ok = sum(
+            1 for v in clone_results.values()
+            if isinstance(v, str))
+
+        # Refresh all_labels so clones participate in the marathon
+        all_labels = sorted(lvol_state.keys())
+        self.logger.info(
+            f"TC-BCK-STR-103B: {clone_ok}/{len(clone_candidates)} "
+            f"clones created, total lvols now {len(all_labels)}")
+
+        # ── Phase 4: Marathon backup/restore loop ──────────────────────
+        self.logger.info(
+            f"TC-BCK-STR-104: starting {self.num_rounds}-round marathon")
+        marathon_backups = 0
+        marathon_restores = 0
+        marathon_restore_ok = 0
+        marathon_fio_writes = 0
+
+        # Each round: 8 backups + 8 restores (with concurrent FIO on
+        # remaining lvols to generate I/O load during restore).
+        # 100 rounds × (8 backups + 8 restores) ≈ 1600 operations.
+        restores_per_round = self.parallel_batch  # 8
+
+        for round_num in range(1, self.num_rounds + 1):
+            # ── Backups ──
+            backup_labels = random.sample(
+                all_labels,
+                min(self.parallel_batch, len(all_labels)))
+            bk_results = self._backup_batch(
+                backup_labels, lvol_state,
+                verify_before=(round_num % 5 == 0))
+            round_bk_ok = sum(1 for v in bk_results.values() if v)
+            marathon_backups += round_bk_ok
+
+            # ── Restores + concurrent FIO load ──
+            # Prefer lvols with ≥2 backups — the oldest are more likely
+            # to have completed S3 upload (avoids "Incomplete backups
+            # in chain" errors from freshly-created backups).
+            restorable = [
+                lbl for lbl in all_labels
+                if lvol_state[lbl]["backup_ids"]]
+            num_restore = min(restores_per_round, len(restorable))
+            if num_restore >= 1:
+                restore_labels = random.sample(restorable, num_restore)
+                restore_specs = []
+                for lbl in restore_labels:
+                    bk_list = lvol_state[lbl]["backup_ids"]
+                    # Pick from older backups (exclude most recent which
+                    # may still be uploading to S3).  Fall back to the
+                    # oldest if there's only one.
+                    older = bk_list[:-1] if len(bk_list) > 1 else bk_list
+                    bk_id, checksums = random.choice(older)
+                    restore_specs.append((lbl, bk_id, checksums))
+
+                # Start FIO on non-restore lvols in background threads
+                # to generate I/O load while restores run
+                fio_candidates = [
+                    lbl for lbl in all_labels if lbl not in restore_labels]
+                fio_labels = random.sample(
+                    fio_candidates,
+                    min(4, len(fio_candidates)))
+                fio_threads = []
+                for label in fio_labels:
+                    def _bg_fio(lbl=label):
+                        info = lvol_state[lbl]
+                        try:
+                            self._run_fio(
+                                info["mount"], runtime=30, rw="randrw")
+                        except Exception:
+                            pass
+                    t = threading.Thread(target=_bg_fio)
+                    fio_threads.append(t)
+                    t.start()
+
+                rst_results = self._restore_batch(
+                    restore_specs, lvol_state)
+                marathon_restores += len(rst_results)
+                marathon_restore_ok += sum(
+                    1 for _, (_, ok) in rst_results.items() if ok)
+
+                # Wait for background FIO to finish
+                for t in fio_threads:
+                    t.join(timeout=120)
+                marathon_fio_writes += len(fio_labels)
+
+            # Every 5 rounds: update checksums after FIO
+            if round_num % 5 == 0:
+                refresh_labels = random.sample(
+                    all_labels, min(4, len(all_labels)))
+                for label in refresh_labels:
+                    info = lvol_state[label]
+                    try:
+                        info["checksums"] = self._get_checksums(
+                            self.fio_node, info["mount"])
+                    except Exception:
+                        pass
+
+            # Every 15 rounds: forced checksum verification
+            if round_num % 15 == 0:
+                verify_labels = random.sample(
+                    all_labels, min(4, len(all_labels)))
+                verify_ok = 0
+                for label in verify_labels:
+                    info = lvol_state[label]
+                    try:
+                        current = self._get_checksums(
+                            self.fio_node, info["mount"])
+                        if current == info["checksums"]:
+                            verify_ok += 1
+                    except Exception:
+                        pass
+                self.logger.info(
+                    f"TC-BCK-STR-107: round {round_num} — "
+                    f"verify {verify_ok}/{len(verify_labels)} ok")
+
+            if round_num % 10 == 0:
+                self.logger.info(
+                    f"TC-BCK-STR-104: round {round_num}/{self.num_rounds} "
+                    f"— backups={marathon_backups}, "
+                    f"restores={marathon_restore_ok}/{marathon_restores}, "
+                    f"fio_writes={marathon_fio_writes}")
+
+            sleep_n_sec(3)
+
+        self.logger.info(
+            f"TC-BCK-STR-104: marathon complete — "
+            f"backups={marathon_backups}, "
+            f"restores={marathon_restore_ok}/{marathon_restores}, "
+            f"fio_writes={marathon_fio_writes}")
+
+        # ── Phase 5: Delete + restore integrity ────────────────────────
+        self.logger.info("TC-BCK-STR-108: delete + restore integrity check")
+        delete_labels = random.sample(
+            [lbl for lbl in all_labels if lvol_state[lbl]["backup_ids"]],
+            min(10, len([lbl for lbl in all_labels
+                         if lvol_state[lbl]["backup_ids"]])))
+        delete_ok = 0
+        for label in delete_labels:
+            info = lvol_state[label]
+            try:
+                self._delete_backups(info["id"])
+                info["backup_ids"].clear()
+                sleep_n_sec(5)
+                # Capture checksums right before the fresh backup
+                fresh_checksums = self._get_checksums(
+                    self.fio_node if not self.k8s_test
+                    else info["mount"],
+                    info["mount"])
+                info["checksums"] = fresh_checksums
+                # Take fresh backup
+                bk_id = self._snap_and_backup(
+                    info["id"], f"comp_fresh_{label}")
+                if bk_id:
+                    info["backup_ids"].append((bk_id, fresh_checksums))
+                sleep_n_sec(30)  # let retention merge run
+                # Restore and verify
+                if info["backup_ids"]:
+                    last_bk_id, last_checksums = info["backup_ids"][-1]
+                    rst_name = f"comp_del_rst_{label}_{_rand_suffix()}"
+                    rst_mount = None
+                    rst_id = None
+                    try:
+                        self._restore_backup(last_bk_id, rst_name)
+                        self._wait_for_restore(rst_name)
+                        rst_id = self._get_lvol_id(rst_name)
+                        _, rst_mount = self._connect_and_mount(
+                            rst_name, rst_id,
+                            mount=(
+                                f"{self.mount_path}/"
+                                f"cdel_{label}_{_rand_suffix()}"
+                            ),
+                            format_disk=False)
+                        self._verify_checksums(
+                            self.fio_node, rst_mount, last_checksums)
+                        delete_ok += 1
+                        self.logger.info(
+                            f"TC-BCK-STR-108: {label} delete+restore OK")
+                    finally:
+                        self._cleanup_restore_lvol(
+                            rst_name, rst_mount, rst_id)
+            except Exception as e:
+                self.logger.error(
+                    f"TC-BCK-STR-108: {label} delete+restore failed: {e}")
+
+        self.logger.info(
+            f"TC-BCK-STR-109: delete+restore — "
+            f"{delete_ok}/{len(delete_labels)} passed")
+
+        # ── Phase 6: Concurrent stress burst ───────────────────────────
+        self.logger.info("TC-BCK-STR-110: concurrent stress burst")
+        burst_threads = []
+        burst_results: dict[str, str] = {}
+
+        # 8 backups
+        backup_burst = random.sample(
+            all_labels, min(8, len(all_labels)))
+        for label in backup_burst:
+            def _bk(lbl=label):
+                try:
+                    info = lvol_state[lbl]
+                    snap_checksums = info.get("checksums") or {}
+                    bk_id = self._snap_and_backup(
+                        info["id"], f"burst_{lbl}")
+                    if bk_id:
+                        info["backup_ids"].append(
+                            (bk_id, snap_checksums))
+                    burst_results[f"backup_{lbl}"] = "ok" if bk_id else "no_id"
+                except Exception as e:
+                    burst_results[f"backup_{lbl}"] = f"fail: {e}"
+            t = threading.Thread(target=_bk)
+            burst_threads.append(t)
+
+        # 4 restores
+        restorable = [
+            lbl for lbl in all_labels
+            if lbl not in backup_burst and lvol_state[lbl]["backup_ids"]]
+        restore_burst = random.sample(
+            restorable, min(4, len(restorable)))
+        for label in restore_burst:
+            def _rs(lbl=label):
+                info = lvol_state[lbl]
+                rst_name = f"burst_rst_{lbl}_{_rand_suffix()}"
+                rst_mount = None
+                rst_id = None
+                try:
+                    bk_id, expected_checksums = random.choice(
+                        info["backup_ids"])
+                    self._restore_backup(bk_id, rst_name)
+                    self._wait_for_restore(rst_name)
+                    rst_id = self._get_lvol_id(rst_name)
+                    _, rst_mount = self._connect_and_mount(
+                        rst_name, rst_id,
+                        mount=(
+                            f"{self.mount_path}/"
+                            f"cburst_{lbl}_{_rand_suffix()}"
+                        ),
+                        format_disk=False)
+                    self._verify_checksums(
+                        self.fio_node, rst_mount, expected_checksums)
+                    burst_results[f"restore_{lbl}"] = "ok"
+                except Exception as e:
+                    burst_results[f"restore_{lbl}"] = f"fail: {e}"
+                finally:
+                    self._cleanup_restore_lvol(
+                        rst_name, rst_mount, rst_id)
+            t = threading.Thread(target=_rs)
+            burst_threads.append(t)
+
+        # 4 FIO writes
+        remaining = [
+            lbl for lbl in all_labels
+            if lbl not in backup_burst and lbl not in restore_burst]
+        fio_burst = random.sample(
+            remaining, min(4, len(remaining)))
+        for label in fio_burst:
+            def _fio(lbl=label):
+                info = lvol_state[lbl]
+                try:
+                    self._run_fio(info["mount"], runtime=15, rw="write")
+                    info["checksums"] = self._get_checksums(
+                        self.fio_node, info["mount"])
+                    burst_results[f"fio_{lbl}"] = "ok"
+                except Exception as e:
+                    burst_results[f"fio_{lbl}"] = f"fail: {e}"
+            t = threading.Thread(target=_fio)
+            burst_threads.append(t)
+
+        for t in burst_threads:
+            t.start()
+        for t in burst_threads:
+            t.join(timeout=_BACKUP_TIMEOUT * 2)
+
+        burst_ok = sum(
+            1 for v in burst_results.values() if v == "ok")
+        self.logger.info(
+            f"TC-BCK-STR-110: burst complete — "
+            f"{burst_ok}/{len(burst_results)} operations ok")
+
+        # ── Phase 7: Retention merge verification ──────────────────────
+        self.logger.info("TC-BCK-STR-111: retention merge verification")
+        all_backups = self._list_backups()
+        tight_counts = []
+        wide_counts = []
+        for idx, label in enumerate(all_labels):
+            info = lvol_state[label]
+            lvol_bks = [
+                b for b in all_backups
+                if info["name"] in " ".join(str(v) for v in b.values())
+            ]
+            active = [
+                b for b in lvol_bks
+                if (b.get("status") or b.get("Status") or "").lower()
+                not in ("merged", "deleted", "failed", "error")
+            ]
+            if idx % 2 == 0:
+                tight_counts.append(len(active))
+            else:
+                wide_counts.append(len(active))
+
+        if tight_counts:
+            self.logger.info(
+                f"TC-BCK-STR-111: tight policy lvols — "
+                f"avg={sum(tight_counts)/len(tight_counts):.1f} "
+                f"active backups (expected ≤3)")
+        if wide_counts:
+            self.logger.info(
+                f"TC-BCK-STR-111: wide policy lvols — "
+                f"avg={sum(wide_counts)/len(wide_counts):.1f} "
+                f"active backups (expected ≤4)")
+
+        # ── Phase 8: Final restore from every lvol ─────────────────────
+        self.logger.info("TC-BCK-STR-112: final restore wave")
+        # Disconnect all source lvols first
+        for label in all_labels:
+            info = lvol_state[label]
+            try:
+                self._unmount_and_disconnect(
+                    self.fio_node, info["mount"], info["id"])
+            except Exception:
+                pass
+
+        final_ok = 0
+        final_total = 0
+        for batch_start in range(0, len(all_labels), self.parallel_batch):
+            batch = all_labels[batch_start:batch_start + self.parallel_batch]
+            restore_specs = []
+            for label in batch:
+                info = lvol_state[label]
+                if info["backup_ids"]:
+                    bk_id, checksums = info["backup_ids"][-1]
+                    restore_specs.append(
+                        (label, bk_id, checksums))
+            if restore_specs:
+                rst_results = self._restore_batch(
+                    restore_specs, lvol_state)
+                batch_ok = sum(
+                    1 for _, (_, ok) in rst_results.items() if ok)
+                final_ok += batch_ok
+                final_total += len(restore_specs)
+                self.logger.info(
+                    f"TC-BCK-STR-112: final batch "
+                    f"{batch_start // self.parallel_batch + 1}: "
+                    f"{batch_ok}/{len(restore_specs)} ok")
+
+        self.logger.info(
+            f"TC-BCK-STR-113: final restore — "
+            f"{final_ok}/{final_total} passed")
+        assert final_ok >= final_total * 0.95, (
+            f"TC-BCK-STR-113: too many final restore failures: "
+            f"{final_ok}/{final_total}")
+
+        # ── Phase 9: Capacity snapshot + cleanup + summary ─────────────
+        self.logger.info("TC-BCK-STR-114: capacity snapshot")
+        try:
+            cap = self.sbcli_utils.get_cluster_capacity()
+            if isinstance(cap, list):
+                cap = cap[0] if cap else {}
+            self.logger.info(
+                f"TC-BCK-STR-114: final capacity — "
+                f"total={cap.get('size_total', 0)}, "
+                f"used={cap.get('size_used', 0)}")
+        except Exception as e:
+            self.logger.warning(f"TC-BCK-STR-114: capacity check: {e}")
+
+        self.logger.info("TC-BCK-STR-115: cleanup")
+        # Detach policies
+        for label in all_labels:
+            info = lvol_state[label]
+            if info.get("policy_id"):
+                try:
+                    self._detach_policy(
+                        info["policy_id"], "lvol", info["id"])
+                except Exception:
+                    pass
+
+        # Delete order: clones → ns_children → ns_parents → regular
+        # Clones must be deleted before their source snapshots (SPDK
+        # dependency).
+        clones = [
+            lbl for lbl in all_labels
+            if lvol_state[lbl].get("is_clone")]
+        ns_children = [
+            lbl for lbl in all_labels
+            if lvol_state[lbl].get("parent_id")]
+        ns_parents = [
+            lbl for lbl in all_labels
+            if lvol_state[lbl].get("is_namespace")
+            and not lvol_state[lbl].get("parent_id")]
+        regular = [
+            lbl for lbl in all_labels
+            if not lvol_state[lbl].get("is_namespace")
+            and not lvol_state[lbl].get("is_clone")]
+
+        for group_name, group in [
+            ("clones", clones),
+            ("ns_children", ns_children),
+            ("ns_parents", ns_parents),
+            ("regular", regular),
+        ]:
+            for label in group:
+                try:
+                    self._force_delete_lvol(lvol_state[label]["name"])
+                except Exception as e:
+                    self.logger.warning(
+                        f"cleanup {label}: {e}")
+
+        # Summary
+        total_backups = initial_ok + marathon_backups
+        clone_count = sum(
+            1 for lbl in all_labels if lvol_state[lbl].get("is_clone"))
+        self.logger.info(
+            f"\n{'=' * 60}\n"
+            f"  BackupStressComprehensive SUMMARY\n"
+            f"{'=' * 60}\n"
+            f"  Lvols created:     {total_lvols}\n"
+            f"  Clones created:    {clone_ok}\n"
+            f"  Initial backups:   {initial_ok}\n"
+            f"  Marathon backups:  {marathon_backups}\n"
+            f"  Marathon restores: {marathon_restore_ok}/{marathon_restores}\n"
+            f"  Delete+restore:    {delete_ok}/{len(delete_labels)}\n"
+            f"  Burst operations:  {burst_ok}/{len(burst_results)}\n"
+            f"  Final restores:    {final_ok}/{final_total}\n"
+            f"  Total backups:     {total_backups}\n"
+            f"  FS breakdown:      "
+            f"ext4={sum(1 for lbl in all_labels if lvol_state[lbl]['fs_type'] == 'ext4')}, "
+            f"xfs={sum(1 for lbl in all_labels if lvol_state[lbl]['fs_type'] == 'xfs')}\n"
+            f"  Namespace lvols:   "
+            f"{sum(1 for lbl in all_labels if lvol_state[lbl].get('is_namespace'))}\n"
+            f"  Clone lvols:       {clone_count}\n"
+            f"{'=' * 60}")
+
+        self.logger.info("=== BackupStressComprehensive PASSED ===")

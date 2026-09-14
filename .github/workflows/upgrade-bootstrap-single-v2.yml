@@ -393,6 +393,7 @@ jobs:
       # PRE-BOOTSTRAP CLEANUP
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -400,7 +401,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -434,6 +436,7 @@ jobs:
           done
 
       - name: Destroy/clean storage nodes (deploy-cleaner, docker prune, uninstall sbcli, k3s)
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -441,7 +444,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -474,6 +478,7 @@ jobs:
           done
 
       - name: Client cleanup disconnect lvols; unmount all /mnt; remove /mnt dirs
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -481,7 +486,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -517,6 +523,7 @@ jobs:
           done
 
       - name: Remove /etc/simplyblock; reboot storage; disk reset + PCI rebind + mklabel
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -524,7 +531,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"

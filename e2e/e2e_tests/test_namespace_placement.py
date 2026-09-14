@@ -40,7 +40,7 @@ class TestNamespacePlacement(TestClusterBase):
             retry=3,
         )
         sleep_n_sec(5)
-        parent_id = self.sbcli_utils.get_lvol_id(parent_name)
+        parent_id = self._get_lvol_id_dual(parent_name)
         assert parent_id, f"Parent {parent_name} not created"
 
         parent_details = self.sbcli_utils.get_lvol_details(parent_id)
@@ -70,7 +70,7 @@ class TestNamespacePlacement(TestClusterBase):
 
         # ── Verify placement ───────────────────────────────────────
         for cname in child_names:
-            cid = self.sbcli_utils.get_lvol_id(cname)
+            cid = self._get_lvol_id_dual(cname)
             assert cid, f"Child {cname} not found"
             cdet = self.sbcli_utils.get_lvol_details(cid)
             if cdet and len(cdet) > 0:

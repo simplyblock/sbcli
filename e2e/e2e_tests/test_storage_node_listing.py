@@ -25,44 +25,38 @@ class TestStorageNodeListing(TestClusterBase):
         # -- TC-SN-008: Node list field validation ----------------------
         self.logger.info("=== TC-SN-008: Node List Validation ===")
 
-        nodes = self.sbcli_utils.get_storage_nodes()
+        # get_storage_nodes() returns {"results": [<node dict>, ...]} in both
+        # Docker (REST) and K8s (CLI) modes — iterate the list, not the dict.
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
         assert nodes, "No storage nodes returned from list"
         assert len(nodes) > 0, "Storage node list is empty"
         self.logger.info(f"Found {len(nodes)} storage node(s)")
 
-        for node_id in nodes:
-            assert node_id, "Node ID is empty/None in list"
-            self.logger.info(f"  Node ID: {node_id}")
+        node_ids = []
+        for node in nodes:
+            nid = node.get("uuid") or node.get("id")
+            assert nid, f"Node ID is empty/None in list entry: {node}"
+            node_ids.append(nid)
+            self.logger.info(f"  Node ID: {nid}")
         self.logger.info("TC-SN-008: Node List — PASS")
 
         # -- TC-SN-009: Node get detail validation ----------------------
         self.logger.info("=== TC-SN-009: Node Get Details ===")
 
-        for node_id in nodes:
-            details = self.sbcli_utils.get_storage_node_details(node_id)
-            assert details is not None, (
-                f"get_storage_node_details returned None for {node_id}"
-            )
+        valid_statuses = (
+            "online", "active", "offline", "suspended",
+            "in_creation", "restarting",
+        )
+        for node in nodes:
+            nid = node.get("uuid") or node.get("id")
+            # Validate key fields exist (uuid/id + status) on the node dict.
+            assert nid, f"Node missing id/uuid: {node}"
+            assert "status" in node, f"Node {nid} missing field 'status': {node}"
 
-            # Validate key fields exist
-            expected_fields = ["id", "status"]
-            for field in expected_fields:
-                assert field in details, (
-                    f"Node {node_id} missing field '{field}' in details"
-                )
-
-            status = details.get("status", "unknown")
-            self.logger.info(
-                f"  Node {node_id}: status={status}"
-            )
-
-            # Validate status is valid
-            valid_statuses = (
-                "online", "active", "offline", "suspended",
-                "in_creation", "restarting",
-            )
+            status = node.get("status", "unknown")
+            self.logger.info(f"  Node {nid}: status={status}")
             assert status in valid_statuses, (
-                f"Node {node_id} has unknown status: {status}"
+                f"Node {nid} has unknown status: {status}"
             )
 
         self.logger.info("TC-SN-009: Node Get Details — PASS")
@@ -70,7 +64,7 @@ class TestStorageNodeListing(TestClusterBase):
         # -- TC-SN-010: Node capacity validation ------------------------
         self.logger.info("=== TC-SN-010: Node Capacity ===")
 
-        for node_id in nodes:
+        for node_id in node_ids:
             try:
                 capacity = self.sbcli_utils.get_node_capacity(node_id)
                 if capacity is not None:
@@ -86,7 +80,7 @@ class TestStorageNodeListing(TestClusterBase):
         self.logger.info("=== TC-SN-011: Device Listing Per Node ===")
 
         total_devices = 0
-        for node_id in nodes:
+        for node_id in node_ids:
             devices = self.sbcli_utils.get_device_details(node_id)
             dev_count = len(devices) if devices else 0
             total_devices += dev_count
@@ -122,14 +116,13 @@ class TestStorageNodeListing(TestClusterBase):
             created.append(name)
 
         # List lvols and verify each has a valid node assignment
-        lvols = self.sbcli_utils.list_lvols()
         for name in created:
-            assert name in lvols, f"Created lvol {name} not in list"
-            lid = lvols[name]
+            self._verify_lvol_exists_dual(name)
+            lid = self._get_lvol_id_dual(name)
             det = self.sbcli_utils.get_lvol_details(lid)
             if det and isinstance(det, list) and len(det) > 0:
                 node_id = det[0].get("node_id", "")
-                assert node_id in nodes, (
+                assert node_id in node_ids, (
                     f"LVOL {name} placed on unknown node: {node_id}"
                 )
                 self.logger.info(f"  LVOL {name} → node {node_id}")
@@ -138,9 +131,6 @@ class TestStorageNodeListing(TestClusterBase):
 
         # -- Cleanup ----------------------------------------------------
         for name in created:
-            try:
-                self.sbcli_utils.delete_lvol(name)
-            except Exception as exc:
-                self.logger.warning(f"Cleanup delete {name}: {exc}")
+            self._delete_lvol_dual(name)
 
         self.logger.info("=== TestStorageNodeListing: ALL PASSED ===")

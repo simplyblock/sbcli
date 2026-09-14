@@ -23,8 +23,12 @@ class TestNodeShutdownRestart(TestClusterBase):
         self.logger.info("=== TC-SN-SHUT: Node Shutdown/Restart ===")
 
         nodes = self.sbcli_utils.get_storage_nodes()
-        assert nodes, "No storage nodes found"
-        node_list = list(nodes.keys()) if isinstance(nodes, dict) else list(nodes)
+        sn_results = nodes.get("results", nodes) if isinstance(nodes, dict) else nodes
+        assert sn_results, "No storage nodes found"
+        node_list = [
+            n.get("uuid") or n.get("id") or n
+            for n in (sn_results if isinstance(sn_results, list) else [sn_results])
+        ]
 
         if len(node_list) < 2:
             self.logger.warning(
@@ -62,7 +66,7 @@ class TestNodeShutdownRestart(TestClusterBase):
             pool_name=self.pool_name,
             size="1G",
         )
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        lvol_id = self._get_lvol_id_dual(lvol_name)
         assert lvol_id, f"Could not get lvol_id for {lvol_name}"
 
         # Connect and run FIO
@@ -156,9 +160,6 @@ class TestNodeShutdownRestart(TestClusterBase):
         # -- Cleanup ----------------------------------------------------
         if not self.k8s_test:
             self._disconnect_and_cleanup_dual(lvol_name)
-        try:
-            self.sbcli_utils.delete_lvol(lvol_name)
-        except Exception as exc:
-            self.logger.warning(f"Cleanup delete {lvol_name}: {exc}")
+        self._delete_lvol_dual(lvol_name)
 
         self.logger.info("=== TestNodeShutdownRestart: ALL PASSED ===")

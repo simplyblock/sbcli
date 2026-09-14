@@ -57,7 +57,7 @@ class TestClusterTasks(TestClusterBase):
             pool_name=self.pool_name,
             size="1G",
         )
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        lvol_id = self._get_lvol_id_dual(lvol_name)
         assert lvol_id, f"Could not get lvol_id for {lvol_name}"
         self.logger.info(f"LVOL {lvol_name} created -- id={lvol_id}")
 
@@ -99,7 +99,7 @@ class TestClusterTasks(TestClusterBase):
 
         # -- Cleanup -------------------------------------------------------
         try:
-            self.sbcli_utils.delete_lvol(lvol_name)
+            self._delete_lvol_dual(lvol_name)
         except Exception as exc:
             self.logger.warning(f"Cleanup delete {lvol_name}: {exc}")
 

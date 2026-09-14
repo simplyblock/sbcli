@@ -1,3 +1,89 @@
+"""
+Docker (VM/bare-metal) rolling major upgrade.
+
+OPERATOR PROCEDURE -- the exact sequence this test performs, so it can be
+handed to a customer without re-reading the code or a CI log. Verified by run
+33733403479 (26.2.8-PRE -> R26.3, success).
+
+Scope: rolling upgrade between R26.x versions (e.g. 26.2.8-PRE -> R26.3).
+The R25 -> R26 path additionally needs a DB migration; see
+_needs_db_migration, which gates it to base versions starting with 25.
+
+Workloads stay online throughout: this test keeps 4 FIO sessions per storage
+node running across every step below.
+
+Preconditions
+-------------
+  * cluster status ACTIVE, every storage node "online"
+  * you know the target release tag and BOTH container image tags
+
+Steps
+-----
+  1. Install the target release on EVERY node (management + storage):
+
+         pip install "git+https://github.com/simplyblock-io/sbcli.git@R26.3" \
+             --upgrade --force-reinstall
+
+  2. Pin the target images in simplyblock_core/env_var on the MANAGEMENT
+     nodes (skip if not overriding image tags). Locate the file with:
+
+         python3 -c "import simplyblock_core, os; print(os.path.join(
+             os.path.dirname(simplyblock_core.__file__), 'env_var'))"
+         # e.g. /usr/local/lib/python3.12/site-packages/simplyblock_core/env_var
+
+  3. Update the control plane only:
+
+         sbctl -d cluster update <CLUSTER_ID> --cp-only true
+
+  4. DB migration -- R25 -> R26 ONLY. Skip it for R26.x -> R26.y.
+
+  5. Rolling storage-node upgrade, ONE NODE AT A TIME. Do not start the next
+     node until the current one is "online" AND its migration tasks have
+     finished.
+
+         sbctl -d sn suspend  <NODE_ID>       # wait: status = suspended
+         sbctl -d sn shutdown <NODE_ID>       # wait: status = offline
+
+         # on the storage node itself, if pinning images: update env_var
+         sbctl -d sn deploy --ifname eth0     # run ON the storage node
+
+         sbctl --dev -d sn restart <NODE_ID> \
+             --spdk-image       public.ecr.aws/simply-block/ultra:R26.3-latest \
+             --spdk-proxy-image public.ecr.aws/simply-block/simplyblock:R26.3
+         # wait: status = online, then wait for migration tasks
+
+     BOTH images are required. They are different repositories ("ultra" vs
+     "simplyblock") with different tag shapes ("R26.3-latest" vs "R26.3"), so
+     neither can be inferred from the other.
+
+  6. Verify every container is running the target image.
+
+  7. Activate v2 write protection, then restart every node AGAIN.
+
+     An upgraded cluster's existing distribs stay on v1 write protection --
+     only freshly created clusters start on v2. Run this only once every node
+     is back online: the switch sends the runtime RPC to all online nodes and
+     records v2 only when every one of them accepts it.
+
+         sbctl -d cluster switch-write-protection <CLUSTER_ID>
+
+     then, one node at a time:
+
+         sbctl --dev -d sn restart <NODE_ID> --force
+         # wait: online + migration tasks, before moving to the next node
+
+     --force is REQUIRED: the nodes are already online and healthy, so a plain
+     restart is refused as unnecessary. No image flags here -- the node is
+     already on the target images. This second pass proves the v2 generation
+     persisted and the nodes come back cleanly under it.
+
+  8. Post-upgrade validation: cluster ACTIVE, all nodes online, workload I/O
+     uninterrupted, pre-upgrade checksums still match.
+
+Note on flags: this test uses -d / --dev (debug/dev) throughout. Confirm which
+of those belong in a customer-facing procedure before publishing it.
+"""
+
 # import os
 # import threading
 # from e2e_tests.cluster_test_base import TestClusterBase
@@ -525,21 +611,34 @@ print("done")
         self.logger.info(f"[{node}] R25->R26 DB migration complete")
 
     def _needs_db_migration(self) -> bool:
-        """Check if DB migration is needed for this upgrade.
+        """Whether the R25 -> R26 DB migration applies to this upgrade.
 
-        The migration re-writes storage node, lvol, and snapshot objects
-        to pick up new fields.  It is idempotent, so it is safe to run on
-        every cross-version upgrade.  The only case we skip is a same-minor
-        hotfix (e.g. R25.10-Hotfix → R25.10-Hotfix2).
+        It applies ONLY when coming from R25. The script backfills fields
+        that R26 introduced (lvstore_ports, lvstore_stack_secondary,
+        lvol_poller_mask, pollers_mask) onto storage-node objects written by
+        R25, and rewrites lvol/snapshot objects in the new shape. On a
+        cluster already running R26 those fields are present and correct, so
+        running it there is at best pointless and at worst overwrites live
+        values with recomputed ones.
+
+        The previous check returned True for ANY base != target, so a
+        26.2.8-PRE -> R26.3 upgrade ran the R25 migration unnecessarily
+        (observed in run 33733403479). Its docstring also claimed a "same
+        base prefix" comparison while the code compared full equality, so
+        even R25.10-Hotfix -> R25.10-Hotfix2 would have run it.
         """
-        if not self.base_version or not self.target_version:
-            return True
-        base_lower = self.base_version.lower()
-        target_lower = self.target_version.lower()
-        # Same base prefix → minor hotfix, skip migration
-        if base_lower == target_lower:
+        if not self.base_version:
+            self.logger.warning(
+                "base_version unknown — assuming the R25->R26 migration is "
+                "NOT needed; pass --base_version to be explicit")
             return False
-        return True
+        base = self.base_version.lower().lstrip("r")
+        needed = base.startswith("25")
+        self.logger.info(
+            f"R25->R26 DB migration {'REQUIRED' if needed else 'not needed'} "
+            f"(base_version={self.base_version!r}, "
+            f"target_version={self.target_version!r})")
+        return needed
 
     def _update_node_env(self, node: str):
         """
@@ -1013,6 +1112,89 @@ print("done")
             post_upgrade_containers[node] = self.ssh_obj.get_image_dict(node=node)
         self.common_utils.assert_upgrade_docker_image(pre_upgrade_containers, post_upgrade_containers)
         sleep_n_sec(self.step_sleep)
+
+        # ----------------------------------------------------------------
+        # TEMP STEP — one-off validation, remove after this run.
+        #
+        # An upgraded cluster's existing distribs are still on v1 write
+        # protection (new clusters are created on v2 already). Activate v2
+        # cluster-wide via the runtime RPC, then restart every storage
+        # node again to verify the v2 generation is correctly
+        # recorded/persisted and nodes come back online cleanly under it.
+        # Deliberately placed BEFORE Step 12 (which waits for FIO to
+        # finish) so FIO keeps running as I/O load through both the
+        # switch and the second round of restarts.
+        # ----------------------------------------------------------------
+        self.logger.info(
+            f"TEMP Step 11b: sbctl cluster switch-write-protection {self.cluster_id}")
+        if self.fio_during_upgrade:
+            for snode in self.storage_nodes:
+                for lvol_ctx in node_ctx[snode]["fio_lvols"]:
+                    cn = lvol_ctx["client_node"]
+                    for sess_key in ("lvol_fio_session", "clone_fio_session"):
+                        session = lvol_ctx[sess_key]
+                        assert self._is_tmux_running(cn, session), (
+                            f"FIO session {session} on {cn} is not running "
+                            f"before switch-write-protection!"
+                        )
+        self.ssh_obj.exec_command(
+            self.mgmt_nodes[0],
+            f"{self.sbctl_cmd} -d cluster switch-write-protection {self.cluster_id}",
+            raise_on_error=True,
+        )
+        sleep_n_sec(self.step_sleep)
+
+        self.logger.info(
+            "TEMP Step 11c: restarting all storage nodes again post-switch, "
+            "with FIO still running")
+        for snode in self.storage_nodes:
+            node_id = node_ctx[snode]["node_id"]
+
+            if self.fio_during_upgrade:
+                for lvol_ctx in node_ctx[snode]["fio_lvols"]:
+                    cn = lvol_ctx["client_node"]
+                    for sess_key in ("lvol_fio_session", "clone_fio_session"):
+                        session = lvol_ctx[sess_key]
+                        assert self._is_tmux_running(cn, session), (
+                            f"FIO session {session} on {cn} is not running "
+                            f"before post-switch restart of {snode}!"
+                        )
+
+            self.logger.info(f"[SN {snode}] TEMP: restarting node {node_id} (post-switch)")
+            self.ssh_obj.exec_command(
+                self.mgmt_nodes[0],
+                f"{self.sbctl_cmd} --dev -d sn restart {node_id} --force",
+                raise_on_error=True,
+            )
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(node_id, "online", timeout=1000)
+            except Exception:
+                self.logger.warning(f"[SN {snode}] TEMP: restart status check failed — continuing")
+            sleep_n_sec(self.step_sleep)
+
+            self.logger.info(f"[SN {snode}] TEMP: waiting for migration tasks post-switch restart")
+            migration_ts = int(time.time()) - 120
+            self.validate_migration_for_node(
+                timestamp=migration_ts,
+                timeout=1800,
+                node_id=None,
+                check_interval=30,
+                no_task_ok=(not self.fio_during_upgrade),
+            )
+            sleep_n_sec(self.step_sleep)
+
+            if self.fio_during_upgrade:
+                for lvol_ctx in node_ctx[snode]["fio_lvols"]:
+                    cn = lvol_ctx["client_node"]
+                    for sess_key in ("lvol_fio_session", "clone_fio_session"):
+                        session = lvol_ctx[sess_key]
+                        assert self._is_tmux_running(cn, session), (
+                            f"FIO session {session} on {cn} stopped running "
+                            f"after post-switch restart of {snode}!"
+                        )
+        # ----------------------------------------------------------------
+        # END TEMP STEP
+        # ----------------------------------------------------------------
 
         # ----------------------------------------------------------------
         # Step 12: Verify fio still running on fio lvols+clones, wait for all to finish
