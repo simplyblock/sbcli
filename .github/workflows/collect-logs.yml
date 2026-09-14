@@ -104,6 +104,15 @@ on:
       # =========================
       # Upload
       # =========================
+      RUNNER:
+        description: "Runner to use (must have NFS mount at /mnt/nfs_share)"
+        required: false
+        default: "vm22"
+        type: choice
+        options:
+          - vm22
+          - vm-runner-43
+
       UPLOAD_TO_MINIO:
         description: "Upload collected logs to MinIO"
         required: false
@@ -117,7 +126,7 @@ concurrency:
 jobs:
   collect-logs:
     name: "Collect logs (${{ inputs.DEPLOY_MODE }}${{ inputs.DEPLOY_MODE == 'k8s-native' && format(' / {0}', inputs.cluster_environment) || '' }})"
-    runs-on: ${{ inputs.DEPLOY_MODE == 'k8s-native' && inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
+    runs-on: ${{ inputs.RUNNER || 'vm22' }}
     timeout-minutes: 720
 
     env:
@@ -361,6 +370,8 @@ jobs:
           set -euxo pipefail
           NAMESPACE="${{ inputs.NAMESPACE || 'simplyblock' }}"
           LOCAL_OUTPUT_DIR="${OUTPUT_DIR}"
+          # Clean any leftover files from previous runs to avoid mixing
+          rm -rf "${LOCAL_OUTPUT_DIR}"
           mkdir -p "${LOCAL_OUTPUT_DIR}"
 
           echo "=== Collecting logs via admin pods (reverse, chunked, parallel) ==="
@@ -665,6 +676,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # Clean any leftover files from previous runs to avoid mixing
+          rm -rf "${OUTPUT_DIR}"
           mkdir -p "${OUTPUT_DIR}"
           python3 sbcli/e2e/utils/test_graylog_export.py
 
@@ -690,7 +703,8 @@ jobs:
 
           TIMESTAMP=$(date -u "+%Y%m%d-%H%M%S")
           NFS_DEST="${NFS_BASE}/graylog_collected-${TIMESTAMP}"
-          mkdir -p "${NFS_DEST}"
+          sudo mkdir -p "${NFS_DEST}"
+          sudo chown "$(id -u):$(id -g)" "${NFS_DEST}"
 
           echo "=== Copying collected logs to NFS ==="
           echo "  Source: ${OUTPUT_DIR}"
@@ -716,7 +730,6 @@ jobs:
           gl_ip="${GRAYLOG_IP:-$MGMT_IP}"
           file_count="$(find "${OUTPUT_DIR}" -type f \( -name '*.log' -o -name '*.tar.gz' \) 2>/dev/null | wc -l || echo 0)"
           total_size="$(du -sh "${OUTPUT_DIR}" 2>/dev/null | awk '{print $1}' || echo 'unknown')"
-          total_lines="$(cat "${OUTPUT_DIR}"/*.log 2>/dev/null | wc -l || echo 0)"
 
           {
             echo "## Log Collection Summary"
@@ -737,11 +750,20 @@ jobs:
             fi
             echo "| **Log Files** | ${file_count} |"
             echo "| **Total Size** | ${total_size} |"
-            echo "| **Total Lines** | ${total_lines} |"
             echo ""
-            echo "### Files Collected"
+            echo "### Chunks"
             echo '```'
-            find "${OUTPUT_DIR}" -type f \( -name '*.log' -o -name '*.tar.gz' \) -printf '%P  (%s bytes)\n' 2>/dev/null | sort || echo "(none)"
+            for d in "${OUTPUT_DIR}"/chunk_*; do
+              [ -d "$d" ] || continue
+              chunk_name=$(basename "$d")
+              chunk_files=$(find "$d" -name '*.log' -size +0 2>/dev/null | wc -l)
+              chunk_size=$(du -sh "$d" 2>/dev/null | awk '{print $1}')
+              echo "${chunk_name}  ${chunk_files} files  ${chunk_size}"
+            done
+            # Fallback if no chunk dirs (flat layout)
+            if ! ls -d "${OUTPUT_DIR}"/chunk_* >/dev/null 2>&1; then
+              echo "${file_count} files  ${total_size}"
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -764,14 +786,6 @@ jobs:
             --secret_key "${MINIO_SECRET_KEY}" \
             --source_dir "${OUTPUT_DIR}" \
             --run_id "collected-logs-$(date +%Y%m%d_%H%M%S)" || true
-
-      - name: Upload as GitHub artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: collected-logs-${{ inputs.DEPLOY_MODE }}-${{ inputs.DEPLOY_MODE == 'k8s-native' && inputs.cluster_environment || inputs.MGMT_IP }}-${{ github.run_id }}
-          path: ${{ inputs.OUTPUT_DIR }}/**
-          if-no-files-found: warn
 
       # ============================================================
       # K8s-native: Cleanup kubeconfig

@@ -41,7 +41,7 @@ class TestNamespaceLimits(TestClusterBase):
             retry=3,
         )
         sleep_n_sec(5)
-        parent_id = self.sbcli_utils.get_lvol_id(parent_name)
+        parent_id = self._get_lvol_id_dual(parent_name)
         assert parent_id, "Parent not created"
         parent_det = self.sbcli_utils.get_lvol_details(parent_id)
         parent_nqn = parent_det[0].get("nqn", "") if parent_det else ""
@@ -64,7 +64,7 @@ class TestNamespaceLimits(TestClusterBase):
 
         # Verify all within-limit children share parent NQN
         for cname in within_limit:
-            cid = self.sbcli_utils.get_lvol_id(cname)
+            cid = self._get_lvol_id_dual(cname)
             cdet = self.sbcli_utils.get_lvol_details(cid) if cid else None
             if cdet and len(cdet) > 0:
                 child_nqn = cdet[0].get("nqn", "")
@@ -87,7 +87,7 @@ class TestNamespaceLimits(TestClusterBase):
             retry=3,
         )
         sleep_n_sec(5)
-        oid = self.sbcli_utils.get_lvol_id(overflow_name)
+        oid = self._get_lvol_id_dual(overflow_name)
         odet = self.sbcli_utils.get_lvol_details(oid) if oid else None
         if odet and len(odet) > 0:
             overflow_nqn = odet[0].get("nqn", "")

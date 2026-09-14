@@ -1,9 +1,12 @@
 import os
+import re
 import threading
 import time
 import boto3
+import requests
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils, RunnerK8sLog, _compress_and_cleanup_old_dumps
+from exceptions.custom_exception import LvolNotConnectException
 from utils.k8s_utils import K8sUtils, K8sSbcliUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger, start_log_flusher
@@ -28,6 +31,151 @@ def generate_random_sequence(length):
     return first_char + remaining_chars
 
 class TestClusterBase:
+    # Heavyweight diagnostic collectors, scoped per platform: ON for k8s,
+    # OFF for docker. Read them through the `COLLECT_DUMP_LVSTORE` /
+    # `COLLECT_DISTRIB_PLACEMENT_DUMPS` properties below, never directly.
+    #
+    # `sbctl --dev sn dump-lvstore` walks the whole lvstore on the SPDK app
+    # thread, and `_collect_all_node_dumps_parallel` fires it at every node at
+    # once. The placement collector adds a map plus a stack dump per distrib per
+    # node on top, which is dozens of RPCs and file copies per round.
+    #
+    # docker: OFF. In docker_multi_failover_device_removed_rca_20260905 the
+    # lvstore walk held the app thread for 1.1-1.5s at a stretch, queued alceml
+    # IOs went undequeued for 4590ms, past the 4000ms `_check_stuck_ios`
+    # watchdog, which unregistered the bdev. The control plane read that
+    # unregister as a surprise hot-remove and retired a healthy device
+    # permanently. The docker hosts also have no memory headroom to spend on
+    # collectors: n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656,
+    # 192.168.10.201/system_memory_usage_*_232824.txt at run start showed
+    #   Mem:  31Gi total, 30Gi used, 374Mi free, 339Mi available
+    #   Swap: 3.0Gi total, 171Mi used
+    # No kernel OOM kill on any of the four hosts, but with ~339Mi available and
+    # swap already in use every extra collector competes with SPDK for memory on
+    # a box that has none left to give.
+    #
+    # k8s: ON. Turned back on because the absence of these dumps is now the
+    # thing blocking diagnosis. In
+    # k8s_native_resilient_failover_20260906_112437 a within-tolerance 2-node
+    # outage produced an unrecoverable stripe read
+    #   DISTRIBD Unable to read stripe vuid=24 ... ndm=2, npm=1
+    # i.e. 3 of 4 columns missing at ndcs=2/npcs=2. Deciding whether that was
+    # transient device loss or a placement violation needs the placement map for
+    # that vuid, and it had not been collected. The three relevant SPDK cores
+    # were also truncated at 1GiB by the hosts' coredump cap, so there was no
+    # second source. A run that cannot be diagnosed is worth less than a run
+    # that is slightly perturbed by collecting.
+    #
+    # The k8s risk is real but smaller and different in kind: in that same run
+    # the dump was not the trigger for anything, though on worker-2 the RPC
+    # never returned while the other five finished in 18-24s and the wrapper
+    # only gave up after 150s. Collected by hand on an idle cluster on
+    # 2026-09-07 all six nodes dumped in about 20s each and `sbctl sn list`
+    # reported 6 online, 0 offline after every one.
+    #
+    # NOTE: the residual k8s risk is concentrated in the parallel fan-out, not
+    # in the dump itself. If these turn out to perturb k8s runs, serialise
+    # `_collect_all_node_dumps_parallel` before switching them back off.
+    COLLECT_DUMP_LVSTORE_K8S = True
+    COLLECT_DUMP_LVSTORE_DOCKER = False
+
+    COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S = True
+    COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER = False
+
+    # Opt-in for tests that keep the synchronous per-outage collectors off but
+    # still need the dumps after every outage. Set it on the test class, then
+    # call `collect_node_dumps_async()` once the nodes are back online.
+    #
+    # This exists because the rapid tests turned both collectors off to hold
+    # their gap budget and then hit exactly the failure the dumps were re-enabled
+    # for: `DISTRIBD Unable to read stripe vuid=13` aborted three uninstrumented
+    # nodes in longfio_nochurn_rapid_outages_v2-20260911-044533, and the only
+    # placement maps in that run were from bootstrap and from the post-failure
+    # sweep. See docker_rapid_fio_hang_rca_20260911.md.
+    #
+    # Three properties make it affordable where the synchronous collector was not:
+    #   * it runs on ONE background thread, so the outage loop never blocks. It
+    #     is dispatched as soon as the nodes report online, which puts it inside
+    #     the 50-90s `_pace_next_outage` window, i.e. time the loop was going to
+    #     spend sleeping anyway.
+    #   * that thread walks the nodes SERIALLY. The parallel fan-out is the part
+    #     that carries the risk (see the note above), so this path deliberately
+    #     does not use it.
+    #   * it runs ALL the placement dumps first, then all the lvstore dumps.
+    #     Placement is the cheap half and the half that answers "was this a
+    #     placement violation", so if a run dies mid-collection, or the next
+    #     outage cuts it short, the half worth having is already on disk. The
+    #     lvstore walk is the part that holds the SPDK app thread, so it goes
+    #     last and never delays a placement dump on another node.
+    # The cost is that a dump can still be in flight when the next outage fires.
+    # That is acceptable for placement and lvstore state, which is what these
+    # answer, and `wait_for_node_dumps()` joins the thread at failure and
+    # teardown so nothing is lost.
+    BACKGROUND_NODE_DUMPS = False
+
+    # Guard so two background dumps never overlap, and a handle to join on.
+    _node_dump_thread = None
+    _node_dump_lock = None
+
+    @property
+    def COLLECT_DUMP_LVSTORE(self):
+        """Whether to run the lvstore walk on this platform."""
+        return (self.COLLECT_DUMP_LVSTORE_K8S
+                if getattr(self, "k8s_test", False)
+                else self.COLLECT_DUMP_LVSTORE_DOCKER)
+
+    @property
+    def COLLECT_DISTRIB_PLACEMENT_DUMPS(self):
+        """Whether to run the distrib placement/stack dumps on this platform."""
+        return (self.COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S
+                if getattr(self, "k8s_test", False)
+                else self.COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER)
+
+    # nvme-cli writes these to stderr for conditions that are NOT failures.
+    #
+    # "already connected": the kernel refused to create a DUPLICATE controller
+    # for the same (hostnqn, subnqn, traddr, trsvcid) tuple, which means the
+    # path is already up. Treating it as a failure is what wedged
+    # n_plus_k_failover_multi_client_ha_all_nodes-20260905-232656: the clone's
+    # three paths were all reported "already connected", all three were deferred
+    # as failed, the device was present and healthy 4s later (/dev/nvme3n1,
+    # mounted, FIO running for the next 50 minutes), and retry_failed_nvme_connects
+    # then raised "0/3 succeeded" ten minutes later.
+    #
+    # It is not a rare race either: connects use --ctrl-loss-tmo=-1, so the
+    # kernel never stops reconnecting and has almost always restored the path
+    # before the retry loop runs. That makes "already connected" the EXPECTED
+    # reply on retry, and a retry loop that only accepts empty stderr can never
+    # converge. That run logged 63 "already connected" against 4 genuine
+    # "could not add new controller: connection refused".
+    BENIGN_NVME_CONNECT_ERRORS = ("already connected",)
+
+    @classmethod
+    def nvme_connect_ok(cls, err):
+        """True when an ``nvme connect`` attempt should count as success.
+
+        Covers both an empty stderr and the benign no-op replies above, so
+        callers can write ``if not self.nvme_connect_ok(err): <defer/fail>``
+        instead of branching on stderr being non-empty.
+        """
+        if not err:
+            return True
+        low = err.lower()
+        return any(benign in low for benign in cls.BENIGN_NVME_CONNECT_ERRORS)
+
+    @staticmethod
+    def _nqn_from_connect_cmds(connect_cmds):
+        """Pull the subsystem NQN out of a list of ``nvme connect`` commands.
+
+        Accepts both ``--nqn=<x>`` and ``--nqn <x>`` / ``-n <x>``. Returns None
+        if no NQN is present.
+        """
+        for cmd in connect_cmds or []:
+            m = re.search(r"(?:--nqn[=\s]|(?<!\S)-n\s)(\S+)", cmd)
+            if m:
+                return m.group(1)
+        return None
+
     def __init__(self, **kwargs):
         self.cluster_secret = os.environ.get("CLUSTER_SECRET")
         self.cluster_id = os.environ.get("CLUSTER_ID")
@@ -43,6 +191,16 @@ class TestClusterBase:
         self.ssh_obj = SshUtils(bastion_server=self.bastion_server)
         self.logger = setup_logger(__name__)
         self.k8s_test = kwargs.get("k8s_run", False)
+        # Outage-gap accounting; only the rapid-failover tests act on these.
+        # Gap window between "nodes online" and the next outage. The lower bound
+        # exists so NVMe paths can re-establish before we cut another node; see
+        # _pace_next_outage.
+        self.MIN_OUTAGE_GAP_SEC = 50
+        self.MAX_OUTAGE_GAP_SEC = 90
+        self._node_online_ts = None
+        # Storage-node IPs outaged since the last checkpoint. A network outage
+        # aborts the node, so these are the only ones worth scanning for cores.
+        self._outaged_since_checkpoint = set()
         if self.k8s_test and not self.api_base_url:
             # K8s mode: route all sbcli calls through kubectl exec into admin pod.
             # K8sUtils needs the first management node IP from MNODES / K3S_MNODES.
@@ -99,6 +257,7 @@ class TestClusterBase:
         self._k8s_storage_class_name = "simplyblock-csi-sc"
         self._k8s_snapshot_class_name = "simplyblock-csi-snapshotclass"
         self._volume_registry = {}  # lvol_name -> {pvc_name, lvol_id, device, mount}
+        self._snapshot_registry = {}  # snapshot_name -> {vs_name, snap_id}
 
     def _validate_storage_node_health(self, timeout=300):
         """Validate all storage nodes are online and healthy before starting test.
@@ -350,6 +509,10 @@ class TestClusterBase:
             self.start_root_monitor()
 
         self.start_nvme_iostat_monitor()
+        try:
+            self.start_alert_collection()
+        except Exception as e:
+            self.logger.warning(f"[alerts] could not start sampler: {e}")
         self.collect_bdev_snapshot(tag="start")
 
         sleep_n_sec(120)
@@ -405,13 +568,16 @@ class TestClusterBase:
         """
         pool_name = pool_name or self.pool_name
         result = self.sbcli_utils.add_storage_pool(pool_name=pool_name, **kwargs)
-        if self.k8s_test and result:
-            if result != self.pool_name:
-                self.logger.info(
-                    f"[dual] Pool name adjusted: '{self.pool_name}' -> '{result}'"
-                )
-            self.pool_name = result
-        return self.pool_name
+        # K8s: the operator may reconcile to a pool whose name differs from the
+        # requested one (add_storage_pool returns it). Docker: the REST client
+        # returns None, so the actual name is exactly what we requested.
+        actual = result if (self.k8s_test and result) else pool_name
+        if actual != self.pool_name:
+            self.logger.info(
+                f"[dual] Pool name: '{self.pool_name}' -> '{actual}'"
+            )
+        self.pool_name = actual
+        return actual
 
     def _verify_pool_exists_dual(self, pool_name=None):
         """Assert that a pool exists. In K8s mode checks the StoragePool CRD;
@@ -642,6 +808,93 @@ class TestClusterBase:
             )
         return self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
 
+    def _delete_lvol_dual(self, lvol_name, skip_error=True):
+        """Delete an lvol (Docker) or its backing PVC (K8s).
+
+        In K8s mode the CSI driver names the backend lvol after the PV, so a
+        name-based ``delete_lvol`` would fail.  Delete the PVC recorded in the
+        volume registry instead and let the CSI driver reclaim the lvol.
+        """
+        if self.k8s_test:
+            reg = self._volume_registry.get(lvol_name)
+            k8s = self._ensure_k8s_utils()
+            pvc_name = (reg or {}).get("pvc_name", self._k8s_normalize_name(lvol_name))
+            try:
+                k8s.delete_pvc(pvc_name)
+            except Exception as exc:
+                if not skip_error:
+                    raise
+                self.logger.warning(f"[k8s] delete PVC {pvc_name} failed: {exc}")
+            if pvc_name in self._k8s_pvcs:
+                self._k8s_pvcs.remove(pvc_name)
+            self._volume_registry.pop(lvol_name, None)
+            return
+        try:
+            self.sbcli_utils.delete_lvol(lvol_name)
+        except Exception as exc:
+            if not skip_error:
+                raise
+            self.logger.warning(f"delete lvol {lvol_name} failed: {exc}")
+        self._volume_registry.pop(lvol_name, None)
+
+    def _verify_lvol_absent_dual(self, lvol_name):
+        """Assert an lvol no longer exists after deletion.
+
+        Docker: checks the name is gone from ``sbcli lvol list``.
+        K8s: the backend name is the PV name, so verify by lvol_id (from the
+        registry snapshot captured before delete) or by PVC absence.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            phase = (k8s.get_pvc_status(pvc_name) or {}).get("phase", "")
+            assert not phase, (
+                f"PVC {pvc_name} (for '{lvol_name}') still present after delete "
+                f"(phase={phase})"
+            )
+        else:
+            lvols = self.sbcli_utils.list_lvols()
+            assert lvol_name not in list(lvols.keys()), \
+                f"Lvol {lvol_name} still present after delete: {list(lvols.keys())}"
+
+    def _disable_pool_dual(self, pool_name=None):
+        """Disable a storage pool (set status to Inactive).
+
+        Docker: SSH exec ``sbcli pool disable <pool_id>`` on a management node.
+        K8s: ``K8sSbcliUtils.disable_storage_pool()`` which execs the CLI
+        inside the admin pod.
+        """
+        pool_name = pool_name or self.pool_name
+        if self.k8s_test:
+            self.sbcli_utils.disable_storage_pool(pool_name)
+        else:
+            pool_id = self.sbcli_utils.get_storage_pool_id(pool_name)
+            assert pool_id, f"Pool {pool_name} not found; cannot disable"
+            out, _ = self.ssh_obj.exec_command(
+                self.mgmt_nodes[0],
+                f"{self.base_cmd} pool disable {pool_id}",
+            )
+            self.logger.info(f"[dual] Pool disabled: {pool_name} ({pool_id})")
+
+    def _enable_pool_dual(self, pool_name=None):
+        """Enable a storage pool (set status to Active).
+
+        Docker: SSH exec ``sbcli pool enable <pool_id>`` on a management node.
+        K8s: ``K8sSbcliUtils.enable_storage_pool()`` which execs the CLI
+        inside the admin pod.
+        """
+        pool_name = pool_name or self.pool_name
+        if self.k8s_test:
+            self.sbcli_utils.enable_storage_pool(pool_name)
+        else:
+            pool_id = self.sbcli_utils.get_storage_pool_id(pool_name)
+            assert pool_id, f"Pool {pool_name} not found; cannot enable"
+            out, _ = self.ssh_obj.exec_command(
+                self.mgmt_nodes[0],
+                f"{self.base_cmd} pool enable {pool_id}",
+            )
+            self.logger.info(f"[dual] Pool enabled: {pool_name} ({pool_id})")
+
     def _connect_and_mount_dual(self, lvol_name, mount_path=None,
                                 format_disk=True, fs_type="ext4"):
         """NVMe connect + mount (Docker) or no-op (K8s). Returns (device, mount).
@@ -802,7 +1055,12 @@ class TestClusterBase:
                 )
 
     def _create_snapshot_dual(self, lvol_name, snapshot_name):
-        """Create a snapshot. Returns snapshot_id (Docker) or snap_name (K8s)."""
+        """Create a snapshot. Returns snapshot_id (Docker) or snap_name (K8s).
+
+        In K8s mode the snapshot is a VolumeSnapshot CRD; the backend snap UUID
+        (from its snapshotHandle) is cached in ``_snapshot_registry`` keyed by
+        the *logical* snapshot_name so ``_get_snapshot_id_dual`` can resolve it.
+        """
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             reg = self._volume_registry.get(lvol_name, {})
@@ -812,11 +1070,72 @@ class TestClusterBase:
                                        snapshot_class=self._k8s_snapshot_class_name)
             k8s.wait_volume_snapshot_ready(snap_name)
             self._k8s_volume_snapshots.append(snap_name)
+            snap_id = k8s.get_volume_snapshot_handle(snap_name)
+            self._snapshot_registry[snapshot_name] = {
+                "vs_name": snap_name, "snap_id": snap_id,
+            }
+            # Return the VolumeSnapshot NAME (not the backend UUID): the K8s
+            # clone path (_create_clone_dual) creates a clone PVC whose
+            # dataSource references the VolumeSnapshot by name.
             return snap_name
         else:
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
             self.sbcli_utils.add_snapshot(lvol_id=lvol_id, snapshot_name=snapshot_name)
-            return self.sbcli_utils.get_snapshot_id(snap_name=snapshot_name)
+            snap_id = self.sbcli_utils.get_snapshot_id(snap_name=snapshot_name)
+            self._snapshot_registry[snapshot_name] = {"snap_id": snap_id}
+            return snap_id
+
+    def _get_snapshot_id_dual(self, snapshot_name):
+        """Return the backend snapshot UUID for *snapshot_name* (dual-mode)."""
+        reg = self._snapshot_registry.get(snapshot_name, {})
+        snap_id = reg.get("snap_id")
+        if snap_id:
+            return snap_id
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            vs_name = reg.get("vs_name", self._k8s_normalize_name(snapshot_name))
+            return k8s.get_volume_snapshot_handle(vs_name)
+        return self.sbcli_utils.get_snapshot_id(snap_name=snapshot_name)
+
+    def _verify_snapshot_exists_dual(self, snapshot_name):
+        """Assert a snapshot exists after creation (dual-mode)."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._snapshot_registry.get(snapshot_name, {})
+            vs_name = reg.get("vs_name", self._k8s_normalize_name(snapshot_name))
+            phase = k8s.get_volume_snapshot_phase(vs_name)
+            assert phase == "true", (
+                f"VolumeSnapshot {vs_name} (for '{snapshot_name}') not ready "
+                f"(readyToUse={phase!r})"
+            )
+        else:
+            snapshots = self.sbcli_utils.list_snapshots()
+            assert snapshot_name in snapshots, \
+                f"Snapshot {snapshot_name} not found in list: {list(snapshots.keys())}"
+
+    def _delete_snapshot_dual(self, snapshot_name, skip_error=True):
+        """Delete a snapshot (Docker: sbcli; K8s: VolumeSnapshot CRD)."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._snapshot_registry.get(snapshot_name, {})
+            vs_name = reg.get("vs_name", self._k8s_normalize_name(snapshot_name))
+            try:
+                k8s.delete_volume_snapshot(vs_name, wait=True)
+            except Exception as exc:
+                if not skip_error:
+                    raise
+                self.logger.warning(f"[k8s] delete VolumeSnapshot {vs_name} failed: {exc}")
+            if vs_name in self._k8s_volume_snapshots:
+                self._k8s_volume_snapshots.remove(vs_name)
+            self._snapshot_registry.pop(snapshot_name, None)
+        else:
+            try:
+                self.sbcli_utils.delete_snapshot(snapshot_name)
+            except Exception as exc:
+                if not skip_error:
+                    raise
+                self.logger.warning(f"delete snapshot {snapshot_name} failed: {exc}")
+            self._snapshot_registry.pop(snapshot_name, None)
 
     def _create_clone_dual(self, snapshot_id, clone_name, size="10Gi",
                            mount_path=None, format_disk=False):
@@ -1106,12 +1425,19 @@ class TestClusterBase:
                     all_ok = False
         assert all_ok, "Placement dump validation failed on one or more storage nodes"
 
-    def collect_outage_diagnostics(self, label):
+    def collect_outage_diagnostics(self, label, force_node_dumps=False, serial=False):
         """Collect management details + lvstore dumps + distrib placement dumps
         for ALL storage nodes, right before an outage or right after recovery.
 
         Args:
             label: e.g. "pre_outage", "post_recovery", "pre_outage_node_<id>"
+            force_node_dumps: collect the lvstore/placement dumps even when the
+                per-platform collectors are off. Passed explicitly rather than
+                held as instance state so that a checkpoint dump running in the
+                background can never switch on a concurrent hot-path call.
+            serial: walk the nodes one at a time instead of fanning out a thread
+                per node. Always use this off the hot path; the fan-out is the
+                expensive part.
         """
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         tag = f"_{label}_{timestamp}"
@@ -1123,11 +1449,22 @@ class TestClusterBase:
         except Exception as e:
             self.logger.warning(f"[diagnostics] collect_management_details failed: {e}")
 
-        # 2. Collect dump_lvstore + distrib placement for ALL nodes in parallel
-        try:
-            self._collect_all_node_dumps_parallel(tag)
-        except Exception as e:
-            self.logger.warning(f"[diagnostics] _collect_all_node_dumps_parallel failed: {e}")
+        # 2. Collect dump_lvstore + distrib placement for ALL nodes in parallel.
+        #    Skipped entirely when both collectors are off, so we do not fan out
+        #    threads and create empty node_dumps dirs for nothing.
+        if force_node_dumps or self.COLLECT_DUMP_LVSTORE or self.COLLECT_DISTRIB_PLACEMENT_DUMPS:
+            try:
+                self._collect_all_node_dumps_parallel(
+                    tag, force=force_node_dumps, serial=serial
+                )
+            except Exception as e:
+                self.logger.warning(f"[diagnostics] _collect_all_node_dumps_parallel failed: {e}")
+        else:
+            self.logger.info(
+                "[diagnostics] node dumps SKIPPED "
+                "(both collectors off for this platform: "
+                f"k8s_test={getattr(self, 'k8s_test', False)})"
+            )
 
         # 3. Compress old dump files & delete aged-out compressed dumps in background
         dump_dir = os.path.join(self.docker_logs_path, f"node_dumps{tag}")
@@ -1139,15 +1476,255 @@ class TestClusterBase:
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
 
-    def _collect_all_node_dumps_parallel(self, tag):
-        """Collect dump_lvstore + fetch_distrib_logs for ALL storage nodes in parallel.
+    def device_subsys_nqn(self, client, device):
+        """The NQN of the subsystem currently backing *device*, or "".
 
-        Handles both k8s and non-k8s environments. Each node's dumps are collected
-        in a separate thread for speed. The dumps are stored in a tagged subdirectory
-        so pre-outage and post-recovery dumps are clearly separated.
+        Simplyblock NQNs embed the volume's UUID
+        (``nqn.2023-02.io.simplyblock:<cluster>:lvol:<lvol_id>``), so this
+        answers "which volume is actually on this device *right now*" without
+        trusting anything the test recorded earlier.
+        """
+        dev_short = device.rsplit("/", 1)[-1]
+        out, _ = self.ssh_obj.exec_command(
+            node=client,
+            command=f"cat /sys/block/{dev_short}/device/subsysnqn 2>/dev/null",
+            supress_logs=True,
+        )
+        return (out or "").strip()
+
+    def _device_claim_is_live(self, client, device, claim_name, claim_det):
+        """Is a registry entry's claim on *device* still true on the host?
+
+        The registry stores kernel device paths, and those are only valid while
+        the controller behind them lives. An outage that tears down every
+        controller on a client frees index 0, so the next volume to connect
+        legitimately becomes /dev/nvme0n1 -- and a months-old entry naming that
+        same path then refuses a perfectly correct device.
+
+        That is exactly what aborted
+        n_plus_k_failover_multi_client_ha_all_nodes-20260914-081252 after 7h51m:
+        `pllvl..._0` had held /dev/nvme0n1 since 08:28, the 15:43 outage removed
+        every namespace on the client, and the new volume took the recycled
+        index at 15:48. Both of the guard's *live* checks (NSID, mount) passed;
+        only the in-memory one, which talks to no one, objected.
+
+        Fails closed. If the owner cannot be read the claim is treated as live,
+        because refusing a good device costs a run while formatting a live one
+        costs the data.
+        """
+        nqn = self.device_subsys_nqn(client, device)
+        if not nqn:
+            self.logger.warning(
+                f"[device_guard] cannot read the owner of {device} on {client}; "
+                f"treating {claim_name}'s claim as live")
+            return True
+
+        claim_id = (claim_det or {}).get("ID")
+        if claim_id and str(claim_id).lower() in nqn.lower():
+            return True
+
+        self.logger.info(
+            f"[device_guard] {claim_name} no longer holds {device} on {client} "
+            f"(device is now {nqn}); dropping the stale claim")
+        return False
+
+    def _assert_device_unclaimed(self, client, device, obj_name,
+                                 expected_ns_id=None):
+        """Refuse a device that belongs to a different namespace or volume.
+
+        Called immediately before mkfs. Three checks:
+
+        * the device's own NSID matches what the control plane said. On a shared
+          subsystem the sibling namespaces differ only by this number, and the
+          names (nvmeXn1 vs nvmeXn2) are easy to resolve wrongly.
+        * no other lvol or clone in this run is already using it -- and, before
+          refusing on that, that the claim is still true on the host. See
+          _device_claim_is_live: device paths do not survive a controller
+          teardown, so an unverified registry match is a false positive waiting
+          for the next total outage.
+        * the device is not already mounted.
+        """
+        dev_short = device.rsplit("/", 1)[-1]
+
+        if expected_ns_id:
+            out, _ = self.ssh_obj.exec_command(
+                node=client, command=f"cat /sys/block/{dev_short}/nsid 2>/dev/null"
+            )
+            actual = (out or "").strip()
+            if actual and actual != str(expected_ns_id):
+                raise LvolNotConnectException(
+                    f"[clone_connect] REFUSING {device} for {obj_name}: it is "
+                    f"NSID {actual} but {obj_name} is NSID {expected_ns_id}. "
+                    f"Formatting it would destroy the sibling namespace on the "
+                    f"same shared subsystem."
+                )
+
+        for registry, kind in ((getattr(self, "lvol_mount_details", {}) or {}, "lvol"),
+                               (getattr(self, "clone_mount_details", {}) or {}, "clone")):
+            for name, det in registry.items():
+                if name == obj_name:
+                    continue
+                if det.get("Device") == device and det.get("Client") == client:
+                    if not self._device_claim_is_live(client, device, name, det):
+                        # Stale path from a controller that no longer exists.
+                        # Clear it, or it refuses this device again on every
+                        # later attempt and misleads anyone reading the registry.
+                        det["Device"] = None
+                        continue
+                    raise LvolNotConnectException(
+                        f"[device_guard] REFUSING {device} for {obj_name}: "
+                        f"already held by {kind} {name} on {client}."
+                    )
+
+        # Cross-client collision. The registry check above compares device paths
+        # on one client, which is useless across clients: the same namespace is
+        # nvme42n1 on one host and nvme76n1 on another, so nothing matches even
+        # though it is the same disk. That is exactly the case that corrupted
+        # data in 20260911-162931. The NSID check above is the real defence, and
+        # this is the belt to its braces: if the device already carries a
+        # mounted filesystem, someone is using it.
+        out, _ = self.ssh_obj.exec_command(
+            node=client,
+            command=f"mount | grep -w {device} | head -1",
+            supress_logs=True,
+        )
+        if (out or "").strip():
+            raise LvolNotConnectException(
+                f"[device_guard] REFUSING {device} for {obj_name}: it is already "
+                f"mounted on {client} ({out.strip()}). Formatting it would "
+                f"destroy a live filesystem."
+            )
+
+    def collect_fio_hdr_dumps(self, label="verify"):
+        """Copy fio's *.hdr_fail verify dumps off every client into the run dir.
+
+        fio writes these to its working directory, which for these runs is
+        /root on the client, NOT the volume's mount point. They hold the bytes
+        that were actually returned when an md5 verify failed, which is the only
+        way to tell a stale read from a second writer or from misdirected IO.
+        Nothing else in the run preserves them and they accumulate on the
+        clients until someone looks.
+        """
+        clients = list(getattr(self, "fio_node", None) or [])
+        if not clients:
+            return
+        dest_root = os.path.join(self.docker_logs_path, f"fio_hdr_dumps_{label}")
+        total = 0
+        for client in clients:
+            try:
+                out, _ = self.ssh_obj.exec_command(
+                    node=client,
+                    command="ls -1 /root/*.hdr_fail 2>/dev/null | head -200",
+                    supress_logs=True,
+                )
+                files = [f.strip() for f in (out or "").splitlines() if f.strip()]
+                if not files:
+                    continue
+                dest = os.path.join(dest_root, client)
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command=f"sudo mkdir -p '{dest}' && sudo cp -f /root/*.hdr_fail '{dest}/' 2>/dev/null || true",
+                )
+                total += len(files)
+                self.logger.info(
+                    f"[fio-verify] copied {len(files)} hdr_fail dump(s) from "
+                    f"{client} -> {dest}"
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[fio-verify] could not collect hdr_fail dumps from {client}: {exc}"
+                )
+        if total:
+            self.logger.warning(
+                f"[fio-verify] {total} hdr_fail dump(s) preserved under {dest_root}. "
+                f"These are verify failures: check whether any are from THIS run."
+            )
+
+    def collect_node_dumps_async(self, label, timeout=900):
+        """Checkpoint-time diagnostics that do not cost the outage gap.
+
+        For tests with `BACKGROUND_NODE_DUMPS` set, this runs the full
+        management + lvstore + placement collection on ONE background thread,
+        walking the storage nodes serially, and returns immediately. For every
+        other test it is just `collect_outage_diagnostics`, so it is safe to use
+        at any checkpoint.
+
+        Only one of these runs at a time. If the previous one has not finished by
+        the next checkpoint the new one is skipped rather than stacked, because
+        two concurrent lvstore walks is the thing we are trying not to do.
+
+        Args:
+            label: diagnostics label, e.g. "checkpoint_5"
+            timeout: guard for the join in `wait_for_node_dumps`.
+        """
+        if not self.BACKGROUND_NODE_DUMPS:
+            self.collect_outage_diagnostics(label)
+            return
+
+        if self._node_dump_lock is None:
+            self._node_dump_lock = threading.Lock()
+
+        prev = self._node_dump_thread
+        if prev is not None and prev.is_alive():
+            self.logger.warning(
+                f"[node_dumps_bg] previous dump still running; SKIPPING '{label}'. "
+                "If this repeats, the dump is slower than the checkpoint window."
+            )
+            return
+
+        def _run():
+            with self._node_dump_lock:
+                started = time.time()
+                self.logger.info(f"[node_dumps_bg] background collection started: {label}")
+                try:
+                    self.collect_outage_diagnostics(
+                        label, force_node_dumps=True, serial=True
+                    )
+                except Exception:
+                    self.logger.exception(f"[node_dumps_bg] collection failed for {label}")
+                finally:
+                    self.logger.info(
+                        f"[node_dumps_bg] background collection finished: {label} "
+                        f"in {time.time() - started:.0f}s"
+                    )
+
+        t = threading.Thread(target=_run, name=f"node-dumps-{label}", daemon=True)
+        self._node_dump_thread = t
+        self._timeout_node_dumps = timeout
+        t.start()
+        self.logger.info(
+            f"[node_dumps_bg] '{label}' dispatched to background; outage loop continues"
+        )
+
+    def wait_for_node_dumps(self, timeout=None):
+        """Join an in-flight checkpoint dump. Call at failure and at teardown so
+        a run that ends mid-collection still keeps the dumps it was taking."""
+        t = self._node_dump_thread
+        if t is None or not t.is_alive():
+            return
+        timeout = timeout or getattr(self, "_timeout_node_dumps", 900)
+        self.logger.info(f"[node_dumps_bg] waiting up to {timeout}s for in-flight dump")
+        t.join(timeout=timeout)
+        if t.is_alive():
+            self.logger.warning(
+                "[node_dumps_bg] dump still running after the join timeout; "
+                "it is a daemon thread and will be dropped at exit"
+            )
+
+    def _collect_all_node_dumps_parallel(self, tag, force=False, serial=False):
+        """Collect dump_lvstore + fetch_distrib_logs for ALL storage nodes.
+
+        Handles both k8s and non-k8s environments. The dumps are stored in a
+        tagged subdirectory so pre-outage and post-recovery dumps are clearly
+        separated.
 
         Args:
             tag: suffix for directory naming, e.g. "_pre_outage_20240408_143000"
+            force: collect regardless of the per-platform collector flags.
+            serial: walk nodes one at a time. The default fan-out is a thread per
+                node, which is the part that carries the risk documented on
+                `COLLECT_DUMP_LVSTORE_DOCKER`; anything off the hot path should
+                pass serial=True and accept the longer wall time.
         """
         try:
             storage_nodes = self.sbcli_utils.get_storage_nodes()
@@ -1163,6 +1740,30 @@ class TestClusterBase:
         dump_dir = os.path.join(self.docker_logs_path, f"node_dumps{tag}")
         os.makedirs(dump_dir, exist_ok=True)
 
+        if serial:
+            # Two passes on purpose. Placement is cheap and is the half that
+            # answers "was this a placement violation", so every node gets its
+            # map before any node pays for the lvstore walk. If the collection
+            # is cut short -- the run dies, the next outage lands -- the half
+            # worth having is already complete.
+            started = time.time()
+            for phase in ("placement", "lvstore"):
+                phase_started = time.time()
+                for node_info in nodes:
+                    self._collect_single_node_dump(
+                        node_info["uuid"], node_info.get("mgmt_ip", ""), dump_dir,
+                        force=force, phase=phase,
+                    )
+                self.logger.info(
+                    f"[node_dumps] SERIAL {phase} pass done for {len(nodes)} nodes "
+                    f"in {time.time() - phase_started:.0f}s"
+                )
+            self.logger.info(
+                f"[node_dumps] Completed SERIAL dumps for {len(nodes)} nodes "
+                f"in {time.time() - started:.0f}s → {dump_dir}"
+            )
+            return
+
         threads = []
         for node_info in nodes:
             node_id = node_info["uuid"]
@@ -1170,6 +1771,7 @@ class TestClusterBase:
             t = threading.Thread(
                 target=self._collect_single_node_dump,
                 args=(node_id, node_ip, dump_dir),
+                kwargs={"force": force},
                 daemon=True,
             )
             threads.append(t)
@@ -1180,15 +1782,26 @@ class TestClusterBase:
 
         self.logger.info(f"[node_dumps] Completed parallel dumps for {len(nodes)} nodes → {dump_dir}")
 
-    def _collect_single_node_dump(self, node_id, node_ip, dump_dir):
+    def _collect_single_node_dump(self, node_id, node_ip, dump_dir, force=False,
+                                  phase="both"):
         """Collect dump_lvstore and distrib placement dump for a single node.
 
         Args:
             node_id: Storage node UUID
             node_ip: Storage node management IP
             dump_dir: Directory to store dump files
+            force: collect regardless of the per-platform collector flags.
+            phase: "placement", "lvstore", or "both". The serial collector drives
+                the two halves as separate passes over all nodes; the parallel
+                path still does both together.
         """
-        self.logger.info(f"[node_dump] Starting dump for node {node_id} ({node_ip})")
+        want_lvstore = (force or self.COLLECT_DUMP_LVSTORE) and phase in ("lvstore", "both")
+        want_placement = (force or self.COLLECT_DISTRIB_PLACEMENT_DUMPS) and phase in ("placement", "both")
+        if not (want_lvstore or want_placement):
+            return
+        self.logger.info(
+            f"[node_dump] Starting {phase} dump for node {node_id} ({node_ip})"
+        )
         try:
             if self.k8s_test:
                 k8s_obj = getattr(self, 'k8s_utils', None) or getattr(
@@ -1201,42 +1814,72 @@ class TestClusterBase:
                     getattr(self, 'sbcli_utils', None), 'sbcli_cmd',
                     os.environ.get("SBCLI_CMD", "sbcli-dev")
                 )
-                try:
-                    k8s_obj.dump_lvstore_k8s(
-                        storage_node_id=node_id,
-                        storage_node_ip=node_ip,
-                        logs_path=dump_dir,
-                        sbcli_cmd=sbcli_cmd,
+                if want_lvstore:
+                    try:
+                        k8s_obj.dump_lvstore_k8s(
+                            storage_node_id=node_id,
+                            storage_node_ip=node_ip,
+                            logs_path=dump_dir,
+                            sbcli_cmd=sbcli_cmd,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] dump_lvstore_k8s failed for {node_id}: {e}")
+                elif phase == "both":
+                    self.logger.info(
+                        f"[node_dump] dump_lvstore_k8s SKIPPED for {node_id} "
+                        f"(COLLECT_DUMP_LVSTORE_K8S="
+                        f"{self.COLLECT_DUMP_LVSTORE_K8S})"
                     )
-                except Exception as e:
-                    self.logger.warning(f"[node_dump] dump_lvstore_k8s failed for {node_id}: {e}")
-                try:
-                    k8s_obj.fetch_distrib_logs_k8s(
-                        storage_node_id=node_id,
-                        storage_node_ip=node_ip,
-                        logs_path=dump_dir,
+                if want_placement:
+                    try:
+                        k8s_obj.fetch_distrib_logs_k8s(
+                            storage_node_id=node_id,
+                            storage_node_ip=node_ip,
+                            logs_path=dump_dir,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] fetch_distrib_logs_k8s failed for {node_id}: {e}")
+                elif phase == "both":
+                    self.logger.info(
+                        f"[node_dump] fetch_distrib_logs_k8s SKIPPED for {node_id} "
+                        f"(COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S="
+                        f"{self.COLLECT_DISTRIB_PLACEMENT_DUMPS_K8S})"
                     )
-                except Exception as e:
-                    self.logger.warning(f"[node_dump] fetch_distrib_logs_k8s failed for {node_id}: {e}")
             else:
-                try:
-                    self.ssh_obj.dump_lvstore(
-                        node_ip=self.mgmt_nodes[0],
-                        storage_node_id=node_id,
+                if want_lvstore:
+                    try:
+                        self.ssh_obj.dump_lvstore(
+                            node_ip=self.mgmt_nodes[0],
+                            storage_node_id=node_id,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] dump_lvstore failed for {node_id}: {e}")
+                elif phase == "both":
+                    self.logger.info(
+                        f"[node_dump] dump_lvstore SKIPPED for {node_id} "
+                        f"(COLLECT_DUMP_LVSTORE_DOCKER="
+                        f"{self.COLLECT_DUMP_LVSTORE_DOCKER})"
                     )
-                except Exception as e:
-                    self.logger.warning(f"[node_dump] dump_lvstore failed for {node_id}: {e}")
-                try:
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=node_ip,
-                        storage_node_id=node_id,
-                        logs_path=dump_dir,
+                if want_placement:
+                    try:
+                        self.ssh_obj.fetch_distrib_logs(
+                            storage_node_ip=node_ip,
+                            storage_node_id=node_id,
+                            logs_path=dump_dir,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] fetch_distrib_logs failed for {node_id}: {e}")
+                elif phase == "both":
+                    self.logger.info(
+                        f"[node_dump] fetch_distrib_logs SKIPPED for {node_id} "
+                        f"(COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER="
+                        f"{self.COLLECT_DISTRIB_PLACEMENT_DUMPS_DOCKER})"
                     )
-                except Exception as e:
-                    self.logger.warning(f"[node_dump] fetch_distrib_logs failed for {node_id}: {e}")
         except Exception as e:
             self.logger.warning(f"[node_dump] Failed for node {node_id} ({node_ip}): {e}")
-        self.logger.info(f"[node_dump] Completed dump for node {node_id} ({node_ip})")
+        self.logger.info(
+            f"[node_dump] Completed {phase} dump for node {node_id} ({node_ip})"
+        )
 
     def _collect_management_details_k8s(self, suffix: str):
         """Collect management details via kubectl exec (k8s mode)."""
@@ -1408,6 +2051,251 @@ class TestClusterBase:
             f"[periodic_resources] Started collection every {interval}s"
         )
         return stop_event
+
+    # ── Alerts endpoint sampler ─────────────────────────────────────────
+
+    def start_alert_collection(self, interval=None):
+        """Poll ``GET /clusters/{id}/alerts`` and record every response.
+
+        The endpoint answers "what is wrong right now", so a single reading
+        at the end of a run says nothing useful -- by then the outages have
+        healed and the answer is an empty list either way. The value is in
+        the series: an alert that fires when a node goes down and clears
+        when it comes back is alerting working; one that never fires, or
+        one that never clears, is the bug the sampler exists to catch.
+
+        Two details matter for that to hold.
+
+        *Window.* Each poll asks for ``history_seconds = 2 * interval``, so
+        the reply also carries alerts that fired **and** resolved since the
+        previous poll. Without it a 5-minute poll only ever sees conditions
+        that outlive 5 minutes, which during rapid outages is almost none of
+        them -- the sampler would report "no alerts" for a run full of them.
+
+        *Tolerance.* The poll is one request with a short timeout and no
+        retry, unlike :meth:`SbcliUtils.get_request`. A failed poll is data:
+        the API being unreachable while a node is down is exactly the sort of
+        thing being tested, and a retry loop would both hide it and stall the
+        thread through the outage it is meant to observe.
+
+        Platform-neutral -- it is an HTTP call against the cluster API, so
+        docker and k8s runs take the same path. Off via ``COLLECT_ALERTS``,
+        period via ``ALERT_POLL_INTERVAL_SEC``.
+        """
+        if os.getenv("COLLECT_ALERTS", "true").lower() in ("false", "0", "no"):
+            self.logger.info("[alerts] COLLECT_ALERTS disabled; not sampling.")
+            return
+        if getattr(self, "_alert_thread", None) and self._alert_thread.is_alive():
+            self.logger.info("[alerts] Sampler already running; skipping start.")
+            return
+        if not self.cluster_id or not self.cluster_secret:
+            self.logger.warning(
+                "[alerts] No CLUSTER_ID/CLUSTER_SECRET; not sampling.")
+            return
+
+        interval = interval or int(os.getenv("ALERT_POLL_INTERVAL_SEC", "300"))
+        window = interval * 2
+
+        # Two transports, because the two modes reach the control plane
+        # differently and only one of them has an HTTP base at all.
+        #
+        # Docker (SbcliUtils) talks to the API over HTTP, so poll the
+        # endpoint. cluster_api_url is the v1 wrapper's base and may already
+        # carry the /api/v1 suffix -- strip it and build the v2 prefix the
+        # same way SbcliUtilsV2 does, or every poll 404s.
+        #
+        # K8s-native (K8sSbcliUtils) has neither cluster_api_url nor headers:
+        # it runs everything as `kubectl exec` into the admin pod. The API
+        # service is not reachable from that pod (verified: empty reply on
+        # both the service and the pod IP), and sbctl does not need it --
+        # the CLI calls the core controllers in-process. So call the same
+        # controller the endpoint calls. The route is a thin severity/status
+        # filter over get_alerts(), so this exercises the alerting logic;
+        # what it does not cover is the HTTP layer itself.
+        api_url = getattr(self.sbcli_utils, "cluster_api_url", None)
+        if api_url:
+            raw = api_url.rstrip("/").removesuffix("/api/v1")
+            source = f"{raw}/api/v2/clusters/{self.cluster_id}/alerts/"
+            # v2 authenticates with HTTPBearer against the cluster secret
+            # alone. sbcli_utils.headers carries the v1 form,
+            # "Authorization: <cluster_id> <secret>", whose scheme is not
+            # Bearer -- v2 rejects that with 403 before any handler runs.
+            headers = {"Authorization": f"Bearer {self.cluster_secret}"}
+
+            def _fetch():
+                resp = requests.get(source, headers=headers, timeout=30,
+                                    params={"history_seconds": window})
+                if resp.status_code != 200:
+                    return resp.status_code, [], (resp.text or "")[:500]
+                body = resp.json()
+                return 200, (body if isinstance(body, list) else []), None
+        else:
+            source = "kubectl exec -> alerts_controller.get_alerts"
+            _marker = "ALERTS_JSON:"
+            _cmd = (
+                "python3 - <<'PYEOF'\n"
+                "import json\n"
+                "from simplyblock_core.controllers import alerts_controller as a\n"
+                f"print('{_marker}' + json.dumps(\n"
+                f"    a.get_alerts('{self.cluster_id}', include_history=True,\n"
+                f"                 history_seconds={window})))\n"
+                "PYEOF"
+            )
+
+            def _fetch():
+                out, err = self.sbcli_utils.k8s.exec_sbcli(
+                    _cmd, supress_logs=True)
+                # The controller logs each transition at CRITICAL, so the
+                # payload is one line in a stream of them -- hence the marker
+                # rather than "parse whatever came back".
+                for line in (out or "").splitlines():
+                    if line.startswith(_marker):
+                        body = json.loads(line[len(_marker):])
+                        return 200, (body if isinstance(body, list) else []), None
+                return None, [], (err or out or "no ALERTS_JSON line")[:500]
+
+        out_dir = os.path.join(self.docker_logs_path, "alerts")
+        os.makedirs(out_dir, exist_ok=True)
+        samples_path = os.path.join(out_dir, "alerts.jsonl")
+        transitions_path = os.path.join(out_dir, "alert_transitions.log")
+
+        self._alert_stop = threading.Event()
+        self._alert_stats = {
+            "polls": 0, "failures": 0, "kinds": set(),
+            "max_firing": 0, "raised": 0, "resolved": 0,
+            "source": source, "interval": interval,
+        }
+        stats = self._alert_stats
+        started = time.time()
+
+        def _write(path, line):
+            try:
+                with open(path, "a") as fh:
+                    fh.write(line + "\n")
+            except Exception as e:                      # pragma: no cover
+                self.logger.warning(f"[alerts] write {path}: {e}")
+
+        def _poll_loop():
+            self.logger.info(
+                f"[alerts] Sampling {source} every {interval}s "
+                f"(window {window}s) -> {samples_path}"
+            )
+            previous = {}
+            seen_statuses = set()
+            while True:
+                ts = datetime.now(UTC)
+                record = {
+                    "ts": ts.isoformat(),
+                    "elapsed_sec": round(time.time() - started, 1),
+                }
+                t0 = time.time()
+                try:
+                    status, alerts, body = _fetch()
+                    record["duration_ms"] = round((time.time() - t0) * 1000, 1)
+                    record["http_status"] = status
+                    record["alerts"] = alerts
+                    if body is not None:
+                        record["body"] = body
+                        stats["failures"] += 1
+                        # A misconfigured sampler fails the same way on every
+                        # poll, so say it once per status rather than 200
+                        # times -- but say it, because a silent stream of 403s
+                        # looks exactly like a cluster with nothing wrong.
+                        if status not in seen_statuses:
+                            seen_statuses.add(status)
+                            hint = {
+                                404: "this build has no alerts endpoint "
+                                     "(added in R26.3)",
+                                401: "token rejected; check CLUSTER_SECRET",
+                                403: "auth scheme rejected; v2 wants "
+                                     "'Bearer <cluster_secret>'",
+                            }.get(status, body[:200])
+                            self.logger.warning(
+                                f"[alerts] poll failed (status={status})"
+                                f"{' -- ' + hint if hint else ''}. "
+                                "Still recording."
+                            )
+                except Exception as e:
+                    record["duration_ms"] = round((time.time() - t0) * 1000, 1)
+                    record["error"] = f"{type(e).__name__}: {e}"
+                    record["alerts"] = []
+                    stats["failures"] += 1
+
+                alerts = record["alerts"]
+                firing = {
+                    a.get("id"): a for a in alerts
+                    if a.get("status", "firing") == "firing"
+                }
+                record["firing_count"] = len(firing)
+                record["total_count"] = len(alerts)
+                stats["polls"] += 1
+                stats["max_firing"] = max(stats["max_firing"], len(firing))
+                for a in alerts:
+                    if a.get("kind"):
+                        stats["kinds"].add(a["kind"])
+
+                _write(samples_path, json.dumps(record, default=str))
+
+                # Only transitions go to the readable log, so a condition
+                # that stands for an hour is two lines rather than twelve.
+                for aid, a in firing.items():
+                    if aid not in previous:
+                        stats["raised"] += 1
+                        line = (f"{ts.isoformat()} RAISED   "
+                                f"[{a.get('severity')}] {a.get('kind')} "
+                                f"node={a.get('node_id') or '-'} "
+                                f"dev={a.get('device_id') or '-'} :: "
+                                f"{a.get('message')}")
+                        _write(transitions_path, line)
+                        self.logger.info(f"[alerts] {line}")
+                for aid, a in previous.items():
+                    if aid not in firing:
+                        stats["resolved"] += 1
+                        line = (f"{ts.isoformat()} RESOLVED "
+                                f"[{a.get('severity')}] {a.get('kind')} "
+                                f"node={a.get('node_id') or '-'} "
+                                f"dev={a.get('device_id') or '-'}")
+                        _write(transitions_path, line)
+                        self.logger.info(f"[alerts] {line}")
+                previous = firing
+
+                if self._alert_stop.wait(interval):
+                    break
+            self.logger.info("[alerts] Sampler exiting.")
+
+        t = threading.Thread(target=_poll_loop, name="AlertSampler", daemon=True)
+        t.start()
+        self._alert_thread = t
+
+    def stop_alert_collection(self):
+        """Stop the sampler and write a summary next to the samples."""
+        if not getattr(self, "_alert_stop", None):
+            return
+        self._alert_stop.set()
+        if getattr(self, "_alert_thread", None):
+            self._alert_thread.join(timeout=60)
+
+        stats = getattr(self, "_alert_stats", None)
+        if not stats:
+            return
+        summary = {
+            "source": stats["source"],
+            "interval_sec": stats["interval"],
+            "polls": stats["polls"],
+            "failed_polls": stats["failures"],
+            "alerts_raised": stats["raised"],
+            "alerts_resolved": stats["resolved"],
+            "max_concurrent_firing": stats["max_firing"],
+            "kinds_seen": sorted(stats["kinds"]),
+        }
+        try:
+            out_dir = os.path.join(self.docker_logs_path, "alerts")
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "alert_summary.json"), "w") as fh:
+                json.dump(summary, fh, indent=2)
+        except Exception as e:                          # pragma: no cover
+            self.logger.warning(f"[alerts] summary write: {e}")
+        self.logger.info(f"[alerts] Summary: {json.dumps(summary)}")
 
     def collect_management_details(self, post_teardown=False, suffix=None):
         if suffix is None:
@@ -1759,6 +2647,10 @@ class TestClusterBase:
         self.stop_root_monitor()
         self.collect_bdev_snapshot(tag="end")
         self.stop_nvme_iostat_monitor()
+        try:
+            self.stop_alert_collection()
+        except Exception as e:
+            self.logger.warning(f"[alerts] could not stop sampler: {e}")
 
         if not self.k8s_test:
             retry_check = 100
@@ -3046,7 +3938,7 @@ class TestClusterBase:
             k8s = self.sbcli_utils.k8s
             pod_name = k8s.get_spdk_pod_name(ip)
             sock = k8s._find_spdk_sock(pod_name)
-            rpc_cmd = f"python spdk/scripts/rpc.py -s {sock} {method}"
+            rpc_cmd = f"sudo python spdk/scripts/rpc.py -s {sock} {method}"
             kubectl_cmd = (
                 f"kubectl exec {pod_name} -c spdk-container "
                 f"-n {k8s.namespace} -- bash -c {shlex.quote(rpc_cmd)}"
@@ -3712,14 +4604,85 @@ class TestClusterBase:
             f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds."
         )
     
-    def check_core_dump(self):
+    # ── outage pacing ────────────────────────────────────────────────────────
+    # The rapid-failover tests exist to land the next outage while migration
+    # from the previous one is still in flight, so the gap between "nodes
+    # online" and "next outage" is a correctness property, not a performance
+    # detail. It is bounded at BOTH ends:
+    #
+    # Lower bound, MIN_OUTAGE_GAP_SEC. The NVMe client is connected with
+    # ctrl_loss_tmo=60 on k8s (`nvme connect ... -l 60`), so a controller that
+    # cannot reconnect is REMOVED after 60s and any IO requeued behind it is
+    # failed with EIO. Firing the next outage while the last one's controllers
+    # are still reconnecting can therefore leave a namespace with no usable path
+    # for longer than that budget, and the client gives up -- which is what
+    # failed k8s_native_rapid_failover_no_gap-20260910-223420 (11 of 22 volumes,
+    # err=5, see k8s_rapid_fio_eio_rca_20260910.md). Holding off until paths
+    # have had time to re-establish removes that self-inflicted failure.
+    #
+    # Upper bound, MAX_OUTAGE_GAP_SEC. Wait too long and migration drains and
+    # the test stops testing what it claims. 90s is far short of the minutes
+    # balancing takes (the 20260910 docker run was still at 10/12 subtasks after
+    # 18 minutes), so the window is comfortably inside migration.
+
+    def _mark_nodes_online(self):
+        """Start the clock on the gap before the next outage."""
+        self._node_online_ts = time.monotonic()
+
+    def _pace_next_outage(self):
+        """Hold the next outage inside the [MIN, MAX] gap window.
+
+        Sleeps until at least MIN_OUTAGE_GAP_SEC has passed since the nodes came
+        back, aiming for a random point in the window so consecutive iterations
+        do not all hit the same phase of recovery. Warns if we were already past
+        MAX before getting here, since that means migration may have drained.
+        """
+        if getattr(self, "_node_online_ts", None) is None:
+            return
+        elapsed = time.monotonic() - self._node_online_ts
+        target = random.uniform(self.MIN_OUTAGE_GAP_SEC, self.MAX_OUTAGE_GAP_SEC)
+        if elapsed < target:
+            self.logger.info(
+                f"[gap] {elapsed:.1f}s since nodes came online; letting paths settle "
+                f"for {target - elapsed:.1f}s more (target {target:.1f}s)"
+            )
+            sleep_n_sec(int(round(target - elapsed)))
+            elapsed = time.monotonic() - self._node_online_ts
+        self._node_online_ts = None
+        if elapsed > self.MAX_OUTAGE_GAP_SEC:
+            self.logger.warning(
+                f"[gap] firing next outage {elapsed:.1f}s after nodes came online, over "
+                f"the {self.MAX_OUTAGE_GAP_SEC}s ceiling -- migration may have drained "
+                f"before this outage, weakening the test"
+            )
+        else:
+            self.logger.info(
+                f"[gap] firing next outage {elapsed:.1f}s after nodes came online "
+                f"(window {self.MIN_OUTAGE_GAP_SEC}-{self.MAX_OUTAGE_GAP_SEC}s)"
+            )
+
+    def check_core_dump(self, nodes=None):
+        """Look for SPDK core dumps and, on docker, produce backtraces for them.
+
+        *nodes* optionally narrows the scan to specific storage-node IPs. Tests
+        that outage a couple of nodes per cycle use it to check just those --
+        a network outage aborts the node, so that is where a core lands -- and
+        skip the cluster-wide sweep. When omitted the behaviour is unchanged:
+        every storage node plus every management node is scanned.
+        """
+        full_sweep = nodes is None
+        targets = [n for n in (self.storage_nodes if full_sweep else nodes) if n]
+        if not targets:
+            self.logger.info("check_core_dump: no target nodes, skipping.")
+            return
+
         if self.k8s_test:
             k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
             if not k8s_obj:
                 self.logger.info("check_core_dump: k8s_utils not available, skipping.")
                 return
 
-            for node_ip in self.storage_nodes:
+            for node_ip in targets:
                 files = k8s_obj.list_files_in_spdk_pod(node_ip, "/etc/simplyblock/")
                 self.logger.info(f"Files in /etc/simplyblock (spdk pod for {node_ip}): {files}")
                 if any("core" in f for f in files) and not any("tmp_cores" in f for f in files):
@@ -3738,23 +4701,75 @@ class TestClusterBase:
                                 f"for {node_ip}: {exc}"
                             )
 
-            # Collect host-level core dumps from K8s node hosts
-            self._check_host_core_dumps_k8s(k8s_obj)
+            # Host-level dumps are a whole-cluster scan, so only on a full sweep
+            if full_sweep:
+                self._check_host_core_dumps_k8s(k8s_obj)
             return
 
-        for node in self.storage_nodes:
+        for node in targets:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
             if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on storage node {node} at {cur_date}")
+                self._analyze_core_dumps_docker(node)
 
-        for node in self.mgmt_nodes:
+        for node in (self.mgmt_nodes if full_sweep else []):
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
             if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on management node {node} at {cur_date}")
+
+    def _analyze_core_dumps_docker(self, node_ip):
+        """Produce gdb backtraces for SPDK cores on a docker storage node.
+
+        Streams ``e2e/scripts/analyze_core_dumps_docker.sh`` to the node, which
+        copies each core into that host's SPDK container (same host means the
+        same SPDK image, so symbols resolve), decompresses it there, and runs
+        ``bt`` and ``thread apply all bt full``. Results land in
+        ``<docker_logs_path>/core_backtraces/<host>/<core>/``.
+
+        The same script runs again from the workflow after the test finishes.
+        This call is what catches a crash the test survived, at the iteration
+        boundary where it was detected. Best-effort: never raises.
+        """
+        if not self.docker_logs_path:
+            self.logger.info(
+                "[core-bt] docker_logs_path not set, skipping backtrace"
+            )
+            return
+
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "scripts", "analyze_core_dumps_docker.sh",
+        )
+        if not os.path.isfile(script):
+            self.logger.warning(f"[core-bt] script not found: {script}")
+            return
+
+        try:
+            with open(script, "r", encoding="utf-8") as fh:
+                body = fh.read()
+            # Run it inline rather than piping a local file over the existing
+            # ssh channel: exec_command sends a command string, not stdin.
+            cmd = (
+                f"cat > /tmp/analyze_core_dumps.sh <<'SB_CORE_EOF'\n"
+                f"{body}\nSB_CORE_EOF\n"
+                f"bash /tmp/analyze_core_dumps.sh {shlex.quote(self.docker_logs_path)}; "
+                f"rm -f /tmp/analyze_core_dumps.sh"
+            )
+            out, err = self.ssh_obj.exec_command(
+                node=node_ip, command=cmd, timeout=1800, max_retries=1
+            )
+            if out:
+                self.logger.info(f"[core-bt] {node_ip}: {out.strip()}")
+            if err:
+                self.logger.warning(f"[core-bt] {node_ip} stderr: {err.strip()}")
+        except Exception as exc:
+            self.logger.warning(
+                f"[core-bt] backtrace generation failed for {node_ip}: {exc}"
+            )
 
     def _check_host_core_dumps_k8s(self, k8s_obj):
         """Collect host-level core dumps from all storage node K8s hosts.
@@ -3770,7 +4785,11 @@ class TestClusterBase:
 
         coredump_dir = os.path.join(self.docker_logs_path, "host_core_dumps")
         os.makedirs(coredump_dir, exist_ok=True)
-        max_size_mb = int(os.environ.get("CORE_DUMP_MAX_SIZE_MB", "500"))
+        # 5000 rather than 500: systemd is configured with ProcessSizeMax=10G
+        # (simplyblock_core/scripts/install_deps.sh), so real SPDK cores
+        # routinely exceed 500 MB and were being silently skipped. This caps
+        # only the copy of the compressed .zst; backtraces are always produced.
+        max_size_mb = int(os.environ.get("CORE_DUMP_MAX_SIZE_MB", "5000"))
 
         for node_ip in self.storage_nodes:
             try:

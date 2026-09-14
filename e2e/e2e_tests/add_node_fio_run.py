@@ -709,18 +709,32 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         return "simplyblk"
 
     def _prepare_worker_node(self, node_ip):
-        """Prepares a worker node by installing necessary packages and configuring kernel parameters."""
+        """Prepares a worker node by installing necessary packages and configuring kernel parameters.
+
+        Deliberately does NOT set vm.nr_hugepages. `storage-node deploy` sizes and claims
+        hugepages itself, so pre-claiming them here is redundant, and the calculation this
+        used to carry was wrong: it computed 30% of total RAM *in MB* and then used that
+        number as a COUNT of 2 MiB pages, reserving 60% of RAM rather than the 30% it read
+        as. It also persisted the value to /etc/sysctl.d/hugepages.conf, which left every
+        host this test ever touched booting with that reservation forever.
+
+        The deploy side already stopped doing this: simplyBlockDeploy's
+        bare-metal/bootstrap-cluster.sh notes "Newer releases claim them themselves, so
+        NR_HUGEPAGES is not required there" and gates its own sysctl on SBCLI_BRANCH=25.*,
+        while bootstrap-k3s.sh / bootstrap-kubeadm.sh hardcode hugepages=0.
+
+        Caveat: an sbcli 25.* release does not self-claim. If this test is ever pointed at
+        25.x, hugepages must be pre-claimed again or SPDK will not start on the new node.
+        """
         commands = [
             "sudo rm -f /usr/local/bin/kubectl || true",
             "sudo rm -f /usr/bin/kubectl || true",
             "sudo yum remove -y kubectl || true",
-            "sudo yum install -y fio nvme-cli bc",
+            "sudo yum install -y fio nvme-cli",
             "sudo modprobe nvme-tcp",
             "sudo modprobe nbd",
-            "total_memory_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')",
-            "total_memory_mb=$((total_memory_kb / 1024))",
-            "hugepages=$(echo \"$total_memory_mb * 0.3 / 1\" | bc)",
-            "sudo sysctl -w vm.nr_hugepages=$hugepages",
+            # ipv6 is disabled live only; nothing here writes to /etc/sysctl.d, so there
+            # is no `sysctl --system` reload to follow.
             "sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1",
             "sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1",
             "sudo systemctl disable nm-cloud-setup.service nm-cloud-setup.timer",
@@ -730,8 +744,6 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             "sudo yum install -y make golang",
             "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
             "echo 'nbd' | sudo tee /etc/modules-load.d/nbd.conf",
-            "echo \"vm.nr_hugepages=$hugepages\" | sudo tee /etc/sysctl.d/hugepages.conf",
-            "sudo sysctl --system"
         ]
         for command in commands:
             self.logger.info(f"Executing command on {node_ip}: {command}")

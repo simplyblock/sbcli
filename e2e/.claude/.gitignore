@@ -1,0 +1,3 @@
+# Per-developer absolute paths to the external repos. Template is committed as
+# settings.local.example.json.
+settings.local.json

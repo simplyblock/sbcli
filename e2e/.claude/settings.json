@@ -1,0 +1,16 @@
+{
+  "_comment": "Hooks scoped to the e2e suite. Used when a session is opened with e2e/ as the project root. When the repo root is the project root, the same SessionStart entry lives in the root .claude/settings.json, pointing at e2e/.agents/hooks/. The PY= prefix picks an interpreter that actually runs: on Windows a bare `python3` resolves to the Microsoft Store alias stub, which exits 49 and makes the hook silently do nothing.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PY=python3; python3 -c '' >/dev/null 2>&1 || PY=python; \"$PY\" \"${CLAUDE_PROJECT_DIR:-.}/.agents/hooks/check-repo-maps.py\"",
+            "statusMessage": "Checking external repo maps"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -192,8 +192,8 @@ jobs:
 
         # If the cluster is running on k8s, we need to set the environment variable
         DEPLOY_CMD="./bootstrap-cluster.sh \
-            --max-lvol 10 --max-snap 10 
-            --max-size 400G --number-of-devices 1 
+            --max-subsys 10 --max-snap 10
+            --max-size 400G --number-of-devices 1
             --sbcli-cmd sbcli-dev --spdk-debug"
 
         if [ "${{ inputs.k8s_snode }}" == "true" ]; then

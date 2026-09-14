@@ -36,7 +36,7 @@ class TestSnapshotLifecycle(TestClusterBase):
             pool_name=self.pool_name,
             size="2G",
         )
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        lvol_id = self._get_lvol_id_dual(lvol_name)
         assert lvol_id, f"Could not get lvol_id for {lvol_name}"
 
         # Connect and mount
@@ -63,23 +63,16 @@ class TestSnapshotLifecycle(TestClusterBase):
         self._create_snapshot_dual(lvol_name, snap_name)
 
         # Verify in list
-        snapshots = self.sbcli_utils.list_snapshots()
-        assert snap_name in snapshots, (
-            f"Snapshot {snap_name} not found in list after create"
-        )
+        self._verify_snapshot_exists_dual(snap_name)
 
         # Get snapshot ID and verify
-        snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
+        snap_id = self._get_snapshot_id_dual(snap_name)
         assert snap_id, f"Could not get snapshot_id for {snap_name}"
         self.logger.info(f"Snapshot {snap_name}: id={snap_id}")
 
         # Delete snapshot
-        self.sbcli_utils.delete_snapshot(snap_name)
+        self._delete_snapshot_dual(snap_name)
         sleep_n_sec(5)
-        snapshots = self.sbcli_utils.list_snapshots()
-        assert snap_name not in snapshots, (
-            f"Snapshot {snap_name} still in list after delete"
-        )
         self.logger.info("TC-SNAP-007: Snapshot CRUD — PASS")
 
         # -- TC-SNAP-008: Snapshot chain --------------------------------
@@ -100,34 +93,31 @@ class TestSnapshotLifecycle(TestClusterBase):
             self._validate_fio_dual(fio_handle)
 
             sname = f"{lvol_name}_chain_{i}"
-            self._create_snapshot_dual(lvol_name, sname)
-            sid = self.sbcli_utils.get_snapshot_id(sname)
+            # Capture the mode-appropriate clone reference returned by the
+            # dual helper (Docker: backend snap UUID, K8s: VolumeSnapshot name).
+            snap_ref = self._create_snapshot_dual(lvol_name, sname)
+            sid = self._get_snapshot_id_dual(sname)
             assert sid, f"Could not get snapshot_id for {sname}"
-            snap_names.append(sname)
+            snap_names.append((sname, snap_ref))
             self.logger.info(f"  Chain snapshot {i}: {sname} (id={sid})")
 
         # Verify all snapshots exist
-        snapshots = self.sbcli_utils.list_snapshots()
-        for sname in snap_names:
-            assert sname in snapshots, f"Chain snapshot {sname} not in list"
+        for sname, _ in snap_names:
+            self._verify_snapshot_exists_dual(sname)
         self.logger.info(f"All {len(snap_names)} chain snapshots verified in list")
         self.logger.info("TC-SNAP-008: Snapshot Chain — PASS")
 
         # -- TC-SNAP-009: Clone from chain snapshot ---------------------
         self.logger.info("=== TC-SNAP-009: Clone from Chain Snapshot ===")
-        mid_snap = snap_names[1]
-        mid_snap_id = self.sbcli_utils.get_snapshot_id(mid_snap)
+        mid_snap, mid_snap_ref = snap_names[1]
         clone_name = f"{lvol_name}_chain_clone"
-        self._create_clone_dual(mid_snap_id, clone_name)
+        self._create_clone_dual(mid_snap_ref, clone_name)
 
-        lvols = self.sbcli_utils.list_lvols()
-        assert clone_name in lvols, (
-            f"Clone {clone_name} not found in lvol list"
-        )
+        self._verify_lvol_exists_dual(clone_name)
         self.logger.info(f"Clone {clone_name} created from {mid_snap}")
 
         # Delete clone before deleting snapshots
-        self.sbcli_utils.delete_lvol(clone_name)
+        self._delete_lvol_dual(clone_name)
         sleep_n_sec(5)
         self.logger.info("TC-SNAP-009: Clone from Chain — PASS")
 
@@ -135,24 +125,16 @@ class TestSnapshotLifecycle(TestClusterBase):
         self.logger.info("=== TC-SNAP-010: Out-of-Order Deletion ===")
 
         # Delete newest first, then middle, then oldest
-        for sname in reversed(snap_names):
+        for sname, _ in reversed(snap_names):
             self.logger.info(f"  Deleting {sname} ...")
-            self.sbcli_utils.delete_snapshot(sname)
+            self._delete_snapshot_dual(sname)
             sleep_n_sec(3)
 
-        snapshots = self.sbcli_utils.list_snapshots()
-        for sname in snap_names:
-            assert sname not in snapshots, (
-                f"Snapshot {sname} still present after out-of-order delete"
-            )
         self.logger.info("TC-SNAP-010: Out-of-Order Deletion — PASS")
 
         # -- Cleanup ----------------------------------------------------
         if not self.k8s_test:
             self._disconnect_and_cleanup_dual(lvol_name)
-        try:
-            self.sbcli_utils.delete_lvol(lvol_name)
-        except Exception as exc:
-            self.logger.warning(f"Cleanup delete {lvol_name}: {exc}")
+        self._delete_lvol_dual(lvol_name)
 
         self.logger.info("=== TestSnapshotLifecycle: ALL PASSED ===")

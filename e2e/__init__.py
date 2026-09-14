@@ -71,7 +71,7 @@ from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailo
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest, K8sNativeScaleBreakTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest, K8sNativeScaleBreakTest, K8sNativeRapidFailoverNoGapTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2WithMigration,
@@ -175,6 +175,7 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityResize,
     TestLvolSecurityWithBackup,
     TestLvolSecurityMultiClientConcurrent,
+    TestDhchapPodScheduling,
 )
 
 from e2e_tests.upgrade_tests.major_upgrade import (
@@ -266,6 +267,8 @@ from e2e_tests.backup.test_backup_restore import (
     # DISABLED: lvol-level backup delete not supported (SFAM-2792)
     # TestBackupDeleteInProgress,
     TestBackupPolicyMultipleLvols,
+    TestBackupBulkLoadIntegrity,
+    TestBackupHighVolumeCombosSequential,
     # Extended backup tests (TC-BCK-150..190)
     TestBackupSecurityLvol,
     TestBackupPolicyVersionsOne,
@@ -300,8 +303,8 @@ from stress_test.continuous_backup_stress import (
     BackupStressMarathon,
     BackupStressLargeScale,
     BackupStressFilesystemSecurityMix,
-    # DISABLED: backup delete not supported (SFAM-2792)
-    # BackupStressRetentionMergeCycles,
+    BackupStressRetentionMergeCycles,
+    BackupStressComprehensive,
 )
 
 
@@ -395,6 +398,8 @@ ALL_TESTS = [
     # DISABLED: lvol-level backup delete not supported (SFAM-2792)
     # TestBackupDeleteInProgress,
     TestBackupPolicyMultipleLvols,
+    TestBackupBulkLoadIntegrity,
+    TestBackupHighVolumeCombosSequential,
     # Extended backup E2E tests (TC-BCK-150..190)
     TestBackupSecurityLvol,
     TestBackupPolicyVersionsOne,
@@ -424,6 +429,7 @@ ALL_TESTS = [
     K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
     K8sNativeResilientFailoverTest,
+    K8sNativeRapidFailoverNoGapTest,
     K8sNativeQuickFailoverTest,
     K8sNativeNamespacedFailoverTest,
     K8sNativeRapidLifecycleTest,
@@ -520,6 +526,7 @@ ALL_TESTS = [
     TestClusterGracefulShutdown,
     TestMultiClientConnect,
     TestPoolDhchap,
+    TestDhchapPodScheduling,
     TestPoolCapacityLimits,
     TestNamespaceE2E,
     TestDeviceRestart,
@@ -668,6 +675,7 @@ def get_security_tests():
         TestLvolSecurityResize,
         TestLvolSecurityWithBackup,
         TestLvolSecurityMultiClientConcurrent,
+        TestDhchapPodScheduling,
         # Security outage tests — run last (involves node shutdown/restart)
         TestLvolSecurityStorageNodeOutage,
         TestLvolSecurityMgmtNodeReboot,
@@ -706,6 +714,7 @@ def get_stress_tests():
         K8sNativeFailoverTest,
         K8sNativeBasicFailoverTest,
         K8sNativeResilientFailoverTest,
+        K8sNativeRapidFailoverNoGapTest,
         K8sNativeQuickFailoverTest,
         K8sNativeNamespacedFailoverTest,
         K8sNativeRapidLifecycleTest,
@@ -855,6 +864,7 @@ def get_backup_tests():
         # DISABLED: lvol-level backup delete not supported (SFAM-2792)
         # TestBackupDeleteInProgress,
         TestBackupPolicyMultipleLvols,
+        TestBackupBulkLoadIntegrity,
         # Extended backup tests (TC-BCK-150..190)
         TestBackupSecurityLvol,
         TestBackupPolicyVersionsOne,
@@ -897,8 +907,9 @@ def get_backup_stress_tests():
         BackupStressMarathon,
         BackupStressLargeScale,
         BackupStressFilesystemSecurityMix,
-        # DISABLED: backup delete not supported (SFAM-2792)
-        # BackupStressRetentionMergeCycles,
+        BackupStressRetentionMergeCycles,
+        BackupStressComprehensive,
+        TestBackupHighVolumeCombosSequential,
     ]
 
 
@@ -923,3 +934,68 @@ def get_load_tests():
 def get_parity_tests():
     """API parity audit — CLI vs v1 vs v2 three-way comparison."""
     return [TestAPIParityAudit]
+
+
+def get_e2e_all_tests():
+    """Comprehensive Docker-safe functional E2E suite (~40 tests).
+
+    Includes all Phase 1-3 functional tests, core outage/failure tests,
+    and resize tests.  Excludes: K8s-only, RDMA, topology-modifying,
+    stress/load, backup (use 'backup' keyword), security (use 'security'
+    keyword), upgrade, QoS (SPDK crash), tests requiring special cluster
+    flags, and tests with uncertain API support.
+
+    Usage: TEST_CLASS=e2e-all
+    """
+    return [
+        # ── Phase 1: API / CRUD / Negative tests ────────────────────────
+        TestLvolBasicCRUD,
+        TestLvolCapacityIOStats,
+        TestLvolNegativeCases,
+        TestSnapshotNegativeCases,
+        TestSnapshotLifecycle,
+        TestPoolEnableDisable,
+        TestPoolNegativeCases,
+        TestPoolDisableIO,
+        TestPoolStats,
+        TestPoolDhchap,
+        TestDhchapPodScheduling,
+        TestPoolCapacityLimits,
+        TestPoolHostManagement,
+        TestCrossResourceNegative,
+        TestVolumeCloneLvol,
+        # ── Phase 2: Cluster / Node / Namespace tests ───────────────────
+        TestLvolInflate,
+        TestLvolMigrationLoad,
+        TestLvolConnectLifecycle,
+        TestLvolPlacement,
+        TestStorageNodeStats,
+        TestStorageNodePorts,
+        TestStorageNodeListing,
+        TestClusterStats,
+        TestClusterTasks,
+        TestClusterSecret,
+        TestClusterOperations,
+        TestClusterGracefulShutdown,
+        TestMultiClientConnect,
+        TestCapacityThresholds,
+        TestHealthChecks,
+        TestMigrationLifecycle,
+        TestConcurrentOperations,
+        TestNamespacePlacement,
+        TestNamespaceFio,
+        TestNamespaceLimits,
+        TestNamespaceNegative,
+        TestNamespaceE2E,
+        # ── Phase 3: Device / Outage / Failure tests ────────────────────
+        TestDeviceRestart,
+        TestDeviceCapacityIO,
+        TestSingleNodeOutage,
+        TestHASingleNodeOutage,
+        TestSingleNodeFailure,
+        TestHASingleNodeFailure,
+        TestSingleNodeReboot,
+        TestHASingleNodeReboot,
+        TestSingleNodeResizeLvolCone,
+        TestNodeShutdownRestart,
+    ]
