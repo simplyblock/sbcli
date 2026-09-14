@@ -1,7 +1,6 @@
-# coding=utf-8
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
@@ -108,7 +107,7 @@ def _in_shutdown_longer_than(node, seconds):
     if not ss:
         return False
     try:
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(ss)).total_seconds() >= seconds
+        return (datetime.now(UTC) - datetime.fromisoformat(ss)).total_seconds() >= seconds
     except Exception:
         return False
 
@@ -125,7 +124,7 @@ def _down_longer_than(node, seconds):
     if not ds:
         return True
     try:
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(ds)).total_seconds() >= seconds
+        return (datetime.now(UTC) - datetime.fromisoformat(ds)).total_seconds() >= seconds
     except Exception:
         return True
 
@@ -398,7 +397,13 @@ def get_next_cluster_status(cluster_id):
             return fd_status
 
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
-    if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
+    #
+    # affected_nodes > 0 guard: "we are exactly at the parity limit" only
+    # means degraded when something is actually affected. Without it a
+    # no-parity cluster (npcs=0, k=0 — the natural single-node schema)
+    # reports DEGRADED while perfectly healthy, because 0 == 0.
+    if affected_nodes > 0 and affected_nodes == k and (
+            not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
         return Cluster.STATUS_DEGRADED
     elif jm_replication_tasks:
         return Cluster.STATUS_DEGRADED
@@ -563,7 +568,7 @@ def _activation_node_gate(cluster_id, nodes, max_fault_tolerance):
             return False, f"node {node.get_id()} has an active restart task"
         if node.online_since:
             try:
-                diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
+                diff = datetime.now(UTC) - datetime.fromisoformat(node.online_since)
                 if diff.total_seconds() < 30:
                     return False, f"node {node.get_id()} has been online less than 30 seconds"
             except (ValueError, TypeError):
@@ -591,7 +596,7 @@ def _watchdog_stuck_activation(cluster):
     if not since:
         return
     try:
-        elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
+        elapsed = (datetime.now(UTC) - datetime.fromisoformat(since)).total_seconds()
     except (ValueError, TypeError):
         return
 
@@ -607,7 +612,7 @@ def _watchdog_stuck_activation(cluster):
     heartbeat = getattr(cluster, "activation_heartbeat", "")
     if heartbeat:
         try:
-            hb_age = (datetime.now(timezone.utc)
+            hb_age = (datetime.now(UTC)
                       - datetime.fromisoformat(heartbeat)).total_seconds()
         except (ValueError, TypeError):
             hb_age = None
@@ -809,6 +814,110 @@ def _delete_old_logs(events: list[EventObj], cluster_id: str):
             event.remove(db.kv_store)
 
 
+def _maybe_enable_shared_placement(cluster, cluster_id, current_cluster_status):
+    """One-shot auto-migration to shared (per-chunk) data placement.
+
+    Runs only for a settled cluster (ACTIVE, not rebalancing, every storage
+    node ONLINE) whose shared_placement is still off, and fires on either of
+    two triggers:
+
+      * shared_placement_migration_pending — armed at cluster creation on
+        releases that still created legacy clusters, and by
+        `sbctl cluster upgrade-complete` after an upgrade's rolling restart;
+      * a data-plane capability probe
+        (cluster_ops.all_nodes_support_shared_placement): every node's
+        running SPDK advertises the runtime shared-placement RPCs. This
+        retro-heals clusters whose upgrade never armed the flag — the
+        original arming sat behind an update_cluster(restart=True) path no
+        CLI invocation reaches, which stranded every CLI-upgraded cluster on
+        per-page placement (customer incident 2026-09-04).
+
+    Why not fire on a bare shared_placement==False: during a rolling upgrade
+    the cluster passes through transient ACTIVE / all-online windows between
+    node restarts. The capability probe is what makes evaluating those
+    windows safe — a node still on a pre-shared-placement image does not
+    expose the RPCs, so the flip waits for the last restart; and
+    set_shared_placement aborts wholesale (nothing persisted) if any node
+    rejects the runtime RPC, so a race lost anyway cannot half-flip the
+    cluster. On success the flip is self-terminating: shared_placement=True
+    ends the condition for good.
+    """
+    if (cluster.shared_placement
+            or current_cluster_status != Cluster.STATUS_ACTIVE
+            or cluster.is_re_balancing):
+        return
+    sp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    if not sp_nodes or any(n.status != StorageNode.STATUS_ONLINE for n in sp_nodes):
+        return
+    armed = cluster.shared_placement_migration_pending
+    if not armed and not cluster_ops.all_nodes_support_shared_placement(sp_nodes):
+        return
+    logger.info(
+        "Auto-enabling shared (per-chunk) placement on cluster %s: %s, "
+        "ACTIVE, all nodes online, not rebalancing", cluster_id,
+        "armed" if armed else "data plane capable")
+    try:
+        if cluster_ops.set_shared_placement(cluster_id, enable=True):
+            # set_shared_placement persisted shared_placement=True; disarm the
+            # request so it runs exactly once. Atomic so it doesn't clobber a
+            # concurrent cluster.status change.
+            db.atomic_update(
+                db.get_cluster_by_id(cluster_id),
+                lambda c: setattr(c, "shared_placement_migration_pending", False))
+            logger.info("shared_placement enabled on cluster %s", cluster_id)
+        else:
+            logger.warning(
+                "set_shared_placement returned False for cluster %s; "
+                "will retry next monitor cycle", cluster_id)
+    except Exception:
+        logger.exception(
+            "Auto shared_placement enable raised for cluster %s", cluster_id)
+
+
+def _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status):
+    """One-shot auto-migration to v2 distrib write protection — the exact
+    sibling of _maybe_enable_shared_placement above; see there for the full
+    trigger rationale.
+
+    update_cluster deliberately stamps write_protection_v2 back to False
+    before an upgrade's rolling restart, so after EVERY upgrade the runtime
+    switch has to run again. It used to be a manual
+    `sbctl cluster switch-write-protection`; the monitor now runs it once the
+    cluster settles, fired by the pending flag (armed by upgrade-complete) or
+    by the data-plane capability probe (which also heals clusters whose
+    upgrade never armed it). switch_write_protection aborts wholesale if any
+    online node rejects the runtime RPC and is idempotent, so a lost race is
+    a plain retry on the next cycle.
+    """
+    if (cluster.write_protection_v2
+            or current_cluster_status != Cluster.STATUS_ACTIVE
+            or cluster.is_re_balancing):
+        return
+    wp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    if not wp_nodes or any(n.status != StorageNode.STATUS_ONLINE for n in wp_nodes):
+        return
+    armed = cluster.write_protection_migration_pending
+    if not armed and not cluster_ops.all_nodes_support_write_protection_v2(wp_nodes):
+        return
+    logger.info(
+        "Auto-switching write protection to v2 on cluster %s: %s, ACTIVE, "
+        "all nodes online, not rebalancing", cluster_id,
+        "armed" if armed else "data plane capable")
+    try:
+        if cluster_ops.switch_write_protection(cluster_id):
+            db.atomic_update(
+                db.get_cluster_by_id(cluster_id),
+                lambda c: setattr(c, "write_protection_migration_pending", False))
+            logger.info("write-protection v2 enabled on cluster %s", cluster_id)
+        else:
+            logger.warning(
+                "switch_write_protection returned False for cluster %s; "
+                "will retry next monitor cycle", cluster_id)
+    except Exception:
+        logger.exception(
+            "Auto write-protection switch raised for cluster %s", cluster_id)
+
+
 def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -883,42 +992,8 @@ def _update_cluster_status_impl(cluster_id):
             except Exception:
                 logger.exception("Suspend-recovery drive failed for cluster %s", cluster_id)
 
-    # One-shot auto-migration to shared (per-chunk) data placement.
-    # Armed (shared_placement_migration_pending) by exactly two events:
-    #   * cluster creation — for brand-new clusters
-    #   * cluster_ops.update_cluster, only AFTER every node's upgrade restart
-    #     has completed — never mid rolling-restart
-    # We require that explicit flag rather than firing on a bare
-    # shared_placement==False, because during a rolling upgrade the cluster
-    # passes through transient ACTIVE / not-rebalancing / all-online windows
-    # between node restarts; switching then would race the still-restarting
-    # nodes. With the flag set only at upgrade completion, switching here is
-    # safe once the cluster has settled.
-    if (cluster.shared_placement_migration_pending
-            and not cluster.shared_placement
-            and current_cluster_status == Cluster.STATUS_ACTIVE
-            and not cluster.is_re_balancing):
-        sp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
-        if sp_nodes and all(n.status == StorageNode.STATUS_ONLINE for n in sp_nodes):
-            logger.info(
-                "Auto-enabling shared (per-chunk) placement on cluster %s: "
-                "armed, ACTIVE, all nodes online, not rebalancing", cluster_id)
-            try:
-                if cluster_ops.set_shared_placement(cluster_id, enable=True):
-                    # set_shared_placement persisted shared_placement=True;
-                    # disarm the request so it runs exactly once. Atomic so it
-                    # doesn't clobber a concurrent cluster.status change.
-                    db.atomic_update(
-                        db.get_cluster_by_id(cluster_id),
-                        lambda c: setattr(c, "shared_placement_migration_pending", False))
-                    logger.info("shared_placement enabled on cluster %s", cluster_id)
-                else:
-                    logger.warning(
-                        "set_shared_placement returned False for cluster %s; "
-                        "will retry next monitor cycle", cluster_id)
-            except Exception:
-                logger.exception(
-                    "Auto shared_placement enable raised for cluster %s", cluster_id)
+    _maybe_enable_shared_placement(cluster, cluster_id, current_cluster_status)
+    _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status)
 
     if current_cluster_status == Cluster.STATUS_IN_ACTIVATION:
         # Don't drive transitions while an activation is in flight, but check
@@ -1343,6 +1418,7 @@ def node_port_check_fun(snode):
     node_port_check = True
     if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
+        port_lvs_owner: dict = {}
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status != "ready":
@@ -1369,15 +1445,21 @@ def node_port_check_fun(snode):
                     if tert and tert.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
                         skip = True
                 if not skip:
-                    ports.append(n.get_lvol_subsys_port(n.lvstore))
+                    _p = n.get_lvol_subsys_port(n.lvstore)
+                    ports.append(_p)
+                    port_lvs_owner[_p] = n.get_id()
         if not snode.is_secondary_node:
-            ports.append(snode.get_lvol_subsys_port(snode.lvstore))
+            _p = snode.get_lvol_subsys_port(snode.lvstore)
+            ports.append(_p)
+            port_lvs_owner[_p] = snode.get_id()
 
         # Batched: one nvmf_get_blocked_ports fetch answers every port.
         try:
-            for port, ret in health_controller.check_ports_on_node(snode, ports).items():
+            port_results = health_controller.check_ports_on_node(snode, ports)
+            for port, ret in port_results.items():
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
+            _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner)
         except Exception as e:
             for port in ports:
                 health_controller._log_port_check_failure(db, snode, port, e)
@@ -1481,6 +1563,141 @@ def _rpc_hang_seconds(node_id):
     with _rpc_hang_lock:
         now = time.monotonic()
         return now - _rpc_hang_since.setdefault(node_id, now)
+
+
+#: A client LVS port that SPDK fenced and nobody lifted. Keyed by
+#: (node_id, port) -> monotonic time first seen blocked.
+_blocked_port_since: dict = {}
+
+#: How long a port must stay blocked on an ONLINE node before the monitor
+#: treats it as a leak. Long enough that a legitimate in-flight fence (the
+#: restart flow holds one for well under a second, and SPDK's own conflict
+#: fence is expected to be resolved by the control plane) is never touched,
+#: far short of the client's ctrl_loss_tmo (30 x 2s = 60s) after which the
+#: kernel deletes the controller and the namespace starts failing IO.
+STALE_PORT_BLOCK_SEC = 25.0
+
+
+def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
+    """Lift a client port that SPDK fenced and nothing ever released.
+
+    SPDK blocks lvs->subsystem_port on a writer conflict, on a leadership
+    change and when failed IO is queued (lvol.c: spdk_lvs_unfreeze_on_conflict,
+    spdk_lvs_change_leader_state, spdk_lvs_queued_failed_IO). That block is
+    correct and deliberate -- it is what prevents split-brain writes. But the
+    10s poller registered alongside it only releases lvs->hublvol_port; nothing
+    in-process ever releases the subsystem port. The release is the control
+    plane's job, and until now the control plane had detection without
+    remediation.
+
+    k8s 2026-09-05 08:57 (1fb83b67, LVS_13). worker-4 was never part of the
+    outage and was the surviving path for four volumes. It fenced port 4436 at
+    08:57:39 after a writer conflict. This monitor logged
+    "Check: node port 10.0.0.14, 4436 ... False" 78 times over 8m37s and did
+    nothing; tasks-runner-port-allow was idle for the whole hour. The fence
+    outlived the clients' ctrl_loss_tmo (60s), the kernel deleted every
+    controller, the namespace flipped from "no usable path - requeuing" to
+    "no available path - failing I/O", and four volumes took EIO. It was
+    finally cleared incidentally by an unrelated restart at 09:06:16.
+
+    Preconditions, all required:
+      * the node is ONLINE -- a fence on a node that is down is not a leak;
+      * no restart task owns that LVS -- the restart flow is the legitimate
+        author of port blocks during its phases and must not be raced;
+      * the block has persisted past STALE_PORT_BLOCK_SEC;
+      * and the node's hublvol for that LVS is healthy and connected.
+
+    That last one is not optional. Unblocking a peer that still has no
+    redirect just re-opens the path to a node that will promote itself on the
+    next write and fence itself again -- the same loop, with client IO let
+    back in each time round.
+    """
+    for port, ok in port_results.items():
+        key = (snode.get_id(), port)
+        if ok:
+            _blocked_port_since.pop(key, None)
+            continue
+        first_seen = _blocked_port_since.setdefault(key, time.monotonic())
+        held = time.monotonic() - first_seen
+        if held < STALE_PORT_BLOCK_SEC:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+
+        owner_id = port_lvs_owner.get(port)
+        if not owner_id:
+            continue
+        try:
+            owner = db.get_storage_node_by_id(owner_id)
+        except Exception:
+            continue
+
+        if health_controller._restart_owns_lvs(owner):
+            logger.info(
+                "Port %s on %s blocked %.0fs but a restart owns %s; leaving it",
+                port, snode.get_id(), held, owner.lvstore)
+            continue
+
+        # Hublvol gate: only lift the fence once this node can actually
+        # redirect. See the docstring -- unblocking without a redirect
+        # reopens the loop.
+        try:
+            if owner_id == snode.get_id():
+                hub_ok = health_controller._check_node_hublvol(snode)
+            else:
+                hub_ok = health_controller._check_sec_node_hublvol(
+                    snode, auto_fix=False, primary_node_id=owner_id,
+                    repair_paths=False)
+        except Exception as e:
+            logger.warning(
+                "Port %s on %s blocked %.0fs; hublvol health check raised "
+                "(%s), not unblocking", port, snode.get_id(), held, e)
+            continue
+        if not hub_ok:
+            logger.warning(
+                "Port %s on %s blocked %.0fs for %s, but its hublvol is not "
+                "healthy -- NOT unblocking; a peer with no redirect would "
+                "promote itself and fence again",
+                port, snode.get_id(), held, owner.lvstore)
+            continue
+
+        logger.error(
+            "Port %s on %s has been blocked %.0fs on an ONLINE node with a "
+            "healthy hublvol and no restart owning %s -- SPDK fenced it and "
+            "nothing released it. Unblocking.",
+            port, snode.get_id(), held, owner.lvstore)
+        try:
+            from simplyblock_core.utils import port_block
+            port_block.set_port(snode, port, block=False, timeout=5, retry=1)
+            _blocked_port_since.pop(key, None)
+        except Exception as e:
+            logger.error("Failed to unblock stale port %s on %s: %s",
+                         port, snode.get_id(), e)
+
+
+#: node_id -> the ``online_since`` stamp we last verified nvme options for.
+#: online_since is re-stamped on every ->ONLINE transition, so this
+#: re-verifies exactly once per online episode (i.e. once per SPDK restart)
+#: rather than on every monitor tick.
+_nvme_opts_verified: dict = {}
+
+
+def _verify_nvme_options_once(snode):
+    node_id = snode.get_id()
+    marker = getattr(snode, "online_since", None)
+    if _nvme_opts_verified.get(node_id) == marker:
+        return
+    try:
+        ok, _drift = storage_node_ops.ensure_nvme_options(
+            snode, context="monitor node check")
+    except Exception as e:
+        logger.warning("nvme options check on %s raised: %s", node_id[:8], e)
+        return
+    if ok:
+        # Only remember a clean result. A drifted node is re-reported every
+        # episode until it is restarted, which is the intent: a node with no
+        # command timeout must not go quiet.
+        _nvme_opts_verified[node_id] = marker
 
 
 def _abort_hung_spdk(snode, hung_for):
@@ -1757,6 +1974,13 @@ def check_node(snode):
            return False
     else:
         _note_rpc_ok(snode.get_id())
+        # SPDK's global nvme options can only be set before the first
+        # controller attach (spdk_bdev_nvme_set_opts returns -EPERM after
+        # that), so an SPDK that came up without the control plane's init
+        # sequence keeps compiled-in defaults for its entire lifetime --
+        # including timeout_us=0, i.e. no command timeout armed at all.
+        # Checked once per online episode: one RPC per restart, not per tick.
+        _verify_nvme_options_once(snode)
 
     decrement()
     if not node_rpc_check or not node_rpc_check_1:

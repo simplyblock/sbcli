@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the volume replication endpoints and the policy assignment
 folded into the volume PUT."""
 
@@ -249,7 +248,7 @@ class TestCutover:
         assert response.status_code == 202
         assert response.content == b''
         assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/tasks/{TASK_ID}/')
-        lvol_controller.replication_commit.assert_called_once_with(VOLUME_ID)
+        lvol_controller.replication_commit.assert_called_once_with(VOLUME_ID, delete_source=False)
 
     def test_unqueued_cutover_is_an_error(self, client, db, volume, lvol_controller):
         lvol_controller.replication_commit.return_value = False

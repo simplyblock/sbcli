@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_distrib_recreate_retry.py
 

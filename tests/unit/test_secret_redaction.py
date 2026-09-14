@@ -1,4 +1,3 @@
-# coding=utf-8
 """Tests for SecretStr-based redaction for BaseModel.
 
 Goal: confirm that secrets are masked anywhere a model or its dict

@@ -1,10 +1,10 @@
-# encoding: utf-8
 
 import base64
 import hmac
 import logging
 from functools import wraps
-from typing import Any, Callable, Dict, Tuple, TypeVar, Union, cast
+from typing import Any, TypeVar, Union, cast
+from collections.abc import Callable
 
 from flask import request, Response
 from werkzeug.wrappers import Response as WerkzeugResponse
@@ -15,7 +15,7 @@ from simplyblock_core.db_controller import DBController
 F = TypeVar('F', bound=Callable[..., Any])
 
 # Type alias for the response type
-AuthResponse = Tuple[Dict[str, Any], int, Dict[str, str]]
+AuthResponse = tuple[dict[str, Any], int, dict[str, str]]
 ResponseType = Union[Response, WerkzeugResponse, AuthResponse]
 
 
@@ -61,7 +61,7 @@ def token_required(f: F) -> Callable[..., ResponseType]:
                         logging.exception("Failed to decode Basic Auth")
 
         # Authentication headers
-        headers: Dict[str, str] = {"WWW-Authenticate": 'Basic realm="Login Required"'}
+        headers: dict[str, str] = {"WWW-Authenticate": 'Basic realm="Login Required"'}
         
         # Validate credentials presence
         if not cluster_id or not cluster_secret:

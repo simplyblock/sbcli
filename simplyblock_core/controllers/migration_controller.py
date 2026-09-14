@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 migration_controller.py – control-plane logic for live volume migration.
 
@@ -398,7 +397,6 @@ def list_migrations(cluster_id=None):
 
     data = []
     for m in reversed(migrations):  # newest first
-        logger.debug(m)
         data.append({
             "Migration ID": m.uuid,
             "Volume ID": m.lvol_id,
@@ -792,13 +790,12 @@ def cleanup_migration_target(migration_id):
         except KeyError:
             continue
         short = snap.snap_bdev.split('/', 1)[-1]
-        if short.endswith(_MIG_SUFFIX):
-            short = short[:-len(_MIG_SUFFIX)]
+        short = short.removesuffix(_MIG_SUFFIX)
         protected_short_bases.add(short)
 
     for stored_path in reversed(migration.target_snap_bdevs):
         lvstore, short_m = stored_path.rsplit('/', 1)
-        short_base = short_m[:-len(_MIG_SUFFIX)] if short_m.endswith(_MIG_SUFFIX) else short_m
+        short_base = short_m.removesuffix(_MIG_SUFFIX)
 
         if short_base in protected_short_bases:
             skipped.append({"type": "snap_bdev", "stored_path": stored_path,
@@ -1280,8 +1277,11 @@ def create_migration(lvol_id, target_node_id,
             # namespace occupying a low nsid on the target (or add_ns calls
             # racing/reordering across nodes) would silently diverge the
             # source and target nsid maps for this lvol.
+            # WIRE identity, not the record uuid: a failed-back volume's
+            # namespace advertises its ns_uuid, and the client's multipath
+            # head only merges the migration target's path when it matches.
             _ns = _rpc.nvmf_subsystem_add_ns(
-                nqn, _ns_bdev, lvol.uuid, lvol.guid,
+                nqn, _ns_bdev, lvol.get_ns_uuid(), lvol.guid,
                 nsid=lvol.ns_id if lvol.ns_id else None)
             if _ns:
                 logger.info(

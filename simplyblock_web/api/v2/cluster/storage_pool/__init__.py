@@ -1,8 +1,10 @@
-from typing import Annotated, List, Optional
+import builtins
+from typing import Annotated, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import pool_controller
@@ -12,6 +14,7 @@ from simplyblock_core.models.pool import Pool as PoolModel
 
 from ... import util as util
 from ..._dependencies import Cluster, StoragePool
+from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .volume import api as volume_api
 from .snapshot import api as snapshot_api
 from ..._dtos import StoragePoolDTO
@@ -21,8 +24,17 @@ api = APIRouter()
 db = DBController()
 
 
-@api.get('/', name='clusters:storage-pools:list')
-def list(cluster: Cluster) -> List[StoragePoolDTO]:
+def _pool_dto(pool: PoolModel) -> StoragePoolDTO:
+    return StoragePoolDTO.from_model(pool, None)
+
+
+@api.get('/', name='clusters:storage-pools:list', response_model=builtins.list[StoragePoolDTO], responses=WATCH_RESPONSES)
+def list(cluster: Cluster, watch: WatchParam = False) -> Union[builtins.list[StoragePoolDTO], EventSourceResponse]:
+    if watch:
+        return sse_response(
+            pool_controller.watch_pools(cluster.get_id()),
+            _pool_dto,
+        )
     return [
         StoragePoolDTO.from_model(pool, single_or_none(db.get_pool_stats(pool, limit=1)))
         for pool in db.get_pools(cluster.get_id())
@@ -72,8 +84,14 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams, respo
 instance_api = APIRouter(prefix='/{pool_id}')
 
 
-@instance_api.get('/', name='clusters:storage-pools:detail')
-def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
+@instance_api.get('/', name='clusters:storage-pools:detail', response_model=StoragePoolDTO, responses=WATCH_RESPONSES)
+def get(cluster: Cluster, pool: StoragePool, watch: WatchParam = False) -> Union[StoragePoolDTO, EventSourceResponse]:
+    if watch:
+        return sse_response(
+            pool_controller.watch_pool(cluster.get_id(), pool.get_id()),
+            _pool_dto,
+            single=True,
+        )
     return StoragePoolDTO.from_model(pool, single_or_none(db.get_pool_stats(pool, limit=1)))
 
 
@@ -89,16 +107,16 @@ def delete(cluster: Cluster, pool: StoragePool) -> Response:
 
 
 class UpdatableStoragePoolParams(BaseModel):
-    name: Optional[str] = None
-    max_size: Optional[util.Unsigned] = None
-    volume_max_size: Optional[util.Unsigned] = None
-    max_rw_iops: Optional[util.Unsigned] = None
-    max_rw_mbytes: Optional[util.Unsigned] = None
-    max_r_mbytes: Optional[util.Unsigned] = None
-    max_w_mbytes: Optional[util.Unsigned] = None
-    lvols_cr_name: Optional[str] = None
-    lvols_cr_namespace: Optional[str] = None
-    lvols_cr_plural: Optional[str] = None
+    name: str | None = None
+    max_size: util.Unsigned | None = None
+    volume_max_size: util.Unsigned | None = None
+    max_rw_iops: util.Unsigned | None = None
+    max_rw_mbytes: util.Unsigned | None = None
+    max_r_mbytes: util.Unsigned | None = None
+    max_w_mbytes: util.Unsigned | None = None
+    lvols_cr_name: str | None = None
+    lvols_cr_namespace: str | None = None
+    lvols_cr_plural: str | None = None
 
 
 @instance_api.put('/', name='clusters:storage-pools:update', status_code=204, responses={204: {"content": None}})

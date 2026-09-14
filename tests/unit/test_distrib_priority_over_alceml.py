@@ -1,4 +1,3 @@
-# coding=utf-8
 """calculate_core_allocations() gives distrib/poller priority over alceml.
 
 Previously alceml claimed its cores (scaled by the node's actual device

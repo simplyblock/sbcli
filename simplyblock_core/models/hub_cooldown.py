@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 hub_cooldown.py — cross-process detach-cooldown record for migration hub
 NVMe-oF controllers.

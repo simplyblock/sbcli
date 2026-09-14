@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 tasks_runner_lvol_migration.py – background task runner for live volume migration.
 
@@ -85,7 +84,6 @@ the 3-second service-loop gap between phases.
 import datetime
 import random
 import time
-from typing import Optional
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
@@ -348,8 +346,7 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             src_lvstore, src_short = snap.snap_bdev.split('/', 1)
             if src_lvstore != tgt_node.lvstore:
                 # Strip any leftover migration suffix (defensive)
-                base = (src_short[:-len(_MIGRATION_BDEV_SUFFIX)]
-                        if src_short.endswith(_MIGRATION_BDEV_SUFFIX) else src_short)
+                base = (src_short.removesuffix(_MIGRATION_BDEV_SUFFIX))
                 snap.snap_bdev = f"{tgt_node.lvstore}/{base}"
         tgt_short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else None
         if tgt_short and tgt_short in spdk_info:
@@ -387,8 +384,7 @@ def _snap_tgt_short_name(snap):
     from the previous migration) do not produce a double suffix like 'SNAP_16745mm'.
     """
     short = _snap_short_name(snap)
-    if short.endswith(_MIGRATION_BDEV_SUFFIX):
-        short = short[:-len(_MIGRATION_BDEV_SUFFIX)]
+    short = short.removesuffix(_MIGRATION_BDEV_SUFFIX)
     return short + _MIGRATION_BDEV_SUFFIX
 
 
@@ -1035,7 +1031,9 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         return None, hub_err
 
     # Step 6: fire async transfer via hub
-    ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 16, hub_bdev, "migrate", lvol_id=tgt_map_id)
+    ret = src_rpc.bdev_lvol_transfer(
+        src_composite, 0, constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev,
+        "migrate", lvol_id=tgt_map_id)
     if ret is None:
         _cleanup()
         return None, f"bdev_lvol_transfer failed for snap {snap_uuid}"
@@ -1050,8 +1048,8 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
 
 
 def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient, migration: LVolMigration,
-                       transfer: dict, tgt_sec:Optional[StorageNode]=None, sec_rpc: Optional[RPCClient]=None,
-                       tgt_ter:Optional[StorageNode]=None, ter_rpc: Optional[RPCClient]=None):
+                       transfer: dict, tgt_sec:StorageNode | None=None, sec_rpc: RPCClient | None=None,
+                       tgt_ter:StorageNode | None=None, ter_rpc: RPCClient | None=None):
     """
     Post-transfer steps for a single snapshot whose data has been fully copied:
       add_clone → convert (on primary, then mirrored on secondary) → cleanup.
@@ -2007,7 +2005,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
         try:
             ret = src_rpc.bdev_lvol_transfer_final_step(
-                src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev, "migrate")
+                src_lvol_composite, tgt_map_id, tgt_snap_composite,
+                constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
             if not ret:
                 # Falsy, not just None: a target restart mid-RPC can come back as a
                 # 200 with an empty/non-JSON body, which rpc_client._request2 then
@@ -2022,7 +2021,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 stat = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
                 state = (stat or {}).get('transfer_state') if stat is not None else None
             else:
-                state = None
+                # The RPC can return normally (no exception) while still reporting
+                # transfer failure — transfer_state is one of "No process" |
+                # "In progress" | "Failed" | "Done".  Checking only for falsy
+                # lets a "Failed" dict slip through to the ANA flip as if the
+                # data had moved (same class of bug as batch migration 2026-08-22).
+                state = ret.get("transfer_state") if isinstance(ret, dict) else None
         except Exception:
             # SRC secondary/tertiary were just flipped inaccessible above; if
             # either RPC above raises (e.g. source unreachable — RPCException
@@ -2047,6 +2051,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             logger.info(
                 f"[IO-RESUME] {_now_ms()} final migration complete (recovered from RPC error, "
                 f"transfer_state={state}): lvol={migration.lvol_id} io now live on target")
+        elif state != "Done":
+            logger.error(
+                f"bdev_lvol_final_migration: transfer_state={state!r} "
+                f"(expected 'Done'): {ret!r} lvol={migration.lvol_id}")
+            _revert_src_replicas(f"final migration failed: transfer_state={state!r}")
+            return False, True, f"bdev_lvol_final_migration failed: transfer_state={state!r}"
         else:
             logger.info(
                 f"[IO-RESUME] {_now_ms()} final migration Done: "
@@ -2728,7 +2738,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
 
         # Derive the migration bdev name in case it was pre-created but not yet
         # recorded in transfer_context (i.e. failure before LVOL_MIGRATE saved ctx).
-        _pre_nqn: Optional[str] = None
+        _pre_nqn: str | None = None
         try:
             _lvol = db.get_lvol_by_id(migration.lvol_id)
             _pre_bdev = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(_lvol.lvol_bdev)}"
@@ -2817,8 +2827,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
         try:
             _s = db.get_snapshot_by_id(_uuid)
             _sbase = _s.snap_bdev.split('/', 1)[-1]
-            if _sbase.endswith(_MIGRATION_BDEV_SUFFIX):
-                _sbase = _sbase[:-len(_MIGRATION_BDEV_SUFFIX)]
+            _sbase = _sbase.removesuffix(_MIGRATION_BDEV_SUFFIX)
             _protected_bases.add(_sbase)
         except KeyError:
             continue
@@ -2828,8 +2837,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
             continue
         _lvstore, _short_m = _stored_path.rsplit('/', 1)
         _short_base = (
-            _short_m[:-len(_MIGRATION_BDEV_SUFFIX)]
-            if _short_m.endswith(_MIGRATION_BDEV_SUFFIX) else _short_m
+            _short_m.removesuffix(_MIGRATION_BDEV_SUFFIX)
         )
         if _short_base in _protected_bases:
             logger.info(

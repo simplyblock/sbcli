@@ -1,4 +1,3 @@
-from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -19,7 +18,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:backups:list')
-def list_backups(cluster: Cluster) -> List[BackupDTO]:
+def list_backups(cluster: Cluster) -> list[BackupDTO]:
     backups = db.get_backups(cluster.get_id())
     backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     return [BackupDTO.from_model(b) for b in backups]
@@ -50,7 +49,7 @@ class _RestoreParams(BaseModel):
     backup_id: str
     lvol_name: str
     pool: str
-    target_node_id: Optional[str] = None
+    target_node_id: str | None = None
 
 
 @api.post('/restore', name='clusters:backups:restore', status_code=202)
@@ -72,8 +71,8 @@ def import_backups(cluster: Cluster, parameters: _ImportParams):
 @api.get('/export', name='clusters:backups:export')
 def export_backups(
     cluster: Cluster,
-    backup_id: Optional[str] = Query(None, description="Export only the chain containing this backup UUID"),
-    lvol_name: Optional[str] = Query(None, description="Export all completed backups for this lvol name"),
+    backup_id: str | None = Query(None, description="Export only the chain containing this backup UUID"),
+    lvol_name: str | None = Query(None, description="Export all completed backups for this lvol name"),
 ):
     lvol_name_filter = lvol_name
     if backup_id and not lvol_name_filter:
@@ -141,16 +140,16 @@ policy_api = APIRouter()
 
 
 @policy_api.get('/', name='clusters:backup-policies:list')
-def list_policies(cluster: Cluster) -> List[BackupPolicyDTO]:
+def list_policies(cluster: Cluster) -> list[BackupPolicyDTO]:
     policies = db.get_backup_policies(cluster.get_id())
     return [BackupPolicyDTO.from_model(p) for p in policies]
 
 
 class _PolicyCreateParams(BaseModel):
     name: str
-    versions: Optional[int] = 0
-    age: Optional[str] = ""
-    schedule: Optional[str] = ""
+    versions: int | None = 0
+    age: str | None = ""
+    schedule: str | None = ""
 
 
 @policy_api.post('/', name='clusters:backup-policies:create', status_code=201, responses={201: {"content": None}})

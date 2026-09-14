@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# PYTHON_ARGCOMPLETE_OK
 
 import argparse
 import json
@@ -7,8 +6,6 @@ import re
 import sys
 import time
 from pathlib import Path
-
-import argcomplete
 
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, utils, db_controller, constants
@@ -80,7 +77,6 @@ class CLIWrapperBase:
 
     def __init__(self):
         self.parser.add_argument("--cmd", help='cmd', nargs='+')
-        argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
         self.parser = argparse.ArgumentParser(description=f'Simplyblock management CLI v{constants.SIMPLY_BLOCK_VERSION}')
@@ -138,15 +134,34 @@ class CLIWrapperBase:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
         if args.nvme_names:
             nvme_names = [str(x) for x in args.nvme_names.split(',')]
+        lblk = getattr(args, 'lblk', False)
+        blk_names = getattr(args, 'blk_names', None)
+        blk_names_exclude = getattr(args, 'blk_names_exclude', None)
+        blk_serials = getattr(args, 'blk_serials', None)
         use_pci_allowed = bool(args.pci_allowed)
         use_pci_blocked = bool(args.pci_blocked)
         use_model_range = bool(args.device_model or args.size_range)
-        if sum([use_pci_allowed, use_pci_blocked, use_model_range]) > 1:
+        use_lblk = bool(lblk or blk_names or blk_names_exclude or blk_serials)
+        if sum([use_pci_allowed, use_pci_blocked, use_model_range, use_lblk]) > 1:
             self.parser.error(
-                "Choose only one device selection method: --pci-allowed, --pci-blocked, or "
+                "Choose only one device selection method: --pci-allowed, --pci-blocked, "
                 "--device-model/--size-range (--device-model and --size-range may be combined "
-                "with each other, but not with --pci-allowed or --pci-blocked)."
+                "with each other, but not with --pci-allowed or --pci-blocked), or --lblk with "
+                "its --blk-* selectors."
             )
+        lblk_selection = None
+        if use_lblk:
+            if not lblk:
+                self.parser.error("--blk-names/--blk-names-exclude/--blk-serials require --lblk")
+            if sum([bool(blk_names), bool(blk_names_exclude), bool(blk_serials)]) > 1:
+                self.parser.error(
+                    "Choose only one block-device selection method: --blk-names, "
+                    "--blk-names-exclude, or --blk-serials.")
+            lblk_selection = {
+                "names": [str(x) for x in blk_names.split(',')] if blk_names else None,
+                "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
+                "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
+            }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
         # baseline for a host that does not belong to a cluster yet.
@@ -161,7 +176,9 @@ class CLIWrapperBase:
             max_lvol, max_prov, sockets_to_use, args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
             size_range=args.size_range, vcpu_count=vcpu_count, nvme_names=nvme_names,
-            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
+            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices,
+            lblk_selection=lblk_selection, jm_percent=int(getattr(args, 'jm_percent', 3) or 3),
+            inline_checksum=getattr(args, 'inline_checksum', False))
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
@@ -231,6 +248,7 @@ class CLIWrapperBase:
                 spdk_sys_mem=spdk_sys_mem,
                 expansion=expansion,
                 failure_domain=failure_domain,
+                force_format=getattr(args, 'force_format', False),
             )
         except Exception as e:
             print(e)
@@ -369,7 +387,9 @@ class CLIWrapperBase:
         return device_controller.add_device(args.device_id)
 
     def storage_node__remove_device(self, sub_command, args):
-        return device_controller.device_remove(args.device_id, args.force)
+        return device_controller.device_remove(
+            args.device_id, args.force,
+            cause=device_controller.CAUSE_ADMIN_REMOVE)
 
     def storage_node__set_failed_device(self, sub_command, args):
         return device_controller.device_set_failed(args.device_id)
@@ -475,6 +495,22 @@ class CLIWrapperBase:
             print(f"Error activating cluster: {e}")
             return False
         return True
+
+    def cluster__event_alerts(self, sub_command, args):
+        cluster_ops.set_event_alerts(
+            args.cluster_id,
+            enabled=not args.disable,
+            log_limit=args.log_limit,
+            interval=args.interval,
+            pending_period=args.pending_period,
+            plugin_url=args.plugin_url,
+            plugin_preinstalled=args.plugin_preinstalled,
+        )
+        if args.disable:
+            return "Event log alert rules removed from Grafana."
+        return ("Event log alert rules provisioned. Grafana was restarted; the rules start "
+                "evaluating once the data source plugin has loaded, which takes a minute or two "
+                "the first time.")
 
     def cluster__op_stop(self, sub_command, args):
         return cluster_ops.set_object_ops(args.cluster_id, True)
@@ -668,7 +704,16 @@ class CLIWrapperBase:
             args.cluster_id, args.name, args.target,
             interval_min=args.interval_min, mode=args.mode,
             keep_replicated=args.keep_replicated,
-            retention_schedule=args.retention_schedule)
+            retention_schedule=args.retention_schedule,
+            consistency_group=args.consistency_group)
+
+    def cluster__replication_policy_snapshot(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller
+        snap_ids, err = consistency_group_controller.create_group_snapshot(
+            args.policy_id)
+        if err:
+            return f"Group snapshot failed: {err}"
+        return utils.print_table([{"Snapshot": s} for s in snap_ids])
 
     def cluster__replication_policy_list(self, sub_command, args):
         data = [{
@@ -679,6 +724,7 @@ class CLIWrapperBase:
             "Mode": p.mode,
             "Keep": p.keep_replicated,
             "Retention": p.retention_schedule or "-",
+            "CG": "yes" if getattr(p, "consistency_group", False) else "-",
             "Status": p.status,
         } for p in replication_policy_controller.list_policies(args.cluster_id)]
         return _format_result(data, json=args.json)
@@ -696,12 +742,16 @@ class CLIWrapperBase:
             return _format_json(results)
         if not results:
             return "No volumes to fail over"
-        return utils.print_table([{
+        table = utils.print_table([{
             "Volume": r.get("lvol_id", ""),
             "Status": r.get("status", ""),
             "Target Volume": r.get("target_lvol_id", "") or "-",
             "Detail": r.get("detail", "") or "",
         } for r in results])
+        warnings = [w for r in results for w in (r.get("warnings") or [])]
+        if warnings:
+            table += chr(10) + chr(10).join("WARNING: " + w for w in warnings)
+        return table
 
     def volume__replication_policy_set(self, sub_command, args):
         return replication_policy_controller.attach_policy(args.volume_id, args.policy)
@@ -1044,7 +1094,7 @@ class CLIWrapperBase:
             args.max_r_mbytes,
             args.max_w_mbytes,
             args.cluster_id,
-            args.qos_host,
+            qos_host=args.qos_host,
             dhchap=args.dhchap,
         )
 
@@ -1326,6 +1376,8 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        device_mode = getattr(args, 'device_mode', 'nvme')
+        inline_checksum = getattr(args, 'inline_checksum', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1334,6 +1386,7 @@ class CLIWrapperBase:
             with open(args.use_backup, 'r') as f:
                 backup_config = json.load(f)
 
+        atomic_4k = getattr(args, 'atomic_4k', False)
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
@@ -1342,6 +1395,9 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            device_mode=device_mode,
+            inline_checksum=inline_checksum,
+            atomic_4k=atomic_4k,
         )
 
     def cluster_create(self, args):
@@ -1379,8 +1435,11 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        device_mode = getattr(args, 'device_mode', 'nvme')
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
+        inline_checksum = getattr(args, 'inline_checksum', False)
+        atomic_4k = getattr(args, 'atomic_4k', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1401,12 +1460,15 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            device_mode=device_mode,
             enable_hang_device=enable_hang_device,
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,
             alert_config=parse_alerting_config(
                 Path(args.alerting_config_path) if args.alerting_config_path else None),
+            inline_checksum=inline_checksum,
+            atomic_4k=atomic_4k,
         )
 
     def query_yes_no(self, question, default="yes"):

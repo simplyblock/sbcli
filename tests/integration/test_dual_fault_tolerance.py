@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_dual_fault_tolerance.py – unit tests for the dual fault tolerance
 (triple-path NVMe-oF) feature.
@@ -26,6 +25,7 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.job_schedule import JobSchedule
+from tests._mocks import unique_ip
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.lvstore = lvstore or f"lvs_{uuid}"
     n.secondary_node_id = secondary_node_id
     n.tertiary_node_id = tertiary_node_id
-    n.mgmt_ip = mgmt_ip or f"10.0.0.{hash(uuid) % 254 + 1}"
+    n.mgmt_ip = mgmt_ip or unique_ip(uuid)
     n.is_secondary_node = is_secondary_node
     n.lvstore_stack_secondary = lvstore_stack_secondary
     n.lvstore_stack_tertiary = lvstore_stack_tertiary

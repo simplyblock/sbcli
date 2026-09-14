@@ -1,0 +1,363 @@
+# Grafana alert rules derived from the control plane's cluster event log,
+# rendered by `sbctl cluster event-alerts` into the alerting folder Grafana is
+# given as a whole, next to the checked-in, Thanos-backed alert_rules.yaml.
+#
+# Each query folds the newest log records into the current state of every node,
+# device and cluster and returns one row per entity that is currently wrong, so
+# healing is structural: the reverting event removes the row, and noDataState:
+# OK turns an empty result into the resolved state. The fold reads transitions
+# because the cause is not in the payload -- get_logs drops caused_by, and
+# set_node_status writes every transition under the same one -- so what
+# separates an operator's shutdown from a fault is the state it passes through.
+#
+# Kept in step with the same rules in the simplyblock-operator Helm chart
+# (helm-charts/charts/simplyblock-operator/templates/controlplane_configmap.yaml).
+{% macro rule(cluster, ea, uid_suffix, title, columns, severity, summary, description) %}
+        - uid: sbev-{{ cluster.uid_prefix }}-{{ uid_suffix }}
+          # Titles must be unique within a group, and each cluster adds a copy.
+          title: {{ title }}_{{ cluster.id }}
+          condition: B
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: {{ cluster.ds_uid }}
+              model:
+                refId: A
+                type: json
+                source: url
+                format: table
+                # Only the backend parser runs server-side, which is what an
+                # alert rule needs. root_selector is tried as gjson first and
+                # falls back to JSONata; opening with a bracket forces that.
+                parser: backend
+                url: /api/v2/clusters/{{ cluster.id }}/logs
+                url_options:
+                  method: GET
+                  params:
+                    - key: limit
+                      value: "{{ ea.logLimit }}"
+                root_selector: |-
+{{ caller() | trim | indent(18, first=True) }}
+                # One numeric field and the rest strings is what makes Grafana
+                # read the frame as a numeric table, turning each string field
+                # into a label of its own alert instance.
+                columns:
+{% for name, type in columns %}
+                  - selector: {{ name }}
+                    text: {{ name }}
+                    type: {{ type }}
+{% endfor %}
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                refId: B
+                type: threshold
+                datasource:
+                  type: __expr__
+                  uid: __expr__
+                expression: A
+                conditions:
+                  - evaluator:
+                      params:
+                        - 0
+                      type: gt
+                    operator:
+                      type: and
+                    query:
+                      params: []
+                    reducer:
+                      params: []
+                      type: last
+                    type: query
+          # An empty result is the healthy state; a failing query is not.
+          noDataState: OK
+          execErrState: Error
+          for: {{ ea['for'] }}
+          annotations:
+            # Single-quoted so the Go template expressions Grafana expands at
+            # notification time survive as written.
+            summary: '{{ summary | replace("'", "''") }}'
+            description: '{{ description | replace("'", "''") }}'
+          labels:
+            app: simplyblock
+            cluster: {{ cluster.id }}
+            severity: {{ severity }}
+          isPaused: false
+{% endmacro %}
+apiVersion: 1
+{% if EVENT_ALERT_CLUSTERS %}
+groups:
+    - orgId: 1
+      name: simplyblock_events
+      folder: grafana_folder
+      interval: {{ EVENT_ALERTS.interval }}
+      rules:
+{% for cluster in EVENT_ALERT_CLUSTERS %}
+{% call rule(cluster, EVENT_ALERTS, 'node-left-online', 'StorageNode_left_online',
+             [('node', 'string'), ('state', 'string'), ('since', 'string'), ('value', 'number')],
+             'critical',
+             'Storage node {{ $labels.node }} left the online state and is now {{ $labels.state }}.',
+             'The rule folds the cluster event log into the current state of every storage node and'
+             ' fires while a node sits in anything other than online or in_creation. A shutdown or'
+             ' removal an operator asked for is exempt: those reach in_shutdown, pending_removal,'
+             ' in_removal, or removed, which no fault path does. The alert clears when the node'
+             ' returns to online.') %}
+(
+  $planned := ['in_shutdown', 'in_removal', 'pending_removal', 'removed'];
+  $healthy := ['online', 'in_creation'];
+  $ev := [$[Event = 'STATUS_CHANGE' and $contains(Message, 'Storage node status changed from: ')]];
+  $fold := function($evs) {
+    $reduce($evs, function($a, $e) {
+      (
+        $to := $substringAfter($e.Message, ' to: ');
+        {
+          'state': $to,
+          'since': $e.Date,
+          'planned': $to in $planned or ($a.planned and $to = 'offline')
+        }
+      )
+    }, { 'state': 'online', 'since': '', 'planned': false })
+  };
+  $nodes := $count($ev) = 0 ? [] : [$each($ev{ NodeId: [$] }, function($evs, $id) {
+    $merge([{ 'node': $id }, $fold($evs)])
+  })];
+  [$nodes[$not(state in $healthy) and $not(planned)].{
+    'node': node,
+    'state': state,
+    'since': since,
+    'value': 1
+  }]
+)
+{% endcall %}
+{% call rule(cluster, EVENT_ALERTS, 'device-unavailable', 'Device_became_unavailable',
+             [('device', 'string'), ('order', 'string'), ('since', 'string'), ('value', 'number')],
+             'warning',
+             'Device {{ $labels.device }} (cluster device order {{ $labels.order }}) is unavailable.',
+             'The rule fires for a device that is currently unavailable and did not become so as'
+             ' part of a whole node going down. A node leaving online cascades every one of its'
+             ' devices to unavailable within seconds, and that is reported once as the storage node'
+             ' alert rather than once per device. The alert clears when the device returns to'
+             ' online.') %}
+(
+  $window := 120000;
+  $ms := function($d) { $toMillis($substring($d & '.000', 0, 23), '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01].[f001]') };
+  $healthy := ['online', 'in_creation'];
+  $nodeEv := [$[Event = 'STATUS_CHANGE' and $contains(Message, 'Storage node status changed from: ')]];
+  $cascades := [$map($nodeEv[$not($substringAfter(Message, ' to: ') in $healthy)], function($e) { $ms($e.Date) })];
+  $devEv := [$[Event = 'STATUS_CHANGE' and $contains(Message, 'Device status changed from: ')]];
+  $fold := function($evs) {
+    $reduce($evs, function($a, $e) {
+      {
+        'state': $substringAfter($e.Message, ' to: '),
+        'since': $e.Date,
+        'at': $ms($e.Date),
+        'order': $e.Storage_ID
+      }
+    }, { 'state': 'online', 'since': '', 'at': 0, 'order': '' })
+  };
+  $devs := $count($devEv) = 0 ? [] : [$each($devEv{ NodeId: [$] }, function($evs, $id) {
+    (
+      $f := $fold($evs);
+      $merge([
+        { 'device': $id, 'cascade': $count($cascades[$ <= $f.at and $f.at - $ <= $window]) > 0 },
+        $f
+      ])
+    )
+  })];
+  [$devs[state = 'unavailable' and $not(cascade)].{
+    'device': device,
+    'order': order,
+    'since': since,
+    'value': 1
+  }]
+)
+{% endcall %}
+{% call rule(cluster, EVENT_ALERTS, 'device-removed', 'Device_removed',
+             [('device', 'string'), ('order', 'string'), ('since', 'string'), ('value', 'number')],
+             'critical',
+             'Device {{ $labels.device }} (cluster device order {{ $labels.order }}) was removed.',
+             'The rule fires for every device whose latest state is removed, whatever the cause. It'
+             ' clears when the device is brought back online, and otherwise ages out a day after the'
+             ' removal, since a device that is genuinely gone has no reversion to wait for.') %}
+(
+  $recent := 86400000;
+  $ms := function($d) { $toMillis($substring($d & '.000', 0, 23), '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01].[f001]') };
+  $now := $millis();
+  $devEv := [$[Event = 'STATUS_CHANGE' and $contains(Message, 'Device status changed from: ')]];
+  $fold := function($evs) {
+    $reduce($evs, function($a, $e) {
+      {
+        'state': $substringAfter($e.Message, ' to: '),
+        'since': $e.Date,
+        'at': $ms($e.Date),
+        'order': $e.Storage_ID
+      }
+    }, { 'state': 'online', 'since': '', 'at': 0, 'order': '' })
+  };
+  $devs := $count($devEv) = 0 ? [] : [$each($devEv{ NodeId: [$] }, function($evs, $id) {
+    $merge([{ 'device': $id }, $fold($evs)])
+  })];
+  [$devs[state = 'removed' and $now - at <= $recent].{
+    'device': device,
+    'order': order,
+    'since': since,
+    'value': 1
+  }]
+)
+{% endcall %}
+{% call rule(cluster, EVENT_ALERTS, 'cluster-degraded', 'Cluster_became_degraded',
+             [('state', 'string'), ('since', 'string'), ('value', 'number')],
+             'warning',
+             'The cluster is degraded.',
+             "The rule fires while the cluster's latest status is degraded. A degradation an operator"
+             ' caused by shutting a node down is exempt, decided by whether any node currently out of'
+             ' service got there through in_shutdown or a removal state. The alert clears when the'
+             ' cluster returns to active.') %}
+(
+  $planned := ['in_shutdown', 'in_removal', 'pending_removal', 'removed'];
+  $healthy := ['online', 'in_creation'];
+  $nodeEv := [$[Event = 'STATUS_CHANGE' and $contains(Message, 'Storage node status changed from: ')]];
+  $fold := function($evs) {
+    $reduce($evs, function($a, $e) {
+      (
+        $to := $substringAfter($e.Message, ' to: ');
+        {
+          'state': $to,
+          'planned': $to in $planned or ($a.planned and $to = 'offline')
+        }
+      )
+    }, { 'state': 'online', 'planned': false })
+  };
+  $nodes := $count($nodeEv) = 0 ? [] : [$each($nodeEv{ NodeId: [$] }, function($evs, $id) { $fold($evs) })];
+  $operatorDown := $count($nodes[$not(state in $healthy) and planned]) > 0;
+  $cluEv := [$[Event = 'STATUS_CHANGE' and $contains(Message, 'Cluster status changed from ')]];
+  $last := $cluEv[-1];
+  $state := $exists($last) ? $substringAfter($last.Message, ' to ') : 'active';
+  [$state = 'degraded' and $not($operatorDown) ? {
+    'state': $state,
+    'since': $last.Date,
+    'value': 1
+  }]
+)
+{% endcall %}
+{% call rule(cluster, EVENT_ALERTS, 'cluster-suspended', 'Cluster_became_suspended',
+             [('state', 'string'), ('since', 'string'), ('value', 'number')],
+             'critical',
+             'The cluster is suspended.',
+             "The rule fires while the cluster's latest status is suspended, whatever the cause,"
+             " including a suspension that followed an operator's node shutdown. The alert clears"
+             ' when the cluster leaves suspended.') %}
+(
+  $cluEv := [$[Event = 'STATUS_CHANGE' and $contains(Message, 'Cluster status changed from ')]];
+  $last := $cluEv[-1];
+  $state := $exists($last) ? $substringAfter($last.Message, ' to ') : 'active';
+  [$state = 'suspended' ? {
+    'state': $state,
+    'since': $last.Date,
+    'value': 1
+  }]
+)
+{% endcall %}
+{% call rule(cluster, EVENT_ALERTS, 'cluster-capacity', 'Cluster_capacity_reached',
+             [('kind', 'string'), ('severity', 'string'), ('value', 'number')],
+             'warning',
+             '{{ $labels.kind }} cluster capacity is at {{ $value }}% ({{ $labels.severity }}).',
+             'The rule reports the newest capacity event per kind, absolute and provisioned, and'
+             ' carries the utilization as its value. The control plane emits no back-to-normal'
+             ' event, so the alert clears by the event ceasing: the capacity monitor re-emits every'
+             ' 30 seconds while over a threshold, except an absolute critical which it throttles to'
+             ' once every 15 minutes, and the rule allows for both.') %}
+(
+  $ms := function($d) { $toMillis($substring($d & '.000', 0, 23), '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01].[f001]') };
+  $now := $millis();
+  $ev := [$[Event = 'CAPACITY']];
+  $latest := $count($ev) = 0 ? [] : [$each(
+    $ev{ ($contains(Message, 'provisioned capacity') ? 'provisioned' : 'absolute'): [$] },
+    function($evs, $kind) {
+      (
+        $e := $evs[-1];
+        $window := ($kind = 'absolute' and $e.Level = 'Critical') ? 1200000 : 180000;
+        {
+          'kind': $kind,
+          'severity': $e.Level,
+          'value': $substringBefore($substringAfter($e.Message, 'reached: '), '%'),
+          'fresh': $now - $ms($e.Date) <= $window
+        }
+      )
+    })];
+  [$latest[fresh and (severity = 'Warning' or severity = 'Critical')].{
+    'kind': kind,
+    'severity': severity,
+    'value': value
+  }]
+)
+{% endcall %}
+{% call rule(cluster, EVENT_ALERTS, 'jm-records-threshold', 'JM_records_threshold_exceeded',
+             [('node', 'string'), ('since', 'string'), ('value', 'number')],
+             'critical',
+             'The journal on storage node {{ $labels.node }} holds more records awaiting compression'
+             ' than the configured threshold.',
+             'Compression is not keeping up with the journal, and journal replay on the next restart'
+             ' or failover grows with every record. The control plane latches this alert on the'
+             ' upward crossing and re-arms silently, emitting nothing when the backlog drains, so the'
+             ' alert clears an hour after the last crossing rather than on a recovery event.') %}
+(
+  $recent := 3600000;
+  $ms := function($d) { $toMillis($substring($d & '.000', 0, 23), '[Y0001]-[M01]-[D01] [H01]:[m01]:[s01].[f001]') };
+  $now := $millis();
+  $ev := [$[Event = 'JM_COMPRESSION_BACKLOG']];
+  $latest := $count($ev) = 0 ? [] : [$each($ev{ NodeId: [$] }, function($evs, $id) {
+    (
+      $e := $evs[-1];
+      { 'node': $id, 'since': $e.Date, 'at': $ms($e.Date) }
+    )
+  })];
+  [$latest[$now - at <= $recent].{
+    'node': node,
+    'since': since,
+    'value': 1
+  }]
+)
+{% endcall %}
+{% call rule(cluster, EVENT_ALERTS, 'jm-compression-error', 'JM_compression_error',
+             [('node', 'string'), ('jm_vuid', 'string'), ('detail', 'string'), ('value', 'number')],
+             'critical',
+             'Journal compression failed on storage node {{ $labels.node }} for jm_vuid'
+             ' {{ $labels.jm_vuid }}: {{ $labels.detail }}.',
+             'The rule tracks the newest compression event per node and journal and fires while that'
+             ' event is an error, which is either a compression_failed status or a non-zero error'
+             ' code. The alert clears when the same journal reports a clean compression run.') %}
+(
+  $ev := [$[Event = 'jm_compression']];
+  $latest := $count($ev) = 0 ? [] : [$each($ev{ (NodeId & '/' & VUID): [$] }, function($evs, $key) {
+    (
+      $e := $evs[-1];
+      {
+        'node': $substringBefore($key, '/'),
+        'jm_vuid': $substringAfter($key, '/'),
+        'level': $e.Level,
+        'detail': $e.Message
+      }
+    )
+  })];
+  [$latest[level = 'Error'].{
+    'node': node,
+    'jm_vuid': jm_vuid,
+    'detail': detail,
+    'value': 1
+  }]
+)
+{% endcall %}
+{% endfor %}
+{% else %}
+# No cluster to read an event log from, or the event log alerts are off, so
+# nothing to provision. Rendered rather than skipped, so that `--disable`
+# overwrites the rules an earlier run left on this management node instead of
+# leaving Grafana to provision them again on its next restart.
+groups: []
+{% endif %}

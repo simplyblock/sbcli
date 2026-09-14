@@ -1,4 +1,3 @@
-# coding=utf-8
 """Create-rollback delete protocol (run 20260725, SNAP_3299; revised
 upgrade run 20260812).
 

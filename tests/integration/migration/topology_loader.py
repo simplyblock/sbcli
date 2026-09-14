@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 topology_loader.py – load a JSON topology spec and populate the FDB
 control-plane database with the described objects.
@@ -88,7 +87,7 @@ them to bytes using the same ``utils.parse_size()`` function the CLI uses.
 import json
 import time
 import uuid as _uuid_mod
-from typing import Any, Dict, Optional
+from typing import Any
 
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -133,15 +132,15 @@ class TestContext:
     def __init__(self, cluster_id: str):
         self.cluster_id = cluster_id
         # symbolic_id → actual UUID string
-        self._node_uuid: Dict[str, str] = {}
-        self._pool_uuid: Dict[str, str] = {}
-        self._lvol_uuid: Dict[str, str] = {}
-        self._snap_uuid: Dict[str, str] = {}
+        self._node_uuid: dict[str, str] = {}
+        self._pool_uuid: dict[str, str] = {}
+        self._lvol_uuid: dict[str, str] = {}
+        self._snap_uuid: dict[str, str] = {}
         # actual UUID → model object (for remove())
-        self._nodes: Dict[str, StorageNode] = {}
-        self._pools: Dict[str, Pool] = {}
-        self._lvols: Dict[str, LVol] = {}
-        self._snaps: Dict[str, SnapShot] = {}
+        self._nodes: dict[str, StorageNode] = {}
+        self._pools: dict[str, Pool] = {}
+        self._lvols: dict[str, LVol] = {}
+        self._snaps: dict[str, SnapShot] = {}
 
     # ---- lookups by symbolic id ----
 
@@ -309,7 +308,7 @@ def load_topology_file(path: str) -> TestContext:
     return load_topology(spec)
 
 
-def load_topology(spec: Dict[str, Any]) -> TestContext:
+def load_topology(spec: dict[str, Any]) -> TestContext:
     """
     Load a topology from a dict (already parsed from JSON) and populate FDB.
     Returns a TestContext.
@@ -338,7 +337,7 @@ def load_topology(spec: Dict[str, Any]) -> TestContext:
 
     # --- Resolve node secondary references (symbolic → uuid) ---
     # First pass: assign UUIDs to all nodes
-    node_sym_to_uuid: Dict[str, str] = {}
+    node_sym_to_uuid: dict[str, str] = {}
     for n_spec in spec.get('nodes', []):
         sym = _req_field(n_spec, 'id', 'node')
         node_sym_to_uuid[sym] = str(_uuid_mod.uuid4())
@@ -354,7 +353,7 @@ def load_topology(spec: Dict[str, Any]) -> TestContext:
         ctx._reg_node(sym, node)
 
     # --- Pools ---
-    pool_sym_to_uuid: Dict[str, str] = {}
+    pool_sym_to_uuid: dict[str, str] = {}
     for p_spec in spec.get('pools', []):
         sym = _req_field(p_spec, 'id', 'pool')
         pool_uuid = str(_uuid_mod.uuid4())
@@ -365,7 +364,7 @@ def load_topology(spec: Dict[str, Any]) -> TestContext:
 
     # --- Namespace-group → NQN mapping ---
     # Volumes in the same namespace_group share an NQN subsystem.
-    ns_group_nqn: Dict[str, str] = {}
+    ns_group_nqn: dict[str, str] = {}
     for v_spec in spec.get('volumes', []):
         grp = v_spec.get('namespace_group', '')
         if grp and grp not in ns_group_nqn:
@@ -373,7 +372,7 @@ def load_topology(spec: Dict[str, Any]) -> TestContext:
                 f"nqn.2023-02.io.simplyblock:{cluster_id[:8]}:grp:{grp}")
 
     # --- Volumes ---
-    lvol_sym_to_uuid: Dict[str, str] = {}
+    lvol_sym_to_uuid: dict[str, str] = {}
     for v_spec in spec.get('volumes', []):
         sym = _req_field(v_spec, 'id', 'volume')
         lvol_uuid = str(_uuid_mod.uuid4())
@@ -407,7 +406,7 @@ def load_topology(spec: Dict[str, Any]) -> TestContext:
         v_spec['_cloned_sym'] = _cloned_sym   # stash for second pass
 
     # --- Snapshots ---
-    snap_sym_to_uuid: Dict[str, str] = {}
+    snap_sym_to_uuid: dict[str, str] = {}
     for s_spec in spec.get('snapshots', []):
         sym = _req_field(s_spec, 'id', 'snapshot')
         snap_sym_to_uuid[sym] = str(_uuid_mod.uuid4())
@@ -522,7 +521,7 @@ def _make_pool(pool_uuid: str, spec: dict, cluster_id: str) -> Pool:
 
 def _make_lvol(lvol_uuid: str, spec: dict, node: StorageNode,
                cluster_id: str, pool_uuid: str,
-               shared_nqn: Optional[str]) -> LVol:
+               shared_nqn: str | None) -> LVol:
     size_bytes = parse_size(str(spec.get('size', '1G')))
     max_size_bytes = parse_size(str(spec.get('max_size', '1000T')))
     nqn = shared_nqn or f"nqn.2023-02.io.simplyblock:{lvol_uuid[:8]}"

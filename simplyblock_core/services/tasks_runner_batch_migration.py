@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 tasks_runner_batch_migration.py – main orchestrator for batch (shared-namespace)
 lvol migration.
@@ -40,7 +39,6 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
 """
 
 import time
-from typing import Optional
 
 from simplyblock_core import constants, db_controller as db_mod, utils
 from simplyblock_core.controllers import migration_controller, migration_events, tasks_controller, tasks_events
@@ -83,7 +81,7 @@ def _get_migration_nic(node):
     return trtype, node.mgmt_ip
 
 
-def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optional[str]:
+def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> str | None:
     """
     After all workers have transferred their owned snaps (without add_clone/convert),
     reconstruct the full ancestry tree on the target in correct order.
@@ -789,7 +787,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         # this file -- use a dedicated, longer-timeout client just for it.
         final_step_rpc = src_node.rpc_client(timeout=15, retry=2)
         ret = final_step_rpc.bdev_lvol_batch_transfer_final_step(
-            lvol_names, lvol_ids, snapshot_names, 16, hub_bdev, "migrate")
+            lvol_names, lvol_ids, snapshot_names,
+            constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
         logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
         # The RPC can return normally (no exception) while still reporting the
         # transfer itself failed -- transfer_state is one of "No process" |

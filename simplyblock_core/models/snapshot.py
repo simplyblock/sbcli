@@ -1,10 +1,11 @@
-# coding=utf-8
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
 from simplyblock_core.models.lvol_model import LVol, LVolMini
 
 
 class SnapShot(BaseModel):
+
+    _WATCHED = True
 
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
@@ -39,6 +40,10 @@ class SnapShot(BaseModel):
     target_replicated_snap_uuid: str = ""
     source_replicated_snap_uuid: str = ""
     snap_type: str = "user"
+    #: consistency-group provenance: which group and which group generation
+    #: this snapshot belongs to (0 = not a group snapshot).
+    group_id: str = ""
+    group_seq: int = 0
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
     instances: list[dict] = default_factory(list)
@@ -47,6 +52,9 @@ class SnapShot(BaseModel):
     # On Snapshot transfer or replicate this field is the same
     # This value can be used to identify the same snapshot on other nodes
     data_uuid: str = ""
+
+    def watch_scope(self):
+        return (self.pool_uuid,)
 
     def write_to_db(self, kv_store=None):
         super().write_to_db(kv_store)

@@ -27,7 +27,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from utils.ssh_utils import RunnerK8sLog
@@ -1836,8 +1836,7 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             all_lvols = self.sbcli_utils.list_lvols()
             test_lvols = [
                 name for name in all_lvols
-                if name.startswith("ns-") or name.startswith("cln-")
-                or name.startswith("snap-")
+                if name.startswith(("ns-", "cln-", "snap-"))
             ]
             self.logger.info(
                 f"[cleanup] Deleting {len(test_lvols)}/{len(all_lvols)} "
@@ -2675,7 +2674,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.fio_node = []
 
         # Record UTC start time for Graylog log export at teardown
-        self.test_start_time_utc = datetime.now(timezone.utc)
+        self.test_start_time_utc = datetime.now(UTC)
 
         # Initialize k8s_utils early so it's available even if _phase_setup fails
         self._init_k8s_utils()
@@ -3020,8 +3019,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             all_lvols = self.sbcli_utils.list_lvols()
             test_lvols = [
                 name for name in all_lvols
-                if name.startswith("ns-") or name.startswith("cln-")
-                or name.startswith("snap-")
+                if name.startswith(("ns-", "cln-", "snap-"))
             ]
             self.logger.info(
                 f"[cleanup] Deleting {len(test_lvols)}/{len(all_lvols)} "

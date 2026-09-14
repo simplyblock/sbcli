@@ -47,7 +47,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Any
 
@@ -322,8 +322,8 @@ def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
         else:
             # Split into 10-minute chunks to stay under max_result_window
             print("    NOTE: >100 k entries – collecting via 10-minute sub-windows")
-            t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-            t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+            t = datetime.fromisoformat(from_iso)
+            t_end = datetime.fromisoformat(to_iso)
             chunk = timedelta(minutes=10)
             while t < t_end:
                 chunk_end = min(t + chunk, t_end)
@@ -457,8 +457,8 @@ def opensearch_diagnose(session, os_url, from_iso, to_iso):
     print("  OpenSearch Diagnostic Report")
     print("=" * 64)
 
-    from_ms = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp() * 1000)
-    to_ms   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+    to_ms   = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
 
     # 1. List all indices
     print("\n[D1] All indices:")
@@ -533,8 +533,8 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
     # Graylog's OpenSearch index maps the timestamp field with format
     # "uuuu-MM-dd HH:mm:ss.SSS" (space separator, no timezone suffix).
     # epoch_millis is accepted regardless of the field's stored date format.
-    from_ms = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp() * 1000)
-    to_ms   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    from_ms = int(datetime.fromisoformat(from_iso).timestamp() * 1000)
+    to_ms   = int(datetime.fromisoformat(to_iso).timestamp() * 1000)
 
     # One-time index discovery + probe (cached)
     if probe_cache is None:
@@ -769,10 +769,10 @@ def collect_k8s_pod_logs(api, namespace: str, pod: str, out_dir: Path,
 
     Files are named <pod>_<container>.log
     """
-    since_dt = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
+    since_dt = datetime.fromisoformat(from_iso)
     # since_seconds is relative to now; we also filter the lower bound in
     # post-processing to stay precise despite the relative approximation.
-    since_seconds = max(1, int((datetime.now(timezone.utc) - since_dt).total_seconds()))
+    since_seconds = max(1, int((datetime.now(UTC) - since_dt).total_seconds()))
     containers = _get_containers(api, namespace, pod)
     for container in containers:
         log_file = out_dir / f"{pod}_{container}.log"
@@ -819,8 +819,8 @@ def collect_k8s_csi_dmesg(api, namespace: str, pod: str, out_dir: Path,
     """Collect dmesg from the csi-node container of a CSI pod,
     filtered to the requested time window using the kernel boot epoch.
     """
-    from_epoch = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp())
-    to_epoch   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp())
+    from_epoch = int(datetime.fromisoformat(from_iso).timestamp())
+    to_epoch   = int(datetime.fromisoformat(to_iso).timestamp())
 
     log_file = out_dir / f"{pod}_csi-node_dmesg.log"
     print(f"      {pod} / csi-node (dmesg)")
@@ -841,7 +841,7 @@ def collect_k8s_csi_dmesg(api, namespace: str, pod: str, out_dir: Path,
 
     uptime_out = _exec(["cat", "/proc/uptime"])
     try:
-        boot_epoch = int(datetime.now(timezone.utc).timestamp()) - int(float(uptime_out.split()[0]))
+        boot_epoch = int(datetime.now(UTC).timestamp()) - int(float(uptime_out.split()[0]))
     except Exception:
         boot_epoch = 0
 
@@ -981,7 +981,7 @@ def main():
         sys.exit(1)
 
     if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=timezone.utc)
+        start_dt = start_dt.replace(tzinfo=UTC)
 
     end_dt = start_dt + timedelta(minutes=args.duration_minutes)
     from_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -1366,7 +1366,7 @@ def main():
         # ── 11. Write a collection manifest ──────────────────────────────────
 
         manifest = {
-            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "collected_at": datetime.now(UTC).isoformat(),
             "window_from": from_iso,
             "window_to": to_iso,
             "duration_minutes": args.duration_minutes,

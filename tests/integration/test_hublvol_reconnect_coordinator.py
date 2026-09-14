@@ -1,4 +1,3 @@
-# coding=utf-8
 """Pin the hublvol reconnect coordinator invariants.
 
 The coordinator is the single entry point for

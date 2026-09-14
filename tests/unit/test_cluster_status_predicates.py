@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 Membership pins for Cluster's status predicate sets.
 

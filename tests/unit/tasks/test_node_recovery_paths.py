@@ -1,4 +1,3 @@
-# coding=utf-8
 """Behavioural tests for the node shutdown/restart recovery paths.
 
 Both regressions were found on 2026-08-27 when FoundationDB filled the mgmt

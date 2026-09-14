@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_failover_failback_combinations.py – comprehensive tests for all
 failover/failback combinations with FTT=1 and FTT=2.
@@ -27,6 +26,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
+from tests._mocks import unique_ip
 
 # Ensure the module is importable for patch() resolution
 import simplyblock_core.storage_node_ops  # noqa: F401
@@ -63,8 +63,8 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.lvstore = lvstore
     n.secondary_node_id = secondary_node_id
     n.tertiary_node_id = tertiary_node_id
-    n.mgmt_ip = mgmt_ip or f"10.0.0.{hash(uuid) % 254 + 1}"
-    n.api_endpoint = f"http://{mgmt_ip or f'10.0.0.{hash(uuid) % 254 + 1}'}:5000"
+    n.mgmt_ip = mgmt_ip or unique_ip(uuid)
+    n.api_endpoint = f"http://{n.mgmt_ip}:5000"
     n.rpc_port = rpc_port
     n.rpc_username = "user"
     n.rpc_password = "pass"
@@ -88,7 +88,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.nvme_devices = []
     n.health_check = True
     nic = IFace()
-    nic.ip4_address = mgmt_ip or f"10.10.10.{hash(uuid) % 254 + 1}"
+    nic.ip4_address = mgmt_ip or unique_ip(f"{uuid}-nic")
     nic.trtype = "TCP"
     n.data_nics = [nic]
     return n
@@ -181,6 +181,7 @@ def _setup_node_methods(nodes, rpc):
     """Attach common mock methods to all nodes."""
     for n in nodes.values():
         n.rpc_client = MagicMock(return_value=rpc)
+        n.client = MagicMock()
         n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
         n.create_hublvol = MagicMock()
         n.create_secondary_hublvol = MagicMock()
@@ -1508,9 +1509,10 @@ class TestRecreateLvstoreReplicationSuspend(unittest.TestCase):
         result, fw_calls, rpc, _api, nodes = self._run(jc_disable_side=[False, True])
         self.assertIs(result, True)
         self.assertEqual(rpc.jc_disable_replication.call_count, 2)
-        # replication wait re-ran on the retry (once per attempt)
+        # One patient wait before the window gate (paid where no port is
+        # fenced), plus one bounded confirmation per attempt.
         self.assertEqual(
-            nodes["node-2"].wait_for_jm_rep_tasks_to_finish.call_count, 2)
+            nodes["node-2"].wait_for_jm_rep_tasks_to_finish.call_count, 3)
         # blocked twice (one per attempt); allowed twice (retry unblock + final 8c)
         self.assertEqual(len(self._leader(fw_calls, "block")), 2)
         self.assertEqual(len(self._leader(fw_calls, "allow")), 2)

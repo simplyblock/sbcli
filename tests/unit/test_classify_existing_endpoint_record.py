@@ -1,4 +1,3 @@
-# coding=utf-8
 """test_classify_existing_endpoint_record.py - unit tests for
 _classify_existing_endpoint_record.
 

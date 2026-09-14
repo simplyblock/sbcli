@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_auto_restart_offline_only.py – guard tests for
 ``simplyblock_core.controllers.tasks_controller.add_node_to_auto_restart``

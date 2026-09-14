@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_jm_rep_wait.py — pins the bounds on wait_for_jm_rep_tasks_to_finish.
 
@@ -49,6 +48,8 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("connection refused")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_OFFLINE), \
+                patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(node.wait_for_jm_rep_tasks_to_finish(10))
         sleep.assert_not_called()
@@ -64,6 +65,8 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("timeout")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_ONLINE), \
+                patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(
                 node.wait_for_jm_rep_tasks_to_finish(10, retry=4, delay=5))
@@ -77,6 +80,8 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.side_effect = RuntimeError("connection refused")
         node = _node(rpc=rpc)
         with self._patch_db(StorageNode.STATUS_ONLINE), \
+                patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
                 patch("simplyblock_core.models.storage_node.time.sleep"):
             result = node.wait_for_jm_rep_tasks_to_finish(10, retry=2, delay=1)
         self.assertFalse(result)  # returned, did not raise
@@ -85,7 +90,9 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = []
         node = _node(rpc=rpc)
-        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+        with patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
+                patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertTrue(node.wait_for_jm_rep_tasks_to_finish(10))
         sleep.assert_not_called()
         rpc.jc_get_jm_status.assert_not_called()
@@ -98,7 +105,9 @@ class TestJmRepWaitBounds(unittest.TestCase):
             {"jm_a": True, "jm_b": True},    # free
         ]
         node = _node(rpc=rpc)
-        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+        with patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
+                patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertTrue(node.wait_for_jm_rep_tasks_to_finish(10, delay=7))
         self.assertEqual(sleep.call_count, 1)
         sleep.assert_called_once_with(7)
@@ -108,7 +117,9 @@ class TestJmRepWaitBounds(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
         rpc.jc_get_jm_status.return_value = {"jm_a": False}
         node = _node(rpc=rpc)
-        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+        with patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
+                patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(
                 node.wait_for_jm_rep_tasks_to_finish(10, retry=3, delay=2))
         self.assertEqual(rpc.jc_get_jm_status.call_count, 3)
@@ -122,11 +133,66 @@ class TestJmRepWaitBounds(unittest.TestCase):
         node = _node(rpc=rpc)
         with patch("simplyblock_core.db_controller.DBController",
                    side_effect=RuntimeError("fdb down")), \
+                patch("simplyblock_core.models.storage_node.time.time",
+                      return_value=1000.0), \
                 patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
             self.assertFalse(
                 node.wait_for_jm_rep_tasks_to_finish(10, retry=3, delay=1))
         self.assertEqual(rpc.bdev_lvol_get_lvstores.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
+
+
+class TestJmRepWaitInsideAPortFence(unittest.TestCase):
+    """The in-fence call site needs a wait that cannot sleep at all.
+
+    Regression: 2026-09-10 14:32:20, LVS_13. recreate_lvstore fenced a peer's
+    client port and then ran this wait with its defaults. One sleep is 20s
+    against a FENCE_DEADLINE_SEC of 7.5s, so the fence ran to 20.087s -- past
+    the 8s (ack_timeout * 4) point where SPDK converts a port block to reject
+    and quiesces the qpairs, losing the client its path.
+
+    storage_node_ops now passes retry=1/delay=0 there. These pin what that
+    means, so a later change to the loop cannot quietly make it sleep again.
+    """
+
+    def test_single_unpaced_poll_never_sleeps(self):
+        rpc = MagicMock()
+        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
+        rpc.jc_get_jm_status.return_value = {"jm_a": False}   # busy
+        node = _node(rpc=rpc)
+        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+            self.assertFalse(
+                node.wait_for_jm_rep_tasks_to_finish(10, retry=1, delay=0))
+        sleep.assert_not_called()
+        self.assertEqual(rpc.jc_get_jm_status.call_count, 1)
+
+    def test_single_unpaced_poll_still_reports_a_clean_leader(self):
+        rpc = MagicMock()
+        rpc.bdev_lvol_get_lvstores.return_value = [{"name": "LVS_10"}]
+        rpc.jc_get_jm_status.return_value = {"jm_a": True}    # free
+        node = _node(rpc=rpc)
+        with patch("simplyblock_core.models.storage_node.time.sleep") as sleep:
+            self.assertTrue(
+                node.wait_for_jm_rep_tasks_to_finish(10, retry=1, delay=0))
+        sleep.assert_not_called()
+        self.assertEqual(rpc.jc_get_jm_status.call_count, 1)
+
+    def test_the_default_budget_would_blow_the_fence_deadline(self):
+        """Why the in-fence call site must override the defaults.
+
+        If this ever stops being true, the override is no longer load-bearing
+        and the comment at that call site should be revisited.
+        """
+        import inspect
+
+        from simplyblock_core import constants
+
+        sig = inspect.signature(StorageNode.wait_for_jm_rep_tasks_to_finish)
+        delay = sig.parameters["delay"].default
+        self.assertGreater(
+            delay, constants.FENCE_DEADLINE_SEC,
+            "a single default-paced sleep must still be shown to exceed the "
+            "whole fence budget")
 
 
 if __name__ == "__main__":

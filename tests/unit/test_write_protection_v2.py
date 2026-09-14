@@ -1,4 +1,3 @@
-# coding=utf-8
 """v2 distrib write protection: which generation a cluster creates with, and
 how an upgraded cluster is moved onto the new one.
 

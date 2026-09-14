@@ -1,4 +1,3 @@
-# coding=utf-8
 
 from simplyblock_core.models.base_model import BaseNodeObject
 

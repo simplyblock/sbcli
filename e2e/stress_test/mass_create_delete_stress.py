@@ -47,7 +47,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import ClassVar
 
@@ -1066,7 +1066,7 @@ class _MassCreateDeleteMixin:
             )
 
             # Stop container / delete pod
-            stop_ts = datetime.now(timezone.utc)
+            stop_ts = datetime.now(UTC)
             t_stop = time.time()
             if getattr(self, "k8s_test", False):
                 self.k8s_utils.restart_spdk_pod(node_ip)
@@ -1096,7 +1096,7 @@ class _MassCreateDeleteMixin:
             self.sbcli_utils.wait_for_storage_node_status(
                 node_uuid, "online", timeout=900,
             )
-            online_ts = datetime.now(timezone.utc)
+            online_ts = datetime.now(UTC)
             stop_to_online = round(time.time() - t_stop, 1)
 
             self.logger.info(
@@ -1443,7 +1443,7 @@ class _MassCreateDeleteMixin:
         status = "passed_with_warnings" if self._terminal_warnings else "passed"
         report = {
             "test_class": self.__class__.__name__,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "status": status,
             "config": {
                 "num_subsystems": self.NUM_SUBSYSTEMS,
@@ -1521,7 +1521,7 @@ class _MassCreateDeleteMixin:
         status = "passed_with_warnings" if self._terminal_warnings else "passed"
         report = {
             "test_class": self.__class__.__name__,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "status": status,
             "config": {
                 "num_subsystems": self.NUM_SUBSYSTEMS,

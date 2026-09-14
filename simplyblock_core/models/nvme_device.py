@@ -1,5 +1,4 @@
-# coding=utf-8
-from typing import ClassVar, List, Optional
+from typing import ClassVar
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
@@ -31,13 +30,13 @@ class NVMeDevice(BaseModel):
 
     alceml_bdev: str = ""
     alceml_name: str = ""
-    bdev_stack: List = default_factory(list)
+    bdev_stack: list = default_factory(list)
     capacity: int = -1
     cluster_device_order: int = -1
     cluster_id: str = ""
     device_name: str = ""
     # None => not applicable (owning node not in ONLINE/DOWN)
-    health_check: Optional[bool] = True
+    health_check: bool | None = True
     io_error: bool = False
     is_partition: bool = False
     model_id: str = ""
@@ -65,8 +64,31 @@ class NVMeDevice(BaseModel):
     # previous one is treated as part of the same error storm and does not
     # advance the counter. Reset to 0.0 on explicit device restart.
     last_flap_tsc: float = 0.0
+    # Bounded self-repair of an `unavailable` device, see
+    # device_controller.device_repair(). Counts only attempts that actually had
+    # something local to rebuild -- a device whose local stack is fully intact
+    # is unavailable for a REMOTE reason (the consensus is a remote-reachability
+    # verdict) and burning attempts on it would strand a healthy device once the
+    # count exhausted. Both fields are cleared whenever the device goes ONLINE,
+    # which covers `sn restart-device` and a node restart alike.
+    repair_attempts: int = 0
+    #: Wall-clock epoch (seconds) of the last counted repair attempt, for the
+    #: backoff schedule in constants.DEVICE_REPAIR_BACKOFF_SEC.
+    last_repair_tsc: float = 0.0
+    #: True when the device reached STATUS_REMOVED by an explicit operator
+    #: request (CLI `sn remove-device`, API v1/v2 remove) rather than by an
+    #: unsolicited SPDK removal. Self-repair must never resurrect a device the
+    #: operator removed on purpose, so this is the one removal that is not
+    #: repairable. Cleared when the device next reaches ONLINE, which is what
+    #: `sn add-device` / a node restart do after the operator puts it back.
+    admin_removed: bool = False
     serial_number: str = ""
     size: int = -1
+    # NVMe per-block metadata size in bytes, as reported by the bound SPDK bdev.
+    # >=8 means alceml can run in cv_md_method (no read/write amplification).
+    # 0 means alceml must use cv_fallback_method (extra md page per 2 MiB extent).
+    md_size: int = 0
+    md_supported: bool = False
     testing_bdev: str = ""
     hang_bdev: str = ""
     connecting_from_node: str = ""
@@ -74,6 +96,19 @@ class NVMeDevice(BaseModel):
     # Passthrough bdev UUID for cross-node nvme bdev identification,
     # meaning that remote bdev to this bdev would share the same uuid.
     pt_bdev_uuid: str = ""
+    # Base-bdev type discriminator: "nvme" (SPDK nvme bdev over a PCIe
+    # controller) or "aio" (SPDK AIO bdev over a Linux block device, lblk
+    # cluster mode). For "aio" devices, pcie_address and nvme_controller stay
+    # empty and nvme_bdev holds the AIO bdev name; identity is serial_number
+    # (lsblk SERIAL/WWN or a synthetic stable id), with device_path /
+    # by_id_path re-resolved from the live host on every restart.
+    bdev_type: str = "nvme"
+    # Current kernel device path (e.g. /dev/sdb) — informational; re-learned
+    # each restart, never used as identity when a serial is available.
+    device_path: str = ""
+    # Stable /dev/disk/by-id/... symlink when the device has one; preferred
+    # as the AIO bdev filename so udev renames cannot bite mid-flight.
+    by_id_path: str = ""
 
     def __change_dev_connection_to(self, connecting_from_node):
         # Targeted single-record write. The previous implementation scanned
@@ -121,13 +156,13 @@ class JMDevice(NVMeDevice):
 
     device_data_dict: dict = default_factory(dict)
     jm_bdev: str = ""
-    jm_nvme_bdev_list: List[str] = default_factory(list)
+    jm_nvme_bdev_list: list[str] = default_factory(list)
     raid_bdev: str = ""
     # RAID 0+1 layout: the two leg bdev names fed to the top raid1 (each is a
     # raid0 over a drive group, or a bare device for a single-drive leg), and
     # the per-leg member partitions. Empty for single-device (no-raid) JMs.
-    jm_leg_bdevs: List[str] = default_factory(list)
-    jm_leg_members: List = default_factory(list)
+    jm_leg_bdevs: list[str] = default_factory(list)
+    jm_leg_members: list = default_factory(list)
 
 
 class RemoteDevice(BaseModel):

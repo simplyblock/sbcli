@@ -1,4 +1,3 @@
-# coding=utf-8
 """ANA failover fires once per offline episode, not once per monitor cycle.
 
 Incident 2026-08-09 (iteration 28): the monitor's OFFLINE branch re-ran

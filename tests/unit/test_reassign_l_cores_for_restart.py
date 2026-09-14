@@ -1,4 +1,3 @@
-# coding=utf-8
 """reassign_l_cores_for_restart(): restart-time index->physical placement.
 
 A restart must never change a role's INDEX SET (its core count, and any
@@ -63,7 +62,7 @@ class TestSiblingPreferenceAndPriority:
         still both hyperthreads of each -- distrib's own two indices must
         still land on a real sibling pair, even though the specific cores
         changed entirely."""
-        new_cores = sorted(list(range(0, 5)) + list(range(20, 25)))  # 5 whole cores
+        new_cores = sorted(list(range(5)) + list(range(20, 25)))  # 5 whole cores
         placement = _reassign(new_cores, distrib=[0, 1], poller=[2, 3], alceml=[4])
         a, b = placement[0], placement[1]
         assert {a, b} in ({0, 20}, {1, 21}, {2, 22}, {3, 23}, {4, 24})

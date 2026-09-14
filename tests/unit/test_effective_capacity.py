@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for raw vs. effective capacity accounting.
 
 The control plane used to mix the two: ``size_prov`` (the sum of provisioned

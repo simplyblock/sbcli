@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 
 def generate_html_report(findings, output_dir, cluster_id="", extra_meta=None):
@@ -46,7 +46,7 @@ def generate_html_report(findings, output_dir, cluster_id="", extra_meta=None):
         cat = f.get("category", "unknown")
         categories.setdefault(cat, []).append(f)
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     html = _build_html(
         findings=findings,

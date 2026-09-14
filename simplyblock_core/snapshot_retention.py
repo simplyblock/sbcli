@@ -24,7 +24,8 @@ is what makes it testable without a cluster: see test_snapshot_retention.py.
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, NamedTuple, Sequence, Set
+from typing import NamedTuple
+from collections.abc import Iterable, Sequence
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _TOKEN = re.compile(r"^(\d+)([smhd])$")
@@ -52,11 +53,11 @@ def _duration(token: str) -> int:
     return value * _UNITS[unit]
 
 
-def parse_schedule(spec: str) -> List[RetentionTier]:
+def parse_schedule(spec: str) -> list[RetentionTier]:
     """Parse ``"15m:2h,1h:11h,1d:7d"`` into tiers. Empty string -> no tiers."""
     if not spec or not spec.strip():
         return []
-    tiers: List[RetentionTier] = []
+    tiers: list[RetentionTier] = []
     for chunk in spec.split(","):
         chunk = chunk.strip()
         if not chunk:
@@ -83,7 +84,7 @@ def horizon_sec(tiers: Sequence[RetentionTier]) -> int:
 
 
 def select_retained(created_ats: Iterable[float], tiers: Sequence[RetentionTier],
-                    now: float, always_keep_newest: int = 0) -> Set[float]:
+                    now: float, always_keep_newest: int = 0) -> set[float]:
     """Return the subset of ``created_ats`` the schedule retains.
 
     One snapshot per bucket per tier: the NEWEST in each bucket, so the
@@ -99,7 +100,7 @@ def select_retained(created_ats: Iterable[float], tiers: Sequence[RetentionTier]
     if not times:
         return set()
 
-    keep: Set[float] = set(times[:max(0, always_keep_newest)])
+    keep: set[float] = set(times[:max(0, always_keep_newest)])
     if not tiers:
         return keep
 

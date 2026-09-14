@@ -1,0 +1,37 @@
+# Grafana data sources for the cluster event log alert rules, rendered by
+# `sbctl cluster event-alerts`. One per cluster: /api/v2 authenticates with the
+# cluster secret as a bearer token, and Grafana binds credentials to a data
+# source rather than to a query. The secret goes through secureJsonData, which
+# Grafana stores encrypted and never returns to the browser.
+apiVersion: 1
+{% if EVENT_ALERT_CLUSTERS %}
+datasources:
+{% for cluster in EVENT_ALERT_CLUSTERS %}
+  - name: Simplyblock Events {{ cluster.id }}
+    type: yesoreyeram-infinity-datasource
+    uid: {{ cluster.ds_uid }}
+    url: {{ CONTROL_PLANE_ADDR }}
+    access: proxy
+    editable: false
+    jsonData:
+      httpHeaderName1: Authorization
+      # Infinity refuses every URL query until the host is allowlisted, and
+      # reports the refusal as a per-rule evaluation error rather than as a
+      # configuration warning. Matched by prefix, so the base address covers
+      # every /api/v2 path the rules query.
+      allowedHosts:
+        - {{ CONTROL_PLANE_ADDR }}
+      # Otherwise the health check probes the bare base URL, which the control
+      # plane answers with a string Infinity cannot read as a table.
+      customHealthCheckEnabled: false
+      tlsSkipVerify: true
+      timeoutInSeconds: 30
+    secureJsonData:
+      httpHeaderValue1: {{ ('Bearer ' ~ cluster.secret) | tojson }}
+{% endfor %}
+{% else %}
+# Off, so nothing to provision. Written rather than deleted: the file stays
+# bind-mounted, and a bind mount whose source is gone comes back as a
+# directory, which Grafana refuses to start on.
+datasources: []
+{% endif %}

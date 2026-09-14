@@ -1,7 +1,7 @@
-from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from simplyblock_core.controllers import lvol_controller, replication_policy_controller
@@ -17,7 +17,7 @@ api = APIRouter(tags=['replication'])
 collection_api = APIRouter(tags=['replication'])
 
 
-def apply_policy(volume: LVol, policy_id: Optional[UUID]) -> None:
+def apply_policy(volume: LVol, policy_id: UUID | None) -> None:
     """Put *volume* under replication policy *policy_id*, or take it out (None).
 
     Changing policy is detach-then-attach, so the new target receives a FULL
@@ -56,15 +56,15 @@ def get_relationship(cluster: Cluster, pool: StoragePool, volume: Volume) -> Rep
 
 
 class ReplicationStartParams(BaseModel):
-    replication_cluster_id: Optional[UUID] = None  # destination; None = cluster default
-    mode: Optional[ReplicationMode] = None
-    interval_min: Optional[util.Unsigned] = None
+    replication_cluster_id: UUID | None = None  # destination; None = cluster default
+    mode: ReplicationMode | None = None
+    interval_min: util.Unsigned | None = None
 
 
 @api.post('/start', name='clusters:storage-pools:volumes:replication:start',
           status_code=204, responses={204: {"content": None}})
 def start(cluster: Cluster, pool: StoragePool, volume: Volume,
-          body: Optional[ReplicationStartParams] = None) -> Response:
+          body: ReplicationStartParams | None = None) -> Response:
     """Start replicating a volume.
 
     The destination is the request's replication_cluster_id, else the cluster's
@@ -129,14 +129,32 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
     if not result:
         raise HTTPException(500, 'Failed to fail the volume over to the target cluster')
 
+    # Consistency groups: an older generation may not match current
+    # membership; the operator must SEE that, so warnings turn the empty 204
+    # into a 200 with a body (requirement: API response, not only a log).
+    if isinstance(result, dict) and result.get("warnings"):
+        return JSONResponse(status_code=200,
+                            content={"warnings": result["warnings"]})
+
     return Response(status_code=204)
+
+
+class CommitParams(BaseModel):
+    delete_source: bool = False
 
 
 @api.post('/commit', name='clusters:storage-pools:volumes:replication:commit',
           status_code=202, responses={202: {"content": None}})
-def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
-    """Queue the planned cutover. Progress is the returned task."""
-    result = lvol_controller.replication_commit(volume.get_id())
+def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
+           body: CommitParams | None = None) -> Response:
+    """Queue the planned cutover. Progress is the returned task.
+
+    delete_source=True instructs the task runner to delete the source volume
+    after the cutover succeeds.
+    """
+    params = body or CommitParams()
+    result = lvol_controller.replication_commit(volume.get_id(),
+                                                delete_source=params.delete_source)
     if isinstance(result, tuple):  # (False, error)
         raise HTTPException(500, str(result[1]))
     if not result:
@@ -149,7 +167,7 @@ def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume
 
 
 class FailbackParams(BaseModel):
-    source_cluster_id: Optional[UUID] = None
+    source_cluster_id: UUID | None = None
 
 
 @api.post('/failback', name='clusters:storage-pools:volumes:replication:failback',
@@ -169,8 +187,23 @@ def failback(cluster: Cluster, pool: StoragePool, volume: Volume, body: Failback
     return Response(status_code=204)
 
 
+@api.post('/cutover-proceed', name='clusters:storage-pools:volumes:replication:cutover-proceed',
+          status_code=204, responses={204: {"content": None}})
+def cutover_proceed(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    """Signal that target NVMe paths are connected and cutover may proceed.
+
+    Called by the operator after its preconnect Job succeeds. The task runner
+    is suspended waiting for this signal; once set, it advances to the ANA flip.
+    """
+    try:
+        replication_policy_controller.set_cutover_proceed(volume.get_id())
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+    return Response(status_code=204)
+
+
 @api.get('/tasks', name='clusters:storage-pools:volumes:replication:tasks')
-def list_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+def list_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> list[TaskDTO]:
     return [TaskDTO.from_model(task) for task in lvol_controller.list_replication_tasks(volume.get_id())]
 
 

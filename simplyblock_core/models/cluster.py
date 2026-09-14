@@ -1,6 +1,5 @@
-# coding=utf-8
 import os.path
-from typing import ClassVar, List, Optional
+from typing import ClassVar
 
 from pydantic import SecretStr
 
@@ -16,6 +15,8 @@ class HashicorpVaultSettings(BaseModel):
 
 
 class Cluster(BaseModel):
+
+    _WATCHED = True
 
     STATUS_ACTIVE = "active"
     STATUS_READONLY = 'read_only'
@@ -89,7 +90,7 @@ class Cluster(BaseModel):
     #: Empty means the cluster has never been activated. Once set, activation
     #: refuses to run with nodes present that are not in this list: growth goes
     #: through the expansion flow, never through re-activation.
-    activated_node_ids: List[str] = default_factory(list)
+    activated_node_ids: list[str] = default_factory(list)
     #: Set by "cluster op-stop": the cluster refuses creation, deletion and
     #: modification of lvols, snapshots, clones and pools while this is true.
     #: Read paths and the cluster's own maintenance are unaffected.
@@ -143,7 +144,7 @@ class Cluster(BaseModel):
     inflight_io_threshold: int = 4
     iscsi: str = ""
     max_queue_size: int = 128
-    model_ids: List[str] = default_factory(list)
+    model_ids: list[str] = default_factory(list)
     cluster_name: str = None # type: ignore[assignment]
     nqn: str = ""
     page_size_in_blocks: int = 2097152
@@ -217,7 +218,25 @@ class Cluster(BaseModel):
     # pre-existing distribs are still v1 until `sbctl cluster
     # switch-write-protection` runs the RPC on every online node.
     write_protection_v2: bool = False
+    # One-shot request to run switch_write_protection once the cluster has
+    # settled after an upgrade. Armed by cluster_ops.upgrade_complete (the
+    # documented final upgrade step); storage_node_monitor consumes it, runs
+    # the switch once, and clears it. write_protection_v2 (above) is the
+    # durable "done" marker. Mirrors shared_placement_migration_pending.
+    write_protection_migration_pending: bool = False
     full_page_unmap: bool = True
+    #: JM RAID geometry this cluster's journals were built with, and must be
+    #: rebuilt with forever (jm_raid.LAYOUT_LEGACY / LAYOUT_RAID01). The geometry
+    #: is not stored on disk (raid superblock=False), so rebuilding a journal
+    #: under a different geometry reads the same bytes back scrambled and the
+    #: alceml/distrib superblock fails to parse (prod incident 2026-09-08).
+    #:
+    #: This cluster-level value is authoritative and overrides the per-JMDevice
+    #: leg record, which a failed rebuild attempt can pollute. Empty means "not
+    #: pinned yet": a fresh cluster sets LAYOUT_RAID01 at create; an upgrade
+    #: pins it from the pre-restart JMDevice records; and _create_jm_stack_on_raid
+    #: falls back to the per-device record when it is still empty.
+    jm_raid_layout: str = ""
     is_single_node: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
     # operator-supplied failure_domain tag (rack/cabinet/DC) and placement
@@ -227,6 +246,21 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
+    # controllers auto-detected and attached through the SPDK nvme bdev.
+    # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one
+    # per device); everything from alceml upward is identical. Deploy-time
+    # only — set at cluster create/add, never toggled at runtime. Inter-node
+    # fabric (nvme-tcp/rdma) is unaffected by this mode.
+    device_mode: str = "nvme"
+    # Inline CRC checksum validation for silent-data-error protection.
+    # Frozen at cluster create time; no upgrade path for existing clusters.
+    inline_checksum: bool = False
+    # Device guarantees 4K write atomicity despite a <4K logical block size
+    # (e.g. AWS NVMe, which is 512B but atomic at 4K). When set, alceml creation
+    # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
+    # fallback-mode inline checksum. Frozen at cluster create time.
+    atomic_4k: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10
@@ -239,7 +273,7 @@ class Cluster(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     container_image_prefix: str = ""
-    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
+    hashicorp_vault_settings: HashicorpVaultSettings | None = None
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
     # is in flight. Populated/advanced/cleared via the helpers in
@@ -258,6 +292,7 @@ class Cluster(BaseModel):
     installed_release: str = ""
     backup_local_path: str = constants.KVD_DB_BACKUP_PATH
     backup_frequency_seconds: int = 3*60*60
+    backup_retention_days: int = 7
     backup_s3_bucket: str = ""
     backup_s3_region: str = ""
     backup_s3_cred: str = ""

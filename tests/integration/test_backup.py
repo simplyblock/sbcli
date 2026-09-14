@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_backup.py – unit tests for the S3 backup feature.
 

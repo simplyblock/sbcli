@@ -1,4 +1,3 @@
-# coding=utf-8
 """Regression tests for the lvol delete/create exclusivity and retry fixes.
 
 Three defects, all found by reading the delete/create paths 2026-08-28:

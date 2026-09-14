@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_remote_dev_reconcile.py — unit tests for
 ``storage_node_ops.reconnect_dropped_remote_devs``.

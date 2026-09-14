@@ -1,4 +1,3 @@
-# coding=utf-8
 """Leaderless-LVS recovery: reload-then-grant, never a blind grant.
 
 Design (2026-08-04): when an object operation needs a leader and none

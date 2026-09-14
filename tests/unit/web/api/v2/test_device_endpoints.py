@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/.../storage-nodes/{id}/devices endpoints (device_controller mocked)."""
 
 import pytest
@@ -67,7 +66,11 @@ class TestDeviceActions:
         response = client.post(f'{BASE}/{DEVICE_ID}/remove', params={'force': True})
 
         assert response.status_code == 204
-        device_controller.device_remove.assert_called_once_with(DEVICE_ID, True)
+        # The cause is not decoration: it is what marks the removal as
+        # operator-initiated so device self-repair never undoes it.
+        device_controller.device_remove.assert_called_once_with(
+            DEVICE_ID, True,
+            cause=device_controller.CAUSE_ADMIN_REMOVE)
 
     def test_restart(self, client, device, device_controller):
         device_controller.restart_device.return_value = True
@@ -135,3 +138,29 @@ class TestDeviceHealthInfo:
 
         with pytest.raises(ValueError):
             client.get(f'{BASE}/{DEVICE_ID}/health-info')
+
+
+class TestWatchDevices:
+
+    def test_list_dispatches_watch_devices(self, client, device, device_controller, watch_stream):
+        device_controller.watch_devices.return_value = watch_stream([device])
+
+        response = client.get(f'{BASE}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert DEVICE_ID in response.text
+        device_controller.watch_devices.assert_called_once_with(CLUSTER_ID, STORAGE_NODE_ID)
+
+    def test_detail_dispatches_watch_device(self, client, device, device_controller, watch_stream):
+        device_controller.watch_device.return_value = watch_stream([device])
+
+        response = client.get(f'{BASE}/{DEVICE_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert DEVICE_ID in response.text
+        device_controller.watch_device.assert_called_once_with(
+            CLUSTER_ID, STORAGE_NODE_ID, DEVICE_ID)
