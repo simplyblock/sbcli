@@ -4141,13 +4141,6 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         random.randint(6001, 6500),  # tertiary
     ]
 
-    # Migration: preserve the source UUID as the NVMe namespace UUID so the kernel
-    # can merge source and target paths into the same multipath namespace during
-    # the preconnect phase (ANA flip requires matching NSUUID on both paths).
-    # Failover: the source is gone — use the clone's own UUID so it appears as
-    # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
-    _src_ns_uuid = lvol.uuid if for_migration else new_lvol.uuid
-
     # For migration/failover, preserve the source nsid so the kernel can
     # match target paths to source paths under the same NQN. new_lvol is a
     # deepcopy of the source lvol, so new_lvol.ns_id is already the source
