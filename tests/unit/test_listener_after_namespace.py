@@ -102,6 +102,25 @@ class ListenerOrderingTest(unittest.TestCase):
             "reaching the subsystem in that window gets Invalid Namespace or "
             "Format with DNR, which is not retried on another path")
 
+    def test_a_listener_failure_detaches_the_namespace_it_attached(self):
+        """Rollback must unwind the namespace, not just the bdev stack.
+
+        Regression: 2026-09-13-listener-published-before-namespace (review).
+        Moving the listener behind the namespace means a listener failure now
+        happens with the namespace already attached. _fail_after_bdev only
+        removes the bdev stack, so without this the namespace is left pointing
+        at a bdev the rollback deletes -- reads on it answer INTERNAL DEVICE
+        ERROR (the 2026-07-14 resurrected-namespace incident).
+        """
+        self.rpc.nvmf_subsystem_add_listener.return_value = (
+            None, {"code": -1, "message": "listener add failed"})
+
+        ok, _ = lvol_controller.add_lvol_on_node(self.lvol, self.snode)
+
+        self.assertFalse(ok)
+        self.rpc.nvmf_subsystem_remove_ns.assert_called_once_with(
+            self.lvol.nqn, 3)
+
     def test_a_failed_namespace_add_publishes_no_listener(self):
         self.rpc.nvmf_subsystem_add_ns2.return_value = (
             None, {"code": -1, "message": "no slot"})
@@ -113,9 +132,6 @@ class ListenerOrderingTest(unittest.TestCase):
             "nvmf_subsystem_add_listener", self._call_order(),
             "a subsystem whose namespace add failed must not be made reachable")
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class BatchListenerBarrierTest(unittest.TestCase):
@@ -168,3 +184,55 @@ class BatchListenerBarrierTest(unittest.TestCase):
             "registered: the subsystem is reachable while its remaining members "
             "are still arriving, and a read to one of those fails EREMOTEIO "
             "(order=%r)" % (namespaces_before, len(lvols), order))
+
+
+class BatchSkipsFailedRegistrationsTest(unittest.TestCase):
+    """A registration that failed must not get a listener.
+
+    Regression: 2026-09-13-listener-published-before-namespace (review).
+    ``failures`` includes lvols whose add_ns or namespace post-condition
+    failed, so their namespace is exactly the one that may be absent.
+    Publishing for them recreates the reachable-but-empty subsystem the
+    barrier exists to prevent.
+    """
+
+    def test_a_failed_registration_gets_no_listener(self):
+        from simplyblock_core import storage_node_ops as ops
+
+        published = []
+
+        def fake_add(lvol, snode, lvol_ana_state="optimized", defer_listener=False):
+            if lvol.get_id() == "lvol-bad":
+                return False, "add_ns failed"
+            return True, None
+
+        def fake_publish(lvol, snode, rpc_client, lvol_ana_state):
+            published.append(lvol.get_id())
+            return True, None
+
+        lvols = []
+        for name in ("lvol-good", "lvol-bad"):
+            lv = MagicMock(name=name)
+            lv.get_id.return_value = name
+            lv.nqn = "nqn.2023-02.io.simplyblock:cl:lvol:shared"
+            lvols.append(lv)
+
+        snode = MagicMock(name="snode")
+        snode.get_id.return_value = "node-1"
+        snode.rpc_client.return_value.subsystem_get.return_value = {"nqn": "x"}
+
+        with patch.object(ops, "add_lvol_thread", side_effect=fake_add), \
+             patch.object(ops, "_publish_lvol_listener", side_effect=fake_publish):
+            ops._register_lvols_on_node(lvols, snode, "optimized")
+
+        self.assertNotIn(
+            "lvol-bad", published,
+            "a listener was published for an lvol whose registration failed: "
+            "its namespace may never have attached, which is the empty-subsystem "
+            "state this barrier exists to prevent")
+        self.assertIn("lvol-good", published,
+                      "the members that did register must still be published")
+
+
+if __name__ == "__main__":
+    unittest.main()

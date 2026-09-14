@@ -280,7 +280,15 @@ class TestPostBdevStackRollback(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_listener_failure_rolls_back_bdev_stack(self, mock_db_cls):
         """A listener-add failure (non -32602) after _create_bdev_stack
-        must also roll back the orphan blob."""
+        must also roll back the orphan blob -- and now the namespace too.
+
+        The listener used to be published BEFORE the namespace was attached,
+        which is what exposed a subsystem that answered while its namespace did
+        not exist ("Invalid Namespace or Format" with DNR, run 2026-09-13). The
+        order is reversed, so a listener failure now finds the namespace already
+        attached and has to unwind it as well: leaving it would point a live
+        namespace at a bdev this rollback deletes.
+        """
         from simplyblock_core.controllers import lvol_controller
 
         lvol = _lvol_for_add("u4")  # standalone path
@@ -294,8 +302,9 @@ class TestPostBdevStackRollback(unittest.TestCase):
 
         self.assertFalse(bdev)
         self.assertIn("Failed to create listener", err)
-        # add_ns was never reached.
-        rpc.nvmf_subsystem_add_ns2.assert_not_called()
+        # The namespace is attached first now, so it must be detached again.
+        rpc.nvmf_subsystem_add_ns2.assert_called_once()
+        rpc.nvmf_subsystem_remove_ns.assert_called_once()
         # Rollback fired.
         rpc.delete_lvol.assert_called()
         self.assertEqual(rpc.delete_lvol.call_args[0][0], lvol.top_bdev)
