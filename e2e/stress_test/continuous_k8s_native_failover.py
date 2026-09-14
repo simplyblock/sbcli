@@ -5309,8 +5309,16 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         iteration = 1
         test_failed = False
         failure_reasons = []
+        # --resume re-enters mid-run: prefixes restored, objects adopted,
+        # clients remounted without mkfs, FIO re-kicked.
+        resumed_at = self.resume_point()
+        if resumed_at:
+            iteration = resumed_at
+            self.adopt_existing_objects()
+            self.resume_reattach_clients()
         try:
             while True:
+                self.checkpoint(iteration)
                 self.logger.info(f"=== Iteration {iteration} ===")
 
                 validation_thread = threading.Thread(
@@ -5633,6 +5641,11 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
         iteration = 1
         test_failed = False
         failure_reasons = []
+        resumed_at = self.resume_point()
+        if resumed_at:
+            iteration = resumed_at
+            self.adopt_existing_objects()
+            self.resume_reattach_clients()
 
         # One monitor for the whole run. The parent starts a fresh daemon
         # thread every iteration and never stops any of them.
@@ -5642,6 +5655,7 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
 
         try:
             while True:
+                self.checkpoint(iteration)
                 self.logger.info(f"=== Iteration {iteration} ===")
 
                 # ── Outage phase ──

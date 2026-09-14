@@ -51,7 +51,6 @@ from stress_test.continuous_failover_ha_multi_outage_all_nodes import (
 )
 from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest
 from utils.common_utils import sleep_n_sec
-from utils.run_state import RunState, adopt_by_prefix, reconcile
 
 
 # ── the axes ──────────────────────────────────────────────────────────────
@@ -134,107 +133,39 @@ class _DualOutageMixin:
         self._multipath_flap_stop = threading.Event()
         self._multipath_flapped_nics = []
         self._dual_outage_events = []
-        self._run_state = None
         self._resumed_from = None
         self._checkpoint_iter = 0
 
-    # ── resume ────────────────────────────────────────────────────────────
-    def _state(self):
-        """The RunState for this (test, cluster). Built lazily: nfs_log_base
-        and cluster_id are set by the base setup(), not at mixin init."""
-        if self._run_state is None:
-            self._run_state = RunState(
-                nfs_log_base=self.nfs_log_base,
-                test_name=type(self).__name__,
-                cluster_id=self.cluster_id,
-                logger=self.logger,
-            )
-        return self._run_state
+    # ── resume (machinery lives on TestClusterBase) ───────────────────────
+    def checkpoint(self, iteration=None, **extra):
+        """Stamp the case id alongside the base fields, so a checkpoint
+        can be recognised as belonging to a particular matrix case.
+        """
+        extra.setdefault("case_id", self._case["id"])
+        extra.setdefault("last_outage", {
+            "nodes": list(self._pair),
+            "types": [self._case["type_a"], self._case["type_b"]],
+            "separation": self._case["separation"],
+        })
+        return super().checkpoint(iteration=iteration, **extra)
 
     def resume_point(self):
-        """The iteration to re-enter at, or None to start fresh.
+        """Resume, warning when the checkpoint belongs to another case.
 
-        Returns None unless --resume was passed AND a checkpoint exists for
-        this exact cluster. Never guesses: a checkpoint from another cluster is
-        refused by RunState.load() rather than adopted, because adopting
-        objects by name across clusters binds the run to whatever happened to
-        share a prefix.
+        Not an error: re-running a different case on a cluster that still
+        holds the previous case's objects is a legitimate thing to do, and
+        the objects are adopted the same way either way. But it has to be
+        said out loud, or the run looks like it resumed something it did
+        not.
         """
-        if not getattr(self, "resume_requested", False):
-            return None
-        doc = self._state().load()
-        if not doc:
-            return None
-        self._resumed_from = doc
-        # The prefixes are what make adoption possible at all: they are random
-        # per process, so without them a resumed run cannot tell its own
-        # objects from anything else on the cluster.
-        for attr in ("lvol_base", "clone_base", "snap_base"):
-            if doc.get(attr):
-                setattr(self, attr, doc[attr])
-        if doc.get("pool_name"):
-            self.pool_name = doc["pool_name"]
-        if doc.get("case_id") and doc["case_id"] != self._case["id"]:
+        point = super().resume_point()
+        doc = getattr(self, "_resumed_from", None)
+        if doc and doc.get("case_id") and doc["case_id"] != self._case["id"]:
             self.logger.warning(
                 "[dual-outage] checkpoint is for case %s but this run is %s -- "
-                "continuing with the requested case", doc["case_id"],
-                self._case["id"])
-        self.logger.info(
-            "[dual-outage] resuming %s at iteration %s with prefixes "
-            "lvol=%s clone=%s snap=%s", self._case["id"], doc.get("iter"),
-            doc.get("lvol_base"), doc.get("clone_base"), doc.get("snap_base"))
-        return doc.get("iter")
-
-    def adopt_existing_objects(self):
-        """Reconcile the checkpoint's inventory against the live cluster.
-
-        Reports what is missing rather than failing: a node that died mid-delete
-        can legitimately leave the cluster short, and refusing to resume there
-        throws away the whole point.
-        """
-        doc = self._resumed_from
-        if not doc:
-            return {}
-        try:
-            live = [lv["lvol_name"] for lv in
-                    (self.sbcli_utils.list_lvols() or [])]
-        except Exception as exc:                      # noqa: BLE001
-            self.logger.warning("[dual-outage] could not list lvols for "
-                                "adoption: %s", exc)
-            return {}
-        adopted = adopt_by_prefix(live, doc.get("lvol_base"))
-        reconcile(doc.get("lvols"), adopted, self.logger, kind="lvol")
-        self.logger.info("[dual-outage] adopted %d lvol(s) by prefix %s",
-                         len(adopted), doc.get("lvol_base"))
-        return {"lvols": adopted}
-
-    def checkpoint(self, iteration=None):
-        """Persist enough to adopt later. Called once per outage set."""
-        self._checkpoint_iter = iteration or (self._checkpoint_iter + 1)
-        self._state().save(
-            run_dir=getattr(self, "docker_logs_path", None),
-            iter=self._checkpoint_iter,
-            iteration=self._checkpoint_iter,
-            case_id=self._case["id"],
-            lvol_base=getattr(self, "lvol_base", None),
-            clone_base=getattr(self, "clone_base", None),
-            snap_base=getattr(self, "snap_base", None),
-            pool_name=getattr(self, "pool_name", None),
-            lvols=sorted(getattr(self, "lvol_devices", {}) or {}),
-            clones=sorted(getattr(self, "clone_devices", {}) or {}),
-            snapshots=list(getattr(self, "snapshot_names", []) or []),
-            last_outage={
-                "nodes": list(self._pair),
-                "types": [self._case["type_a"], self._case["type_b"]],
-                "separation": self._case["separation"],
-            },
-        )
-
-    def finish_clean(self):
-        """Drop the checkpoint so the next run starts fresh rather than
-        adopting a completed run."""
-        if self._run_state is not None:
-            self._run_state.clear()
+                "adopting its objects and continuing with the requested case",
+                doc["case_id"], self._case["id"])
+        return point
 
     # ── case resolution ───────────────────────────────────────────────────
     def _resolve_case(self):

@@ -1764,7 +1764,15 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
     def _outage_loop(self):
         """Outage, recover, and checkpoint until something raises."""
         iteration = 1
+        # --resume re-enters here instead of at 1, with the previous run's
+        # random name prefixes restored so its objects are recognisable.
+        resumed_at = self.resume_point()
+        if resumed_at:
+            iteration = resumed_at
+            self.adopt_existing_objects()
+            self.resume_reattach_clients()
         while True:
+            self.checkpoint(iteration)
             if self.dump_validation_errors:
                 raise RuntimeError(
                     f"[V2] Placement dump validation failed: {self.dump_validation_errors}"

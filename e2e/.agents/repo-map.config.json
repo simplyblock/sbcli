@@ -1,0 +1,8 @@
+{
+  "repos": {
+    "spdk":     { "path": "E:/spdk",                  "languages": ["c", "cpp"] },
+    "ultra":    { "path": "E:/ultra",                 "languages": ["c", "cpp", "python"] },
+    "operator": { "path": "E:/simplyblock-operator",  "languages": ["go", "python"] },
+    "sbcli":    { "path": "E:/sbcli",                 "languages": ["python"], "exclude_dirs": ["e2e"] }
+  }
+}

@@ -1406,6 +1406,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.sn_primary_secondary_map[result["uuid"]] = result["secondary_node_id"]
         self.logger.info(f"Secondary node map: {self.sn_primary_secondary_map}")
 
+        # --resume re-enters mid-run rather than rebuilding from scratch.
+        resumed_at = self.resume_point()
+        if resumed_at:
+            iteration = resumed_at
+            self.adopt_existing_objects()
+            self.resume_reattach_clients()
+
         if not self.spdk_mem_thread:
             self.spdk_mem_thread = threading.Thread(
                 target=self._spdk_mem_stats_worker,
@@ -1421,6 +1428,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         sleep_n_sec(30)
 
         while True:
+            # Checkpoint before the iteration's work, so a kill anywhere inside
+            # it resumes at this iteration rather than silently skipping it.
+            self.checkpoint(iteration)
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
 

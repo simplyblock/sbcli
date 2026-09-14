@@ -71,6 +71,17 @@ def _rand_seq(length: int = 8) -> str:
 class _MassCreateDeleteMixin:
     """Shared orchestration for mass-creation/deletion stress test."""
 
+    # Phase-shaped, not iteration-shaped: phase N+1 consumes the registry
+    # phase N built in memory. Re-entering at phase 5 with an empty
+    # _clone_registry would delete nothing and call it a pass, so --resume
+    # refuses here instead of appearing to work.
+    RESUME_SUPPORTED = False
+    RESUME_UNSUPPORTED_REASON = (
+        "phase-based: _lvol_registry/_snapshot_registry/_clone_registry are "
+        "built in memory by earlier phases and would have to be rebuilt from "
+        "the cluster before a later phase could run"
+    )
+
     # ── Scale (overridden per ratio class) ─────────────────────────────────
     # NxM = N namespaces per subsystem × M subsystems
     NUM_SUBSYSTEMS = 1
