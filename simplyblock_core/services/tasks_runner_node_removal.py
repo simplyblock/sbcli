@@ -41,8 +41,13 @@ def process_task(task):
         task.write_to_db(db.kv_store)
 
     force_remove = bool(task.function_params.get("force_remove", False))
+    # The cursor reads its position out of the task and writes it back as the
+    # orchestration advances, so a removal that is taking hours can be asked
+    # which step it is on instead of only when it started.
+    cursor = storage_node_ops.RemovalCursor(task)
     try:
-        done = storage_node_ops.node_removal_orchestrate(task.node_id, force_remove=force_remove)
+        done = storage_node_ops.node_removal_orchestrate(
+            task.node_id, force_remove=force_remove, cursor=cursor)
     except Exception as e:
         logger.error(f"Node-removal task {task.uuid} raised: {e}")
         logger.exception(e)
@@ -67,8 +72,8 @@ def process_task(task):
             # refused with "Task found". The node keeps whatever data could not
             # be migrated off it, so it is REMOVED_FAILED, not REMOVED.
             msg = (f"removal gave up after {task.retry} retries "
-                   f"(~{constants.NODE_REMOVAL_MAX_WAIT_SEC // 3600}h): "
-                   f"a step never completed")
+                   f"(~{constants.NODE_REMOVAL_MAX_WAIT_SEC // 3600}h) "
+                   f"at step '{cursor.step or 'unknown'}'")
             logger.error(f"Node-removal task {task.uuid}: {msg}")
             storage_node_ops.set_node_status(
                 task.node_id, StorageNode.STATUS_REMOVED_FAILED, caused_by="remove")
