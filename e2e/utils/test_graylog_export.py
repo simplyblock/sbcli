@@ -592,8 +592,8 @@ def gl_fetch_container_logs(container_name, source, out_path,
             written = _write_window(fh, query, chunk_from_iso, chunk_to_iso)
         else:
             # Split into 10-minute sub-windows
-            t = datetime.fromisoformat(chunk_from_iso.replace("Z", "+00:00"))
-            t_end = datetime.fromisoformat(chunk_to_iso.replace("Z", "+00:00"))
+            t = datetime.fromisoformat(chunk_from_iso)
+            t_end = datetime.fromisoformat(chunk_to_iso)
             chunk = timedelta(minutes=10)
             while t < t_end:
                 chunk_end = min(t + chunk, t_end)

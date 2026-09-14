@@ -53,7 +53,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENTS_DIR = os.path.dirname(HERE)
@@ -322,7 +322,7 @@ def scan(root, langs, sym_res, log_res, excludes=None):
     syms, logs = [], []
     for ap, rp, lang in iter_source_files(root, langs, excludes):
         try:
-            with open(ap, "r", encoding="utf-8", errors="ignore") as fh:
+            with open(ap, encoding="utf-8", errors="ignore") as fh:
                 for lineno, line in enumerate(fh, 1):
                     if len(line) > 400:
                         continue
@@ -437,7 +437,7 @@ def build_map(name, cfg, check_only=False, ref=None, keep=False):
     max_syms = cfg.get("max_symbols", 100000)
     max_logs = cfg.get("max_log_strings", 100000)
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Three files, on purpose.
     #

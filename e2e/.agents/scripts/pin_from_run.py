@@ -44,7 +44,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENTS_DIR = os.path.dirname(HERE)
@@ -135,7 +135,7 @@ def write_pins(pins, source, run_meta=None):
     os.makedirs(OUT_DIR, exist_ok=True)
     doc = {
         "source": source,
-        "captured": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "captured": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "pins": pins,
     }
     if run_meta:
