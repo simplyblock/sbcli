@@ -8997,15 +8997,25 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
     # Namespace or Format" with DNR, which is not retried on another path
     # (2026-09-13: an 838ms window on worker-1, fio took EREMOTEIO).
     #
-    # A member that failed to register is skipped, not published. Its failure
-    # may be the add_ns or the post-condition that follows it, so its namespace
-    # is exactly the one that may be absent -- publishing for it would recreate
-    # the reachable-but-empty subsystem this barrier exists to prevent. It is
-    # already reported as INCOMPLETE REGISTRATION below, and the lvol monitor's
-    # repair cycle is what gives it a listener once its namespace is there.
+    # A failed member withholds the listener for its whole SUBSYSTEM, not just
+    # for itself. On a shared subsystem every member answers on one NQN, so
+    # publishing a healthy member's listener makes that NQN reachable while the
+    # failed member's namespace is absent -- which is the reachable-but-empty
+    # state this barrier exists to prevent, reached by a different door.
+    # Skipping only the failed lvol id is therefore not enough.
+    #
+    # A subsystem held back this way is already reported as INCOMPLETE
+    # REGISTRATION below, and the lvol monitor's repair cycle is what gives it a
+    # listener once every member's namespace is there.
+    blocked_nqns = {lv.nqn for lv in lvol_list if lv.get_id() in failures}
+    if blocked_nqns:
+        logger.warning(
+            "withholding listeners on %s for %d subsystem(s) with an "
+            "unregistered member: %s",
+            snode.get_id()[:8], len(blocked_nqns), sorted(blocked_nqns))
     listener_rpc = snode.rpc_client(timeout=10, retry=2)
     for lvol in lvol_list:
-        if lvol.get_id() in failures:
+        if lvol.get_id() in failures or lvol.nqn in blocked_nqns:
             continue
         try:
             ok, msg = _publish_lvol_listener(lvol, snode, listener_rpc, lvol_ana_state)

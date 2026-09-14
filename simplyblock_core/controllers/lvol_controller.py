@@ -1164,11 +1164,34 @@ def _fail_after_ns(lvol, rpc_client, nsid, msg):
     DEVICE ERROR, incident 2026-07-14).
     """
     if nsid:
+        # remove_ns is asynchronous inside SPDK: it can return success and
+        # defer the actual removal, which is why the delete path confirms with
+        # _confirm_namespace_removed rather than trusting the return. Deleting
+        # the bdev while the subsystem still references its namespace is the
+        # stale-namespace state this rollback exists to avoid, so an
+        # unconfirmed removal must NOT fall through to the bdev delete.
         try:
-            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, nsid)
+            removed = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, nsid))
+            confirmed = False
+            if removed:
+                confirmed, _ = _confirm_namespace_removed(rpc_client, lvol.nqn, nsid)
         except Exception:
             logger.exception("rollback of namespace nsid=%s on %s failed for %s",
                              nsid, lvol.nqn, lvol.get_id())
+            removed = confirmed = False
+        if not confirmed:
+            logger.error(
+                "Namespace nsid=%s still on %s after rollback (removed=%s); leaving "
+                "the bdev in place -- deleting it under a live namespace is the "
+                "state the rollback is meant to prevent. Original failure: %s",
+                nsid, lvol.nqn, removed, msg)
+            lvol.status = LVol.STATUS_IN_DELETION
+            try:
+                lvol.write_to_db(DBController().kv_store)
+            except Exception:
+                logger.exception("failed to mark %s in_deletion", lvol.get_id())
+            return False, (f"{msg}; rollback incomplete: namespace nsid={nsid} "
+                           f"still on {lvol.nqn}")
     return _fail_after_bdev(lvol, rpc_client, msg)
 
 
@@ -1513,6 +1536,7 @@ def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
     # Use the per-lvstore port for the lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     logger.info("adding listeners")
+    added = []
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             trtype = iface.trtype
@@ -1527,7 +1551,21 @@ def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
             if err and "code" in err and err["code"] == -32602:
                 logger.warning("listener already exists")
             else:
+                # A node with several matching NICs can get one listener up and
+                # fail on the next. The caller rolls the namespace and the bdev
+                # back, so anything published here would be left pointing at a
+                # deleted bdev -- take them down again first.
+                for done_trtype, done_ip in added:
+                    try:
+                        rpc_client.listeners_del(
+                            lvol.nqn, done_trtype, done_ip, listener_port)
+                    except Exception:
+                        logger.exception(
+                            "failed to remove listener %s %s:%s from %s during rollback",
+                            done_trtype, done_ip, listener_port, lvol.nqn)
                 return False, f"Failed to create listener for {lvol.get_id()}"
+        else:
+            added.append((trtype, iface.ip4_address))
     return True, None
 
 
