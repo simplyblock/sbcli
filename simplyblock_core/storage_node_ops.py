@@ -5010,7 +5010,79 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     return best
 
 
-def node_removal_orchestrate(node_id, force_remove=False):
+#: Ordered removal steps, by the name the cursor records. The orchestrator's
+#: own "phase N" vocabulary is kept in the log lines so existing greps and
+#: incident notes still resolve; these names are what gets persisted, because
+#: "phase 3a" says nothing to anyone reading a stuck task.
+REMOVAL_STEPS = (
+    "shutdown",
+    "relocation_gate",
+    "teardown_own_replicas",
+    "decommission_jm",
+    "relocate_hosted",
+    "verify_stacks",
+    "finalize",
+    "devices",
+)
+
+
+class RemovalCursor:
+    """Which removal step is in progress, persisted on the task record.
+
+    The orchestrator has always been resumable, but it had no saved position:
+    it re-derived one from ``snode.status`` plus DB state on every entry. That
+    works, and is why re-entry is safe today, but it cannot answer the question
+    an operator actually asks of a removal that is taking hours -- *which* step
+    is it stuck on -- and it gives a step nowhere to keep work in progress.
+
+    So this records the step rather than replacing the guards. Control flow is
+    unchanged: a step that cannot finish still returns False and is retried in
+    place, never stepped over.
+
+    ``data`` is per-step scratch that survives a retry. Nothing uses it yet;
+    volume drain will, to remember the migrations it started so a re-entrant
+    pass polls them instead of issuing them again.
+
+    Lifetime is one removal attempt, not the node: it lives in the task's
+    ``function_params``, so a removal re-driven after REMOVED_FAILED gets a new
+    task and therefore a fresh cursor, with no stale position to clear.
+    """
+
+    def __init__(self, task=None):
+        self._task = task
+        params = (task.function_params if task is not None else None) or {}
+        self.step = params.get("step")
+        self.data = params.get("step_data") or {}
+
+    def enter(self, step, message):
+        """Mark ``step`` as the one now running and log it unchanged."""
+        logger.info(message)
+        if step != self.step:
+            self.step = step
+            self.data = {}
+        self._persist()
+
+    def _persist(self):
+        if self._task is None:
+            return
+        params = self._task.function_params or {}
+        params["step"] = self.step
+        params["step_data"] = self.data
+        self._task.function_params = params
+
+    def save(self):
+        """Persist per-step ``data`` mutated by a step in progress."""
+        self._persist()
+
+
+class _NullCursor(RemovalCursor):
+    """Used when no task is available (direct calls, tests)."""
+
+    def __init__(self):
+        super().__init__(None)
+
+
+def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
     """Idempotent, resumable orchestration driven by tasks_runner_node_removal.
 
     Returns True only when the node has been fully removed (status REMOVED).
@@ -5021,6 +5093,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
     completed work.
     """
     db_controller = DBController()
+    cursor = cursor if cursor is not None else _NullCursor()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
@@ -5055,7 +5128,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
         if not already_removed:
             # Phase 1 — shut the node down (graceful). Skipped on re-entry.
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-                logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
+                cursor.enter("shutdown", f"[REMOVAL] {node_id}: phase 1 — shutdown")
                 ret = shutdown_storage_node(node_id, force=force_remove)
                 if isinstance(ret, tuple):
                     ret, reason = ret
@@ -5129,6 +5202,8 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # the peers' back-references -- neither of which it reads -- so
             # 3b recomputes the same answer. Persisting it would add a stale
             # plan to apply against a cluster that has since moved.
+            cursor.enter("relocation_gate",
+                         f"[REMOVAL] {node_id}: phase 0 — prove the relocation is planable")
             feasible, reason = _check_replica_relocation_feasible(snode, db_controller)
             if not feasible:
                 logger.error(
@@ -5138,7 +5213,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
                     f"once the cluster can host the relocation.")
                 return False
 
-            logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
+            cursor.enter("teardown_own_replicas", f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
             if not _teardown_replicas_of_primary(snode):
                 return False
 
@@ -5148,12 +5223,12 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # matters: a replica relocated while a dying JM is still listed
             # in its primary's jm_ids bakes that unreachable member into the
             # new host's construct permanently.
-            logger.info(f"[REMOVAL] {node_id}: phase 2 — decommission JM")
+            cursor.enter("decommission_jm", f"[REMOVAL] {node_id}: phase 2 — decommission JM")
             _decommission_node_jm(snode, replica_peer_ids=replica_peer_ids)
             snode = db_controller.get_storage_node_by_id(node_id)
 
             # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
-            logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
+            cursor.enter("relocate_hosted", f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
             if not _relocate_replicas_hosted_on(snode):
                 return False
 
@@ -5163,12 +5238,12 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # physically done and the node is on its way out, so failing would
             # only spin the retry loop against a state it cannot re-drive --
             # but a missing replica must never leave this function silently.
-            logger.info(f"[REMOVAL] {node_id}: phase 3c — verify replica stacks")
+            cursor.enter("verify_stacks", f"[REMOVAL] {node_id}: phase 3c — verify replica stacks")
             _verify_replica_stacks(snode.cluster_id, db_controller,
                                    context=f" after removing {node_id}")
 
             # Phase 4 — finalize (swarm leave, gpt cleanup) and flip to removed.
-            logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
+            cursor.enter("finalize", f"[REMOVAL] {node_id}: phase 4 — finalize")
             _finalize_node_removal(snode)
             set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
             snode = db_controller.get_storage_node_by_id(node_id)
@@ -5178,7 +5253,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
         # Phase 5 — remove + fail devices, then wait for failure-migration to
         # finish. Always attempted, even on resume after status already
         # flipped to REMOVED -- see the already_removed comment above.
-        logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
+        cursor.enter("devices", f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
         if not _decommission_node_devices(snode):
             return False
 
