@@ -615,7 +615,7 @@ class SbcliUtils:
         """
         try:
             lvol_id = self.get_lvol_id(lvol_name=lvol_name)
-        except:
+        except Exception:
             if skip_error:
                 self.logger.info(f"Lvol {lvol_name} not not found!! Continuing without Delete!!")
                 return True
