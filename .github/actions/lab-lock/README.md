@@ -131,7 +131,7 @@ still stomp a locked run. Adding it is a checkout plus one step -- the release
 comes with it:
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@v7
   with:
     sparse-checkout: |
       .github/actions/lab-lock
