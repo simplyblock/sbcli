@@ -499,16 +499,33 @@ class BaseNodeObject(BaseModel):
     #: (see remove_storage_node, which admits this status).
     STATUS_REMOVED_FAILED = 'removed_failed'
 
-    #: Statuses meaning "this node is on its way out of the cluster". A node in
-    #: any of them has had its SPDK shut down by the removal flow, so work that
-    #: has to execute ON it can never run and must not be queued against it.
-    DEPARTING_STATUSES: ClassVar[tuple] = (
-        STATUS_PENDING_REMOVAL,
+    #: Removal statuses in which the node's SPDK has already been stopped.
+    #: Anything deciding "skip it, it cannot answer" -- peer routing, JM
+    #: replacement, cluster shutdown -- asks this set, not DEPARTING_STATUSES
+    #: below. The two differ by exactly PENDING_REMOVAL, which is stamped when
+    #: a removal is *requested*, before the orchestrator's shutdown step runs:
+    #: a node carrying it may still be up and serving, and treating a live peer
+    #: as gone would skip the port-block that keeps it from writing.
+    REMOVAL_SHUT_DOWN_STATUSES: ClassVar[tuple] = (
         STATUS_MIGRATING_LVOLS,
         STATUS_IN_REMOVAL,
         STATUS_REMOVED,
         STATUS_REMOVED_FAILED,
     )
+
+    #: Statuses meaning "this node is on its way out of the cluster" -- it will
+    #: not serve again under this identity, so work that has to execute ON it
+    #: must not be queued against it.
+    #:
+    #: Listed once and derived everywhere, including from the set above: every
+    #: consumer asking "is this node leaving?" reads one of these two rather
+    #: than spelling statuses out. Six such lists existed by hand and five
+    #: still named only IN_REMOVAL when MIGRATING_LVOLS and REMOVED_FAILED were
+    #: added, which is how a removal ended up RPC-ing a node whose pod was
+    #: already gone, and shipping a status string the data plane could not
+    #: decode (cluster a6e7569d, 2026-09-15).
+    DEPARTING_STATUSES: ClassVar[tuple] = (
+        STATUS_PENDING_REMOVAL,) + REMOVAL_SHUT_DOWN_STATUSES
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,
