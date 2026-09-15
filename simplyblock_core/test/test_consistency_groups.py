@@ -202,6 +202,31 @@ def test_group_snapshot_is_one_rpc_and_bumps_seq_only_on_full_success():
     assert "_rollback_all" in src
 
 
+def test_group_snapshot_serializes_concurrent_takes_on_the_group():
+    # Two group snapshots taken with a near-zero gap on the SAME group must not
+    # race on the generation counter. The take reads last_group_seq at the top
+    # and writes it at the bottom; with no lock spanning the two, concurrent
+    # takes both read N, both stamp group_seq = N+1, and both write N+1. Observed
+    # live (2026-09-15, 20 members): seq 11 held 39 member snapshots (two
+    # generations under one seq) and seq 12 was never assigned, wedging both
+    # VolumeGroupSnapshots at readyToUse=false. The whole take -- from the seq
+    # claim through the counter write -- must hold the OUTER per-group mutation
+    # lock (object_mutation_lock, as snapshot_controller.add does per object),
+    # keyed on the group's id, so concurrent takes on the group serialize and
+    # get distinct, monotonic generations.
+    src = inspect.getsource(cgc.create_group_snapshot_for_group)
+    assert "with object_mutation_lock(" in src, \
+        "the group take must serialize concurrent takes with the outer per-group lock"
+    lock_at = src.index("with object_mutation_lock(")
+    lock_line = src[lock_at:src.index("\n", lock_at)]
+    assert "group.get_id()" in lock_line or "group.uuid" in lock_line, \
+        "the outer lock must be keyed on the group's identity, not a member's"
+    seq_claim_at = src.index("group.last_group_seq + 1", lock_at)
+    seq_write_at = src.index("group.last_group_seq = group_seq")
+    assert lock_at < seq_claim_at, "the seq is claimed OUTSIDE the serialize lock"
+    assert lock_at < seq_write_at, "the counter write is OUTSIDE the serialize lock"
+
+
 def test_failover_result_carries_membership_warnings():
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.replicate_lvol_on_target_cluster)

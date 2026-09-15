@@ -33,7 +33,8 @@ from simplyblock_core import db_controller as db_mod
 from simplyblock_core import utils
 from simplyblock_core.controllers import snapshot_events, tasks_controller
 from simplyblock_core.controllers.snapshot_controller import (
-    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock)
+    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock,
+    object_mutation_lock)
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
@@ -385,143 +386,153 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                        if n.get_id() != primary_node.get_id()
                        and n.status == StorageNode.STATUS_ONLINE]
 
-    group_seq = group.last_group_seq + 1
-    now_ts = int(time.time())
-    plan = []
-    for lvol in members:
-        snap_vuid = utils.get_random_snapshot_vuid()
-        plan.append({
-            "lvol": lvol,
-            "vuid": snap_vuid,
-            "snap_bdev_name": f"SNAP_{snap_vuid}",
-            "snap_name": f"repl_cg_{group.uuid[:8]}_{group_seq}_{lvol.get_id()[:8]}_{now_ts}",
-        })
+    # Serialize concurrent takes on THIS group end to end. Without it, two
+    # group snapshots taken with a near-zero gap both read the same
+    # last_group_seq and stamp the same group_seq, so one generation number
+    # holds two generations of member snapshots and the next is skipped
+    # (observed live: seq 11 held 39 member snapshots, seq 12 never existed).
+    # object_mutation_lock, keyed on the group, is the same outer lock the
+    # single-volume path holds per object; the inner lvstore_op_lock below is
+    # taken per single-node RPC inside it. Re-read the group inside the lock
+    # so a take that just released it is seen.
+    with object_mutation_lock(pool.cluster_id, group.get_id(), enabled=lock):
+        group = db.get_consistency_group_by_id(group.get_id())
+        group_seq = group.last_group_seq + 1
+        now_ts = int(time.time())
+        plan = []
+        for lvol in members:
+            snap_vuid = utils.get_random_snapshot_vuid()
+            plan.append({
+                "lvol": lvol,
+                "vuid": snap_vuid,
+                "snap_bdev_name": f"SNAP_{snap_vuid}",
+                "snap_name": f"repl_cg_{group.uuid[:8]}_{group_seq}_{lvol.get_id()[:8]}_{now_ts}",
+            })
 
-    rpc_client = primary_node.rpc_client()
-    logger.info("Consistency group %s: taking generation %d over %d member(s) "
-                "on %s/%s", group.uuid[:8], group_seq, len(plan),
-                primary_node.get_id()[:8], group.lvs_name)
+        rpc_client = primary_node.rpc_client()
+        logger.info("Consistency group %s: taking generation %d over %d member(s) "
+                    "on %s/%s", group.uuid[:8], group_seq, len(plan),
+                    primary_node.get_id()[:8], group.lvs_name)
 
-    # ONE lvstore mutation: the whole frozen window is a single RPC.
-    with lvstore_op_lock(pool.cluster_id, group.lvs_name,
-                         node_id=primary_node.get_id(), enabled=lock):
-        ret = rpc_client.bdev_lvol_snapshot_group(
-            group.lvs_name,
-            [{"lvol_name": f"{p['lvol'].lvs_name}/{p['lvol'].lvol_bdev}",
-              "snapshot_name": p["snap_bdev_name"]} for p in plan])
-    if not ret:
-        # SPDK unfroze first and garbage-collected the partial snapshots.
-        return None, (f"Group snapshot RPC failed on {primary_node.get_id()}; "
-                      f"SPDK rolled the partial group back")
+        # ONE lvstore mutation: the whole frozen window is a single RPC.
+        with lvstore_op_lock(pool.cluster_id, group.lvs_name,
+                             node_id=primary_node.get_id(), enabled=lock):
+            ret = rpc_client.bdev_lvol_snapshot_group(
+                group.lvs_name,
+                [{"lvol_name": f"{p['lvol'].lvs_name}/{p['lvol'].lvol_bdev}",
+                  "snapshot_name": p["snap_bdev_name"]} for p in plan])
+        if not ret:
+            # SPDK unfroze first and garbage-collected the partial snapshots.
+            return None, (f"Group snapshot RPC failed on {primary_node.get_id()}; "
+                          f"SPDK rolled the partial group back")
 
-    # Bound outside the closure: mypy does not carry the ``group is None``
-    # guard's narrowing into nested functions.
-    group_lvs_name = group.lvs_name
+        # Bound outside the closure: mypy does not carry the ``group is None``
+        # guard's narrowing into nested functions.
+        group_lvs_name = group.lvs_name
 
-    def _rollback_all():
+        def _rollback_all():
+            for p in plan:
+                _rollback_snapshot_bdev(pool.cluster_id, group_lvs_name,
+                                        primary_node, p["snap_bdev_name"],
+                                        all_nodes, lock=lock)
+
+        # Everything below mirrors snapshot_controller.add's tail per member:
+        # read back uuid/blobid, register on the HA peers, then the record.
+        created_ids: list = []
         for p in plan:
-            _rollback_snapshot_bdev(pool.cluster_id, group_lvs_name,
-                                    primary_node, p["snap_bdev_name"],
-                                    all_nodes, lock=lock)
-
-    # Everything below mirrors snapshot_controller.add's tail per member:
-    # read back uuid/blobid, register on the HA peers, then the record.
-    created_ids: list = []
-    for p in plan:
-        lvol = p["lvol"]
-        snap_bdev = rpc_client.get_bdevs(f"{group.lvs_name}/{p['snap_bdev_name']}")
-        if not snap_bdev:
-            _rollback_all()
-            return None, (f"group snapshot {p['snap_bdev_name']} not readable "
-                          f"after creation")
-        p["snap_uuid"] = snap_bdev[0]["uuid"]
-        p["blobid"] = snap_bdev[0]["driver_specific"]["lvol"]["blobid"]
-        num_allocated = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
-        p["used_size"] = int(num_allocated * cluster.page_size_in_blocks)
-
-        for sec in secondary_nodes:
-            from simplyblock_core.storage_node_ops import (
-                wait_or_delay_for_restart_gate, queue_for_restart_drain)
-            gate = wait_or_delay_for_restart_gate(sec.get_id(), group.lvs_name)
-            if gate == "delay":
-                queue_for_restart_drain(
-                    sec.get_id(), group.lvs_name,
-                    lambda s=sec, pp=p, lv=lvol: s.rpc_client().bdev_lvol_snapshot_register(
-                        f"{group.lvs_name}/{lv.lvol_bdev}", pp["snap_bdev_name"],
-                        pp["snap_uuid"], pp["blobid"]),
-                    f"register group snapshot {p['snap_bdev_name']} on {sec.get_id()[:8]}")
-                continue
-            with lvstore_op_lock(pool.cluster_id, group.lvs_name,
-                                 node_id=sec.get_id(), enabled=lock):
-                reg = sec.rpc_client().bdev_lvol_snapshot_register(
-                    f"{group.lvs_name}/{lvol.lvol_bdev}", p["snap_bdev_name"],
-                    p["snap_uuid"], p["blobid"])
-            if not reg:
-                logger.error("Group snapshot register of %s failed on %s; "
-                             "rolling the WHOLE generation back",
-                             p["snap_bdev_name"], sec.get_id())
+            lvol = p["lvol"]
+            snap_bdev = rpc_client.get_bdevs(f"{group.lvs_name}/{p['snap_bdev_name']}")
+            if not snap_bdev:
                 _rollback_all()
-                for snap_id in created_ids:
-                    try:
-                        rec = db.get_snapshot_by_id(snap_id)
-                        db.unindex_snapshot(rec)
-                        rec.remove(db.kv_store)
-                    except Exception:
-                        pass
-                return None, f"Failed to register group snapshot on {sec.get_id()}"
+                return None, (f"group snapshot {p['snap_bdev_name']} not readable "
+                              f"after creation")
+            p["snap_uuid"] = snap_bdev[0]["uuid"]
+            p["blobid"] = snap_bdev[0]["driver_specific"]["lvol"]["blobid"]
+            num_allocated = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+            p["used_size"] = int(num_allocated * cluster.page_size_in_blocks)
 
-        snap = SnapShot()
-        snap.uuid = str(uuid_module.uuid4())
-        snap.data_uuid = str(uuid_module.uuid4())
-        snap.snap_uuid = p["snap_uuid"]
-        snap.size = lvol.size
-        snap.used_size = p["used_size"]
-        snap.blobid = p["blobid"]
-        snap.pool_uuid = pool.get_id()
-        snap.cluster_id = pool.cluster_id
-        snap.snap_name = p["snap_name"]
-        snap.snap_bdev = f"{group.lvs_name}/{p['snap_bdev_name']}"
-        snap.created_at = now_ts
-        snap.lvol = lvol
-        snap.fabric = lvol.fabric
-        snap.vuid = p["vuid"]
-        snap.status = SnapShot.STATUS_ONLINE
-        snap.snap_type = snap_type
-        snap.group_id = group.get_id()
-        snap.group_seq = group_seq
-        snap.create_dt = str(datetime.now())
-        snap.write_to_db(db.kv_store)
+            for sec in secondary_nodes:
+                from simplyblock_core.storage_node_ops import (
+                    wait_or_delay_for_restart_gate, queue_for_restart_drain)
+                gate = wait_or_delay_for_restart_gate(sec.get_id(), group.lvs_name)
+                if gate == "delay":
+                    queue_for_restart_drain(
+                        sec.get_id(), group.lvs_name,
+                        lambda s=sec, pp=p, lv=lvol: s.rpc_client().bdev_lvol_snapshot_register(
+                            f"{group.lvs_name}/{lv.lvol_bdev}", pp["snap_bdev_name"],
+                            pp["snap_uuid"], pp["blobid"]),
+                        f"register group snapshot {p['snap_bdev_name']} on {sec.get_id()[:8]}")
+                    continue
+                with lvstore_op_lock(pool.cluster_id, group.lvs_name,
+                                     node_id=sec.get_id(), enabled=lock):
+                    reg = sec.rpc_client().bdev_lvol_snapshot_register(
+                        f"{group.lvs_name}/{lvol.lvol_bdev}", p["snap_bdev_name"],
+                        p["snap_uuid"], p["blobid"])
+                if not reg:
+                    logger.error("Group snapshot register of %s failed on %s; "
+                                 "rolling the WHOLE generation back",
+                                 p["snap_bdev_name"], sec.get_id())
+                    _rollback_all()
+                    for snap_id in created_ids:
+                        try:
+                            rec = db.get_snapshot_by_id(snap_id)
+                            db.unindex_snapshot(rec)
+                            rec.remove(db.kv_store)
+                        except Exception:
+                            pass
+                    return None, f"Failed to register group snapshot on {sec.get_id()}"
 
-        prev = db.get_lvol_latest_snapshot(lvol.get_id(), exclude_uuid=snap.get_id())
-        if prev is not None and not prev.next_snap_uuid:
-            prev.next_snap_uuid = snap.get_id()
-            snap.prev_snap_uuid = prev.get_id()
-            prev.write_to_db()
-            snap.write_to_db()
+            snap = SnapShot()
+            snap.uuid = str(uuid_module.uuid4())
+            snap.data_uuid = str(uuid_module.uuid4())
+            snap.snap_uuid = p["snap_uuid"]
+            snap.size = lvol.size
+            snap.used_size = p["used_size"]
+            snap.blobid = p["blobid"]
+            snap.pool_uuid = pool.get_id()
+            snap.cluster_id = pool.cluster_id
+            snap.snap_name = p["snap_name"]
+            snap.snap_bdev = f"{group.lvs_name}/{p['snap_bdev_name']}"
+            snap.created_at = now_ts
+            snap.lvol = lvol
+            snap.fabric = lvol.fabric
+            snap.vuid = p["vuid"]
+            snap.status = SnapShot.STATUS_ONLINE
+            snap.snap_type = snap_type
+            snap.group_id = group.get_id()
+            snap.group_seq = group_seq
+            snap.create_dt = str(datetime.now())
+            snap.write_to_db(db.kv_store)
 
-        db.index_snapshot(snap)
-        snapshot_events.snapshot_create(snap)
-        created_ids.append(snap.get_id())
-        p["snap_id"] = snap.get_id()
+            prev = db.get_lvol_latest_snapshot(lvol.get_id(), exclude_uuid=snap.get_id())
+            if prev is not None and not prev.next_snap_uuid:
+                prev.next_snap_uuid = snap.get_id()
+                snap.prev_snap_uuid = prev.get_id()
+                prev.write_to_db()
+                snap.write_to_db()
 
-    # The generation exists in full: bump the counter, then enqueue the
-    # per-member replication tasks (transfer machinery is per-snapshot).
-    group = db.get_consistency_group_by_id(group.get_id())
-    group.last_group_seq = group_seq
-    group.write_to_db(db.kv_store)
+            db.index_snapshot(snap)
+            snapshot_events.snapshot_create(snap)
+            created_ids.append(snap.get_id())
+            p["snap_id"] = snap.get_id()
 
-    for p in plan:
-        lvol = p["lvol"]
-        if lvol.do_replicate:
-            task = tasks_controller.add_snapshot_replication_task(
-                pool.cluster_id, lvol.node_id, p["snap_id"])
-            if task:
-                snap = db.get_snapshot_by_id(p["snap_id"])
-                snapshot_events.replication_task_created(snap)
+        # The generation exists in full: bump the counter, then enqueue the
+        # per-member replication tasks (transfer machinery is per-snapshot).
+        group.last_group_seq = group_seq
+        group.write_to_db(db.kv_store)
 
-    logger.info("Consistency group %s: generation %d complete (%d snapshots)",
-                group.uuid[:8], group_seq, len(created_ids))
-    return created_ids, None
+        for p in plan:
+            lvol = p["lvol"]
+            if lvol.do_replicate:
+                task = tasks_controller.add_snapshot_replication_task(
+                    pool.cluster_id, lvol.node_id, p["snap_id"])
+                if task:
+                    snap = db.get_snapshot_by_id(p["snap_id"])
+                    snapshot_events.replication_task_created(snap)
+
+        logger.info("Consistency group %s: generation %d complete (%d snapshots)",
+                    group.uuid[:8], group_seq, len(created_ids))
+        return created_ids, None
 
 
 # --------------------------------------------------------------------------- #
