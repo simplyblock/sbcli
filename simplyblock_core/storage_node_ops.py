@@ -4635,8 +4635,17 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove node {node_id}: {reason}")
         return False
 
-    if snode.status not in [StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_IN_REMOVAL,
-                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+    # Same positive condition the orchestrator's own shutdown step uses (see
+    # "Phase 1 -- shut the node down"), not an exclusion list that has to
+    # enumerate every status a node might already be stopped in. Written the
+    # other way round, this guard and that one disagreed the moment
+    # REMOVED_FAILED existed: re-driving a removal from REMOVED_FAILED fell
+    # through to shutdown_storage_node, which refuses that status outright --
+    # "Node is in removed_failed state; only online/suspended/down can be
+    # gracefully shut down" -- and the re-drive died before it queued anything
+    # (2026-09-15, node a1b050f1). That is the recovery STATUS_REMOVED_FAILED
+    # exists to offer, so it must not be the one status that cannot use it.
+    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
         logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
         ret = shutdown_storage_node(node_id, force=force_remove)
         if isinstance(ret, tuple):
