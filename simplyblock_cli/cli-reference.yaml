@@ -2903,6 +2903,28 @@ commands:
             dest: json
             type: bool
             action: store_true
+      - name: add-member
+        help: "Join an EXISTING volume to a consistency group. The volume must live on the group's pinned node/LVS and in the members' storage pool; a volume that once left the group cannot rejoin (membership is one-way)."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "lvol_id"
+            help: "The logical volume id to join."
+            dest: lvol_id
+            type: str
+      - name: remove-member
+        help: "Detach a member from a consistency group: closes its epoch one-way, preserving its snapshots in prior generations. The volume itself is untouched."
+        arguments:
+          - name: "group_id"
+            help: "Consistency group id (or uuid)."
+            dest: group_id
+            type: str
+          - name: "lvol_id"
+            help: "The logical volume id to detach."
+            dest: lvol_id
+            type: str
       - name: snapshot-take
         help: "Take ONE crash-consistent snapshot generation across every current member."
         arguments:

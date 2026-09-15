@@ -163,6 +163,60 @@ def join_new_volume(cluster_id, lvol, name):
     return group
 
 
+def join_existing_volume(group, lvol):
+    """Join an EXISTING volume to ``group`` (design §4.5, Phase 4 late join).
+
+    The label path's late join: unlike :func:`join_new_volume`, which funnels
+    freshly created volumes whose placement the create path just decided, the
+    volume already exists somewhere, so the guards the create path gets for
+    free are enforced here explicitly:
+
+    - **Idempotent.** Joining a volume whose epoch in this group is already
+      open returns the group unchanged, so a retried label reconcile converges.
+    - **One-way (design §4.3).** A volume whose epoch in this group is CLOSED
+      is refused: membership windows never reopen, and re-establishment is a
+      labeled clone. (The legacy policy attach path replaces closed epochs;
+      the label path deliberately does not — design Open Question 5.)
+    - **Pool alignment (design §4.5).** Every open member must live in one
+      storage pool. The group's subsystem-scoped operations (the frozen cut,
+      the migration exclusion) reach every volume sharing a member's
+      subsystem, and the control plane guarantees a subsystem never spans
+      pools — so a single-pool group's operations can never touch another
+      pool's volumes. A cross-pool join would break exactly that.
+    - **Placement pin and member cap**, enforced by
+      :func:`add_member_to_group` the same way the create path enforces them.
+      A join never moves the volume: off the pinned node/LVS means refused.
+    """
+    entry = (group.members or {}).get(lvol.get_id())
+    if entry is not None:
+        if entry.get("removed_seq", 0) != 0:
+            raise ConsistencyGroupError(
+                f"volume {lvol.get_id()} left consistency group "
+                f"{group.uuid[:8]} at generation {entry['removed_seq']} and "
+                f"cannot rejoin: membership is one-way, re-establish it by "
+                f"creating a labeled clone")
+        return group
+
+    for member_id, m in (group.members or {}).items():
+        if m.get("removed_seq", 0) != 0:
+            continue
+        try:
+            member = db.get_lvol_by_id(member_id)
+        except KeyError:
+            continue
+        if member.pool_uuid != lvol.pool_uuid:
+            raise ConsistencyGroupError(
+                f"volume {lvol.get_id()} is in pool {lvol.pool_uuid[:8]} but "
+                f"consistency group {group.uuid[:8]} members live in pool "
+                f"{member.pool_uuid[:8]}; all members of a consistency group "
+                f"must share one storage pool")
+
+    group = add_member_to_group(group, lvol)
+    lvol.group_id = group.get_id()
+    lvol.write_to_db(db.kv_store)
+    return group
+
+
 def add_member(policy, lvol):
     """Policy path: resolve the policy's group, then join ``lvol`` to it."""
     group = db.get_consistency_group_for_policy(policy.get_id())
@@ -213,6 +267,27 @@ def remove_member(policy_id, lvol_id):
     """Policy path: resolve the policy's group, then close ``lvol_id``'s epoch."""
     remove_member_from_group(
         db.get_consistency_group_for_policy(policy_id), lvol_id)
+
+
+def detach_existing_volume(group, lvol_id):
+    """Detach a member AND clear the volume's denormalized group pointer.
+
+    The label path's counterpart of :func:`join_existing_volume` (design
+    §4.5): the epoch closes one-way via :func:`remove_member_from_group`
+    (history-preserving, §8.2), and ``lvol.group_id`` is cleared so the volume
+    reads as a non-member (the migration webhook, §9.5, keys off it). The
+    group's members map keeps the closed epoch for generation history.
+    Idempotent: detaching a non-member is a no-op, and a missing volume record
+    only skips the pointer cleanup.
+    """
+    remove_member_from_group(group, lvol_id)
+    try:
+        volume = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return
+    if volume.group_id:
+        volume.group_id = ""
+        volume.write_to_db(db.kv_store)
 
 
 def group_for_lvol(lvol_id):

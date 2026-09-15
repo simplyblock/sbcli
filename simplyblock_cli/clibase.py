@@ -1222,6 +1222,29 @@ class CLIWrapperBase:
         } for m in cgc.list_members(self._cg_resolve(args.group_id))]
         return _format_result(data, json=args.json)
 
+    def consistency_group__add_member(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        db = db_controller.DBController()
+        group = self._cg_resolve(args.group_id)
+        try:
+            lvol = db.get_lvol_by_id(args.lvol_id)
+        except KeyError:
+            return f"Volume {args.lvol_id} not found"
+        try:
+            group = cgc.join_existing_volume(group, lvol)
+        except cgc.ConsistencyGroupError as e:
+            return f"Join refused: {e}"
+        return (f"Volume {args.lvol_id} joined consistency group "
+                f"{group.get_id()} (effective from generation "
+                f"{group.last_group_seq + 1})")
+
+    def consistency_group__remove_member(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        group = self._cg_resolve(args.group_id)
+        cgc.detach_existing_volume(group, args.lvol_id)
+        return (f"Volume {args.lvol_id} detached from consistency group "
+                f"{group.get_id()} (prior generations preserved)")
+
     def consistency_group__snapshot_take(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller as cgc
         ids, err = cgc.create_group_snapshot_for_group(self._cg_resolve(args.group_id))

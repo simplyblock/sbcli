@@ -20,6 +20,7 @@ from .._dtos import (
     ConsistencyGroupGenerationDTO,
     ConsistencyGroupGenerationMemberDTO,
     ConsistencyGroupMemberDTO,
+    ConsistencyGroupMemberJoinDTO,
 )
 
 api = APIRouter(tags=['consistency-groups'])
@@ -67,24 +68,36 @@ def members(cluster: Cluster, group: ConsistencyGroupResource) -> builtins.list[
             for m in consistency_group_controller.list_members(group)]
 
 
+@instance_api.post('/members', name='clusters:consistency-groups:members:join',
+                   response_model=ConsistencyGroupMemberDTO)
+def join_member(cluster: Cluster, group: ConsistencyGroupResource,
+                body: ConsistencyGroupMemberJoinDTO) -> ConsistencyGroupMemberDTO:
+    """Join an EXISTING volume to the group (design §4.5, Phase 4 late join).
+
+    Validates the pinned placement, the pool, the member cap, and the one-way
+    rule; a refusal is a 409 naming the precondition. Idempotent: joining a
+    current member returns its membership row unchanged.
+    """
+    try:
+        volume = db.get_lvol_by_id(body.lvol_id)
+    except KeyError:
+        raise HTTPException(404, f'volume {body.lvol_id} not found')
+    try:
+        consistency_group_controller.join_existing_volume(group, volume)
+    except consistency_group_controller.ConsistencyGroupError as e:
+        raise HTTPException(409, str(e))
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    for m in consistency_group_controller.list_members(fresh):
+        if m["lvol_id"] == body.lvol_id:
+            return ConsistencyGroupMemberDTO(**m)
+    raise HTTPException(500, f'volume {body.lvol_id} joined but is not listed as a member')
+
+
 @instance_api.delete('/members/{lvol_id}', name='clusters:consistency-groups:members:detach',
                      status_code=204, responses={204: {"content": None}})
 def detach_member(cluster: Cluster, group: ConsistencyGroupResource, lvol_id: str) -> Response:
     """Detach a member: close its epoch one-way, preserving prior generations (§8.2)."""
-    consistency_group_controller.remove_member_from_group(group, lvol_id)
-    # Clear the volume's denormalized group pointer so it reads as a non-member
-    # (the migration webhook, §9.5, keys off this); the group's members map
-    # keeps the closed epoch for generation history.
-    try:
-        volume = db.get_lvol_by_id(lvol_id)
-        if volume.group_id:
-            volume.group_id = ""
-            volume.write_to_db(db.kv_store)
-    except KeyError:
-        # Best-effort cleanup: if the volume record is already missing, the
-        # detach operation has already removed membership and should still be
-        # treated as successful/idempotent.
-        pass
+    consistency_group_controller.detach_existing_volume(group, lvol_id)
     return Response(status_code=204)
 
 

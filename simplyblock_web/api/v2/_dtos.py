@@ -751,6 +751,11 @@ class ConsistencyGroupMemberDTO(BaseModel):
     online: bool
 
 
+class ConsistencyGroupMemberJoinDTO(BaseModel):
+    """Request body for the late join of an existing volume (design §4.5)."""
+    lvol_id: str
+
+
 class ConsistencyGroupGenerationMemberDTO(BaseModel):
     lvol_id: str
     snapshot_id: str
