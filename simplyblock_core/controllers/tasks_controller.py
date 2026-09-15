@@ -351,7 +351,8 @@ def add_device_mig_task_for_node(node_id):
                 break
 
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        # Same reasoning as add_device_failed_mig_task.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
 
         for bdev in node.lvstore_stack:
@@ -730,11 +731,22 @@ def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
 def add_device_failed_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        # IN_REMOVAL nodes have a dead SPDK (shut down by the removal flow);
-        # a migration task targeting their distribs can never run and would
-        # stall the node-removal completion check forever. Skip them like
-        # already-REMOVED nodes.
-        if node.status == StorageNode.STATUS_REMOVED:
+        # A node on its way out has a dead SPDK (shut down by the removal
+        # flow); a migration task targeting its distribs can never run and
+        # would stall the node-removal completion check forever.
+        #
+        # This is what that comment always said, but the check only covered
+        # REMOVED. It held anyway for as long as device failure happened at the
+        # very end of a removal, after the status flip -- so the one status it
+        # tested was the only one a departing node was ever in here. Failing
+        # the devices EARLIER, while the node is MIGRATING_LVOLS, made the gap
+        # reachable: the tasks were created, the failed-migration runner
+        # refused to run them ("node is not online, retrying", see
+        # tasks_runner_failed_migration.py), their devices never reached
+        # FAILED_AND_MIGRATED, and the removal waited on them until its
+        # ceiling -- exactly the stall predicted here (observed live
+        # 2026-09-15, 99 retries in 17 minutes on cluster 6740f9c5).
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
@@ -746,7 +758,9 @@ def add_device_failed_mig_task(device_id):
 def add_new_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        # Same reasoning as add_device_failed_mig_task: a departing node cannot
+        # run the task, so queueing it only leaves work nothing will ever do.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
