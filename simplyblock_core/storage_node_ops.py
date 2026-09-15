@@ -5358,7 +5358,18 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
     # here, since the node being removed has just been shut down.
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     prev_cluster_status = cluster.status
-    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
+    # IN_SHRINK is deliberately NOT set yet. It used to cover the whole
+    # orchestration, which made the drain impossible: migration_controller
+    # requires the cluster to be ACTIVE (see its create/start guards), so a
+    # removal that marked the cluster IN_SHRINK up front then asked it to
+    # migrate a volume was refused by its own bookkeeping -- observed live
+    # 2026-09-15, "Cluster ... is not active (status=in_shrink)", 52 retries.
+    #
+    # Nothing before the teardown is destructive: shutdown, the condition
+    # re-check, device rebuild and volume drain all leave a cluster that is
+    # still serving. IN_SHRINK belongs to the phases that actually dismantle
+    # the node, and is set there instead.
+    shrink_marked = False
     try:
         if not already_removed:
             # Phase 1 — shut the node down (graceful). Skipped on re-entry.
@@ -5419,6 +5430,13 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
             if not _drain_lvols_from_node(snode, cursor, db_controller):
                 return False
             snode = db_controller.get_storage_node_by_id(node_id)
+
+            # From here on the removal dismantles the node, so the cluster is
+            # genuinely shrinking. Set it now rather than at entry -- see the
+            # note above.
+            if not shrink_marked:
+                cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
+                shrink_marked = True
 
             if snode.status != StorageNode.STATUS_IN_REMOVAL:
                 set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
@@ -5539,7 +5557,8 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
 
         logger.info(f"[REMOVAL] {node_id}: done")
     finally:
-        cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
+        if shrink_marked:
+            cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
     return True
 
 

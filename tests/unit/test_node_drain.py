@@ -259,3 +259,39 @@ class TestDeviceWorkSplitFromJmWork(unittest.TestCase):
         self.assertLess(drain, teardown, "nothing may be torn down before the drain")
         self.assertLess(teardown, jm,
                         "phase 3a must still precede the JM decommission")
+
+
+class TestClusterStaysActiveUntilTeardown(unittest.TestCase):
+    """The drain cannot run against a cluster the removal has already marked
+    as shrinking.
+
+    migration_controller refuses to create or start a migration unless the
+    cluster is ACTIVE. The removal used to set IN_SHRINK at entry, covering the
+    whole orchestration -- so the drain asked for a migration the removal's own
+    bookkeeping had just made impossible: "Cluster ... is not active
+    (status=in_shrink)", 52 retries before it was caught (2026-09-15).
+
+    Nothing before the teardown is destructive, so IN_SHRINK belongs to the
+    phases that actually dismantle the node.
+    """
+
+    def _source(self):
+        return __import__("inspect").getsource(
+            storage_node_ops.node_removal_orchestrate)
+
+    def test_shrink_is_marked_after_the_drain_not_before(self):
+        src = self._source()
+        shrink = src.index("Cluster.STATUS_IN_SHRINK")
+        drain = src.index('cursor.enter("drain_lvols"')
+        devices = src.index('cursor.enter("migrate_devices"')
+        self.assertGreater(
+            shrink, drain,
+            "IN_SHRINK must be set after the volume drain -- migration is "
+            "refused while the cluster is not ACTIVE")
+        self.assertGreater(shrink, devices)
+
+    def test_the_status_is_only_restored_if_it_was_set(self):
+        """Early returns happen before the marker now, so the finally must not
+        restore a status it never changed."""
+        src = self._source()
+        self.assertIn("if shrink_marked:", src)
