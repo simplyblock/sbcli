@@ -14568,7 +14568,13 @@ def safe_delete_bdev(name, node_id):
 
     db_controller = DBController()
     primary_node = db_controller.get_storage_node_by_id(node_id)
-    secondary_node = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    # secondary_node_id is "" on a node with no secondary (ha_type single), and
+    # a blank id is a KeyError by contract -- see tests/unit/test_blank_id_
+    # lookups.py. Every other caller guards it; this one did not, so the first
+    # orphan on such a node aborted the whole repair with a traceback.
+    secondary_node = (
+        db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+        if primary_node.secondary_node_id else None)
     bdev_name = f"{primary_node.lvstore}/{name}"
     logger.info(f"deleting from primary: {bdev_name}")
     ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
@@ -14596,6 +14602,10 @@ def safe_delete_bdev(name, node_id):
                 return False
 
             logger.info(f"deletion completed on primary: {bdev_name}")
+            if secondary_node is None:
+                logger.info(f"no secondary for {primary_node.get_id()}; "
+                            f"deletion completed: {bdev_name}")
+                return True
             logger.info(f"deleting from secondary: {bdev_name}")
             ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, sync=True)
             if not ret:
@@ -14732,48 +14742,57 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
             else:
                 diff_clone_dict[blob] = out_blobid_dict[blob]
 
+    # Capture the status to restore. The entry guard above admits DEGRADED as
+    # well as ACTIVE, so writing ACTIVE back unconditionally promoted a
+    # degraded cluster to healthy just for having run a repair.
+    prev_cluster_status = cluster.status
     if not validate_only:
         cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_ACTIVATION)
         time.sleep(3)
 
-    print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
-    print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
-    print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
-    print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
-    print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
-    print("#########################################")
-    print("Safe lvols to be deleted:")
-    for blob, value in diff_lvol_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+    # try/finally, because every safe_delete_bdev below can raise (a node
+    # lookup, an RPC timeout, a wedged delete-status poll). Without it the
+    # first failure left the cluster parked in IN_ACTIVATION with no path back
+    # -- the repair looked destructive and was in fact completely ineffective.
+    try:
+        print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
+        print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
+        print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
+        print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
+        print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
+        print("#########################################")
+        print("Safe lvols to be deleted:")
+        for blob, value in diff_lvol_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Safe snaps to be deleted:")
+        for blob, value in diff_snap_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Safe clones to be deleted:")
+        for blob, value in diff_clone_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Manual bdeves to be deleted that have wrong ref number:")
+        for blob, value in manual_del.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only and force_remove_worng_ref:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Inconsistent bdeves to be checked:")
+        for blob, value in inconsistent_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only and force_remove_inconsistent:
+                safe_delete_bdev(value['name'], node_id)
+    finally:
         if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Safe snaps to be deleted:")
-    for blob, value in diff_snap_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Safe clones to be deleted:")
-    for blob, value in diff_clone_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Manual bdeves to be deleted that have wrong ref number:")
-    for blob, value in manual_del.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only and force_remove_worng_ref:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Inconsistent bdeves to be checked:")
-    for blob, value in inconsistent_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only and force_remove_inconsistent:
-            safe_delete_bdev(value['name'], node_id)
-
-    if not validate_only:
-        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_ACTIVE)
+            cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
 
     print("#########################################")
     print("All mgmt bdeves to be checked:")
