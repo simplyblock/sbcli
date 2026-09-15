@@ -416,7 +416,7 @@ jobs:
           [[ -n "${SSH_PASSWORD}" ]] || (echo "ERROR: secrets.SSH_PASSWORD required" && exit 1)
 
       - name: Check out the lab lock
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: |
             .github/actions/lab-lock
