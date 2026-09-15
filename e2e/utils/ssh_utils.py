@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 import paramiko
 # paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)

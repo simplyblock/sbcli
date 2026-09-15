@@ -108,6 +108,40 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
     # ------------------------------------------------------------------
     # Override: pick outage nodes from every node, not just primaries
     # ------------------------------------------------------------------
+    # Multipath axis. `random` keeps the historical 50/50 behaviour so
+    # existing runs do not silently lose coverage; the dual-outage matrix sets
+    # this explicitly per case.
+    MULTIPATH_MODE = "random"
+
+    def _multipath_selected(self):
+        """Whether to take the single-NIC-down path this iteration.
+
+        Split out so a skip says which precondition failed. The old single log
+        line covered both "fewer than 2 data NICs" and "lost the coin flip",
+        which meant a run with no multipath coverage was indistinguishable from
+        one whose hardware could not provide it.
+        """
+        mode = getattr(self, "MULTIPATH_MODE", "random")
+        if mode == "off":
+            self.logger.info("[multipath] skipped: MULTIPATH_MODE=off")
+            return False
+        if not self._is_multipath_enabled():
+            self.logger.info(
+                "[multipath] skipped: MULTIPATH_MODE=%s but not every node has "
+                "2+ data NICs", mode)
+            return False
+        if mode == "random":
+            picked = random.random() < 0.5
+            self.logger.info(
+                "[multipath] enabled and %s this iteration (MULTIPATH_MODE="
+                "random)", "selected" if picked else "not selected")
+            return picked
+        if mode == "single_nic_down":
+            self.logger.info("[multipath] single_nic_down (always on)")
+            return True
+        self.logger.info("[multipath] mode %r takes no action here", mode)
+        return False
+
     def perform_n_plus_k_outages(self):
         """
         Select K outage nodes randomly from ALL storage nodes (primary and
@@ -125,8 +159,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         """
         # ── Multipath: optionally disable one data NIC on ALL nodes ──────
         use_multipath_outage = False
-        if self._is_multipath_enabled() and random.random() < 0.5:
-            self.logger.info("Multipath detected and selected — disabling one data NIC on all nodes")
+        if self._multipath_selected():
             self.multipath_nic_disabled = True
             nic_plans = self._disconnect_single_data_nic_all_nodes()
             self.log_outage_event(

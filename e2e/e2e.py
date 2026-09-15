@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 import traceback
-from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, get_e2e_all_tests, ALL_TESTS
+from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, get_e2e_all_tests, ALL_TESTS, get_lblk_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -115,12 +115,19 @@ def main():
                         help="Path to simplyblock helm chart directory "
                              "(auto-detected from GITHUB_WORKSPACE if not set).",
                         default="")
+    # Pass these as --opt=value. The value is itself a string of flags, and
+    # argparse treats any token starting with a dash as an option, so the
+    # separated form fails with "expected one argument" on a value like
+    # '--lblk'. It happens to work for multi-word values only because argparse
+    # exempts anything containing a space. EXTRA_CLUSTER_ARGS/EXTRA_SN_ARGS in
+    # the environment sidestep the question entirely.
     parser.add_argument('--extra_cluster_args', type=str,
-                        help="Extra args appended to 'sbcli cluster create' "
-                             "(e.g. '--enable-node-affinity true').",
+                        help="Extra args appended to 'sbcli cluster create'. "
+                             "Use the = form: --extra_cluster_args='--device-mode lblk'.",
                         default=os.environ.get("EXTRA_CLUSTER_ARGS", ""))
     parser.add_argument('--extra_sn_args', type=str,
-                        help="Extra args for storage node add-node.",
+                        help="Extra args for storage node add-node. "
+                             "Use the = form: --extra_sn_args='--lblk'.",
                         default=os.environ.get("EXTRA_SN_ARGS", ""))
 
     args = parser.parse_args()
@@ -144,6 +151,8 @@ def main():
         test_class_run = get_backup_topology_tests()
     elif args.testname and args.testname.strip().lower() == "backup-stress":
         test_class_run = get_backup_stress_tests()
+    elif args.testname and args.testname.strip().lower() == "lblk":
+        test_class_run = get_lblk_tests()
     elif args.testname and args.testname.strip().lower() == "parity":
         test_class_run = get_parity_tests()
     elif args.testname and args.testname.strip().lower() == "e2e-all":

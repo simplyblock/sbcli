@@ -1,3 +1,8 @@
+# First, and before any test module: a few tests import the product for its
+# constants, and e2e runs from e2e/ where the repo root is not on sys.path.
+# See _product_path.py -- this used to work only by accident.
+import _product_path  # noqa: F401
+
 from e2e_tests.single_node_outage import (
     TestSingleNodeOutage,
     TestHASingleNodeOutage
@@ -94,6 +99,34 @@ from stress_test.continuous_bulk_lvol_delete import (
 from stress_test.large_scale_lvol_stress import (
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
+)
+from stress_test.dual_outage_matrix import (
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
+)
+from e2e_tests.lblk.test_lblk import (
+    LblkFunctionalDocker,
+    LblkFunctionalK8s,
+    LblkIntegrityDocker,
+    LblkIntegrityK8s,
+    LblkDeviceFaultDocker,
+    LblkDeviceFaultK8s,
+    LblkJournalRecoveryDocker,
+    LblkJournalRecoveryK8s,
+    LblkUnfencedJournalDocker,
+    LblkUnfencedJournalK8s,
+)
+from stress_test.lblk_stress import (
+    LblkStressDocker,
+    LblkStressK8s,
+    LblkMultiOutageStressDocker,
+    LblkResilientStressK8s,
+)
+from stress_test.product_limits_stress import (
+    ProductLimits_Docker,
+    ProductLimits_K8s,
+    ProductLimits_70TiB_Docker,
+    ProductLimits_70TiB_K8s,
 )
 from stress_test.mass_create_delete_stress import (
     MassCreateDelete_1x500_Docker,
@@ -443,6 +476,26 @@ ALL_TESTS = [
     BulkLvolHotDeleteK8s,
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
+    DualOutageMatrixDocker,
+    DualOutageMatrixK8s,
+    LblkFunctionalDocker,
+    LblkFunctionalK8s,
+    LblkIntegrityDocker,
+    LblkIntegrityK8s,
+    LblkDeviceFaultDocker,
+    LblkDeviceFaultK8s,
+    LblkJournalRecoveryDocker,
+    LblkJournalRecoveryK8s,
+    LblkUnfencedJournalDocker,
+    LblkUnfencedJournalK8s,
+    LblkStressDocker,
+    LblkStressK8s,
+    LblkMultiOutageStressDocker,
+    LblkResilientStressK8s,
+    ProductLimits_Docker,
+    ProductLimits_K8s,
+    ProductLimits_70TiB_Docker,
+    ProductLimits_70TiB_K8s,
     MassCreateDelete_1x500_Docker,
     MassCreateDelete_30x100_Docker,
     MassCreateDelete_300x10_Docker,
@@ -728,6 +781,16 @@ def get_stress_tests():
         BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
+        DualOutageMatrixDocker,
+        DualOutageMatrixK8s,
+        LblkStressDocker,
+        LblkStressK8s,
+        LblkMultiOutageStressDocker,
+        LblkResilientStressK8s,
+        ProductLimits_Docker,
+        ProductLimits_K8s,
+        ProductLimits_70TiB_Docker,
+        ProductLimits_70TiB_K8s,
         MassCreateDelete_1x500_Docker,
         MassCreateDelete_30x100_Docker,
         MassCreateDelete_300x10_Docker,
@@ -929,6 +992,29 @@ def get_load_tests():
         TestLvolOutageLoadTest
     ]
     return tests
+
+
+def get_lblk_tests():
+    """Functional and integration coverage for lblk (non-NVMe) clusters.
+
+    Every one of these asserts device_mode == "lblk" first and fails fast if
+    not, so pointing this at an NVMe cluster reports a precondition error
+    rather than quietly passing against the wrong storage path.
+
+    The open-ended soak is LblkStress* in get_stress_tests().
+    """
+    return [
+        LblkFunctionalDocker,
+        LblkFunctionalK8s,
+        LblkIntegrityDocker,
+        LblkIntegrityK8s,
+        LblkDeviceFaultDocker,
+        LblkDeviceFaultK8s,
+        LblkJournalRecoveryDocker,
+        LblkJournalRecoveryK8s,
+        LblkUnfencedJournalDocker,
+        LblkUnfencedJournalK8s,
+    ]
 
 
 def get_parity_tests():

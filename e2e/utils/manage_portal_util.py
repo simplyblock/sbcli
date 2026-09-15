@@ -1,4 +1,6 @@
 # utils/supabase_test_runs.py
+from __future__ import annotations
+
 import os
 import requests
 from datetime import datetime, UTC
