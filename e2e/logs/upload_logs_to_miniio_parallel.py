@@ -7,6 +7,7 @@ Parallel MinIO uploader with:
 - Robust JSON embedding via SFTP (no giant heredocs)
 - Remote uploader accepts [src, key] OR {"src":..., "key":...}
 """
+from __future__ import annotations
 
 import os
 import json

@@ -42,6 +42,7 @@ Config: .agents/repo-map.config.json (see repo-map.config.example.json).
 Output: .agents/repo-maps/<name>.md, which is gitignored by default because it
 is a derived artefact and its size scales with someone else's repo.
 """
+from __future__ import annotations
 
 import argparse
 import contextlib
