@@ -20,8 +20,8 @@
 #
 # What it does
 # ------------
-#   1. Look for an interpreter >= the required minor on PATH.
-#   2. If there is none, fetch one with uv -- no root, no system packages.
+#   1. Get CPython 3.11 through uv, so every runner uses the same one.
+#   2. Fall back to a host interpreter only if uv cannot be obtained.
 #   3. Build (or reuse) a venv from it and install e2e/requirements.txt.
 #   4. Put that venv first on PATH, so every later `python3` in the workflow
 #      resolves to it with no other edits.
@@ -139,20 +139,30 @@ install_with_uv() {
 }
 
 # ── 1/2. get an interpreter ────────────────────────────────────────────────
-BASE_PYTHON="$(find_host_python || true)"
-if [[ -n "$BASE_PYTHON" ]]; then
-    log "found $("$BASE_PYTHON" -V 2>&1) at $BASE_PYTHON"
-else
-    log "no Python >= ${REQUIRED_MAJOR}.${REQUIRED_MINOR} on PATH"
-    BASE_PYTHON="$(install_with_uv || true)"
-    if [[ -z "$BASE_PYTHON" || ! -x "$BASE_PYTHON" ]] || ! version_ok "$BASE_PYTHON"; then
-        log "ERROR: could not obtain Python >= ${REQUIRED_MAJOR}.${REQUIRED_MINOR}."
-        log "       The e2e suite requires it (pyproject: requires-python >= 3.11)"
-        log "       and will fail at import on anything older."
-        exit 1
-    fi
-    log "using $("$BASE_PYTHON" -V 2>&1) at $BASE_PYTHON"
+#
+# uv first, always -- the same choice simplyBlockDeploy PR #221 makes for the
+# nodes. Preferring whatever the host has would mean runner2 on 3.12, runner3
+# on 3.9 and a third on 3.13, which is precisely the inconsistency that let a
+# PEP 604 annotation pass for weeks and then fail hours into a bootstrap. One
+# pinned interpreter everywhere is worth more than saving a cached download.
+#
+# Both uv and its CPython are cached under our own directory, so the network is
+# only touched the first time a given runner runs this.
+BASE_PYTHON="$(install_with_uv || true)"
+if [[ -z "$BASE_PYTHON" || ! -x "$BASE_PYTHON" ]] || ! version_ok "$BASE_PYTHON"; then
+    # Fall back to a host interpreter only if uv could not be had at all -- an
+    # offline runner with a good 3.11 should still be able to run the suite.
+    log "uv path unavailable; looking for a host Python >= ${REQUIRED_MAJOR}.${REQUIRED_MINOR}"
+    BASE_PYTHON="$(find_host_python || true)"
 fi
+if [[ -z "$BASE_PYTHON" || ! -x "$BASE_PYTHON" ]] || ! version_ok "$BASE_PYTHON"; then
+    log "ERROR: could not obtain Python >= ${REQUIRED_MAJOR}.${REQUIRED_MINOR}."
+    log "       e2e requires it -- e2e_tests/cluster_test_base.py does"
+    log "       'from datetime import UTC', which is 3.11+ and cannot be"
+    log "       polyfilled, so every test fails at import on anything older."
+    exit 1
+fi
+log "using $("$BASE_PYTHON" -V 2>&1) at $BASE_PYTHON"
 
 # ── 3. venv ────────────────────────────────────────────────────────────────
 # Reused across runs and revalidated every time: a venv left over from an
