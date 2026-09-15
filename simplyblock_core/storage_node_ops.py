@@ -3122,6 +3122,7 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
             ok, err = snode_api.persist_node_config(
                 max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
                 ssd_list=entry.get("ssd_pcis"),
+                lblk_serials=utils.lblk_device_serials(entry.get("lblk_devices")),
                 cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
                 l_cores=entry["l-cores"], distribution=entry["distribution"],
                 core_to_index={str(k): v for k, v in entry["core_to_index"].items()},
@@ -3179,6 +3180,7 @@ def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
     ok, err = snode_api.persist_node_config(
         max_lvol=None, huge_page_memory=huge_page_memory, numa_node=node_config.get("socket"),
         ssd_list=node_config.get("ssd_pcis"),
+        lblk_serials=utils.lblk_device_serials(node_config.get("lblk_devices")),
         small_pool_count=small_pool_count, large_pool_count=large_pool_count)
     if not ok:
         logger.error("Failed to persist the recalculated huge-page sizing: %s", err)
@@ -7242,7 +7244,20 @@ def _restart_storage_node_impl(
 
         fdb_connection = cluster.db_connection
         if lvol_changed:
-            snode_api.persist_node_config(snode.max_lvol, minimum_hp_memory, snode.socket, snode.ssd_pcie)
+            # Keyword args: the positional order here silently paired
+            # huge_page_memory/numa_node/ssd_list correctly only by luck, and
+            # an unchecked result meant an lblk node (whose ssd_pcie is always
+            # empty) restarted against a stale config with no sign of it.
+            ok, err = snode_api.persist_node_config(
+                max_lvol=snode.max_lvol, huge_page_memory=minimum_hp_memory,
+                numa_node=snode.socket, ssd_list=snode.ssd_pcie,
+                lblk_serials=utils.lblk_device_serials(snode.lblk_devices))
+            if not ok:
+                logger.error(
+                    "Failed to persist max_lvol=%s for node %s: %s -- refusing "
+                    "to restart SPDK against a config that does not match it",
+                    snode.max_lvol, snode.get_id(), err)
+                return False
         snode_api.set_hugepages()
         # A restart must actually bounce SPDK: see ensure_spdk_stopped.
         # snode.api_endpoint is already rewritten to node_address above when

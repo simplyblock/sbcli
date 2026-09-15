@@ -4,7 +4,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import docker
 import psutil
@@ -878,17 +878,34 @@ def bind_device_to_spdk(body: utils.DeviceParams):
     return utils.get_response(True)
 
 
+def _node_config_device_ids(node_config: dict) -> set[str]:
+    """Identity of a node-config entry's device set, whichever device mode the
+    host is in: PCI addresses (nvme) or block-device serials (lblk). A valid
+    entry carries exactly one non-empty list, so the union identifies the
+    entry without this endpoint having to know the cluster's mode.
+    """
+    return (set(node_config.get("ssd_pcis") or [])
+            | core_utils.lblk_device_serials(node_config.get("lblk_devices")))
+
+
 class PersistNodeConfigParams(BaseModel):
-    max_lvol: int | None = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
-    huge_page_memory: int | None = Field(None, ge=0)
+    max_lvol: Annotated[int | None, Field(ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)] = None
+    huge_page_memory: Annotated[int | None, Field(ge=0)] = None
     # small/large_pool_count are written alongside huge_page_memory whenever
     # add_node recalculates it against the cluster's real max_lvol/core count
     # -- they are what that memory figure was derived from (calculate_pool_count
     # -> calculate_minimum_hp_memory), so they must never drift from it.
-    small_pool_count: int | None = Field(None, ge=0)
-    large_pool_count: int | None = Field(None, ge=0)
-    numa_node: int | None = Field(None, ge=0)
-    ssd_list: list[str] | None = Field(None)
+    small_pool_count: Annotated[int | None, Field(ge=0)] = None
+    large_pool_count: Annotated[int | None, Field(ge=0)] = None
+    # Which node slot to write. A host can carry several (one per socket, and
+    # more than one per socket when nodes_per_socket > 1), so the socket alone
+    # does not identify one -- the slot's device set is what tells them apart.
+    # Whichever device list this host's mode uses is the one that arrives:
+    # PCI addresses in nvme mode, lblk device serials in lblk mode. Both empty
+    # means "don't filter on devices", NOT "match nothing".
+    numa_node: Annotated[int | None, Field(ge=0)] = None
+    ssd_list: list[str] | None = None
+    lblk_serials: list[str] | None = None
     # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
     # storage_node_ops.apply_cluster_vcpu_count). Written together, once, by
     # the same caller -- never partially, so the file never holds a mask from
@@ -898,7 +915,7 @@ class PersistNodeConfigParams(BaseModel):
     l_cores: str | None = None
     distribution: dict | None = None
     core_to_index: dict | None = None
-    number_of_distribs: int | None = Field(None, ge=0)
+    number_of_distribs: Annotated[int | None, Field(ge=0)] = None
 
 
 @api.post('/persist_node_config', responses={
@@ -911,12 +928,19 @@ def persist_node_config(body: PersistNodeConfigParams):
     if not node_info.get("nodes"):
         return utils.get_response(False, "Config not found")
 
-    ssd_set = set(body.ssd_list) if body.ssd_list is not None else None
+    # An EMPTY device list means the caller is not filtering on devices, the
+    # same as sending none at all -- never "match nothing". lblk-mode configs
+    # always carry ssd_pcis == [] (generate_configs seeds it, validate_config
+    # requires exactly one of the two lists to be non-empty), so treating []
+    # as a filter made every lblk node unmatchable and failed every add-node
+    # that reached here.
+    requested_devices = set(body.ssd_list or []) | set(body.lblk_serials or [])
     matched = False
     for node_config in node_info["nodes"]:
         if body.numa_node is not None and node_config["socket"] != body.numa_node:
             continue
-        if ssd_set is not None and not ssd_set.intersection(set(node_config.get("ssd_pcis", []))):
+        if requested_devices and not requested_devices.intersection(
+                _node_config_device_ids(node_config)):
             continue
         if body.max_lvol is not None:
             node_config["max_lvol"] = body.max_lvol
@@ -942,7 +966,10 @@ def persist_node_config(body: PersistNodeConfigParams):
         break
 
     if not matched:
-        return utils.get_response(False, "No matching node found for given numa_node and ssd_list")
+        return utils.get_response(
+            False,
+            f"No node config entry matches numa_node={body.numa_node} and "
+            f"devices={sorted(requested_devices)}")
 
     # isolated_cores/host_cpu_mask are the union of every node's "isolated"
     # list, computed once at configure time (generate_configs/regenerate_
