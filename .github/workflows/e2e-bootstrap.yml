@@ -823,14 +823,18 @@ jobs:
           test -f sbcli/e2e/e2e.py
           test -f sbcli/e2e/logs/cleanup.py
 
-      - name: Install Python deps (best-effort)
+      # Pins the interpreter the suite actually runs on. The workflows invoke
+      # e2e as a bare `python3`, so which Python that is depends on the runner:
+      # actions-runner2 ran the suite for hours while actions-runner-3, on an
+      # older Python, died at import on a PEP 604 annotation. This puts a 3.11
+      # venv first on PATH so every later `python3` resolves to it, fetching a
+      # standalone interpreter only if the host has none. It never modifies or
+      # replaces a Python the host already has.
+      - name: Ensure Python 3.11 for e2e
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
-            pip install -r sbcli/e2e/requirements.txt
-          fi
+          bash sbcli/e2e/scripts/ensure_python.sh
 
       - name: Cleanup logs before e2e
         shell: bash
