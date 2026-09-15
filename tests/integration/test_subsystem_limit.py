@@ -43,9 +43,14 @@ def _node(uuid, max_lvol=3, status=StorageNode.STATUS_ONLINE,
     return n
 
 
-def _lvol(uuid, node_id, nqn=None, max_ns=1, status=LVol.STATUS_ONLINE):
+POOL = "pool-1"
+
+
+def _lvol(uuid, node_id, nqn=None, max_ns=1, status=LVol.STATUS_ONLINE,
+          pool=POOL):
     lv = LVol()
     lv.uuid = uuid
+    lv.pool_uuid = pool
     lv.node_id = node_id
     lv.nqn = nqn or f"nqn.unique:{uuid}"
     lv.status = status
@@ -69,7 +74,7 @@ def _flatten(nodes, lvols_by_node):
 
 
 def _call_get_next_3_nodes(nodes, lvols_by_node, cluster_id="cluster-1",
-                           namespaced=False):
+                           namespaced=False, pool_id=POOL):
     """Call _get_next_3_nodes with the DB mocked out.
 
     Subsystem counting works on the pre-fetched ``all_lvols`` list (one
@@ -89,7 +94,7 @@ def _call_get_next_3_nodes(nodes, lvols_by_node, cluster_id="cluster-1",
 
         with patch.object(StorageNode, 'lvol_sync_del', return_value=False):
             return _get_next_3_nodes(cluster_id, all_lvols=all_lvols,
-                                     namespaced=namespaced)
+                                     namespaced=namespaced, pool_id=pool_id)
 
 
 # ===========================================================================
@@ -294,6 +299,25 @@ class TestGetNext3NodesNamespaced(unittest.TestCase):
         self.assertIn(node_parent, result)
         self.assertIn(node_empty, result)
 
+    def test_namespaced_other_pools_slot_does_not_attract(self):
+        """A joinable subsystem of ANOTHER pool is not a free slot for this
+        pool: the node is not preferred and, at max_lvol, not eligible."""
+        node_parent = _node("n-parent", max_lvol=10)
+        node_empty = _node("n-empty", max_lvol=10)
+        lvols = [_lvol("parent", "n-parent", nqn="nqn:parent", max_ns=300,
+                       pool="pool-other")]
+        result = _call_get_next_3_nodes([node_parent, node_empty], lvols,
+                                        namespaced=True)
+        self.assertIn(node_parent, result)
+        self.assertIn(node_empty, result)
+
+        full = _node("n-full", max_lvol=1)
+        lvols = [_lvol("parent", "n-full", nqn="nqn:parent", max_ns=300,
+                       pool="pool-other")]
+        self.assertEqual(_call_get_next_3_nodes([full], lvols, namespaced=True), [])
+        self.assertIn(full, _call_get_next_3_nodes([full], lvols, namespaced=True,
+                                                   pool_id="pool-other"))
+
     def test_namespaced_no_slots_anywhere_falls_back_to_normal(self):
         """With no joinable subsystem on any node, namespaced creates fall
         back to the normal selection over nodes below the limit."""
@@ -332,6 +356,22 @@ class TestResolveLvolSubsystem(unittest.TestCase):
         self.assertEqual(new_lvol.nqn, "nqn:parent")
         self.assertEqual(new_lvol.namespace, "parent")
         self.assertEqual(new_lvol.max_namespace_per_subsys, 300)
+
+    def test_namespaced_never_joins_other_pools_subsystem(self):
+        """Subsystem/pool alignment: with room only in another pool's
+        subsystem, the lvol opens its own (and hits the cap on a full node)."""
+        parent = _lvol("parent", "n1", nqn="nqn:parent", max_ns=300, pool="pool-other")
+        new_lvol = _lvol("new", "n1")
+
+        ok, error = self._resolve(new_lvol, _node("n1", max_lvol=10), True, [parent])
+        self.assertTrue(ok, error)
+        self.assertNotEqual(new_lvol.nqn, "nqn:parent")
+        self.assertIn(new_lvol.uuid, new_lvol.nqn)
+
+        new_lvol = _lvol("new2", "n1")
+        ok, error = self._resolve(new_lvol, _node("n1", max_lvol=1), True, [parent])
+        self.assertFalse(ok)
+        self.assertIn("Too many subsystems", error)
 
     def test_namespaced_rejected_on_full_node_without_slot(self):
         node = _node("n1", max_lvol=1)

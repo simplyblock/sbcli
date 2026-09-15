@@ -61,19 +61,52 @@ def repairs_allowed(node) -> bool:
         StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN)
 
 
-def _restart_owns_lvs(primary_node) -> bool:
-    """True if the restart task currently owns ``primary_node.lvstore``.
+def _restart_owns_lvs(primary_node, db_controller=None) -> bool:
+    """True if a restart task currently owns ``primary_node.lvstore``.
 
-    While ``primary_node.restart_phases[lvs]`` is set (pre_block / blocked /
+    While ``restart_phases[lvs]`` is set (pre_block / blocked /
     post_unblock), the restart runner is the exclusive author of hublvol
-    attach/detach on that LVS. The periodic health repair must stand aside
-    so it doesn't issue a parallel bdev_nvme_attach_controller on the same
+    attach/detach AND of the port fences on that LVS. The periodic health
+    repair and the monitor's stale-port-block remediation must stand aside
+    so they don't issue a parallel bdev_nvme_attach_controller on the same
     subnqn — that was the class of race that produced
     "bdev_nvme_check_multipath: cntlid N are duplicated" and left the
-    tertiary without a hublvol to primary.
+    tertiary without a hublvol to primary — or lift a fence the restart is
+    still relying on.
+
+    The phase is stamped on the node RUNNING the restart, keyed by the
+    lvstore NAME: ``_recreate_lvstore_impl`` stamps the primary itself, but
+    ``_recreate_lvstore_on_non_leader_impl`` stamps the restarting FOLLOWER
+    for the primary's lvstore. Checking only the primary's record therefore
+    misses a follower restart — which is precisely when follower ports are
+    fenced. Pass ``db_controller`` to check the follower records too; a
+    follower that cannot be read counts as owning, because "unknown" must
+    never license lifting a fence.
     """
-    phases = getattr(primary_node, "restart_phases", None) or {}
-    return bool(phases.get(primary_node.lvstore))
+    lvs = getattr(primary_node, "lvstore", None)
+    if not lvs:
+        return False
+
+    def _owns(node):
+        phases = getattr(node, "restart_phases", None) or {}
+        return bool(phases.get(lvs))
+
+    if _owns(primary_node):
+        return True
+    if db_controller is None:
+        return False
+    for nid in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+        if not nid:
+            continue
+        try:
+            follower = db_controller.get_storage_node_by_id(nid)
+        except Exception:
+            return True  # unreadable follower -> assume a restart owns it
+        if follower is None:
+            continue
+        if _owns(follower):
+            return True
+    return False
 
 
 def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
@@ -464,33 +497,22 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             # _collect_attached_ips holds the same rule for device controllers,
             # including the older single-entry/alternate_trids shape.
             attached_ips = storage_node_ops._collect_attached_ips(ret)
-
-            def _data_ips(peer):
-                ips = set()
-                for iface in peer.data_nics:
-                    if (peer.active_rdma and iface.trtype == "RDMA") or                        (not peer.active_rdma and peer.active_tcp
-                            and iface.trtype == "TCP"):
-                        ips.add(iface.ip4_address)
-                return ips
-
-            # Expected paths depend on the ROLE of this node, not just on the
-            # primary. A secondary connects to the primary (2 paths); a
-            # tertiary connects to the primary AND the secondary (4 paths).
-            # Built from the primary alone, a tertiary that came up with only
-            # one of the secondary's two paths looked complete here — the
-            # primary's paths were all present, missing_ips was empty, and the
-            # 3-path controller sat unrepaired forever (both tertiaries on the
-            # fresh 2026-08-24 deploy, always missing the secondary's second
-            # NIC; the len(ctrlrs) < 2 branch above cannot see it either).
-            expected_ips = _data_ips(primary_node)
+            expected_ips = set()
+            for iface in primary_node.data_nics:
+                if (primary_node.active_rdma and iface.trtype == "RDMA") or                    (not primary_node.active_rdma and primary_node.active_tcp
+                        and iface.trtype == "TCP"):
+                    expected_ips.add(iface.ip4_address)
+            # Tertiary nodes connect to both primary AND secondary; include
+            # secondary NIPs so a missing secondary path is detected.
             if is_sec2 and primary_node.secondary_node_id:
                 try:
                     _sec1 = db_controller.get_storage_node_by_id(
                         primary_node.secondary_node_id)
-                    if _sec1.status in (StorageNode.STATUS_ONLINE,
-                                        StorageNode.STATUS_DOWN):
-                        expected_ips |= _data_ips(_sec1)
-                except KeyError:
+                    for iface in _sec1.data_nics:
+                        if (_sec1.active_rdma and iface.trtype == "RDMA") or                            (not _sec1.active_rdma and _sec1.active_tcp
+                                and iface.trtype == "TCP"):
+                            expected_ips.add(iface.ip4_address)
+                except Exception:
                     pass
             # A duplicated address is invisible to the set comparison below --
             # (96.179, 97.9, 97.9) reads as 2-of-2 -- so it must be checked
@@ -974,20 +996,30 @@ def check_node(node_id, with_devices=True):
             for remote_device in snode.remote_jm_devices:
 
                 name = remote_device.remote_bdev
-                bdev_info = rpc_client.get_bdevs(name)
-                logger.log(INFO if bdev_info else ERROR,
-                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                # Owner resolved BEFORE the probe, not after. Previously the
+                # RPC went out unconditionally and the ERROR line was logged
+                # before anything knew the owner was gone -- so a removed
+                # node's stale entry cost one RPC per cycle and left an ERROR
+                # in the log that the very next line classified as expected,
+                # and never retracted. Live 2026-09-02: 1797 such hits on one
+                # removed node's JM.
                 try:
                     jm_owner = db_controller.get_storage_node_by_id(remote_device.node_id)
                 except KeyError:
                     jm_owner = None
-                if _peer_connections_relevant(jm_owner):
-                    node_remote_devices_check &= bool(bdev_info)
-                elif not bdev_info:
+                owner_relevant = _peer_connections_relevant(jm_owner)
+                if not owner_relevant:
                     logger.info(
-                        "Remote JM %s missing, but owning node %s is %s — expected, "
-                        "not failing health", name, remote_device.node_id,
+                        "Remote JM %s belongs to node %s (%s); not probing and not "
+                        "failing health", name, remote_device.node_id,
                         jm_owner.status if jm_owner else "not-found")
+                    connected_jms.append(remote_device.get_id())
+                    continue
+
+                bdev_info = rpc_client.get_bdevs(name)
+                logger.log(INFO if bdev_info else ERROR,
+                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                node_remote_devices_check &= bool(bdev_info)
                 connected_jms.append(remote_device.get_id())
 
                 controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
@@ -1141,6 +1173,26 @@ def check_remote_device(device_id, target_node=None):
     except KeyError:
         logger.exception("node not found")
         return False
+
+    # The device's OWNER decides whether a remote connection to it is even
+    # expected. Skip the probe entirely when it is not -- same rule, and the
+    # same reason, as the remote-JM loop above: a missing connection to a
+    # departed owner is the expected consequence of its teardown.
+    #
+    # Gating only the verdict is not enough. The caller already discards the
+    # result for an irrelevant owner, but it calls this function first, so the
+    # two RPCs below still went out on every cycle for every surviving node.
+    # For a REMOVED node's devices that never stops: each miss makes SPDK log
+    # `*ERROR*: ctrlr 'remote_alceml_<uuid>' does not exist`, measured at
+    # 3-15 errors/min still climbing 35 minutes after the removal that made
+    # those devices failed_and_migrated (2026-09-03, devices 04fce724 /
+    # b0ada39d / ddf660f5 of the removed 2vk79, probed by 9 surviving nodes).
+    # Real faults then drown in a permanent error stream.
+    if not _peer_connections_relevant(snode):
+        logger.info(
+            "Remote device %s belongs to node %s (%s); not probing and not "
+            "failing health", device_id, device.node_id, snode.status)
+        return True
 
     result = True
     if target_node:

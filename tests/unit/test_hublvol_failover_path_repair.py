@@ -113,10 +113,14 @@ class TestStaleFenceRemediation:
         assert "NOT unblocking" in src
 
     def test_it_stands_down_for_restart_owned_lvs(self):
+        """The db handle is part of the gate, not decoration: the phase for a
+        FOLLOWER restart is stamped on the follower's own record, so checking
+        only the primary would miss the window in which follower ports are
+        legitimately fenced (k8s 2026-09-11)."""
         import inspect as _i
         from simplyblock_core.services import storage_node_monitor
         src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)
-        assert "_restart_owns_lvs(owner)" in src
+        assert "_restart_owns_lvs(owner, db)" in src
 
     def test_it_requires_the_node_to_be_online(self):
         import inspect as _i

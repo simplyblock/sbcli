@@ -9,7 +9,8 @@ import time
 import uuid
 from datetime import datetime
 
-from simplyblock_core.controllers import ops_gate
+from simplyblock_core.controllers import object_limits, ops_gate
+from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
 
@@ -706,7 +707,23 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         cached_mini_snapshots(db_controller))
     if limit_error:
         logger.error(limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, lvol, limit_error,
+            limit_key=f"lvstore_objects:{snode.get_id()}")
         return False, limit_error
+
+    # Hard per-volume snapshot cap (active = not deleted). Internal snapshots
+    # (replication / migration) are exempt so a volume at the cap can still be
+    # replicated and migrated; they are transient and cleaned up by their owner.
+    if snap_type == SnapShot.TYPE_USER:
+        snap_limit_error = object_limits.check_snapshot_limit(
+            lvol_id, cached_mini_snapshots(db_controller))
+        if snap_limit_error:
+            logger.error(snap_limit_error)
+            events_controller.log_object_limit_reached(
+                pool.cluster_id, lvol, snap_limit_error,
+                limit_key=f"snapshots:{lvol_id}")
+            return False, snap_limit_error
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
@@ -1014,7 +1031,6 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
 
     data = []
     for snap in snaps:
-        logger.debug(snap)
         clones = clones_by_snap.get(snap.get_id(), [])
         d = {
             "UUID": snap.uuid,
@@ -1384,7 +1400,28 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         cached_mini_snapshots(db_controller))
     if limit_error:
         logger.error(limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, snap, limit_error,
+            limit_key=f"lvstore_objects:{snode.get_id()}")
         return False, limit_error
+
+    # Hard per-snapshot clone cap (active = not deleted) and the volume size cap
+    # on a clone-with-resize.
+    clone_limit_error = object_limits.check_clone_limit(
+        snapshot_id, cached_mini_lvols(db_controller))
+    if clone_limit_error:
+        logger.error(clone_limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, snap, clone_limit_error,
+            limit_key=f"clones:{snapshot_id}")
+        return False, clone_limit_error
+    if new_size:
+        size_error = object_limits.check_lvol_size(new_size, what="Clone size")
+        if size_error:
+            logger.error(size_error)
+            events_controller.log_object_limit_reached(
+                pool.cluster_id, snap, size_error, limit_key="lvol_size")
+            return False, size_error
 
     # Clone-name uniqueness / reuse via the per-pool lvol name index (O(1) point
     # read) instead of scanning every lvol in the DB.
@@ -1449,7 +1486,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     # ADVISORY early capacity check only — the authoritative namespace-slot
     # pick happens transactionally in claim_lvol_ns_slot at record-write time
     # (two concurrent clones/creates otherwise race for the same last slot).
-    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
+    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(
+        snode.get_id(), all_lvols=all_lvols, pool_id=pool.get_id()) if namespaced else None
 
     if not _available_subsys:
         subsys_count = lvol_controller.count_lvol_subsystems(snode, all_lvols)

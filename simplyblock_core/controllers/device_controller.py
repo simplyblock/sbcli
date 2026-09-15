@@ -1228,7 +1228,6 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
 
     out = []
     for record in records_list:
-        logger.debug(record)
         out.append({
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
             "Absolut": utils.humanbytes(record['size_total']),

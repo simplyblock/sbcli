@@ -397,7 +397,6 @@ def list_migrations(cluster_id=None):
 
     data = []
     for m in reversed(migrations):  # newest first
-        logger.debug(m)
         data.append({
             "Migration ID": m.uuid,
             "Volume ID": m.lvol_id,

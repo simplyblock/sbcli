@@ -576,7 +576,6 @@ def list_backups(cluster_id=None):
     backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     data = []
     for b in backups:
-        logger.debug(b)
         source = b.source_cluster_id or b.cluster_id
         is_external = source != b.cluster_id
         entry = {

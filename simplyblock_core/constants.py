@@ -72,6 +72,14 @@ DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
 #: is no discard counterpart -- jm_get_events returns every event it holds on
 #: every call -- so the collector filters what it has already logged and the
 #: poll can afford to be less frequent than the distrib one.
+#: How many of the newest event-log records the alerts endpoint scans.
+#: The event-derived alert rules only look back EVENT_WINDOW_SEC, so this
+#: only has to exceed the number of events a busy cluster can produce in
+#: that window. It exists to bound the cost: an unbounded scan of a
+#: months-old event log on every poll of a monitoring endpoint is the one
+#: thing this endpoint must not do.
+ALERT_EVENT_SCAN_LIMIT = 2000
+
 JM_EVENT_COLLECTOR_INTERVAL_SEC = 10
 #: How many recently-logged JM event keys to remember per node for that filter.
 JM_EVENT_DEDUPE_MAX = 10000
@@ -367,7 +375,32 @@ INSTANCE_STORAGE_DATA = {
         'm6id.8xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1900},
     }
 
-MAX_SNAP_COUNT = 100
+# ---------------------------------------------------------------------------
+# Hard object limits (enforced on every create / resize path, CLI and API).
+#
+# These are product limits, not capacity math: they bound the shapes that the
+# SPDK blobstore/lvol layer has been validated to serve without degradation.
+#
+# MAX_LVOL_SIZE            largest provisioned size of one volume (create,
+#                          resize, clone --resize, and the thin max_size ceiling).
+# MAX_SNAPSHOTS_PER_LVOL   active (non-deleted) snapshots of one volume. A
+#                          volume's snapshots form one blob chain; every
+#                          snapshot deepens the chain that reads of that volume
+#                          and its clones must walk.
+# MAX_CLONES_PER_SNAPSHOT  active (non-deleted) clones created from one
+#                          snapshot.
+#
+# Deleted objects never count; objects in deletion still do (they are still in
+# the chain until the delete completes). Internal snapshots (replication /
+# migration, SnapShot.TYPE_INTERNAL) are exempt from the snapshot cap so a
+# volume at the cap can still be replicated and migrated -- they are transient.
+# ---------------------------------------------------------------------------
+MAX_LVOL_SIZE = 70 * 1024 ** 4          # 70 TiB
+MAX_SNAPSHOTS_PER_LVOL = 100
+MAX_CLONES_PER_SNAPSHOT = 500
+
+# Backward-compatible alias (previously defined but never enforced).
+MAX_SNAP_COUNT = MAX_SNAPSHOTS_PER_LVOL
 
 # Hard per-lvstore object cap: an lvstore serves at most this many objects
 # (lvols + clones + snapshots), counted against the lvstore's owning node.

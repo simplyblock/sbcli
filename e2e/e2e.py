@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 import traceback
-from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, ALL_TESTS
+from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, get_e2e_all_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -146,6 +146,8 @@ def main():
         test_class_run = get_backup_stress_tests()
     elif args.testname and args.testname.strip().lower() == "parity":
         test_class_run = get_parity_tests()
+    elif args.testname and args.testname.strip().lower() == "e2e-all":
+        test_class_run = get_e2e_all_tests()
     elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
@@ -305,6 +307,11 @@ def main():
 
     errors = {}
     passed_cases = []
+    # Per-test NFS log directory, for the Slack summary. A failure
+    # notification that names the test but not its logs makes the reader go
+    # hunting for a path the run summary already knew.
+    test_log_paths = {}
+
     for i, test in enumerate(test_class_run):
         logger.info(f"Running Test {test}")
         test_obj = test(fio_debug=args.fio_debug,
@@ -324,6 +331,16 @@ def main():
                         )
         try:
             test_obj.setup()
+            # After setup(), not inside it: several test classes replace
+            # setup() wholesale without calling super(), so anything wired
+            # into the base setup silently does not run for them. Guarded
+            # because a diagnostic collector must never fail the test it
+            # is only there to observe.
+            try:
+                test_obj.start_alert_collection()
+            except Exception:
+                logger.error("Error starting alert collection")
+                logger.error(traceback.format_exc())
             if i == 0:
                 test_obj.cleanup_logs()
                 test_obj.configure_sysctl_settings()
@@ -365,6 +382,14 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            # In finally, so the samples and summary survive a teardown that
+            # threw before reaching its own stop call.
+            try:
+                test_obj.stop_alert_collection()
+            except Exception:
+                logger.error("Error stopping alert collection")
+                logger.error(traceback.format_exc())
+
             # Print log path FIRST — before any file copies or core dump
             # checks that might break/hang.  The workflow summary parses
             # "Logs Path:" from output.log to build the per-test table.
@@ -372,6 +397,7 @@ def main():
 
             # Copy e2e/logs/ folder to NFS so automation logs are accessible post-run
             log_path = getattr(test_obj, "docker_logs_path", "")
+            test_log_paths[test.__name__] = log_path
             if log_path:
                 logs_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
                 if os.path.isdir(logs_src):
@@ -492,6 +518,9 @@ def main():
         elif test.__name__ in failed_cases:
             logger.info(f"{test.__name__} FAILED CASE.")
             summary += f"❌ {test.__name__}: *FAILED*\n"
+            _lp = test_log_paths.get(test.__name__)
+            if _lp:
+                summary += f"    `{_lp}`\n"
         else:
             logger.info(f"{test.__name__} SKIPPED CASE.")
             summary += f"⚠️ {test.__name__}: *SKIPPED*\n"

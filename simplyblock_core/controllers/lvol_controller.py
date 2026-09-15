@@ -7,7 +7,8 @@ from datetime import datetime
 from typing import Any
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import ops_gate
+from simplyblock_core.controllers import object_limits, ops_gate
+from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -120,6 +121,9 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #  size validation
     if size < utils.parse_size('100MiB'):
         return False, "Size must be larger than 100M"
+    size_error = object_limits.check_lvol_size(size)
+    if size_error:
+        return False, size_error
 
     #  host validation
     # snode = db_controller.get_storage_node_by_id(host_id_or_name)
@@ -204,7 +208,16 @@ def max_subsystems_for_node(node):
     return node.max_lvol
 
 
-def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False):
+def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
+                      pool_id=None):
+    """Pick candidate primary nodes for a new lvol.
+
+    ``pool_id`` is the pool of the lvol being placed; for namespaced creates
+    it decides which existing subsystems count as joinable (a shared
+    subsystem is exclusive to one pool -- see
+    ``get_next_available_subsystem_on_node``). Non-namespaced placement
+    ignores it.
+    """
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     if all_lvols is None:
@@ -220,7 +233,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
         if node.status == node.STATUS_ONLINE:
             subsys_count = count_lvol_subsystems(node, all_lvols)
             has_ns_slot = bool(
-                namespaced and get_next_available_subsystem_on_node(node.get_id(), all_lvols))
+                namespaced and get_next_available_subsystem_on_node(
+                    node.get_id(), all_lvols, pool_id=pool_id))
             if subsys_count >= max_subsystems_for_node(node) and not has_ns_slot:
                 # At subsystem capacity, and (for namespaced creates) no
                 # existing subsystem on the node has a free namespace slot.
@@ -396,8 +410,9 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
     otherwise both grab the same last free namespace slot). Whatever this
     function assigns to ``lvol.nqn``/``lvol.namespace`` is overwritten there.
 
-    A namespaced lvol joins an existing subsystem on the host node when one
-    has a free namespace slot; otherwise (and for non-namespaced lvols) a new
+    A namespaced lvol joins an existing subsystem OF ITS POOL on the host node
+    when one has a free namespace slot (``lvol.pool_uuid`` must already be
+    set); otherwise (and for non-namespaced lvols) a new
     subsystem is claimed. The node's ``max_lvol`` subsystem cap is enforced
     only when a new subsystem would actually be created — joining an existing
     one consumes no subsystem slot.
@@ -406,7 +421,8 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
     """
     lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
     if namespaced:
-        result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols)
+        result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols,
+                                                      pool_id=lvol.pool_uuid)
         if result:
             lvol.nqn = result.nqn
             lvol.namespace = result.uuid
@@ -562,6 +578,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         return False, f"Pool not found: {pool_id_or_name}"
 
     ops_gate.assert_object_ops_allowed("volume create", cluster_id=pool.cluster_id)
+
+    # Hard product limit on the provisioned size. Deliberately NOT applied to
+    # max_size: that is the thin-provisioning growth ceiling and the CLI/CSI
+    # pass a large default (1000T) when the user gives none -- capping it
+    # rejected every `sbctl volume add` (AWS soak 2026-09-11). Growth is
+    # bounded where it happens: resize_lvol enforces MAX_LVOL_SIZE on new_size.
+    size_error = object_limits.check_lvol_size(size)
+    if size_error:
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, pool, size_error, limit_key="lvol_size")
+        return False, size_error
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
 
@@ -734,7 +761,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.fabric = fabric
 
     if not host_node:
-        nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced))
+        nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced),
+                                  pool_id=pool.get_id())
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
@@ -742,6 +770,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     limit_error = check_lvstore_object_limit(host_node, all_lvols, all_snaps)
     if limit_error:
         logger.error(limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, pool, limit_error,
+            limit_key=f"lvstore_objects:{host_node.get_id()}")
         return False, limit_error
 
     # Create a new subsystem by default unless namespaced is set and an
@@ -1291,6 +1322,49 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
         return False
 
 
+def _fail_after_ns(lvol, rpc_client, nsid, msg, is_primary=True):
+    """Rollback for a failure that happens AFTER the namespace was attached.
+
+    _fail_after_bdev alone removes the bdev stack, which used to be the whole
+    rollback because every failure it covered happened before the namespace
+    existed -- the listener was published first. Now that the namespace goes on
+    before the listener, leaving it behind would point a live namespace at a
+    bdev the rollback is about to delete, which is the resurrected-namespace
+    state the delete flow already guards against (reads on it answered INTERNAL
+    DEVICE ERROR, incident 2026-07-14).
+    """
+    if nsid:
+        # remove_ns is asynchronous inside SPDK: it can return success and
+        # defer the actual removal, which is why the delete path confirms with
+        # _confirm_namespace_removed rather than trusting the return. Deleting
+        # the bdev while the subsystem still references its namespace is the
+        # stale-namespace state this rollback exists to avoid, so an
+        # unconfirmed removal must NOT fall through to the bdev delete.
+        try:
+            removed = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, nsid))
+            confirmed = False
+            if removed:
+                confirmed, _ = _confirm_namespace_removed(rpc_client, lvol.nqn, nsid)
+        except Exception:
+            logger.exception("rollback of namespace nsid=%s on %s failed for %s",
+                             nsid, lvol.nqn, lvol.get_id())
+            removed = confirmed = False
+        if not confirmed:
+            logger.error(
+                "Namespace nsid=%s still on %s after rollback (removed=%s); leaving "
+                "the bdev in place -- deleting it under a live namespace is the "
+                "state the rollback is meant to prevent. Original failure: %s",
+                nsid, lvol.nqn, removed, msg)
+            lvol.status = LVol.STATUS_IN_DELETION
+            try:
+                lvol.write_to_db(DBController().kv_store)
+            except Exception:
+                logger.exception("failed to mark %s in_deletion", lvol.get_id())
+            return False, (f"{msg}; rollback incomplete: namespace nsid={nsid} "
+                           f"still on {lvol.nqn}")
+    return _fail_after_bdev(lvol, rpc_client, msg, is_primary=is_primary)
+
+
 def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
     already produced a bdev/blob. Without this, a post-bdev-stack failure (a
@@ -1388,7 +1462,7 @@ def _lvol_secondary_index(lvol, node):
 
 
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None, ns_uuid=None,
-                     primary_nsid=None):
+                     primary_nsid=None, defer_listeners=False):
     rpc_client = snode.rpc_client()
 
     # Refuse to attach a new namespace to a shared subsystem while any
@@ -1484,39 +1558,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                     else:
                         logger.warning("[DHCHAP-DEBUG] subsystem_add_host PLAIN — no DHCHAP keys at all")
                         rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
-
-        if is_primary or lvol.node_id == snode.get_id():
-            ana_state = "optimized"
-        else:
-            ana_state = "non_optimized"
-
-        # add listeners
-        # Use the per-lvstore port for the lvol's lvstore
-        listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
-        logger.info("adding listeners")
-        for iface in snode.data_nics:
-            if iface.ip4_address and lvol.fabric==iface.trtype.lower():
-                logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-                ret, err = rpc_client.nvmf_subsystem_add_listener(
-                    lvol.nqn, iface.trtype, iface.ip4_address, listener_port, ana_state)
-                if not ret:
-                    if err and "code" in err and err["code"] == -32602:
-                        logger.warning("listener already exists")
-                    else:
-                        return _fail_after_bdev(
-                            lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}", is_primary=is_primary)
-            elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-                logger.info("adding listener for %s on IP %s, fabric TCP port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-                ret, err = rpc_client.nvmf_subsystem_add_listener(
-                        lvol.nqn, "TCP", iface.ip4_address, listener_port, ana_state)
-                if not ret:
-                    if err and "code" in err and err["code"] == -32602:
-                        logger.warning("listener already exists")
-                    else:
-                        return _fail_after_bdev(
-                            lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}", is_primary=is_primary)
 
     logger.info("Add BDev to subsystem")
     # Cluster-consistent namespace IDs: the PRIMARY add lets the target
@@ -1632,7 +1673,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                     logger.error(str(e))
                     return _fail_after_bdev(lvol, rpc_client, str(e),
                                             is_primary=is_primary)
-                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
+                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index,
+                                        defer_listeners=defer_listeners)
 
         # A REPLICA add cannot re-claim a slot (its nsid is dictated by the
         # primary), so -32602 here ends the whole create/fail-over. Say WHY.
@@ -1642,6 +1684,45 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return _fail_after_bdev(
             lvol, rpc_client, "Failed to add bdev to subsystem" + detail,
             is_primary=is_primary)
+
+    # The namespace is attached: only now may the subsystem be reachable.
+    #
+    # This used to run inside the resolve_subsys block above, so the listener
+    # went up first and the subsystem answered on the network while this lvol's
+    # namespace did not exist yet. A client reading it in that window gets
+    # "Invalid Namespace or Format" with DNR set, and DNR means the kernel does
+    # not try another path -- it fails the I/O to the application. See
+    # tests/unit/test_listener_after_namespace.py for the incident.
+    #
+    # defer_listeners is for the caller that registers a whole node's lvols at
+    # once: on a shared subsystem the members are registered concurrently, so
+    # the first one to get here would publish a listener for a subsystem whose
+    # other members are still arriving. That caller publishes once the batch is
+    # complete instead.
+    attached_nsid = int(ret) if is_primary else requested_nsid
+    # Only the call that resolved/created the subsystem publishes its listener.
+    # An lvol JOINING an existing namespaced subsystem must not: the listener is
+    # already there from whoever created it, and re-adding it is a wasted RPC
+    # that the attach path explicitly does not pay (see
+    # tests/integration/test_clone_namespace_race.py). The gap a join leaves --
+    # this member's namespace landing after a listener someone else published --
+    # is the cross-member case, and it is closed by the batch barrier in
+    # _register_lvols_on_node rather than here.
+    if resolve_subsys and not defer_listeners:
+        # No re-read of the namespace before publishing here, deliberately.
+        # The batch path polls (_rpc_wait_subsystem_has_ns) because it reads
+        # back state other threads wrote during a recovery; this call just
+        # issued the add itself and holds the nsid the target returned. And the
+        # probe's known failure is the FALSE NEGATIVE -- soak 2026-08-11 read a
+        # present namespace as absent and left every lvol with a namespace and
+        # zero listeners, permanently (see rpc_client.namespace_matches). There
+        # that costs a listener the monitor can repair; here, with the rollback
+        # below, it would delete the namespace and the blob under a create that
+        # actually succeeded.
+        ok, err = publish_lvol_listeners(lvol, snode, rpc_client, is_primary=is_primary)
+        if not ok:
+            return _fail_after_ns(lvol, rpc_client, attached_nsid, err,
+                                  is_primary=is_primary)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
@@ -1671,6 +1752,56 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return lvol_bdev, None
     else:
         return False, "Failed to get lvol bdev"
+
+def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
+    """Publish ``lvol``'s subsystem listeners on ``snode``.
+
+    Separated from add_lvol_on_node so it can be called once a whole batch of
+    namespaces is attached: see the defer_listeners note there. Returns
+    ``(True, None)`` or ``(False, reason)``; "listener already exists" is a
+    success, since that is what a re-registration looks like.
+    """
+    rpc_client = rpc_client or snode.rpc_client()
+    if is_primary or lvol.node_id == snode.get_id():
+        ana_state = "optimized"
+    else:
+        ana_state = "non_optimized"
+
+    # Use the per-lvstore port for the lvol's lvstore
+    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+    logger.info("adding listeners")
+    added: list[tuple[str, str]] = []
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            trtype = iface.trtype
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            trtype = "TCP"
+        else:
+            continue
+        logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
+        ret, err = rpc_client.nvmf_subsystem_add_listener(
+            lvol.nqn, trtype, iface.ip4_address, listener_port, ana_state)
+        if not ret:
+            if err and "code" in err and err["code"] == -32602:
+                logger.warning("listener already exists")
+            else:
+                # A node with several matching NICs can get one listener up and
+                # fail on the next. The caller rolls the namespace and the bdev
+                # back, so anything published here would be left pointing at a
+                # deleted bdev -- take them down again first.
+                for done_trtype, done_ip in added:
+                    try:
+                        rpc_client.listeners_del(
+                            lvol.nqn, done_trtype, done_ip, listener_port)
+                    except Exception:
+                        logger.exception(
+                            "failed to remove listener %s %s:%s from %s during rollback",
+                            done_trtype, done_ip, listener_port, lvol.nqn)
+                return False, f"Failed to create listener for {lvol.get_id()}"
+        else:
+            added.append((trtype, iface.ip4_address))
+    return True, None
+
 
 def is_node_leader(snode, lvs_name):
     rpc_client = snode.rpc_client()
@@ -2607,7 +2738,6 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
             pool_policy_map[att.target_id] = pol
 
     for lvol in lvols:
-        logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
         size_used = 0
@@ -3109,6 +3239,16 @@ def resize_lvol(id, new_size, lock=True) -> None:
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(id)
     ops_gate.assert_object_ops_allowed("volume resize", pool_uuid=lvol.pool_uuid)
+
+    size_error = object_limits.check_lvol_size(new_size, what="New size")
+    if size_error:
+        try:
+            _snode = db_controller.get_storage_node_by_id(lvol.node_id)
+            events_controller.log_object_limit_reached(
+                _snode.cluster_id, lvol, size_error, limit_key="lvol_size")
+        except Exception as _e:
+            logger.warning("Could not log resize limit event: %s", _e)
+        raise PreconditionError(size_error)
 
     # Block during restart Phase 5
     try:
@@ -3717,7 +3857,8 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     # Resolve the namespace slot early so we can (a) skip the subsystem limit
     # check when the clone fits into an existing subsystem, and (b) reuse the
     # result below instead of calling get_next_available_subsystem_on_node twice.
-    _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols)
+    _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols,
+                                                             pool_id=lvol.pool_uuid)
 
     if not _available_subsys:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -4138,6 +4279,17 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     new_lvol.write_to_db(db_controller.kv_store)
 
     _evict_stale_namespace(new_lvol, target_node, superseded=superseded)
+
+    # The target clone shares the source NQN.  During preconnect the host has
+    # live paths to the source (cntlids 1, 1000, 2000) AND tries to add paths
+    # to the inaccessible target simultaneously.  If target uses the same
+    # min_cntlid the kernel rejects it as a duplicate cntlid.  Use windows
+    # above 4000 so source (1/1000/2000) and target never collide.
+    _tgt_cntlids = [
+        random.randint(4001, 4500),  # primary
+        random.randint(5001, 5500),  # secondary
+        random.randint(6001, 6500),  # tertiary
+    ]
 
     # The target clone shares the source NQN.  During preconnect the host has
     # live paths to the source (cntlids 1, 1000, 2000) AND tries to add paths
@@ -5312,8 +5464,26 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None)-> LVol | None:
-    """``exclude_nqns`` skips subsystems the caller knows are unusable even
+def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None,
+                                         *, pool_id) -> LVol | None:
+    """Pick the shared subsystem on ``node_id`` that a new namespaced lvol of
+    pool ``pool_id`` should join, or ``None`` when it has to open a new one.
+
+    Subsystem/pool alignment: a shared subsystem belongs to exactly ONE pool
+    -- the pool of the lvols already in it. Only a subsystem whose every
+    non-deleted member (in_creation included: that record is a committed
+    slot claim) belongs to ``pool_id`` is joinable, so a pool's lvols never
+    share an NQN with another pool's. A legacy subsystem that already mixes
+    pools (created before alignment was enforced) is frozen: it is never
+    offered for a join, by any pool.
+
+    Fill order: the MOST-occupied joinable subsystem of the pool is offered
+    first, so the pool fills one subsystem completely before the next one is
+    opened -- a new subsystem is created only when none of the pool's
+    subsystems on the node has a free namespace slot (``None`` returned).
+    Ties break on NQN so a conflict retry of the claim is deterministic.
+
+    ``exclude_nqns`` skips subsystems the caller knows are unusable even
     though the DB count says they have room (SPDK rejected the add with
     -32602 — SPDK is the authority on its own namespace table)."""
     # `is None`, NOT falsy: an empty list from an in-transaction snapshot read
@@ -5322,17 +5492,20 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
     if all_lvols is None:
         all_lvols = DBController().get_mini_lvols()
 
-    # Count active namespaces per NQN in a single pass instead of issuing a
-    # separate DB read for every subsystem root (was O(N²)).
+    # One pass: active namespaces per NQN and the set of pools present in
+    # each subsystem (was O(N^2) with a DB read per subsystem root).
     ns_counts: dict[str, int] = {}
+    nqn_pools: dict[str, set] = {}
 
     for lv in all_lvols:
         if lv.node_id != node_id:
             continue
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
             ns_counts[lv.nqn] = ns_counts.get(lv.nqn, 0) + 1
+            nqn_pools.setdefault(lv.nqn, set()).add(lv.pool_uuid)
 
-    ret = []
+    best: LVol | None = None
+    best_key = None
     for lvol in all_lvols:
         if lvol.node_id != node_id:
             continue
@@ -5340,18 +5513,22 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
             continue
         if exclude_nqns and lvol.nqn in exclude_nqns:
             continue
+        # Pool exclusivity: every member must be from the joining lvol's pool.
+        if nqn_pools.get(lvol.nqn) != {pool_id}:
+            continue
         # The subsystem's recorded max is bounded by the hard per-subsystem
         # cap: legacy subsystems created with a larger max stop accepting
         # joins at the cap.
         subsys_max = min(lvol.max_namespace_per_subsys,
                          constants.MAX_NAMESPACES_PER_SUBSYSTEM)
-        if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < subsys_max:
-            if lvol not in ret:
-                ret.append(lvol)
+        used = ns_counts.get(lvol.nqn, 0)
+        if used >= subsys_max:
+            continue
+        key = (-used, lvol.nqn)
+        if best_key is None or key < best_key:
+            best, best_key = lvol, key
 
-    if ret:
-        return ret[random.randint(0, len(ret) - 1)]
-    return None
+    return best
 
 
 # --- Functions carried over from main (reconcile-1276): SSE watch + HA role helper ---

@@ -15,6 +15,7 @@ from simplyblock_core import cluster_ops
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 
 from .._dependencies import Cluster
+from .alert import api as alert_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
 from .replication import api as replication_api
@@ -291,6 +292,7 @@ def rebalance_cluster( cluster: Cluster) -> Response:
     return Response(status_code=204)
 
 
+instance_api.include_router(alert_api, prefix='/alerts')
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')

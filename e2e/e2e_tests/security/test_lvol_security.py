@@ -16,6 +16,9 @@ All sbcli CLI wrappers live in ssh_utils.SshUtils:
   ssh_obj.get_client_host_nqn(node)
 """
 
+import json
+import re
+import shlex
 import threading
 import time
 import random
@@ -31,8 +34,173 @@ from exceptions.custom_exception import LvolNotConnectException
 # ───────────────────────────────────── helpers ──────────────────────────────
 
 
+class DhchapUnsupportedByHost(Exception):
+    """The node's kernel has no in-band NVMe authentication.
+
+    DH-HMAC-CHAP needs ``CONFIG_NVME_AUTH`` in the host kernel. Without it
+    the kernel's nvme-fabrics parser reports ``option "dhchap_secret"
+    ignored`` and refuses the controller, so a DHCHAP volume cannot be
+    mounted even from an allowed node. Confirmed on Talos v1.12.7
+    (6.18.24-talos); works on RHCOS 9.6 (5.14.0-570.el9_6). Treated as an
+    environment limit and skipped, matching how the RDMA security test skips
+    when RDMA is unavailable.
+    """
+
+
 def _rand_suffix(n=6):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=n))
+
+
+_SIZE_UNITS = {
+    "": 1,
+    "K": 10 ** 3, "KB": 10 ** 3, "KI": 2 ** 10, "KIB": 2 ** 10,
+    "M": 10 ** 6, "MB": 10 ** 6, "MI": 2 ** 20, "MIB": 2 ** 20,
+    "G": 10 ** 9, "GB": 10 ** 9, "GI": 2 ** 30, "GIB": 2 ** 30,
+    "T": 10 ** 12, "TB": 10 ** 12, "TI": 2 ** 40, "TIB": 2 ** 40,
+}
+
+
+# A resize target is checked with a floor, not for equality. "10G" reaches
+# the control plane as a decimal 10^10 while the PV that backs it is a binary
+# 10Gi, and a filesystem loses a further slice to metadata -- so the useful
+# question is "did it grow to about the target", never "is it exactly N bytes".
+_SIZE_FLOOR = 0.95          # block/backing-device sizes
+_FS_SIZE_FLOOR = 0.90       # filesystem sizes, which also pay metadata overhead
+
+
+def _size_to_bytes(size):
+    """Parse a size string (``'10G'``, ``'10Gi'``, ``'512M'``) into bytes.
+
+    sbcli sizes are decimal (10G = 10 * 10^9) while K8s quantities are binary
+    (10Gi = 10 * 2^30). Both spellings appear in this suite, so each is
+    parsed by its own unit rather than assumed interchangeable.
+    """
+    if isinstance(size, (int, float)):
+        return int(size)
+    text = str(size).strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([A-Za-z]*)", text)
+    if not match:
+        raise ValueError(f"unparseable size: {size!r}")
+    value, unit = match.group(1), match.group(2).upper()
+    if unit not in _SIZE_UNITS:
+        raise ValueError(f"unknown size unit in {size!r}")
+    return int(float(value) * _SIZE_UNITS[unit])
+
+
+def _to_k8s_quantity(size):
+    """Render an sbcli size as the K8s quantity a PVC will report back.
+
+    ``_resize_lvol_dual`` patches the claim with G->Gi / M->Mi substituted,
+    and the API server echoes that spelling back in ``status.capacity``, so
+    an assertion has to compare against the same string.
+    """
+    text = str(size).strip()
+    if "G" in text and "Gi" not in text:
+        return text.replace("G", "Gi")
+    if "M" in text and "Mi" not in text:
+        return text.replace("M", "Mi")
+    return text
+
+
+class DhchapHost:
+    """An identity a DHCHAP authorization question can be asked about.
+
+    Two coordinates, because the two modes enforce at different layers:
+
+      nqn  -- docker: the NQN handed to ``volume connect --host-nqn``. The
+              control plane decides whether to hand back DHCHAP keys for it.
+      node -- k8s:   the node a workload is pinned to. The operator labels
+              allowed nodes and the CSI driver writes a matching nodeAffinity
+              onto every PV, so the *node* is the subject. The NQN is derived
+              by the CSI node plugin from the node's Kubernetes UID and is
+              carried here for logging only -- a K8s test never supplies it,
+              which is the documented model.
+
+    Exactly one coordinate is load-bearing per mode. Authorization state is
+    deliberately NOT stored here: a host allowed now can be revoked later, so
+    the expectation always lives at the call site.
+    """
+
+    def __init__(self, nqn=None, node=None, desc=""):
+        self.nqn = nqn
+        self.node = node
+        self.desc = desc
+
+    def __repr__(self):
+        bits = [f"node={self.node!r}"] if self.node else []
+        if self.nqn:
+            bits.append(f"nqn={self.nqn!r}")
+        if self.desc:
+            bits.append(self.desc)
+        return f"DhchapHost({', '.join(bits)})"
+
+
+def _as_nqn(host):
+    """Accept a bare NQN string or a DhchapHost.
+
+    Back-compat shim so residual docker-only call sites need no edit.
+    """
+    return host.nqn if isinstance(host, DhchapHost) else host
+
+
+# Grep-able coverage tokens. The e2e runner has no skip API -- it computes
+# ``skipped = total - (passed + failed)`` (e2e/e2e.py:473), so a test that
+# returns early is counted as PASSED. Any run whose log contains one of these
+# is NOT full coverage, whatever the summary says.
+TOK_COVERAGE_LOST = "DHCHAP-COVERAGE-LOST"
+TOK_K8S_LIMITATION = "DHCHAP-K8S-LIMITATION"
+TOK_WEAK_EVIDENCE = "DHCHAP-WEAK-EVIDENCE"
+TOK_SKIPPED_K8S = "SKIPPED-K8S"
+
+# The enforcement canary runs once per process, not once per test class.
+_DHCHAP_ENFORCEMENT_CHECKED = False
+
+# Event substrings that positively identify a DHCHAP/allowed-hosts denial.
+_DENIAL_REASONS = (
+    "nodeaffinity check failed",
+    "no matching nodeselectorterms",
+    "not found in allowed hosts",
+    # Provisioning-time rejection. With the operator StorageClass the
+    # volume may never be provisioned for a disallowed node at all:
+    # allowedTopologies keys off the pool label, which the CSI plugin
+    # only reports on allowed nodes, so the provisioner refuses before
+    # any mount is attempted.
+    "is not in requisite",
+    "volume node affinity conflict",
+    # Scheduler-side wording. With nodeSelector pinning + the PV's
+    # nodeAffinity, a denied node is rejected by the SCHEDULER rather
+    # than by kubelet, and it words it differently from the mount-time
+    # "NodeAffinity check failed".
+    "didn't match persistentvolume's node affinity",
+)
+
+# Event substrings that mean the pod failed for a reason that has NOTHING to do
+# with DHCHAP. Seeing one of these on a denial path is a test bug, not a pass:
+# the observation "pod never ran" would be right for the wrong reason.
+#
+# Only reasons attributable to THIS pod belong here. A FailedScheduling
+# message is an aggregate over every node in the cluster -- e.g. "0/9 nodes
+# are available: 1 didn't match PersistentVolume's node affinity, 3 had
+# untolerated taint, 5 didn't match Pod's node affinity/selector" -- so it
+# always mentions master taints and the nodeSelector rejecting every node we
+# did not target. Those describe nodes the pod never wanted, so "untolerated
+# taint" and "insufficient <resource>" are deliberately NOT listed: they would
+# fire on essentially every scheduler-side denial.
+_DISQUALIFYING_REASONS = (
+    "multi-attach",
+    "volume is already exclusively attached",
+    # NOTE: "failedscheduling" is deliberately NOT here. With the
+    # operator StorageClass (WaitForFirstConsumer + allowedTopologies) a
+    # genuinely denied node produces FailedScheduling as its real,
+    # correct symptom, so treating it as an impostor would reject valid
+    # evidence. It is caught instead by requiring a positive denial
+    # reason, with a bare FailedScheduling logged as weak evidence.
+    "errimagepull",
+    "imagepullbackoff",
+    "createcontainerconfigerror",
+    "waiting for first consumer",
+    "unbound immediate persistentvolumeclaims",
+)
 
 
 # COMMENTED OUT: old security option constants (DHCHAP is now pool-level via --dhchap flag)
@@ -65,17 +233,81 @@ class SecurityTestBase(TestClusterBase):
         self.mount_path = "/mnt"
         self.log_path = str(Path.home())
         self.lvol_mount_details = {}
-        self.pool_name = "sec_test_pool"
+        # Kept short on purpose. The operator turns this into a node label
+        # key: simplyblock.io/pool.<ns>.<cluster CR>.simplyblock-<pool>, whose
+        # name part is capped at 63 chars, and the CSI driver writes that key
+        # into every PV's nodeAffinity — overflow means the PV is rejected and
+        # the PVC never binds. With ns=simplyblock and CR=simplyblock-cluster,
+        # "sec_test_pool" landed at 62/63 and any dedicated-pool suffix pushed
+        # it over. "secpool" leaves ~7 chars of headroom for the suffix.
+        self.pool_name = "secpool"
         self._client_host_nqn = None
         self.fio_threads = []
+
+        # K8s-native resource tracking (only used when k8s_test=True)
+        self.created_pvcs: list[str] = []
+        self.created_fio_jobs: list[str] = []
+        self.created_configmaps: list[str] = []
+        self.created_pods: list[str] = []
+        self.created_storage_classes: list[str] = []
+        self._storage_class_name: str = "simplyblock-sec-sc"
+        self._dhchap_node_label: str = None
+        # Resolved once in _ensure_pool_and_sc. The operator derives the node
+        # label key from the StoragePool CRD's metadata.name, which can carry a
+        # timestamp suffix and be truncated to fit the 63-char label budget --
+        # so it is NOT always self.pool_name. Recomputing it later is a footgun.
+        self._pool_crd_name: str = None
+        self._dhchap_allowed_nodes: list[str] = []
+        self._dhchap_disallowed_nodes: list[str] = []
+        # Volumes for which a positive control has already succeeded. A denial
+        # assertion refuses to run without one -- see _assert_host_denied.
+        self._dhchap_positive_control: set = set()
+        # Operator StorageClass of a second, encrypted DHCHAP pool.
+        # storageClassParameters is immutable per pool, so encryption needs
+        # its own StoragePool rather than another class on the main one.
+        self._encrypted_sc_name: str = None
+        self._encrypted_pool_crd: str = None
+        self._encrypted_pool_label: str = None
+        self._encrypted_pool_name: str = None
+        # PVC name -> the pool label its PV should carry. Encrypted volumes
+        # live in a SEPARATE pool (storageClassParameters is immutable per
+        # pool), so they carry that pool's label, not the main one.
+        self._pvc_pool_label: dict = {}
+        # Chosen once per test so docker and K8s exercise the same filesystem.
+        self._fs_type: str = None
 
     # ── filesystem helper ────────────────────────────────────────────────────
 
     def _pick_fs_type(self):
-        """Randomly choose ext4 or xfs so both filesystems get coverage."""
-        fs = random.choice(["ext4", "xfs"])
-        self.logger.info(f"[_pick_fs_type] Selected filesystem: {fs}")
-        return fs
+        """Choose ext4 or xfs once per test so both filesystems get coverage.
+
+        Cached on ``self._fs_type`` because in K8s the choice has to be baked
+        into the StorageClass (the CSI node plugin creates the filesystem from
+        ``csi.storage.k8s.io/fstype``) *before* any volume exists, and the
+        later verification has to compare against the same value.
+        """
+        if self._fs_type:
+            return self._fs_type
+        self._fs_type = random.choice(["ext4", "xfs"])
+        self.logger.info(f"[_pick_fs_type] Selected filesystem: {self._fs_type}")
+        return self._fs_type
+
+    def _normalize_fio_node(self):
+        """Collapse ``self.fio_node`` to a single host.
+
+        Tolerates the K8s-native shape where there are no client machines at
+        all: ``cluster_test_base`` sets ``self.fio_node = []`` when there is
+        neither a CLIENT_IP nor a mgmt node (cluster_test_base.py:243), so the
+        ``self.fio_node[0]`` every test class used to open with raised
+        IndexError before a single assertion ran.
+
+        Also the single hook every active class already calls first, so the
+        enforcement canary runs from here -- once per process.
+        """
+        if isinstance(self.fio_node, list):
+            self.fio_node = self.fio_node[0] if self.fio_node else None
+        self._assert_dhchap_enforceable()
+        return self.fio_node
 
     # ── debug helpers ─────────────────────────────────────────────────────────
 
@@ -250,6 +482,1785 @@ class SecurityTestBase(TestClusterBase):
             self.ssh_obj.kill_processes(node=self.fio_node, process_name="fio")
             sleep_n_sec(3)
         self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+
+    # ── K8s dual-mode helpers ─────────────────────────────────────────────────
+    # These allow the same test logic to run in both Docker (SSH) and K8s
+    # (CRD/PVC/Job) modes, following the pattern from BackupTestBase.
+
+    def _ensure_pool_and_sc(self, dhchap=False, allowed_nodes=None,
+                            encryption=False):
+        """Create (or reuse) a storage pool and StorageClass.
+
+        In Docker mode: uses ssh_obj.add_storage_pool(dhchap=True).
+        In K8s mode: creates StoragePool CRD with dhchap + allowedNodes fields.
+        """
+        if not self.k8s_test:
+            self.ssh_obj.add_storage_pool(
+                self.mgmt_nodes[0], self.pool_name, self.cluster_id,
+                dhchap=dhchap)
+            return
+
+        # The operator builds this pool's StorageClass from these. We do
+        # NOT create our own class -- the operator's is the documented
+        # customer path and it already sets dhchap_node_label itself.
+        scp = {
+            "encryption": bool(encryption),
+            "filesystem": self._pick_fs_type(),
+        }
+        actual = self.sbcli_utils.add_storage_pool(
+            pool_name=self.pool_name, dhchap=dhchap,
+            allowed_nodes=allowed_nodes,
+            storage_class_parameters=scp)
+        if actual and actual != self.pool_name:
+            self.logger.info(
+                f"[pool] Requested '{self.pool_name}' but using '{actual}'")
+            self.pool_name = actual
+        self._pool_crd_name = self._k8s_resolve_pool_crd(dhchap, allowed_nodes)
+        self._dhchap_node_label = (
+            self._k8s_pool_node_label(allowed_nodes) if dhchap else None
+        )
+        self._k8s_setup_storage_class(allowed_nodes=allowed_nodes)
+
+    def _k8s_resolve_pool_crd(self, dhchap, allowed_nodes):
+        """Return the StoragePool CRD's metadata.name for the current pool.
+
+        The operator builds the node label key from the CRD name, not from the
+        backend pool name that ``add_storage_pool`` hands back -- and the two
+        diverge whenever the CRD name picked up a timestamp suffix or was
+        truncated to fit the 63-char label budget (k8s_utils.py:3669,3702).
+        Match on the spec we asked for, which is unambiguous for a DHCHAP pool
+        with a specific allowedNodes subset.
+        """
+        k8s = self._ensure_k8s_utils()
+
+        # Authoritative source first: `pool get` reports the CRD name it was
+        # reconciled from as ``cr_name``. Verified on OpenShift 2026-09-04.
+        try:
+            details = self.sbcli_utils.get_pool_by_id(self._get_pool_id())
+            if isinstance(details, list):
+                details = details[0] if details else {}
+            cr_name = (details or {}).get("cr_name")
+            if cr_name:
+                self.logger.info(
+                    f"[pool] StoragePool CRD from pool.cr_name: {cr_name!r}")
+                return cr_name
+        except Exception as exc:
+            self.logger.info(
+                f"[pool] cr_name unavailable ({exc}) — matching on spec")
+
+        wanted = sorted(allowed_nodes or [])
+        out, _ = k8s._exec_kubectl(
+            f"kubectl get storagepools -n {k8s.namespace} -o json "
+            f"2>/dev/null || true")
+        try:
+            items = json.loads(out).get("items", []) if out.strip() else []
+        except (json.JSONDecodeError, AttributeError):
+            items = []
+        for crd in items:
+            spec = crd.get("spec", {}) or {}
+            if (bool(spec.get("dhchap")) == bool(dhchap)
+                    and sorted(spec.get("allowedNodes") or []) == wanted):
+                name = crd.get("metadata", {}).get("name")
+                self.logger.info(f"[pool] StoragePool CRD resolved: {name!r}")
+                return name
+        # Fall back to the derived shape rather than failing here; the label
+        # lookup and _k8s_assert_dhchap_wiring both cross-check it.
+        derived = f"simplyblock-{self.pool_name.lower().replace('_', '-')}"
+        self.logger.warning(
+            f"[pool] Could not match a StoragePool CRD to dhchap={dhchap} "
+            f"allowedNodes={wanted} — assuming CRD name {derived!r}")
+        return derived
+
+    def _k8s_pool_node_label(self, allowed_nodes=None):
+        """Return the operator's node label key for the current pool.
+
+        Read it off an allowed node rather than rebuilding the string. The
+        operator derives the key from the StoragePool CRD's metadata.name,
+        while ``self.pool_name`` holds the *backend* pool name — those have
+        matched so far but nothing guarantees it, and a wrong key means the
+        StorageClass silently carries no enforcement at all (the exact
+        failure this whole change is fixing). Falls back to the computed
+        shape ``simplyblock.io/pool.<ns>.<StorageCluster CR>.<pool>`` only if
+        no label can be found, and says so loudly.
+        """
+        k8s = self._ensure_k8s_utils()
+        for node in (allowed_nodes or []):
+            out, _ = k8s._exec_kubectl(
+                f"kubectl get node {node} -o jsonpath='{{.metadata.labels}}' "
+                f"2>/dev/null || true"
+            )
+            try:
+                labels = json.loads(out) if out.strip().startswith("{") else {}
+            except (json.JSONDecodeError, AttributeError):
+                labels = {}
+            pool_keys = [
+                key for key, val in labels.items()
+                if key.startswith("simplyblock.io/pool.") and val == "allowed"
+            ]
+            # Match on the CRD name first: the operator derives the key from
+            # the StoragePool CRD's metadata.name, while self.pool_name is the
+            # *backend* pool name, and the two diverge under the timestamp
+            # suffix / 63-char truncation in add_storage_pool.
+            for candidate in (self._pool_crd_name, self.pool_name):
+                if not candidate:
+                    continue
+                exact = [k for k in pool_keys
+                         if k.rsplit(".", 1)[-1] == candidate]
+                if exact:
+                    self.logger.info(
+                        f"[dhchap] pool node label (read from {node}): "
+                        f"{exact[0]}")
+                    return exact[0]
+            if len(pool_keys) == 1:
+                self.logger.info(
+                    f"[dhchap] pool node label (sole pool label on {node}, "
+                    f"did not match CRD {self._pool_crd_name!r} or pool "
+                    f"{self.pool_name!r}): {pool_keys[0]}")
+                return pool_keys[0]
+
+        # Do NOT fall back silently. A wrong key means the StorageClass
+        # carries no enforcement at all and every assertion in this suite
+        # passes vacuously -- which is the exact failure this change exists to
+        # prevent. It also cannot be diagnosed later: it surfaces 20 minutes
+        # downstream as "pod never reached Running".
+        computed = self._k8s_pool_node_label_computed()
+        raise AssertionError(
+            f"{TOK_COVERAGE_LOST}: could not read the operator's pool label "
+            f"off any allowed node {allowed_nodes} (CRD "
+            f"{self._pool_crd_name!r}, pool {self.pool_name!r}). Computed "
+            f"shape would be {computed!r}. Without the real key the "
+            f"StorageClass gets no dhchap_node_label and DHCHAP is not "
+            f"enforced at all -- refusing to run a suite that would pass "
+            f"vacuously. Check that the operator reconciled the StoragePool "
+            f"and labelled its allowedNodes.")
+
+    def _k8s_pool_node_label_computed(self):
+        """Best-effort construction of the pool label key (fallback only)."""
+        k8s = self._ensure_k8s_utils()
+        out, _ = k8s._exec_kubectl(
+            f"kubectl get storageclusters -n {k8s.namespace} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+        )
+        names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
+        cluster_cr = names[0] if names else "simplyblock-cluster"
+        label = (
+            f"simplyblock.io/pool.{k8s.namespace}.{cluster_cr}.{self.pool_name}"
+        )
+        self.logger.info(f"[dhchap] pool node label: {label}")
+        return label
+
+    def _k8s_setup_storage_class(self, allowed_nodes=None):
+        """Adopt the StorageClass the operator generated for this pool.
+
+        We deliberately do NOT create our own class. The operator emits one
+        per StoragePool, named
+        ``simplyblock-{namespace}-{clusterName}-{poolCRDname}``, and it
+        already carries ``dhchap_node_label`` -- the parameter that makes CSI
+        write a matching ``nodeAffinity`` onto every PV, which is what
+        actually enforces allowedNodes at mount. Encryption and filesystem
+        come from the pool's ``spec.storageClassParameters``, set in
+        ``_ensure_pool_and_sc``.
+
+        One product workaround is unavoidable here. The operator's class also
+        sets ``allowedTopologies`` keyed on the pool label, and the CSI node
+        plugin only snapshots node labels as topology keys at REGISTRATION
+        time. A pool created while the driver is already running is therefore
+        invisible to it and every PVC fails with::
+
+            ProvisioningFailed: topology map[topology.kubernetes.io/zone:...]
+            from selected node "worker-0" is not in requisite:
+            [map[simplyblock.io/pool....:allowed]]
+
+        So we restart the CSI node daemonset once per pool to force a
+        re-register. Customers following the documented flow hit exactly this
+        and need the same step -- it belongs in the docs until the operator
+        either triggers the re-register itself after labelling nodes, or drops
+        ``allowedTopologies`` (``dhchap_node_label`` alone already enforces,
+        which this suite proves).
+        """
+        if not self.k8s_test:
+            return
+        k8s = self._ensure_k8s_utils()
+
+        self._storage_class_name = k8s.operator_storage_class_name(
+            self._pool_crd_name)
+        assert k8s.wait_storage_class_exists(self._storage_class_name), (
+            f"{TOK_COVERAGE_LOST}: the operator did not generate "
+            f"StorageClass {self._storage_class_name!r} for pool "
+            f"{self._pool_crd_name!r}. Without it there is nothing to "
+            f"provision from.")
+        self.logger.info(
+            f"[k8s] using operator StorageClass {self._storage_class_name!r}")
+
+        # Make the pool label a CSI topology key, or allowedTopologies cannot
+        # be satisfied and nothing provisions.
+        if self._dhchap_node_label:
+            ok = k8s.restart_csi_node_driver(
+                expect_topology_key=self._dhchap_node_label,
+                expect_on_nodes=list(allowed_nodes or []))
+            if not ok:
+                self.logger.warning(
+                    f"{TOK_K8S_LIMITATION}: CSI re-register did not surface "
+                    f"{self._dhchap_node_label!r} as a topology key; "
+                    f"provisioning from the operator StorageClass may fail")
+
+        # Aliases the inherited cluster_test_base dual helpers key off, so
+        # _create_snapshot_dual / _create_clone_dual / _resize_lvol_dual all
+        # operate against the operator class and clones inherit its
+        # dhchap_node_label (and therefore its enforcement).
+        self._k8s_storage_class_name = self._storage_class_name
+        try:
+            k8s.create_volume_snapshot_class(
+                name=self._k8s_snapshot_class_name)
+        except Exception as exc:
+            self.logger.warning(
+                f"[k8s] VolumeSnapshotClass "
+                f"{self._k8s_snapshot_class_name!r}: {exc}")
+
+    def _k8s_encrypted_storage_class(self):
+        """Return the operator StorageClass of a DHCHAP pool with encryption.
+
+        ``storageClassParameters`` is immutable once the class exists -- the
+        CRD says to create a new StoragePool to change it -- so an encrypted
+        volume needs its own pool rather than a second class on this one.
+        Created lazily and cached, with the same allowedNodes as the main
+        pool so the allowed/denied matrix still holds.
+        """
+        if self._encrypted_sc_name:
+            return self._encrypted_sc_name
+        saved = (self.pool_name, self._storage_class_name,
+                 self._dhchap_node_label, self._pool_crd_name)
+        try:
+            self.pool_name = "secenc"
+            self._ensure_pool_and_sc(
+                dhchap=True, allowed_nodes=list(self._dhchap_allowed_nodes),
+                encryption=True)
+            self._encrypted_sc_name = self._storage_class_name
+            self._encrypted_pool_crd = self._pool_crd_name
+            self._encrypted_pool_label = self._dhchap_node_label
+            self._encrypted_pool_name = self.pool_name
+            self.logger.info(
+                f"[k8s] encrypted DHCHAP pool {self.pool_name!r} -> "
+                f"StorageClass {self._encrypted_sc_name!r}")
+        finally:
+            (self.pool_name, self._storage_class_name,
+             self._dhchap_node_label, self._pool_crd_name) = saved
+        return self._encrypted_sc_name
+
+    def _k8s_verify_pod_scheduling(self, pvc_name, node_name, expect_success,
+                                    pod_prefix="dhchap"):
+        """Pin a utility pod consuming *pvc_name* to *node_name* and verify
+        the DHCHAP allowedNodes outcome, the K8s-native way: no host NQN is
+        ever supplied by the test — the CSI node plugin derives it from the
+        node itself and the operator's StoragePool CRD enforces the rest.
+
+        expect_success=True: *node_name* is an allowed host — the pod must
+        reach Running.
+        expect_success=False: *node_name* is NOT an allowed host — the pod
+        must NOT reach Running, and kubelet must emit a FailedMount event
+        (NodeStageVolume rejected with "not found in allowed hosts").
+
+        Returns the (still-running) pod name on the success path, or None
+        on the expected-failure path (pod is cleaned up before returning).
+
+        Raises ``DhchapUnsupportedByHost`` if the node's kernel has no
+        in-band NVMe authentication — the connect then fails on an allowed
+        node too, which is an environment limit rather than a test failure.
+
+        Pinning uses ``spec.nodeSelector``, never ``spec.nodeName``. The
+        operator's StorageClass binds ``WaitForFirstConsumer``, and only the
+        scheduler triggers that binding -- a nodeName-pinned pod bypasses the
+        scheduler, so the claim would sit at "waiting for first consumer" and
+        the pod would never run whether the node is allowed or not, making the
+        negative assertion pass vacuously.
+
+        Because the operator's class also carries ``allowedTopologies``, a
+        denial can now surface at PROVISIONING time (``is not in requisite``)
+        as well as at mount time (``NodeAffinity check failed``); both are in
+        ``_DENIAL_REASONS``.
+        """
+        k8s = self._ensure_k8s_utils()
+        pod_name = f"{pod_prefix}-{_rand_suffix().lower()}"
+        # Track before creating: if anything below raises, teardown still
+        # deletes the pod. A surviving pod pins kubernetes.io/pvc-protection
+        # on its claim and leaves the PVC stuck Terminating for hours.
+        self.created_pods.append(pod_name)
+        # nodeSelector, not nodeName: the operator StorageClass binds
+        # WaitForFirstConsumer, and only the scheduler triggers that.
+        k8s.create_utility_pod(pod_name, pvc_name, node_selector=node_name)
+
+        if expect_success:
+            try:
+                running = k8s.wait_pod_running(pod_name, timeout=300)
+            except (TimeoutError, RuntimeError):
+                events = k8s.get_pod_events(pod_name)
+                self.logger.info(
+                    f"[dhchap] Events for {pod_name} on allowed node "
+                    f"{node_name!r}: {events!r}")
+                if 'dhchap_secret" ignored' in events or "dhchap_ctrl_secret\" ignored" in events:
+                    raise DhchapUnsupportedByHost(
+                        f"node {node_name!r} kernel ignored the DHCHAP "
+                        f"connect options (no in-band NVMe auth / "
+                        f"CONFIG_NVME_AUTH); events: {events!r}")
+                raise
+            assert running, (
+                f"Pod {pod_name} pinned to allowed node {node_name!r} did "
+                f"not reach Running — DHCHAP should have permitted this node")
+            self.logger.info(
+                f"[dhchap] Pod {pod_name} on allowed node {node_name!r} "
+                f"is Running")
+            return pod_name
+
+        # expect_success=False: wait_pod_running raises TimeoutError rather
+        # than returning False when the pod never reaches Running — that
+        # timeout IS the expected outcome here. A pod that unexpectedly
+        # reaches Running (no exception) is the real failure.
+        try:
+            try:
+                k8s.wait_pod_running(pod_name, timeout=60)
+            except TimeoutError:
+                pass
+            else:
+                raise AssertionError(
+                    f"Pod {pod_name} pinned to DISALLOWED node {node_name!r} "
+                    f"reached Running — DHCHAP allowedNodes restriction was "
+                    f"not enforced")
+            events = k8s.get_pod_events(pod_name)
+            self.logger.info(
+                f"[dhchap] Events for {pod_name} on disallowed node "
+                f"{node_name!r}: {events!r}")
+            low = events.lower()
+
+            # The event list is a TIMELINE (get_pod_events sorts by
+            # .lastTimestamp), not a set of competing verdicts. So order of
+            # evaluation matters: a positive DHCHAP denial anywhere in it is
+            # conclusive, because the volume was offered to this node and
+            # refused on nodeAffinity grounds. A transient impostor earlier in
+            # the timeline does not undo that.
+            #
+            # Real example from CI run 093822:
+            #   1. FailedAttachVolume: Multi-Attach error      (transient)
+            #   2. SuccessfulAttachVolume: Attach succeeded    (resolved)
+            #   3. FailedMount: NodeAffinity check failed      (decisive)
+            # Checking for the impostor first rejected a correct denial.
+            impostor = next(
+                (r for r in _DISQUALIFYING_REASONS if r in low), None)
+            specific = any(r in low for r in _DENIAL_REASONS)
+
+            if specific:
+                self.logger.info(
+                    f"[dhchap] denial positively identified for {pod_name} "
+                    f"on {node_name!r}")
+                if impostor:
+                    # Worth surfacing: it means a volume was still attached
+                    # elsewhere when this pod was created, i.e. a release did
+                    # not wait for detach. The assertion still stands.
+                    self.logger.warning(
+                        f"[dhchap] {pod_name} also saw a transient "
+                        f"{impostor!r} before the DHCHAP denial — a preceding "
+                        f"release did not wait for the volume to detach. The "
+                        f"denial itself is conclusive, but see "
+                        f"_k8s_release_pod(pvc_name=...). Events: {events!r}")
+                return None
+
+            # No positive DHCHAP wording. Now an impostor IS disqualifying:
+            # without a denial reason, "pod never ran" is equally explained by
+            # Multi-Attach, a failed image pull, or an unschedulable node.
+            assert not impostor, (
+                f"Pod {pod_name} on disallowed node {node_name!r} never ran, "
+                f"and the only reason given is unrelated to DHCHAP "
+                f"({impostor!r}) — this assertion would have passed for the "
+                f"wrong reason. Release the volume on the allowed node (and "
+                f"wait for detach) before re-checking. Events: {events!r}")
+
+            # A bare FailedMount is weak evidence: it also covers a CSI-down
+            # or quota failure. Accept it so a genuine denial on a
+            # differently-worded build still passes, but mark the run.
+            assert "failedmount" in low, (
+                f"Pod {pod_name} on disallowed node {node_name!r} never "
+                f"ran, but not for a DHCHAP reason — expected a "
+                f"NodeAffinity / not-in-allowed-hosts / FailedMount "
+                f"event; got: {events!r}")
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE}: {pod_name} on disallowed node "
+                f"{node_name!r} failed with a bare FailedMount and no "
+                f"NodeAffinity / allowed-hosts wording — treating as a "
+                f"denial, but the evidence does not positively identify "
+                f"DHCHAP. Events: {events!r}")
+        finally:
+            # Wait for detach here too. A denied pod still ATTACHES the volume
+            # before the mount is refused — the CI events show
+            # "SuccessfulAttachVolume" immediately before the NodeAffinity
+            # failure — so it leaves a VolumeAttachment on the disallowed node
+            # that would block the next pod in classes which continue past a
+            # denial (e.g. DynamicModification's grant-then-authorize).
+            try:
+                k8s.delete_pod_and_wait_detached(pod_name, pvc_name=pvc_name)
+                if pod_name in self.created_pods:
+                    self.created_pods.remove(pod_name)
+            except Exception as e:
+                self.logger.warning(f"  cleanup {pod_name}: {e}")
+        return None
+
+    def _assert_dhchap_enforceable(self):
+        """Prove DHCHAP enforcement is live before any test trusts it.
+
+        Turns the *silent* failure mode into a loud one. If the StorageClass
+        carries no ``dhchap_node_label``, or the operator never labelled the
+        allowed nodes, then nothing is enforced and EVERY restriction
+        assertion in this suite passes while proving nothing -- the condition
+        that made five consecutive CI runs look plausible.
+
+        Cheap by design: four kubectl reads plus one PVC, no pods. The
+        expensive pod probes are the individual tests' job; this only has to
+        establish that the wiring exists at all, and to distinguish
+        "the environment cannot" (skip) from "the product is not wired"
+        (fail).
+
+        Cached per process -- the cost is paid once per run, not once per
+        class.
+        """
+        global _DHCHAP_ENFORCEMENT_CHECKED
+        if not self.k8s_test or _DHCHAP_ENFORCEMENT_CHECKED:
+            return
+        _DHCHAP_ENFORCEMENT_CHECKED = True
+
+        k8s = self._ensure_k8s_utils()
+        workers = self._get_k8s_worker_nqns()
+        if len(workers) < 2:
+            self.logger.warning(
+                f"{TOK_COVERAGE_LOST} [canary]: only {len(workers)} "
+                f"schedulable worker(s) — no node can be excluded from "
+                f"spec.allowedNodes, so no DHCHAP rejection is provable in "
+                f"this environment. Restriction assertions will be skipped.")
+            return
+
+        saved = (self.pool_name, self._storage_class_name,
+                 self._dhchap_node_label, self._pool_crd_name)
+        canary_pvc = None
+        try:
+            self.pool_name = f"canary{_rand_suffix().lower()}"[:20]
+            allowed = [w[0] for w in workers[:-1]]
+            disallowed = [workers[-1][0]]
+            self.logger.info(
+                f"[canary] verifying DHCHAP enforcement is wired: "
+                f"allowed={allowed} excluded={disallowed}")
+            self._ensure_pool_and_sc(dhchap=True, allowed_nodes=allowed)
+
+            # L1-L4 minus the PV: this is the whole silent-failure class.
+            self._k8s_assert_dhchap_wiring(allowed, disallowed)
+
+            canary_pvc = f"canary-{_rand_suffix().lower()}"
+            k8s.create_pvc(name=canary_pvc, size="1Gi",
+                           storage_class=self._storage_class_name)
+            self.created_pvcs.append(canary_pvc)
+            # WaitForFirstConsumer: needs a scheduled pod to bind.
+            self._dhchap_allowed_nodes = allowed
+            self._k8s_bind_pvc(canary_pvc, node=allowed[0])
+            self._k8s_assert_pv_node_affinity(canary_pvc, tc="canary")
+
+            self.logger.info(
+                "[canary] DHCHAP enforcement is wired end to end: pool "
+                "labelled, StorageClass carries dhchap_node_label, and the "
+                "provisioned PV carries a matching nodeAffinity. Restriction "
+                "assertions in this run are meaningful.")
+        except AssertionError:
+            self.logger.error(
+                f"{TOK_COVERAGE_LOST} [canary]: DHCHAP enforcement is NOT "
+                f"wired in this environment. Refusing to run a suite whose "
+                f"restriction assertions would all pass vacuously — this is "
+                f"the exact condition that produced several green-but-empty "
+                f"CI runs. See the assertion below for which link broke.")
+            raise
+        finally:
+            for name in ([canary_pvc] if canary_pvc else []):
+                try:
+                    k8s.delete_pvc(name)
+                    if name in self.created_pvcs:
+                        self.created_pvcs.remove(name)
+                except Exception as exc:
+                    self.logger.warning(f"[canary] cleanup {name}: {exc}")
+            # No StorageClass to clean up: the operator owns it and
+            # removes it with the pool below.
+            # Delete the canary's StoragePool too. Without this it outlives
+            # the check and, because it asks for the same dhchap +
+            # allowedNodes as _k8s_setup_dhchap_pool_subset does,
+            # add_storage_pool hands it straight back to the first real test
+            # -- so the whole suite ends up running against a pool named
+            # "canary...". Functionally equivalent, but it leaks a pool per
+            # run and makes every downstream log line misleading.
+            canary_crd = self._pool_crd_name
+            if canary_crd:
+                try:
+                    self.sbcli_utils.delete_storage_pool(canary_crd)
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[canary] cleanup pool {canary_crd}: {exc}")
+            (self.pool_name, self._storage_class_name,
+             self._dhchap_node_label, self._pool_crd_name) = saved
+
+    def _get_pool_id(self):
+        """Get pool UUID for host registration."""
+        return self.sbcli_utils.get_storage_pool_id(self.pool_name)
+
+    def _register_host_to_pool(self, pool_id, host_nqn):
+        """Register a host NQN at pool level. Works in both Docker and K8s."""
+        if self.k8s_test:
+            self.sbcli_utils.add_host_to_pool(pool_id, host_nqn)
+        else:
+            self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+    def _unregister_host_from_pool(self, pool_id, host_nqn):
+        """Remove a host NQN from pool. Works in both Docker and K8s."""
+        if self.k8s_test:
+            self.sbcli_utils.remove_host_from_pool(pool_id, host_nqn)
+        else:
+            self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+    def _get_k8s_worker_nqns(self):
+        """Get all K8s worker node names and their deterministic NQNs.
+
+        Returns list of (node_name, nqn) tuples.
+        """
+        k8s = self._ensure_k8s_utils()
+        out, _ = k8s._exec_kubectl(
+            "kubectl get nodes "
+            "-l node-role.kubernetes.io/control-plane!= "
+            "--no-headers "
+            "-o custom-columns=NAME:.metadata.name,UID:.metadata.uid"
+        )
+        results = []
+        for line in out.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            node_name = parts[0]
+            node_uid = parts[1] if len(parts) > 1 else None
+            if not node_uid:
+                uid_out, _ = k8s._exec_kubectl(
+                    f"kubectl get node {node_name} "
+                    f"-o jsonpath='{{{{.metadata.uid}}}}'")
+                node_uid = uid_out.strip()
+            nqn = f"nqn.2014-08.io.simplyblock:uuid:{node_uid}"
+            results.append((node_name, nqn))
+        assert results, "No K8s worker nodes found"
+        self.logger.info(f"[k8s] Worker NQNs: {results}")
+        return results
+
+    def _setup_pool_and_host(self, dhchap=True, register=True):
+        """Create the DHCHAP pool and return ``(pool_id, allowed, denied)``.
+
+        ``allowed`` and ``denied`` are :class:`DhchapHost` instances.
+
+        docker -- ``allowed.nqn`` is the client's real /etc/nvme/hostnqn,
+          registered at pool level. ``denied.nqn`` is a synthetic NQN that is
+          deliberately never registered.
+        k8s -- ``spec.allowedNodes`` is a STRICT SUBSET of the workers, so
+          ``denied.node`` is a real node outside the pool. Nothing is
+          registered by hand: the operator derives each allowed node's NQN
+          from its Kubernetes UID and reconciles the pool's allowed hosts
+          purely from ``allowedNodes``, which is what the K8s security doc
+          specifies.
+
+        The previous version passed EVERY worker as an allowed node and
+        hand-registered an NQN on top. That contradicted the operator model
+        and, more importantly, left no node outside the pool -- so not one of
+        the ~14 classes built on it could exercise a rejection.
+
+        ``denied`` is None only when the environment cannot express denial (a
+        single-worker cluster). Callers whose purpose *is* denial must go
+        through :meth:`_require_denied_host`.
+        """
+        if self.k8s_test:
+            allowed_names, denied_names = self._k8s_setup_dhchap_pool_subset(
+                dhchap=dhchap)
+            nqn_by_node = dict(self._get_k8s_worker_nqns())
+            allowed = DhchapHost(
+                node=allowed_names[0], nqn=nqn_by_node.get(allowed_names[0]),
+                desc="in spec.allowedNodes")
+            denied = (
+                DhchapHost(node=denied_names[0],
+                           nqn=nqn_by_node.get(denied_names[0]),
+                           desc="NOT in spec.allowedNodes")
+                if denied_names else None)
+            pool_id = self._get_pool_id()
+            if dhchap:
+                self._k8s_assert_dhchap_wiring(allowed_names, denied_names)
+            return pool_id, allowed, denied
+
+        self._ensure_pool_and_sc(dhchap=dhchap)
+        pool_id = self._get_pool_id()
+        allowed = DhchapHost(nqn=self._get_client_host_nqn(),
+                             node=self.fio_node, desc="registered host")
+        denied = DhchapHost(
+            nqn=f"nqn.2014-08.org.nvmexpress:uuid:deadbeef-{_rand_suffix().lower()}",
+            desc="never registered")
+        if register:
+            self._register_host_to_pool(pool_id, allowed.nqn)
+        return pool_id, allowed, denied
+
+    def _require_denied_host(self, denied, tc=""):
+        """Fail loudly when the environment cannot express a denial.
+
+        A single-worker K8s cluster has no node outside the pool, so every
+        restriction assertion silently evaporates and the suite still reports
+        green. For a class whose entire purpose is proving a rejection, that
+        is worse than a failure -- it is a false statement about coverage.
+        """
+        if denied is not None:
+            return denied
+        raise AssertionError(
+            f"{TOK_COVERAGE_LOST} [{tc}]: no host outside the pool's allowed "
+            f"set exists in this environment (K8s needs >=2 schedulable "
+            f"workers so one can be excluded from spec.allowedNodes). This "
+            f"test exists to prove a rejection and cannot do so here.")
+
+    def _k8s_assert_dhchap_wiring(self, allowed, disallowed):
+        """Prove the four enforcement links up front.
+
+        Each break is then attributable to a stage, instead of surfacing 20
+        minutes later as an unexplained "pod never reached Running":
+
+          L0 Pool keys -- the pool reports ``dhchap: true`` and carries both
+             a ``dhchap_key`` and a ``dhchap_ctrlr_key``. The only check here
+             that is about authentication rather than placement.
+          L1 StoragePool CRD -- spec.dhchap is true, spec.allowedNodes is what
+             we asked for, and status.allowedNodes mirrors it (i.e. the
+             operator has actually reconciled).
+          L2 Node labels -- every allowed node carries ``<label>=allowed`` and
+             no disallowed node does. This is the check that catches a wrong
+             label key, the failure this whole change exists to prevent.
+          L3 Allowed hosts -- the backend pool's allowed hosts are exactly the
+             derived NQNs of status.allowedNodes.
+          L4 StorageClass -- parameters.dhchap_node_label equals that key.
+             Without the parameter, CSI writes no nodeAffinity and there is
+             *zero* enforcement while every other assertion still passes.
+
+        NOTE ON WHAT THIS PROVES. L1-L4 plus a pod-placement check demonstrate
+        that the pool's ``allowedNodes`` restriction is enforced at
+        mount/attach via the PV's nodeAffinity. They do NOT demonstrate that
+        DH-HMAC-CHAP was negotiated in-band: a pool with ``dhchap: false``
+        carrying the same node label would satisfy all of them, because
+        nodeAffinity is a scheduling/mount gate rather than authentication.
+        In-band negotiation is probed separately, on an allowed node, by
+        ``TestLvolSecurityNegativeConnect``.
+        """
+        k8s = self._ensure_k8s_utils()
+        crd = self._pool_crd_name
+        label = self._dhchap_node_label
+        assert label, (
+            f"{TOK_COVERAGE_LOST}: no dhchap_node_label resolved for pool "
+            f"{self.pool_name!r} — the StorageClass would carry no "
+            f"enforcement")
+
+        # L1 — CRD spec/status
+        out, _ = k8s._exec_kubectl(
+            f"kubectl get storagepool {crd} -n {k8s.namespace} -o json")
+        try:
+            obj = json.loads(out) if out.strip() else {}
+        except json.JSONDecodeError as exc:
+            raise AssertionError(
+                f"L1: StoragePool {crd!r} did not return JSON: {exc}; "
+                f"raw={out[:200]!r}")
+        spec, status = obj.get("spec", {}) or {}, obj.get("status", {}) or {}
+        assert bool(spec.get("dhchap")) is True, (
+            f"L1: StoragePool {crd!r} spec.dhchap is "
+            f"{spec.get('dhchap')!r}, expected true")
+        assert sorted(spec.get("allowedNodes") or []) == sorted(allowed), (
+            f"L1: StoragePool {crd!r} spec.allowedNodes is "
+            f"{spec.get('allowedNodes')!r}, expected {sorted(allowed)}")
+        self._k8s_wait_allowed_nodes_converged(allowed)
+        self.logger.info(
+            f"[dhchap L1] CRD {crd!r}: dhchap=true, allowedNodes={sorted(allowed)} "
+            f"reconciled (status={sorted(status.get('allowedNodes') or [])})")
+
+        # L2 — node labels, set equality both ways
+        labelled = set(self._k8s_nodes_with_label(label))
+        assert labelled == set(allowed), (
+            f"L2: nodes carrying {label}=allowed are {sorted(labelled)}, "
+            f"expected exactly {sorted(allowed)}. A disallowed node holding "
+            f"this label can mount the volume and every restriction "
+            f"assertion below would pass for the wrong reason.")
+        for node in disallowed or []:
+            assert node not in labelled, (
+                f"L2: disallowed node {node!r} carries {label}=allowed")
+        self.logger.info(
+            f"[dhchap L2] label {label}=allowed on exactly {sorted(labelled)}; "
+            f"absent from {sorted(disallowed or [])}")
+
+        # L0 — the pool really has DHCHAP provisioned.
+        #
+        # This is the ONLY assertion in the K8s path that is specific to
+        # DH-HMAC-CHAP rather than to node placement: it checks the pool
+        # carries actual host and controller keys. Everything below (labels,
+        # nodeAffinity, mount outcome) would hold equally for a pool with
+        # dhchap:false that happened to carry the same node label, because
+        # nodeAffinity is a scheduling gate and not authentication.
+        pool_details = None
+        try:
+            pool_details = self.sbcli_utils.get_pool_by_id(self._get_pool_id())
+            if isinstance(pool_details, list):
+                pool_details = pool_details[0] if pool_details else {}
+        except Exception as exc:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} [dhchap L0] could not read pool "
+                f"details: {exc}")
+        if isinstance(pool_details, dict) and pool_details:
+            assert pool_details.get("dhchap") is True, (
+                f"L0: pool {self.pool_name!r} reports dhchap="
+                f"{pool_details.get('dhchap')!r}, expected True")
+            for key in ("dhchap_key", "dhchap_ctrlr_key"):
+                val = pool_details.get(key) or ""
+                assert val.startswith("DHHC-"), (
+                    f"L0: pool {self.pool_name!r} has no usable {key} "
+                    f"(got {val[:12]!r}...). Without a provisioned key there "
+                    f"is no in-band authentication to enforce, whatever the "
+                    f"node labels say.")
+            self.logger.info(
+                "[dhchap L0] pool has dhchap=true with both a host and a "
+                "controller key provisioned")
+
+        # L3 — backend allowed hosts == derived NQNs of the allowed nodes
+        nqn_by_node = dict(self._get_k8s_worker_nqns())
+        expected_nqns = {nqn_by_node[n] for n in allowed if n in nqn_by_node}
+        actual_nqns = set(self._get_pool_allowed_hosts(self._get_pool_id()))
+        if expected_nqns and actual_nqns:
+            assert actual_nqns == expected_nqns, (
+                f"L3: pool allowed hosts are {sorted(actual_nqns)}, expected "
+                f"the derived NQNs of {sorted(allowed)} = "
+                f"{sorted(expected_nqns)}")
+            self.logger.info(
+                f"[dhchap L3] pool allowed hosts == derived NQNs of "
+                f"allowedNodes ({len(actual_nqns)} host(s))")
+        else:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} [dhchap L3] could not compare pool "
+                f"allowed hosts (expected={sorted(expected_nqns)}, "
+                f"actual={sorted(actual_nqns)}) — skipping L3")
+
+        # L4 — the StorageClass actually carries the parameter
+        sc_label = self._k8s_sc_dhchap_label(self._storage_class_name)
+        assert sc_label == label, (
+            f"L4: StorageClass {self._storage_class_name!r} has "
+            f"dhchap_node_label={sc_label!r}, expected {label!r}. Without a "
+            f"matching parameter the CSI driver writes no nodeAffinity onto "
+            f"the PV and DHCHAP is not enforced at all.")
+        self.logger.info(
+            f"[dhchap L4] StorageClass {self._storage_class_name!r} carries "
+            f"dhchap_node_label={sc_label}")
+
+    def _k8s_nodes_with_label(self, label_key, value="allowed"):
+        """Return the node names carrying ``label_key=value``."""
+        k8s = self._ensure_k8s_utils()
+        out, _ = k8s._exec_kubectl(
+            f"kubectl get nodes -l {label_key}={value} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true")
+        return [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
+
+    def _k8s_sc_dhchap_label(self, sc_name):
+        """Read ``parameters.dhchap_node_label`` back off a StorageClass."""
+        k8s = self._ensure_k8s_utils()
+        out, _ = k8s._exec_kubectl(
+            f"kubectl get storageclass {sc_name} "
+            f"-o jsonpath='{{.parameters.dhchap_node_label}}' "
+            f"2>/dev/null || true")
+        return (out or "").strip()
+
+    def _k8s_assert_pv_node_affinity(self, pvc_name, tc=""):
+        """Assert the PV bound to *pvc_name* carries the pool's nodeAffinity.
+
+        Per volume, not per class: the parameter is applied at provision time,
+        so a crypto class, a clone PVC, a restored PVC or the seventh volume
+        in a scale loop can each individually miss it while everything else
+        still looks fine.
+        """
+        k8s = self._ensure_k8s_utils()
+        # The volume's OWN pool label -- an encrypted volume belongs to the
+        # separate encrypted pool and carries that pool's label.
+        label = self._pvc_pool_label.get(pvc_name) or self._dhchap_node_label
+        pv_name = k8s.get_pvc_pv_name(pvc_name)
+        assert pv_name, f"L4 [{tc}]: PVC {pvc_name!r} has no bound PV"
+        out, _ = k8s._exec_kubectl(
+            f"kubectl get pv {pv_name} "
+            f"-o jsonpath='{{.spec.nodeAffinity}}' 2>/dev/null || true")
+        affinity = (out or "").strip()
+        assert label and label in affinity, (
+            f"L4 [{tc}]: PV {pv_name!r} (PVC {pvc_name!r}) nodeAffinity does "
+            f"not reference {label!r} — this volume has NO DHCHAP "
+            f"enforcement. nodeAffinity={affinity!r}")
+        self.logger.info(
+            f"[dhchap L4] PV {pv_name} (PVC {pvc_name}) nodeAffinity "
+            f"references {label}")
+        return pv_name
+
+    def _k8s_wait_allowed_nodes_converged(self, expected, timeout=180):
+        """Wait until the operator has reconciled ``allowedNodes``.
+
+        Convergence is observed on two surfaces, both of which have to agree
+        before any assertion downstream is trustworthy: ``status.allowedNodes``
+        on the CRD, and the node labels the CSI nodeAffinity actually keys off.
+        Replaces the blind ``sleep_n_sec(3)`` the dynamic tests used to do,
+        which made every one of them a race.
+
+        Returns True on convergence. On timeout, returns False rather than
+        raising -- whether the operator clears the label on *removal* is not
+        among the behaviours we have verified, so the caller decides whether
+        that is a hard failure (see :meth:`_revoke_host_dual`).
+        """
+        k8s = self._ensure_k8s_utils()
+        want = sorted(expected)
+        label = self._dhchap_node_label
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            out, _ = k8s._exec_kubectl(
+                f"kubectl get storagepool {self._pool_crd_name} "
+                f"-n {k8s.namespace} "
+                f"-o jsonpath='{{.status.allowedNodes}}' 2>/dev/null || true")
+            try:
+                status_nodes = sorted(json.loads(out) if out.strip().startswith("[")
+                                      else [])
+            except json.JSONDecodeError:
+                status_nodes = []
+            labelled = sorted(self._k8s_nodes_with_label(label)) if label else []
+            last = (status_nodes, labelled)
+            if status_nodes == want and labelled == want:
+                self.logger.info(
+                    f"[dhchap] allowedNodes converged to {want} "
+                    f"(status + node labels agree)")
+                return True
+            sleep_n_sec(5)
+        self.logger.warning(
+            f"{TOK_K8S_LIMITATION}: allowedNodes did not converge to {want} "
+            f"within {timeout}s — status.allowedNodes={last[0] if last else None}, "
+            f"labelled nodes={last[1] if last else None}")
+        return False
+
+    def _k8s_setup_dhchap_pool_subset(self, dhchap=True):
+        """K8s-native: create a pool whose allowedNodes is a strict subset of
+        the worker nodes, guaranteeing at least one disallowed node so the
+        restriction can actually be exercised.
+
+        No host NQN is registered manually — the operator derives each
+        allowed node's NQN itself and reconciles allowed hosts purely from
+        the StoragePool's allowedNodes field.
+
+        Returns (allowed_node_names, disallowed_node_names) and caches both on
+        ``self`` so FIO pinning and the assertion verbs can default sensibly.
+        """
+        workers = self._get_k8s_worker_nqns()  # [(node_name, nqn), ...]
+        all_names = [w[0] for w in workers]
+        if len(all_names) > 1:
+            allowed, disallowed = all_names[:-1], all_names[-1:]
+        else:
+            allowed, disallowed = all_names, []
+            self.logger.warning(
+                f"{TOK_COVERAGE_LOST}: only one schedulable worker "
+                f"({all_names}) — no node can be excluded from "
+                f"spec.allowedNodes, so no DHCHAP rejection can be proven "
+                f"in this environment")
+        self._ensure_pool_and_sc(dhchap=dhchap, allowed_nodes=allowed)
+        self._dhchap_allowed_nodes = allowed
+        self._dhchap_disallowed_nodes = disallowed
+        return allowed, disallowed
+
+    # ── authorization verbs ──────────────────────────────────────────────────
+
+    def _assert_host_authorized(self, lvol_name, lvol_id, host, tc="",
+                                require_ctrl_secret=False, prove_io=False,
+                                expect_fs_type=None, keep_pod=False):
+        """Assert *host* IS authorized for this volume.
+
+        docker -- ``volume connect --host-nqn host.nqn`` must return at least
+          one nvme-connect command with an empty error channel, containing
+          ``--dhchap-secret`` (and ``--dhchap-ctrl-secret`` when
+          *require_ctrl_secret*). This is the assertion the classes already
+          made, moved verbatim.
+        k8s -- a pod consuming the volume, hard-pinned to ``host.node``, must
+          reach Running. Mount/attach is where the operator's restriction is
+          enforced, so reaching Running *is* the authorization proof; a FIO
+          job would add data-path coverage but takes minutes rather than
+          seconds and, on the denial path, is strictly worse evidence (see
+          :meth:`_assert_host_denied`). Pass *prove_io* where the data path
+          itself is the point.
+
+        Records *lvol_name* as a positive control, without which a later
+        denial assertion on the same volume refuses to run.
+
+        Raises :class:`DhchapUnsupportedByHost` when the node kernel has no
+        in-band NVMe auth -- the connect then fails on an allowed node too,
+        which is an environment limit rather than a test failure.
+        """
+        if self.k8s_test:
+            assert host is not None and host.node, (
+                f"[{tc}] _assert_host_authorized needs a host with a node in "
+                f"K8s mode, got {host!r}")
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            self._k8s_assert_pv_node_affinity(pvc_name, tc=tc)
+            pod = self._k8s_verify_pod_scheduling(
+                pvc_name, host.node, expect_success=True)
+            self._dhchap_positive_control.add(lvol_name)
+            fs_want = expect_fs_type or self._fs_type
+            if fs_want and pod:
+                self._k8s_assert_fs_type(pod, fs_want, tc=tc)
+            if prove_io:
+                self._run_fio_dual(lvol_name, None, None, runtime=30,
+                                   node_name=host.node)
+            if pod and not keep_pod:
+                self._k8s_release_pod(pod, pvc_name=pvc_name)
+                return None
+            self.logger.info(
+                f"[{tc}] AUTHORIZED: {host!r} may mount {lvol_name}")
+            return pod
+
+        connect_ls, err = self._get_connect_str_dual(
+            lvol_id, host_nqn=_as_nqn(host))
+        assert not err, (
+            f"[{tc}] connect for authorized host {_as_nqn(host)!r} errored: "
+            f"{err!r}")
+        assert connect_ls, (
+            f"[{tc}] no connect string returned for authorized host "
+            f"{_as_nqn(host)!r}")
+        blob = " ".join(connect_ls).lower()
+        assert "dhchap-secret" in blob, (
+            f"[{tc}] connect string for authorized host {_as_nqn(host)!r} "
+            f"carries no --dhchap-secret: {connect_ls}")
+        if require_ctrl_secret:
+            assert "dhchap-ctrl-secret" in blob, (
+                f"[{tc}] connect string carries no --dhchap-ctrl-secret "
+                f"(bidirectional auth expected): {connect_ls}")
+        self._dhchap_positive_control.add(lvol_name)
+        self.logger.info(
+            f"[{tc}] AUTHORIZED: {_as_nqn(host)!r} got DHCHAP keys for "
+            f"{lvol_name}")
+        return connect_ls
+
+    def _assert_host_denied(self, lvol_name, lvol_id, host, tc="",
+                            why="not in the pool's allowed set"):
+        """Assert *host* is NOT authorized for this volume.
+
+        docker -- ``volume connect --host-nqn host.nqn`` must be rejected:
+          a non-empty error channel, or no connect line at all.
+        k8s -- a pod pinned to ``host.node`` must NOT reach Running, and its
+          kubelet events must NAME the authorization failure
+          (``MountVolume.NodeAffinity check failed`` / ``no matching
+          NodeSelectorTerms`` / ``not found in allowed hosts``).
+
+        PRECONDITION, enforced: a positive control must already have
+        succeeded for *lvol_name* in this test. Without one, a volume that
+        cannot mount ANYWHERE -- wrong dhchap_node_label, CSI node plugin
+        down, PV never published -- produces the identical observation ("pod
+        never ran"), and the denial would pass for entirely the wrong reason.
+        This single precondition covers the largest class of false pass in
+        this suite.
+        """
+        if self.k8s_test:
+            assert host is not None and host.node, (
+                f"[{tc}] _assert_host_denied needs a host with a node in K8s "
+                f"mode, got {host!r}")
+            assert lvol_name in self._dhchap_positive_control, (
+                f"{TOK_WEAK_EVIDENCE} [{tc}]: refusing to assert a denial for "
+                f"{lvol_name!r} before a positive control has passed on it. "
+                f"A volume that cannot mount anywhere looks exactly like a "
+                f"DHCHAP denial, so this assertion would be meaningless. "
+                f"Call _assert_host_authorized on an allowed node first.")
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            self._k8s_verify_pod_scheduling(
+                pvc_name, host.node, expect_success=False)
+            self.logger.info(
+                f"[{tc}] DENIED as expected: {host!r} ({why}) could not "
+                f"mount {lvol_name}")
+            return
+
+        connect_ls, err = self._get_connect_str_dual(
+            lvol_id, host_nqn=_as_nqn(host))
+        rejected = bool(err) or not connect_ls
+        assert rejected, (
+            f"[{tc}] host {_as_nqn(host)!r} ({why}) was NOT rejected — got a "
+            f"usable connect string: {connect_ls}")
+        self.logger.info(
+            f"[{tc}] DENIED as expected: {_as_nqn(host)!r} ({why}) "
+            f"err={err!r} connect={connect_ls}")
+
+    def _k8s_assert_fs_type(self, pod_name, expect_fs_type, tc=""):
+        """Verify the CSI-created filesystem type inside a running pod.
+
+        This is the only place ext4/xfs coverage exists in K8s: the mount is
+        performed by the CSI node plugin from the StorageClass's
+        ``csi.storage.k8s.io/fstype``, so ``_pick_fs_type`` was previously
+        dead code in K8s mode. Costs no extra pod -- the positive control
+        already has one running with the volume mounted.
+        """
+        k8s = self._ensure_k8s_utils()
+        try:
+            # exec_in_pod returns (stdout, stderr) -- unlike get_pod_logs and
+            # get_pod_events on the same class, which return a bare string.
+            out, err = k8s.exec_in_pod(
+                pod_name, "grep ' /spdkvol ' /proc/mounts || cat /proc/mounts")
+        except Exception as exc:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} [{tc}] could not read /proc/mounts in "
+                f"{pod_name}: {exc}")
+            return
+        if err and not (out or "").strip():
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} [{tc}] reading /proc/mounts in "
+                f"{pod_name} errored: {err!r}")
+            return
+        line = next((ln for ln in (out or "").splitlines()
+                     if " /spdkvol " in ln), "")
+        if not line:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} [{tc}] /spdkvol not found in "
+                f"/proc/mounts of {pod_name}: {out!r}")
+            return
+        assert expect_fs_type in line, (
+            f"[{tc}] volume mounted in {pod_name} is not {expect_fs_type}: "
+            f"{line.strip()!r}")
+        self.logger.info(
+            f"[{tc}] filesystem verified as {expect_fs_type}: {line.strip()}")
+
+    def _k8s_bind_pvc(self, pvc_name, node=None, timeout=420):
+        """Force a WaitForFirstConsumer PVC to bind, then release it.
+
+        The operator's StorageClass uses ``volumeBindingMode:
+        WaitForFirstConsumer``, so a freshly created PVC stays Pending until a
+        pod referencing it is scheduled -- provisioning is deliberately
+        deferred so the volume lands in the right topology. Every caller here
+        needs the bound PV up front (for the volumeHandle and for the
+        per-volume nodeAffinity assertion), so schedule a short-lived binder
+        pod on an allowed node to trigger it.
+
+        The binder is pinned with ``nodeSelector``, never ``nodeName``:
+        nodeName bypasses the scheduler, and it is the scheduler that triggers
+        WaitForFirstConsumer binding, so a nodeName-pinned pod would leave the
+        claim Pending forever.
+        """
+        k8s = self._ensure_k8s_utils()
+        node = node or (self._dhchap_allowed_nodes[0]
+                        if self._dhchap_allowed_nodes else None)
+        binder = f"bind-{_rand_suffix().lower()}"
+        self.created_pods.append(binder)
+        try:
+            k8s.create_utility_pod(binder, pvc_name, node_selector=node)
+            k8s.wait_pvc_bound(pvc_name, timeout=timeout)
+            self.logger.info(
+                f"[k8s] PVC {pvc_name!r} bound via binder pod on {node!r}")
+        finally:
+            self._k8s_release_pod(binder, pvc_name=pvc_name)
+
+    def _k8s_release_pod(self, pod_name, pvc_name=None):
+        """Delete a pod and wait until its volume is genuinely detached.
+
+        Load-bearing before any denial assertion: a volume still attached on
+        the previous node makes the next node's attach fail with
+        ``Multi-Attach error``, which is not a DHCHAP denial at all.
+
+        Deleting the pod is NOT enough. ``delete_pod(wait=True)`` waits for the
+        Pod object only, while the VolumeAttachment survives until kubelet
+        finishes unmounting and the CSI controller completes
+        ``ControllerUnpublishVolume``. Observed in CI: 31 seconds after the
+        pod was gone, the volume was still attached and the next pod hit
+        Multi-Attach. Pass *pvc_name* wherever it is known so the detach is
+        actually waited for.
+        """
+        k8s = self._ensure_k8s_utils()
+        try:
+            if pvc_name:
+                k8s.delete_pod_and_wait_detached(pod_name, pvc_name=pvc_name)
+            else:
+                k8s.delete_pod(pod_name, wait=True)
+        except Exception as exc:
+            self.logger.warning(f"  release {pod_name}: {exc}")
+        if pod_name in self.created_pods:
+            self.created_pods.remove(pod_name)
+
+    # ── dynamic host management ──────────────────────────────────────────────
+
+    def _get_pool_allowed_hosts(self, pool_id):
+        """Return the pool's registered allowed-host NQNs, both modes."""
+        try:
+            details = self.sbcli_utils.get_pool_by_id(pool_id)
+        except Exception as exc:
+            self.logger.warning(
+                f"[pool] could not read pool {pool_id}: {exc}")
+            return []
+        if isinstance(details, list):
+            details = details[0] if details else {}
+        if not isinstance(details, dict):
+            return []
+        hosts = (details.get("allowed_hosts")
+                 or details.get("allowedHosts") or [])
+        out = []
+        for h in hosts:
+            if isinstance(h, dict):
+                nqn = h.get("nqn") or h.get("host_nqn")
+                if nqn:
+                    out.append(nqn)
+            elif h:
+                out.append(str(h))
+        return out
+
+    def _pool_host_op_dual(self, pool_id, host_nqn, remove=False):
+        """Run ``pool add-host`` / ``pool remove-host`` returning (out, err).
+
+        The K8s wrappers on ``K8sSbcliUtils`` return stdout only, so the four
+        negative host-op assertions used to force ``err = ""`` and could not
+        fail. Go through ``exec_sbcli`` for a real error channel.
+        """
+        sub = "remove-host" if remove else "add-host"
+        if self.k8s_test:
+            cmd = f"{self.sbcli_utils.sbcli_cmd} pool {sub} {pool_id} {host_nqn}"
+            out, err = self.sbcli_utils.k8s.exec_sbcli(cmd)
+            out = out or ""
+            if not err and self.sbcli_utils._cli_output_is_error(out, err):
+                err = next(
+                    (ln.strip() for ln in out.splitlines()
+                     if "error" in ln.lower() or "usage:" in ln.lower()),
+                    out.strip()[:200])
+            return out, err
+        return self.ssh_obj.exec_command(
+            self.mgmt_nodes[0],
+            f"{self.base_cmd} pool {sub} {pool_id} {host_nqn}")
+
+    def _assert_cli_rejected(self, out, err, label, pool_id=None,
+                             host_nqn=None):
+        """Assert a CLI mutation was rejected, via two independent signals.
+
+        (a) textual -- out/err carries a failure word. Best-effort only,
+            because ``exec_sbcli`` discards the exit code in K8s.
+        (b) effect -- when *pool_id* and *host_nqn* are given, re-read the
+            pool's allowed hosts and assert *host_nqn* is absent. This one is
+            mode-independent and wording-independent, and it is the real
+            assertion.
+
+        The previous helper passed whenever stdout happened to be empty
+        (``has_signal or not out.strip()``), which combined with the forced
+        ``err = ""`` on the K8s path meant it could not fail. That escape
+        hatch is gone; signal (b) carries its weight.
+        """
+        blob = f"{out or ''}\n{err or ''}".lower()
+        has_signal = any(
+            tok in blob for tok in
+            ("error", "invalid", "not found", "failed", "usage:", "traceback",
+             "exception", "must be", "cannot"))
+        checked_effect = False
+        if pool_id and host_nqn:
+            hosts = self._get_pool_allowed_hosts(pool_id)
+            assert host_nqn not in hosts, (
+                f"[{label}] operation was NOT rejected — {host_nqn!r} is now "
+                f"in the pool's allowed hosts {hosts}")
+            checked_effect = True
+            self.logger.info(
+                f"[{label}] effect verified: {host_nqn!r} absent from pool "
+                f"allowed hosts")
+        if not has_signal and not checked_effect:
+            raise AssertionError(
+                f"[{label}] expected a rejection but got no error signal and "
+                f"no verifiable effect. out={out!r} err={err!r}")
+        if not has_signal:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} [{label}] no textual error signal; "
+                f"relying on the state check. out={out!r} err={err!r}")
+        else:
+            self.logger.info(f"[{label}] rejected as expected: {err or out!r}")
+
+    def _grant_host_dual(self, pool_id, host, tc=""):
+        """Grant *host* access. docker: ``pool add-host``. k8s: append the
+        node to ``spec.allowedNodes`` and wait for the operator.
+        """
+        if self.k8s_test:
+            nodes = sorted(set(self._dhchap_allowed_nodes) | {host.node})
+            self._k8s_set_pool_allowed_nodes(nodes)
+            converged = self._k8s_wait_allowed_nodes_converged(nodes)
+            assert converged, (
+                f"[{tc}] operator did not add {host.node!r} to allowedNodes")
+            self._dhchap_allowed_nodes = nodes
+            self._dhchap_disallowed_nodes = [
+                n for n in self._dhchap_disallowed_nodes if n != host.node]
+            self.logger.info(f"[{tc}] granted {host.node!r}; allowed={nodes}")
+            return True
+        out, err = self._pool_host_op_dual(pool_id, _as_nqn(host))
+        assert not err or "error" not in err.lower(), (
+            f"[{tc}] pool add-host failed: {err!r}")
+        hosts = self._get_pool_allowed_hosts(pool_id)
+        if hosts:
+            assert _as_nqn(host) in hosts, (
+                f"[{tc}] {_as_nqn(host)!r} not in pool allowed hosts after "
+                f"add-host: {hosts}")
+        self.logger.info(f"[{tc}] granted {_as_nqn(host)!r}")
+        return True
+
+    def _revoke_host_dual(self, pool_id, host, tc="", hard=False):
+        """Withdraw *host*'s access. Returns True if it was OBSERVED to
+        take effect.
+
+        docker -- ``pool remove-host``, then re-read the pool's allowed hosts
+          and confirm the NQN is gone. Replaces the blind ``sleep_n_sec(3)``
+          the call sites used to do.
+        k8s -- patch ``spec.allowedNodes`` to drop the node, then WAIT (not
+          sleep) until the operator has removed the pool label from it and
+          ``status.allowedNodes`` no longer lists it. Waiting on the label is
+          what makes the following denial assertion deterministic, since the
+          PV's nodeAffinity keys off exactly that label.
+
+        IMPORTANT, and a real product limit rather than a test shortcut: a
+        PV's ``nodeAffinity`` is written at provision time and does not
+        shrink, and an already-mounted volume is unaffected because
+        nodeAffinity is checked at mount. So revocation is only observable for
+        *newly provisioned* volumes and *new* mounts.
+
+        Whether the operator clears the node label on removal is not among the
+        behaviours verified so far. ``hard=False`` logs a limitation token and
+        returns False so the caller can skip just that assertion; ``hard=True``
+        raises. Use ``hard=True`` only where probing this is the point, so the
+        unknown is exercised once per run instead of silently everywhere.
+        """
+        if self.k8s_test:
+            nodes = [n for n in self._dhchap_allowed_nodes if n != host.node]
+            assert nodes, (
+                f"[{tc}] refusing to empty spec.allowedNodes (revoking "
+                f"{host.node!r} would leave the pool with no allowed node)")
+            self._k8s_set_pool_allowed_nodes(nodes)
+            converged = self._k8s_wait_allowed_nodes_converged(nodes)
+            if not converged:
+                msg = (f"{TOK_K8S_LIMITATION} [{tc}]: operator did not "
+                       f"withdraw {host.node!r} from allowedNodes/node labels "
+                       f"within the timeout — revocation not observable")
+                if hard:
+                    raise AssertionError(msg)
+                self.logger.warning(msg)
+                return False
+            self._dhchap_allowed_nodes = nodes
+            if host.node not in self._dhchap_disallowed_nodes:
+                self._dhchap_disallowed_nodes.append(host.node)
+            self.logger.info(f"[{tc}] revoked {host.node!r}; allowed={nodes}")
+            return True
+
+        out, err = self._pool_host_op_dual(pool_id, _as_nqn(host), remove=True)
+        assert not err or "error" not in err.lower(), (
+            f"[{tc}] pool remove-host failed: {err!r}")
+        hosts = self._get_pool_allowed_hosts(pool_id)
+        assert _as_nqn(host) not in hosts, (
+            f"[{tc}] {_as_nqn(host)!r} still in pool allowed hosts after "
+            f"remove-host: {hosts}")
+        self.logger.info(f"[{tc}] revoked {_as_nqn(host)!r}")
+        return True
+
+    def _k8s_set_pool_allowed_nodes(self, nodes):
+        """Patch the StoragePool CRD's ``spec.allowedNodes``."""
+        k8s = self._ensure_k8s_utils()
+        patch = json.dumps({"spec": {"allowedNodes": list(nodes)}})
+        cmd = (f"kubectl patch storagepool {self._pool_crd_name} "
+               f"-n {k8s.namespace} --type merge -p {shlex.quote(patch)}")
+        out, err = k8s._exec_kubectl(cmd)
+        assert not err or "error" not in err.lower(), (
+            f"patching allowedNodes to {list(nodes)} failed: {err!r}")
+        self.logger.info(
+            f"[dhchap] patched {self._pool_crd_name} allowedNodes="
+            f"{list(nodes)}: {(out or '').strip()}")
+
+    def _create_lvol_dual(self, name, size=None, encrypt=False):
+        """Create an lvol. Docker: ssh_obj.create_sec_lvol(). K8s: PVC.
+
+        Returns (name, lvol_id).
+        """
+        size = size or self.lvol_size
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(name)
+            sc_name = self._storage_class_name
+            if encrypt:
+                # Operator SC of a dedicated encrypted DHCHAP pool.
+                sc_name = self._k8s_encrypted_storage_class()
+                self._pvc_pool_label[pvc_name] = self._encrypted_pool_label
+            self._pvc_pool_label.setdefault(pvc_name, self._dhchap_node_label)
+            pvc_size = size if "Gi" in size else size.replace("G", "Gi")
+            k8s.create_pvc(name=pvc_name, size=pvc_size,
+                           storage_class=sc_name)
+            self.created_pvcs.append(pvc_name)
+            self._k8s_bind_pvc(pvc_name)
+            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            return pvc_name, lvol_id
+
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], name, size, self.pool_name,
+            encrypt=encrypt)
+        assert not err or "error" not in err.lower(), \
+            f"lvol creation failed: {err}"
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(name)
+        assert lvol_id, f"Could not find ID for {name}"
+        return name, lvol_id
+
+    def _get_lvol_id_dual(self, name):
+        """Get lvol UUID. K8s: resolve via PVC volumeHandle."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(name)
+            vol_handle = k8s.get_pvc_volume_handle(pvc_name)
+            if vol_handle and ":" in vol_handle:
+                return vol_handle.rsplit(":", 1)[-1]
+            return vol_handle
+        return self.sbcli_utils.get_lvol_id(name)
+
+    def _get_connect_str_dual(self, lvol_id, host_nqn=None):
+        """Get connect string. Docker: ssh. K8s: kubectl exec sbcli.
+
+        In K8s mode, lvol_id may be a compound volumeHandle; extracts UUID.
+        Returns (connect_lines, error_string).
+
+        The K8s branch used to hardcode the error slot to ``""``, which
+        disarmed every ``assert not err`` and every
+        ``rejected = bool(err) or not connect_ls`` in the file -- they all
+        collapsed to ``not connect_ls``. It goes through ``exec_sbcli``, which
+        returns a real (stdout, stderr) tuple, rather than
+        ``sbcli_utils._run``, which throws stderr away; and it folds an sbcli
+        ``Error:`` printed on *stdout* into the error channel, because
+        ``exec_sbcli`` discards the exit code.
+        """
+        host_nqn = _as_nqn(host_nqn)
+        if self.k8s_test:
+            actual_id = lvol_id
+            if ":" in str(lvol_id):
+                actual_id = str(lvol_id).rsplit(":", 1)[-1]
+            cmd = f"{self.sbcli_utils.sbcli_cmd} volume connect {actual_id}"
+            if host_nqn:
+                cmd += f" --host-nqn {host_nqn} --ctrl-loss-tmo -1"
+            out, err = self.sbcli_utils.k8s.exec_sbcli(cmd)
+            out = out or ""
+            if not err and self.sbcli_utils._cli_output_is_error(out, err):
+                # sbcli printed a failure to stdout; surface it as an error so
+                # callers asserting on the error channel see it.
+                err = next(
+                    (ln.strip() for ln in out.splitlines()
+                     if "error" in ln.lower() or "usage:" in ln.lower()),
+                    out.strip()[:200])
+            connect_lines = [
+                ' '.join(line.split()) for line in out.strip().split('\n')
+                if line.strip() and 'nvme connect' in line
+            ]
+            return connect_lines, err
+        return self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+
+    def _connect_and_get_device_dual(self, lvol_name, lvol_id,
+                                      host_nqn=None):
+        """Connect lvol. Docker: nvme connect. K8s: genuinely nothing to do.
+
+        Returns (device_or_pvc, connect_commands).
+
+        There is no client-issued ``nvme connect`` in the CSI path -- the node
+        plugin owns it. The no-op is correct, but it must not be mistaken for
+        coverage: the authorization this call used to imply is now asserted
+        explicitly by :meth:`_assert_host_authorized`.
+        """
+        host_nqn = _as_nqn(host_nqn)
+        if self.k8s_test:
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            return pvc_name, []
+        return self._connect_and_get_device(
+            lvol_name, lvol_id, host_nqn=host_nqn)
+
+    def _format_and_mount_dual(self, lvol_name, device, mount_point=None,
+                                fs_type=None, format_first=True):
+        """Format + mount. Docker: ssh. K8s: CSI already mounted it.
+
+        Returns the mount point (Docker) or PVC name (K8s).
+
+        The K8s branch is a no-op by necessity -- the CSI node plugin creates
+        the filesystem from the StorageClass's ``csi.storage.k8s.io/fstype``
+        and mounts it. That is why ``_pick_fs_type`` used to be dead code in
+        K8s: the choice is now threaded into the StorageClass instead, and
+        verified inside a running pod by ``_k8s_assert_fs_type``.
+
+        Pass ``format_first=False`` for a volume that already carries a
+        filesystem (a clone, or a re-mount after a reconnect) -- formatting it
+        would destroy the very data the test is about to verify.
+        """
+        if self.k8s_test:
+            return self._k8s_normalize_name(lvol_name)
+        fs_type = fs_type or self._pick_fs_type()
+        mount_point = mount_point or f"{self.mount_path}/{lvol_name}"
+        if format_first:
+            self.ssh_obj.format_disk(
+                node=self.fio_node, device=device, fs_type=fs_type)
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=device, mount_path=mount_point)
+        return mount_point
+
+    def _run_fio_dual(self, lvol_name, mount_point, log_file,
+                       rw="randrw", bs="4K", runtime=30, numjobs=2,
+                       fio_size=None, node_name=None):
+        """Run FIO. Docker: tmux session. K8s: FIO Job + ConfigMap.
+
+        In K8s the job is pinned to *node_name*, defaulting to an allowed
+        node. Pinning is not optional once the pool restricts allowedNodes: an
+        unpinned pod can land on the disallowed node and fail, which would
+        break every class non-deterministically. The landed node is asserted
+        afterwards, so a pin that silently did not apply is caught rather than
+        producing a pass that proves nothing about node placement.
+        """
+        if self.k8s_test:
+            node_name = node_name or (
+                self._dhchap_allowed_nodes[0]
+                if self._dhchap_allowed_nodes else None)
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            fio_name = f"sec-fio-{_rand_suffix().lower()}"
+            job_name = f"fio-{fio_name}"
+            cm_name = f"fiocfg-{job_name}"
+            size = fio_size or self.fio_size
+
+            fio_config = (
+                f"[global]\n"
+                f"ioengine=libaio\n"
+                f"direct=1\n"
+                f"bs={bs}\n"
+                f"iodepth=1\n"
+                f"numjobs={numjobs}\n"
+                f"time_based\n"
+                f"runtime={runtime}\n"
+                f"\n"
+                f"[{fio_name[:20]}]\n"
+                f"rw={rw}\n"
+                f"size={size}\n"
+                f"directory=/spdkvol\n"
+                f"nrfiles=4\n"
+            )
+
+            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config,
+                               node_selector=node_name)
+            self.created_fio_jobs.append(job_name)
+            self.created_configmaps.append(cm_name)
+
+            status = k8s.wait_job_complete(job_name, timeout=runtime + 120)
+            assert status == "succeeded", (
+                f"FIO job {job_name} did not succeed (status={status})")
+
+            # Confirm the pin took. Without this an unpinned/mis-pinned job
+            # that happens to succeed proves nothing about node placement.
+            try:
+                fio_pod = k8s.get_job_pod_name(job_name)
+                landed = k8s.get_pod_node_name(fio_pod) if fio_pod else None
+            except Exception as exc:
+                landed = None
+                self.logger.warning(
+                    f"{TOK_WEAK_EVIDENCE} could not resolve the node for FIO "
+                    f"job {job_name}: {exc}")
+            if landed:
+                if node_name:
+                    assert landed == node_name, (
+                        f"FIO job {job_name} was pinned to {node_name!r} but "
+                        f"ran on {landed!r}")
+                elif self._dhchap_allowed_nodes:
+                    assert landed in self._dhchap_allowed_nodes, (
+                        f"FIO job {job_name} ran on {landed!r}, which is not "
+                        f"in the pool's allowed nodes "
+                        f"{self._dhchap_allowed_nodes} — the PV's "
+                        f"nodeAffinity should have made this impossible")
+                self.logger.info(
+                    f"[dhchap] FIO job {job_name} ran on {landed!r}")
+
+            k8s.delete_job(job_name)
+            k8s.delete_configmap(cm_name)
+            if job_name in self.created_fio_jobs:
+                self.created_fio_jobs.remove(job_name)
+            if cm_name in self.created_configmaps:
+                self.created_configmaps.remove(cm_name)
+            return
+
+        self._run_fio_and_validate(
+            lvol_name, mount_point, log_file,
+            rw=rw, bs=bs, numjobs=numjobs, runtime=runtime,
+            fio_size=fio_size)
+
+    # ── background FIO (outage / failover tests) ─────────────────────────────
+
+    def _start_bg_fio_dual(self, lvol_name, mount_point, log_file,
+                            runtime=300, rw="randrw", bs="4K", numjobs=2,
+                            node_name=None):
+        """Start FIO and return immediately with an opaque handle.
+
+        docker: a thread running ``ssh_obj.run_fio_test`` (as before).
+        k8s: a FIO Job, pinned to an allowed node, that is NOT waited on.
+
+        The outage classes need I/O in flight *across* the outage, which the
+        synchronous ``_run_fio_dual`` cannot express -- it blocks on
+        ``wait_job_complete``. The three classes previously started a raw
+        ``threading.Thread(target=self.ssh_obj.run_fio_test, ...)``, which
+        cannot work in K8s at all.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            node_name = node_name or (
+                self._dhchap_allowed_nodes[0]
+                if self._dhchap_allowed_nodes else None)
+            fio_name = f"bg-{_rand_suffix().lower()}"
+            job_name = f"fio-{fio_name}"
+            cm_name = f"fiocfg-{job_name}"
+            fio_config = (
+                f"[global]\n"
+                f"ioengine=libaio\n"
+                f"direct=1\n"
+                f"bs={bs}\n"
+                f"iodepth=1\n"
+                f"numjobs={numjobs}\n"
+                f"time_based\n"
+                f"runtime={runtime}\n"
+                f"verify=md5\n"
+                f"verify_fatal=1\n"
+                f"\n"
+                f"[{fio_name}]\n"
+                f"rw={rw}\n"
+                f"size={self.fio_size}\n"
+                f"directory=/spdkvol\n"
+                f"nrfiles=4\n"
+            )
+            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config,
+                               node_selector=node_name)
+            self.created_fio_jobs.append(job_name)
+            self.created_configmaps.append(cm_name)
+            self.logger.info(
+                f"[k8s] background FIO job {job_name} started on "
+                f"{node_name!r} (runtime={runtime}s)")
+            return {"job": job_name, "cm": cm_name, "runtime": runtime}
+
+        fio_thread = threading.Thread(
+            target=self.ssh_obj.run_fio_test,
+            args=(self.fio_node, None, mount_point, log_file),
+            kwargs={
+                "name": f"fio_run_{lvol_name}", "runtime": runtime,
+                "rw": rw, "bs": bs, "size": self.fio_size, "nrfiles": 4,
+                "iodepth": 1, "numjobs": numjobs, "time_based": True,
+            },
+        )
+        fio_thread.start()
+        self.fio_threads.append(fio_thread)
+        return {"thread": fio_thread, "name": f"fio_run_{lvol_name}",
+                "log": log_file, "runtime": runtime}
+
+    def _assert_bg_fio_alive_dual(self, handle, tc=""):
+        """Assert the background FIO is still doing I/O mid-outage.
+
+        docker: the fio process is still in the process table.
+        k8s: the job's pod is still Running and has not been rescheduled --
+          a rescheduled pod would void the "I/O survived" claim, since the
+          new pod would simply have re-mounted after the outage.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            job = handle["job"]
+            pod = k8s.get_job_pod_name(job)
+            assert pod, f"[{tc}] background FIO job {job} has no pod"
+            detail = k8s.get_pod_status_detail(pod)
+            phase = (detail or {}).get("phase") if isinstance(detail, dict) \
+                else str(detail)
+            assert phase == "Running", (
+                f"[{tc}] background FIO pod {pod} is {phase!r}, expected "
+                f"Running — I/O did not survive the outage")
+            node = k8s.get_pod_node_name(pod)
+            if handle.get("node") and node != handle["node"]:
+                raise AssertionError(
+                    f"[{tc}] background FIO pod moved from "
+                    f"{handle['node']!r} to {node!r} — the 'I/O survived' "
+                    f"claim is void, the pod simply re-mounted elsewhere")
+            handle["node"] = node
+            self.logger.info(
+                f"[{tc}] background FIO pod {pod} still Running on {node!r}")
+            return
+        procs = self.ssh_obj.find_process_name(
+            self.fio_node, f"fio.*{handle['name']}")
+        running = [p for p in procs
+                   if p.strip() and "grep" not in p and "fio --name" in p]
+        assert running, f"[{tc}] FIO should still be running during outage"
+        self.logger.info(f"[{tc}] FIO process still alive")
+
+    def _finish_bg_fio_dual(self, handle, tc=""):
+        """Wait for the background FIO to finish and validate the result.
+
+        Job status alone is not enough: a job that exits instantly reports
+        succeeded. The config sets ``verify=md5`` + ``verify_fatal=1``, and the
+        pod log is checked for a nonzero error count.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            job, cm = handle["job"], handle["cm"]
+            status = k8s.wait_job_complete(
+                job, timeout=handle["runtime"] + 300)
+            assert status == "succeeded", (
+                f"[{tc}] background FIO job {job} ended {status!r} — I/O did "
+                f"not survive the outage")
+            pod = k8s.get_job_pod_name(job)
+            logs = k8s.get_pod_logs(pod, tail=200) if pod else ""
+            bad = [ln for ln in logs.splitlines()
+                   if "err=" in ln and "err= 0" not in ln and "err=0" not in ln]
+            assert not bad, (
+                f"[{tc}] background FIO job {job} succeeded but reported "
+                f"errors: {bad[:3]}")
+            self.logger.info(
+                f"[{tc}] background FIO job {job} completed with md5 verify")
+            for name, lst, fn in (
+                    (job, self.created_fio_jobs, k8s.delete_job),
+                    (cm, self.created_configmaps, k8s.delete_configmap)):
+                try:
+                    fn(name)
+                    if name in lst:
+                        lst.remove(name)
+                except Exception as exc:
+                    self.logger.warning(f"  cleanup {name}: {exc}")
+            return
+        self.common_utils.manage_fio_threads(
+            self.fio_node, self.fio_threads,
+            timeout=handle["runtime"] + 120)
+        self.common_utils.validate_fio_test(
+            self.fio_node, log_file=handle["log"])
+        self.logger.info(f"[{tc}] FIO completed without interruption")
+
+    def _network_outage_dual(self, node_ip, duration=30):
+        """Trigger a self-restoring full network outage on a storage node.
+
+        docker: drop the node's NICs over SSH for *duration* seconds.
+        k8s: kubectl exec into the privileged hostNetwork SPDK pod and apply
+          iptables DROP rules, with the flush scheduled as a HOST-level
+          process via ``nsenter --target 1`` so it survives SPDK's 60-second
+          abort timer killing the container. Without that, the DROP rules
+          would be permanent and the node never comes back. Ported from the
+          proven implementation in
+          ``e2e/stress_test/continuous_k8s_native_failover.py``.
+        """
+        if not self.k8s_test:
+            active = self.ssh_obj.get_active_interfaces(node_ip)
+            assert active, f"No active interfaces found on {node_ip}"
+            self.ssh_obj.disconnect_all_active_interfaces(
+                node_ip, active, duration_secs=duration)
+            return duration
+
+        k8s = self._ensure_k8s_utils()
+        flush_delay = duration + 5
+        flush_cmd = (
+            f"sudo nsenter --target 1 --mount --net -- "
+            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
+            f"> /dev/null 2>&1 &'"
+        )
+        k8s.exec_in_spdk_container(node_ip, flush_cmd)
+        self.logger.info(
+            f"[k8s] scheduled host-level iptables flush in {flush_delay}s on "
+            f"{node_ip}")
+        drop_cmd = (
+            "sudo nohup bash -c '"
+            "sleep 5 && "
+            "iptables -A INPUT -j DROP && "
+            "iptables -A OUTPUT -j DROP"
+            "' > /tmp/k8s_nw_outage.log 2>&1 &"
+        )
+        k8s.exec_in_spdk_container(node_ip, drop_cmd)
+        self.logger.info(
+            f"[k8s] network outage triggered on {node_ip} (self-restoring "
+            f"after {duration}s)")
+        return duration
+
+    def _disconnect_and_unmount_dual(self, lvol_name, lvol_id, mount_point):
+        """Release the volume so it can be published elsewhere.
+
+        docker: unmount + nvme disconnect.
+        k8s: NOT a no-op, despite CSI owning the mount. Delete every pod and
+          FIO job this test attached to the volume and wait for them to go,
+          freeing the ReadWriteOnce claim. Leaving one attached makes the next
+          node's mount fail with ``Multi-Attach error``, which is
+          indistinguishable from a DHCHAP denial at the event level and is the
+          primary way a denial assertion could pass for the wrong reason.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            for job_name in list(self.created_fio_jobs):
+                try:
+                    k8s.delete_job(job_name)
+                    self.created_fio_jobs.remove(job_name)
+                except Exception as exc:
+                    self.logger.warning(f"  release job {job_name}: {exc}")
+            for pod_name in list(self.created_pods):
+                # Pod names are prefixed, not PVC-derived, so release every
+                # pod this test created rather than trying to match them to
+                # the claim.
+                self._k8s_release_pod(pod_name)
+            # Then wait for THIS claim's volume to be genuinely detached.
+            # Deleting the pods above only removes the Pod objects; the
+            # VolumeAttachment outlives them, and a denial assertion issued
+            # inside that window sees Multi-Attach rather than the DHCHAP
+            # rejection it is trying to observe.
+            try:
+                pv_name = k8s.get_pvc_pv_name(pvc_name)
+                if pv_name and not k8s.wait_volume_detached(pv_name):
+                    self.logger.warning(
+                        f"{TOK_WEAK_EVIDENCE} PVC {pvc_name!r} (PV {pv_name}) "
+                        f"is still attached; a following denial assertion may "
+                        f"observe Multi-Attach instead of a DHCHAP rejection")
+            except Exception as exc:
+                self.logger.warning(
+                    f"  detach wait for {pvc_name}: {exc}")
+            self.logger.info(
+                f"[k8s] released all attachments to PVC {pvc_name!r}")
+            return
+        if mount_point:
+            self.ssh_obj.unmount_path(self.fio_node, mount_point)
+            sleep_n_sec(2)
+        self._disconnect_lvol(lvol_id)
+        sleep_n_sec(2)
+
+    def teardown(self, **kwargs):
+        """Clean up K8s resources before delegating to parent teardown."""
+        if self.k8s_test:
+            try:
+                k8s = self._ensure_k8s_utils()
+                for job_name in list(self.created_fio_jobs):
+                    try:
+                        k8s.delete_job(job_name)
+                    except Exception:
+                        pass
+                for cm_name in list(self.created_configmaps):
+                    try:
+                        k8s.delete_configmap(cm_name)
+                    except Exception:
+                        pass
+                # Pods MUST go before PVCs: a surviving pod holds the
+                # kubernetes.io/pvc-protection finalizer on its claim, which
+                # leaves the PVC stuck Terminating indefinitely.
+                for pod_name in list(self.created_pods):
+                    try:
+                        k8s.delete_pod(pod_name, wait=True)
+                    except Exception:
+                        pass
+                # VolumeSnapshots before PVCs: a snapshot holds a reference to
+                # its source claim.
+                for vs_name in list(getattr(self, "_k8s_volume_snapshots", [])):
+                    try:
+                        k8s.delete_volume_snapshot(vs_name, wait=True)
+                    except Exception:
+                        pass
+                for pvc_name in list(self.created_pvcs):
+                    try:
+                        k8s.delete_pvc(pvc_name)
+                    except Exception:
+                        pass
+                for pvc_name in list(getattr(self, "_k8s_pvcs", [])):
+                    # Clone PVCs created via the inherited _create_clone_dual
+                    # land in the parent's registry, not ours.
+                    try:
+                        k8s.delete_pvc(pvc_name)
+                    except Exception:
+                        pass
+                for sc_name in list(self.created_storage_classes):
+                    try:
+                        k8s.delete_storage_class(sc_name)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                self.logger.warning(f"K8s teardown error: {exc}")
+        super().teardown(**kwargs)
+
 # ═══════════════════════════════════════════════════════════════════════════
 # COMMENTED OUT: All old test classes below used volume-level host management
 # (volume add-host/remove-host, --allowed-hosts, --sec-options) which has been
@@ -2801,16 +4812,13 @@ class TestLvolSecurityCombinations(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityCombinations START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
         # TC-NEW-001: create DHCHAP pool and register host
         self.logger.info("TC-NEW-001: Creating DHCHAP pool …")
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
         assert pool_id, f"Pool {self.pool_name} not found"
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
         self.logger.info("TC-NEW-001: Pool created + host registered PASSED")
 
         combos = [
@@ -2822,34 +4830,34 @@ class TestLvolSecurityCombinations(SecurityTestBase):
 
         for tag, encrypt in combos:
             tc = f"TC-NEW-00{combos.index((tag, encrypt)) + 2}"
-            lvol_name = f"sec{tag}{_rand_suffix()}"
+            raw_name = f"sec{tag}{_rand_suffix()}"
             self.logger.info(f"{tc}: Creating {tag} lvol …")
 
-            out, err = self.ssh_obj.create_sec_lvol(
-                self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-                encrypt=encrypt,
-            )
-            assert not err or "error" not in err.lower(), f"{tag} lvol creation failed: {err}"
-            sleep_n_sec(3)
-            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-            assert lvol_id, f"Could not find ID for {lvol_name}"
+            lvol_name, lvol_id = self._create_lvol_dual(raw_name, encrypt=encrypt)
             self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-            # Validate connect string contains DHCHAP secrets
-            cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-            cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
-            assert "dhchap-secret" in cs_str.lower(), \
-                f"{tc}: Expected DHCHAP keys in connect string for {tag}; got: {cs_str}"
-            self.logger.info(f"{tc}: Connect string contains DHCHAP keys")
+            # Authorization: DHCHAP keys in the connect string (docker) /
+            # the volume mounts on an allowed node and NOT on a disallowed one
+            # (k8s). Asserted per flavour, because the crypto flavours get
+            # their own StorageClass and can individually miss the
+            # dhchap_node_label that carries all the enforcement.
+            self._assert_host_authorized(lvol_name, lvol_id, allowed, tc=tc)
 
-            lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-            mount_point = f"{self.mount_path}/{lvol_name}"
-            self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-            self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+            device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+            mount_point = self._format_and_mount_dual(lvol_name, device)
             self.lvol_mount_details[lvol_name]["Mount"] = mount_point
             log_file = f"{self.log_path}/{lvol_name}_out.log"
-            self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
+            self._run_fio_dual(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
             self.logger.info(f"{tc}: {tag} FIO PASSED")
+
+            if denied is not None:
+                self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
+                self._assert_host_denied(lvol_name, lvol_id, denied, tc=tc)
+            else:
+                self.logger.warning(
+                    f"{TOK_COVERAGE_LOST} {tc}: no disallowed host in this "
+                    f"environment — the {tag} flavour's restriction was not "
+                    f"exercised")
 
         self.logger.info("=== TestLvolSecurityCombinations PASSED ===")
 
@@ -2869,74 +4877,77 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolDynamicHostManagement START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
 
-        lvol_name = f"secdyn{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secdyn{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-NEW-010: validate connect string has DHCHAP, then connect + FIO
+        # TC-NEW-010: prove the host is authorized, then connect + FIO
         self.logger.info("TC-NEW-010: Connecting and running FIO …")
-        connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
-        assert "dhchap-secret" in connect_str.lower(), \
-            f"TC-NEW-010: Expected DHCHAP keys in connect string for registered host; got: {connect_str}"
-        self.logger.info("TC-NEW-010: Connect string contains DHCHAP keys")
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-NEW-010")
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_pre.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="write", runtime=30)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="write", runtime=30)
         self.logger.info("TC-NEW-010: Pre-removal FIO PASSED")
 
         # Disconnect before removal
-        self.ssh_obj.unmount_path(self.fio_node, mount_point)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id)
-        sleep_n_sec(2)
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
-        # TC-NEW-011: remove host from pool
-        # Known behaviour: when pool has NO allowed hosts we still get a
-        # connect string but WITHOUT dhchap keys (issue #3).
-        self.logger.info("TC-NEW-011: Removing host from pool …")
-        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-        sleep_n_sec(3)
-        connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert connect_ls and not err, \
-            f"Expected connect string (without dhchap) after removing only host; err={err}"
-        connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
-        assert "dhchap" not in connect_str.lower(), \
-            f"Expected no DHCHAP keys when pool has no allowed hosts; got: {connect_str}"
-        self.logger.info("TC-NEW-011: Host removed – connect string without DHCHAP PASSED")
+        # TC-NEW-011: revoke the host's access, then prove it lost access.
+        #
+        # This is the one place the suite probes whether the operator actually
+        # withdraws a node on ``spec.allowedNodes`` removal (hard=True), so
+        # the unknown is exercised once per run and fails attributably here
+        # rather than diffusely across three classes.
+        #
+        # In K8s revocation IS observable for an existing volume: the PV's
+        # nodeAffinity requires the pool label, and the operator strips that
+        # label from the withdrawn node — so a *new mount* on it fails. What
+        # revocation cannot do is affect an already-mounted volume, since
+        # nodeAffinity is only evaluated at mount; the release above is what
+        # makes this assertion meaningful.
+        self.logger.info("TC-NEW-011: Revoking host access …")
+        if self.k8s_test:
+            self._revoke_host_dual(pool_id, allowed, tc="TC-NEW-011",
+                                   hard=True)
+            self._assert_host_denied(
+                lvol_name, lvol_id, allowed, tc="TC-NEW-011",
+                why="withdrawn from spec.allowedNodes")
+        else:
+            self._revoke_host_dual(pool_id, allowed, tc="TC-NEW-011")
+            # Docker keeps the historical expectation: with no allowed hosts
+            # the pool still returns a connect string, just without keys.
+            connect_ls, err = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
+            assert connect_ls and not err, \
+                f"Expected connect string (without dhchap) after removing only host; err={err}"
+            connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
+            assert "dhchap" not in connect_str.lower(), \
+                f"Expected no DHCHAP keys when pool has no allowed hosts; got: {connect_str}"
+        self.logger.info("TC-NEW-011: Host revoked – access withdrawn PASSED")
 
-        # TC-NEW-012: re-add host
-        self.logger.info("TC-NEW-012: Re-adding host to pool …")
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-        sleep_n_sec(3)
-        connect_ls2, err2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        connect_str2 = " ".join(connect_ls2) if isinstance(connect_ls2, list) else str(connect_ls2)
-        assert "dhchap-secret" in connect_str2.lower(), \
-            f"TC-NEW-012: Expected DHCHAP keys after re-adding host; got: {connect_str2}"
-        self.logger.info("TC-NEW-012: Connect string contains DHCHAP keys after re-add")
-        lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device2, mount_path=mount_point)
-        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        # TC-NEW-012: re-grant
+        self.logger.info("TC-NEW-012: Re-granting host access …")
+        self._grant_host_dual(pool_id, allowed, tc="TC-NEW-012")
+        if self.k8s_test:
+            # The positive control has to be re-established: the volume was
+            # just proven un-mountable on this node, so a stale entry would
+            # let a later denial assertion pass on the wrong evidence.
+            self._dhchap_positive_control.discard(lvol_name)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-NEW-012")
+        device2, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point2 = self._format_and_mount_dual(lvol_name, device2)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point2
         log_file2 = f"{self.log_path}/{lvol_name}_post.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file2, rw="randrw", runtime=30)
+        self._run_fio_dual(lvol_name, mount_point2, log_file2, rw="randrw", runtime=30)
         self.logger.info("TC-NEW-012: Re-added host – FIO PASSED")
 
         self.logger.info("=== TestLvolDynamicHostManagement PASSED ===")
@@ -2946,9 +4957,17 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
     """
     Encryption + DHCHAP combined test.
 
-    TC-NEW-020  Create DHCHAP pool with host registered
-    TC-NEW-021  Create encrypted lvol in DHCHAP pool
-    TC-NEW-022  Connect with host-nqn, mount, FIO (randrw)
+    Docker:
+      TC-NEW-020  Create DHCHAP pool with host registered
+      TC-NEW-021  Create encrypted lvol in DHCHAP pool
+      TC-NEW-022  Connect with host-nqn, mount, FIO (randrw)
+
+    K8s (native — no manual connect/host-nqn; the operator enforces
+    allowedNodes at the control plane, a client never supplies its own NQN):
+      TC-NEW-020  Create DHCHAP pool with allowedNodes = subset of workers
+      TC-NEW-021  Create encrypted PVC in that pool
+      TC-NEW-022  Pod pinned to an allowed node mounts + runs FIO; a pod
+                  pinned to a disallowed node gets rejected (FailedMount)
     """
 
     def __init__(self, **kwargs):
@@ -2957,42 +4976,59 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolCryptoWithDhchap START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        # TC-NEW-020
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-        self.logger.info("TC-NEW-020: DHCHAP pool + host PASSED")
+        # TC-NEW-020 — pool with a strict allowedNodes subset in K8s, plus the
+        # four structural wiring assertions (L1-L4) before any volume work.
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
+        self.logger.info(
+            f"TC-NEW-020: DHCHAP pool + host PASSED (allowed={allowed!r} "
+            f"denied={denied!r})")
 
         # TC-NEW-021
-        lvol_name = f"seccryp{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True)
-        assert not err or "error" not in err.lower(), f"crypto lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"seccryp{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name, encrypt=True)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
         self.logger.info("TC-NEW-021: Encrypted lvol created PASSED")
 
-        # TC-NEW-022: validate connect string has DHCHAP, then connect + FIO
-        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
-        assert "dhchap-secret" in cs_str.lower(), \
-            f"TC-NEW-022: Expected DHCHAP keys in connect string; got: {cs_str}"
-        self.logger.info("TC-NEW-022: Connect string contains DHCHAP keys")
+        if self.k8s_test:
+            # TC-NEW-022: the encrypted volume must be usable on an allowed
+            # node and rejected on a disallowed one. prove_io=True because
+            # encryption is a data-path feature — "it mounted" is not enough.
+            try:
+                self._assert_host_authorized(
+                    lvol_name, lvol_id, allowed, tc="TC-NEW-022",
+                    prove_io=True)
+            except DhchapUnsupportedByHost as exc:
+                self.logger.warning(f"TC-NEW-022: {exc}")
+                self.logger.info(
+                    f"=== TestLvolCryptoWithDhchap {TOK_SKIPPED_K8S} "
+                    f"(host kernel has no in-band NVMe auth) ===")
+                return
+            self.logger.info(
+                "TC-NEW-022: Encrypted volume mounted + I/O on allowed node "
+                "PASSED")
 
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+            self._require_denied_host(denied, tc="TC-NEW-022")
+            self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+            self._assert_host_denied(lvol_name, lvol_id, denied,
+                                     tc="TC-NEW-022")
+            self.logger.info(
+                "TC-NEW-022: Encrypted volume rejected on disallowed node "
+                "PASSED")
+            self.logger.info("=== TestLvolCryptoWithDhchap PASSED ===")
+            return
+
+        # TC-NEW-022 (docker): connect string carries the keys, then FIO
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-NEW-022")
+
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_out.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
         self.logger.info("TC-NEW-022: Crypto+DHCHAP FIO PASSED")
 
         self.logger.info("=== TestLvolCryptoWithDhchap PASSED ===")
@@ -3002,9 +5038,18 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
     """
     Verifies bidirectional DHCHAP – always the default mode now.
 
-    TC-NEW-030  Create DHCHAP pool + host
-    TC-NEW-031  Create lvol, connect with host-nqn
-    TC-NEW-033  FIO completes successfully
+    Docker:
+      TC-NEW-030  Create DHCHAP pool + host
+      TC-NEW-031  Create lvol, connect with host-nqn
+      TC-NEW-033  FIO completes successfully
+
+    K8s (native): SKIPPED. DHCHAP on a StoragePool has no direction toggle —
+    it is a single ``dhchap: true`` boolean, bidirectional by construction, so
+    there is no K8s observable that docker's "ctrl-secret is in the connect
+    string" check maps to. The previous K8s branch was a copy of
+    TestLvolCryptoWithDhchap's allowedNodes matrix on a plain volume: it
+    reported PASSED while proving nothing about direction, which is worse than
+    an explicit skip because it implies coverage that does not exist.
     """
 
     def __init__(self, **kwargs):
@@ -3013,43 +5058,43 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolDhchapBidirectional START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        if self.k8s_test:
+            self.logger.warning(
+                f"{TOK_SKIPPED_K8S} TestLvolDhchapBidirectional: "
+                f"bidirectional DHCHAP is not separately configurable on a "
+                f"StoragePool (spec.dhchap is one boolean), so direction "
+                f"coverage is not obtainable in K8s mode. Mount enforcement "
+                f"is covered by TestDhchapPodScheduling and in-band "
+                f"negotiation by TestLvolSecurityNegativeConnect. "
+                f"{TOK_COVERAGE_LOST}: docker-only assertion "
+                f"(--dhchap-ctrl-secret present in the connect string).")
+            self.logger.info(
+                "=== TestLvolDhchapBidirectional SKIPPED (k8s) ===")
+            return
+
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
         self.logger.info("TC-NEW-030: DHCHAP pool + host PASSED")
 
-        lvol_name = f"secbidir{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secbidir{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-NEW-031: validate connect string has bidirectional DHCHAP, then connect
-        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
-        assert "dhchap-secret" in cs_str.lower(), \
-            f"TC-NEW-031: Expected DHCHAP key in connect string; got: {cs_str}"
-        assert "dhchap-ctrl-secret" in cs_str.lower(), \
-            f"TC-NEW-031: Expected bidirectional DHCHAP (ctrl-secret) in connect string; got: {cs_str}"
-        self.logger.info("TC-NEW-031: Connect string contains bidirectional DHCHAP keys")
+        # TC-NEW-031: connect string must carry BOTH keys (bidirectional)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-NEW-031",
+                                     require_ctrl_secret=True)
 
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
         self.logger.info("TC-NEW-031: Connected with host-nqn PASSED")
 
         # TC-NEW-033: FIO
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_out.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
         self.logger.info("TC-NEW-033: Bidirectional FIO PASSED")
 
         self.logger.info("=== TestLvolDhchapBidirectional PASSED ===")
@@ -3070,61 +5115,82 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityNegativeHostOps START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        # Pool with a real allowedNodes subset in K8s; register=False so
+        # TC-NEW-040 still starts from an unregistered state in docker.
+        pool_id, allowed, denied = self._setup_pool_and_host(
+            dhchap=True, register=False)
+        host_nqn = _as_nqn(allowed)
 
-        lvol_name = f"secneg{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secneg{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-NEW-040: connect without registering host → connect string returned but without DHCHAP keys
-        self.logger.info("TC-NEW-040: Connecting without registered host …")
-        connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert connect_ls and not err, \
-            f"Expected connect string even without registered host; err={err}"
-        connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
-        assert "dhchap" not in connect_str.lower(), \
-            f"Expected no DHCHAP keys when host is not registered; got: {connect_str}"
-        self.logger.info("TC-NEW-040: Connect without DHCHAP keys PASSED")
+        # TC-NEW-040: an unregistered host gets no DHCHAP keys.
+        # In K8s there is no such state to construct: the operator derives and
+        # registers the allowed nodes' NQNs itself, so a node is either in
+        # allowedNodes (registered) or outside the pool entirely. The
+        # equivalent assertion is TC-NEW-041's state check below.
+        if self.k8s_test:
+            self.logger.warning(
+                f"{TOK_SKIPPED_K8S} TC-NEW-040: an 'unregistered host' is not "
+                f"a constructible state in K8s — the operator owns pool host "
+                f"registration and derives NQNs from allowedNodes. Covered "
+                f"instead by the L3 assertion (pool allowed hosts == derived "
+                f"NQNs of allowedNodes) and by TC-NEW-042 below.")
+        else:
+            self.logger.info("TC-NEW-040: Connecting without registered host …")
+            connect_ls, err = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
+            assert connect_ls and not err, \
+                f"Expected connect string even without registered host; err={err}"
+            connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
+            assert "dhchap" not in connect_str.lower(), \
+                f"Expected no DHCHAP keys when host is not registered; got: {connect_str}"
+            self.logger.info("TC-NEW-040: Connect without DHCHAP keys PASSED")
 
-        # TC-NEW-041: remove non-registered NQN → should not crash
+        # TC-NEW-041: removing a non-registered NQN must be rejected or a
+        # no-op — asserted on the EFFECT (the pool's allowed hosts did not
+        # change), which is wording- and mode-independent. The K8s branch used
+        # to force err="" here, so nothing could fail.
         self.logger.info("TC-NEW-041: Removing non-registered NQN …")
         fake_nqn = f"nqn.2024-01.io.simplyblock:test:fake-{_rand_suffix()}"
-        out, err = self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, fake_nqn)
-        # Should return error or be a no-op – must not crash
-        self.logger.info(f"TC-NEW-041: remove non-registered NQN result: out={out!r} err={err!r}")
-        self.logger.info("TC-NEW-041: PASSED (no crash)")
+        before = sorted(self._get_pool_allowed_hosts(pool_id))
+        out, err = self._pool_host_op_dual(pool_id, fake_nqn, remove=True)
+        self.logger.info(
+            f"TC-NEW-041: remove non-registered NQN result: out={out!r} err={err!r}")
+        after = sorted(self._get_pool_allowed_hosts(pool_id))
+        assert fake_nqn not in after, (
+            f"TC-NEW-041: a never-registered NQN appeared in the pool's "
+            f"allowed hosts after remove-host: {after}")
+        assert before == after, (
+            f"TC-NEW-041: removing a non-registered NQN changed the pool's "
+            f"allowed hosts: {before} -> {after}")
+        self.logger.info("TC-NEW-041: PASSED (rejected/no-op, state unchanged)")
 
-        # TC-NEW-042: add host → connect with DHCHAP keys; remove → connect without DHCHAP keys
-        self.logger.info("TC-NEW-042: Add host, verify connect with DHCHAP, remove, verify no DHCHAP …")
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-        sleep_n_sec(3)
-        connect_ls2, err2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert connect_ls2 and not err2, \
-            f"Connect should succeed after adding host; err={err2}"
-        connect_str2 = " ".join(connect_ls2) if isinstance(connect_ls2, list) else str(connect_ls2)
-        assert "dhchap" in connect_str2.lower(), \
-            f"Expected DHCHAP keys after registering host; got: {connect_str2}"
-        self.logger.info("TC-NEW-042: Connect with DHCHAP keys PASSED")
+        # TC-NEW-042: grant -> access; revoke -> no access.
+        self.logger.info("TC-NEW-042: Grant, verify access, revoke, verify no access …")
+        self._grant_host_dual(pool_id, allowed, tc="TC-NEW-042")
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-NEW-042")
 
-        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-        sleep_n_sec(3)
-        connect_ls3, err3 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert connect_ls3 and not err3, \
-            f"Connect string should still be returned after removing host; err={err3}"
-        connect_str3 = " ".join(connect_ls3) if isinstance(connect_ls3, list) else str(connect_ls3)
-        assert "dhchap" not in connect_str3.lower(), \
-            f"Expected no DHCHAP keys after removing host; got: {connect_str3}"
-        self.logger.info("TC-NEW-042: Add/remove lifecycle PASSED")
+        if self.k8s_test:
+            # Revoking the node the volume was just proven on: the operator
+            # strips the pool label, so a fresh mount there must now fail.
+            self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+            if self._revoke_host_dual(pool_id, allowed, tc="TC-NEW-042"):
+                self._assert_host_denied(
+                    lvol_name, lvol_id, allowed, tc="TC-NEW-042",
+                    why="withdrawn from spec.allowedNodes")
+        else:
+            self._revoke_host_dual(pool_id, allowed, tc="TC-NEW-042")
+            connect_ls3, err3 = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
+            assert connect_ls3 and not err3, \
+                f"Connect string should still be returned after removing host; err={err3}"
+            connect_str3 = " ".join(connect_ls3) if isinstance(connect_ls3, list) else str(connect_ls3)
+            assert "dhchap" not in connect_str3.lower(), \
+                f"Expected no DHCHAP keys after removing host; got: {connect_str3}"
+        self.logger.info("TC-NEW-042: Grant/revoke lifecycle PASSED")
 
         self.logger.info("=== TestLvolSecurityNegativeHostOps PASSED ===")
 
@@ -3144,82 +5210,92 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecuritySnapshotClone START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
 
         # TC-NEW-050: create lvol, write data
-        lvol_name = f"secsnap{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secsnap{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # Validate source lvol connect string has DHCHAP
-        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
-        assert "dhchap-secret" in cs_str.lower(), \
-            f"TC-NEW-050: Expected DHCHAP keys in source lvol connect string; got: {cs_str}"
-        self.logger.info("TC-NEW-050: Source lvol connect string contains DHCHAP keys")
+        # Source volume must be authorized before anything is snapshotted
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-NEW-050")
 
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        # Use ext4 explicitly: xfs clones share the source UUID and cannot be
-        # connected on the same client as the source (known issue #2).
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_w.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="write", runtime=20)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="write", runtime=20)
 
-        self.ssh_obj.unmount_path(self.fio_node, mount_point)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id)
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = None
         self.logger.info("TC-NEW-050: Source lvol written PASSED")
 
-        # TC-NEW-051: snapshot + clone
+        # TC-NEW-051: snapshot + clone, via the inherited dual helpers.
+        # In K8s these are a VolumeSnapshot CRD and a clone PVC created from
+        # self._k8s_storage_class_name — aliased to the DHCHAP StorageClass in
+        # _k8s_setup_storage_class, which is what makes the clone inherit the
+        # dhchap_node_label. The raw `sbcli snapshot add` over SSH this used
+        # to run hard-failed in K8s.
         self.logger.info("TC-NEW-051: Creating snapshot and clone …")
         snap_name = f"snap{lvol_name[-6:]}"
-        out, err = self.ssh_obj.exec_command(
-            self.mgmt_nodes[0],
-            f"{self.base_cmd} -d snapshot add {lvol_id} {snap_name}")
-        assert not err or "error" not in err.lower(), f"snapshot creation failed: {err}"
-        sleep_n_sec(3)
-        snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
-        assert snap_id
+        snap_ref = self._create_snapshot_dual(lvol_name, snap_name)
+        assert snap_ref, f"TC-NEW-051: snapshot {snap_name} not created"
+        self._verify_snapshot_exists_dual(snap_name)
 
         clone_name = f"secclone{_rand_suffix()}"
-        out, err = self.ssh_obj.exec_command(
-            self.mgmt_nodes[0],
-            f"{self.base_cmd} -d snapshot clone {snap_id} {clone_name}")
-        assert not err or "error" not in err.lower(), f"clone creation failed: {err}"
-        sleep_n_sec(5)
-        clone_id = self.sbcli_utils.get_lvol_id(clone_name)
-        assert clone_id
+        clone_size = self.lvol_size if not self.k8s_test else \
+            self.lvol_size.replace("G", "Gi")
+        if self.k8s_test:
+            # _create_clone_dual waits for Bound, but the operator
+            # StorageClass binds WaitForFirstConsumer -- a clone PVC with
+            # no consumer never binds and the wait times out. Create the
+            # claim, then schedule a binder pod on an allowed node.
+            k8s = self._ensure_k8s_utils()
+            clone_pvc = self._k8s_normalize_name(clone_name)
+            k8s.create_clone_pvc(
+                name=clone_pvc, size=clone_size,
+                storage_class=self._storage_class_name,
+                snapshot_name=snap_ref)
+            self.created_pvcs.append(clone_pvc)
+            self._pvc_pool_label[clone_pvc] = self._dhchap_node_label
+            self._k8s_bind_pvc(clone_pvc)
+        else:
+            self._create_clone_dual(snap_ref, clone_name, size=clone_size)
+        clone_id = self._get_lvol_id_dual(clone_name)
+        assert clone_id, f"TC-NEW-051: clone {clone_name} has no id"
         self.lvol_mount_details[clone_name] = {"ID": clone_id, "Mount": None}
         self.logger.info("TC-NEW-051: Snapshot+clone PASSED")
 
-        # TC-NEW-052: validate clone connect string has DHCHAP, then connect
-        self.logger.info("TC-NEW-052: Connecting clone with host-nqn …")
-        clone_cs_ls, _ = self._get_connect_str_cli(clone_id, host_nqn=host_nqn)
-        clone_cs_str = " ".join(clone_cs_ls) if isinstance(clone_cs_ls, list) else str(clone_cs_ls)
-        assert "dhchap-secret" in clone_cs_str.lower(), \
-            f"TC-NEW-052: Expected DHCHAP keys in clone connect string; got: {clone_cs_str}"
-        self.logger.info("TC-NEW-052: Clone connect string contains DHCHAP keys")
-        clone_device, _ = self._connect_and_get_device(clone_name, clone_id, host_nqn=host_nqn)
-        clone_mount = f"{self.mount_path}/{clone_name}"
-        self.ssh_obj.mount_path(node=self.fio_node, device=clone_device, mount_path=clone_mount)
+        # TC-NEW-052: the CLONE must inherit the pool's DHCHAP enforcement.
+        # Asserted on the clone itself, not inherited from the source: if the
+        # clone landed on a StorageClass without the label it would carry no
+        # enforcement while every other assertion still passed.
+        self.logger.info("TC-NEW-052: Verifying clone inherits DHCHAP …")
+        self._assert_host_authorized(clone_name, clone_id, allowed,
+                                     tc="TC-NEW-052")
+
+        if self.k8s_test:
+            self._require_denied_host(denied, tc="TC-NEW-052")
+            self._disconnect_and_unmount_dual(clone_name, clone_id, None)
+            self._assert_host_denied(clone_name, clone_id, denied,
+                                     tc="TC-NEW-052",
+                                     why="clone inherits the pool restriction")
+            self.logger.info("TC-NEW-052: Clone DHCHAP inheritance PASSED")
+            self.logger.info("=== TestLvolSecuritySnapshotClone PASSED ===")
+            return
+
+        clone_device, _ = self._connect_and_get_device_dual(clone_name, clone_id, host_nqn=host_nqn)
+        clone_mount = self._format_and_mount_dual(
+            clone_name, clone_device,
+            mount_point=f"{self.mount_path}/{clone_name}",
+            format_first=False)
         self.lvol_mount_details[clone_name]["Mount"] = clone_mount
         log_file2 = f"{self.log_path}/{clone_name}_out.log"
-        self._run_fio_and_validate(clone_name, clone_mount, log_file2, rw="randrw", runtime=20)
+        self._run_fio_dual(clone_name, clone_mount, log_file2, rw="randrw", runtime=20)
         self.logger.info("TC-NEW-052: Clone FIO PASSED")
 
         self.logger.info("=== TestLvolSecuritySnapshotClone PASSED ===")
@@ -3240,44 +5316,46 @@ class TestLvolSecurityRDMAv2(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityRDMAv2 START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
+
+        if self.k8s_test:
+            self.logger.warning(
+                f"{TOK_SKIPPED_K8S} TestLvolSecurityRDMAv2: the test's "
+                f"substance is a manual `nvme connect -t rdma`, which has no "
+                f"CSI equivalent — in K8s the fabric is a StorageClass "
+                f"parameter. {TOK_COVERAGE_LOST}: DHCHAP over the RDMA "
+                f"fabric is not covered in K8s mode.")
+            self.logger.info("=== TestLvolSecurityRDMAv2 SKIPPED (k8s) ===")
+            return
 
         # TC-NEW-060: check RDMA
         cluster_details = self.sbcli_utils.get_cluster_details()
         if not cluster_details.get("fabric_rdma", False):
+            self.logger.warning(
+                f"{TOK_COVERAGE_LOST} TC-NEW-060: RDMA fabric is not "
+                f"available on this cluster — DHCHAP-over-RDMA not exercised")
             self.logger.info("TC-NEW-060: RDMA not available – SKIPPED")
             return
         self.logger.info("TC-NEW-060: RDMA available")
 
         # TC-NEW-061: DHCHAP pool + RDMA lvol
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
 
-        lvol_name = f"secrdma{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            fabric="rdma")
-        assert not err or "error" not in err.lower(), f"RDMA lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secrdma{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert connect_ls and not err, f"RDMA connect string failed; err={err}"
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-NEW-061")
         self.logger.info("TC-NEW-061: RDMA DHCHAP lvol PASSED")
 
         # TC-NEW-062: connect, FIO
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_out.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
         self.logger.info("TC-NEW-062: RDMA FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityRDMAv2 PASSED ===")
@@ -3309,69 +5387,56 @@ class TestLvolSecurityStorageNodeOutage(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityStorageNodeOutage START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
         # TC-SEC-070: DHCHAP pool + host + HA lvol
         self.logger.info("TC-SEC-070: Creating DHCHAP pool + HA lvol …")
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
         assert pool_id, f"Pool {self.pool_name} not found"
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
 
-        lvol_name = f"secout{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            distr_ndcs=1, distr_npcs=1,
-        )
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(5)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        raw_name = f"secout{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         assert lvol_id, f"Could not find ID for {lvol_name}"
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
         self.logger.info("TC-SEC-070: DHCHAP pool + HA lvol PASSED")
 
-        # TC-SEC-071: validate DHCHAP in connect string, then connect + FIO
+        # TC-SEC-071: prove authorization, then start FIO in the background
         self.logger.info("TC-SEC-071: Connecting and starting long-running FIO …")
-        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
-        assert "dhchap-secret" in cs_str.lower(), \
-            f"TC-SEC-071: Expected DHCHAP keys in connect string; got: {cs_str}"
-        self.logger.info("TC-SEC-071: Connect string contains DHCHAP keys")
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-071")
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 
         log_file = f"{self.log_path}/{lvol_name}_out.log"
-        fio_thread = threading.Thread(
-            target=self.ssh_obj.run_fio_test,
-            args=(self.fio_node, None, mount_point, log_file),
-            kwargs={
-                "name": f"fio_run_{lvol_name}",
-                "runtime": self.fio_runtime,
-                "rw": "randrw",
-                "bs": "4K",
-                "size": self.fio_size,
-                "nrfiles": 4,
-                "iodepth": 1,
-                "numjobs": 2,
-                "time_based": True,
-            },
-        )
-        fio_thread.start()
-        self.fio_threads.append(fio_thread)
+        fio = self._start_bg_fio_dual(
+            lvol_name, mount_point, log_file,
+            runtime=self.fio_runtime, rw="randrw")
         sleep_n_sec(15)  # let FIO settle
-        self.logger.info("TC-SEC-071: FIO thread started PASSED")
+        self.logger.info("TC-SEC-071: FIO started PASSED")
 
         # TC-SEC-072: shutdown a primary storage node
         self.logger.info("TC-SEC-072: Shutting down a primary storage node …")
         nodes = self.sbcli_utils.get_storage_nodes()
-        primary_nodes = [n for n in nodes["results"]
-                         if not n.get("is_secondary_node") and n.get("lvols", 0) > 0]
-        assert primary_nodes, "No primary storage nodes with lvols found"
+        # Do NOT filter on n["lvols"]: the REST storage-node payload
+        # reports lvols=0 for every node in K8s even when `sbctl sn list`
+        # shows real counts, so this matched nothing and the class died
+        # with "No primary storage nodes with lvols found". Prefer a node
+        # that reports lvols, fall back to any online primary.
+        primaries = [n for n in nodes["results"]
+                     if not n.get("is_secondary_node")]
+        with_lvols = [n for n in primaries if (n.get("lvols") or 0) > 0]
+        primary_nodes = with_lvols or [
+            n for n in primaries if n.get("status") == "online"]
+        assert primary_nodes, (
+            f"No online primary storage node found "
+            f"(primaries={len(primaries)}, with lvols={len(with_lvols)})")
+        if not with_lvols:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE}: no node reported lvols>0 (the K8s "
+                f"REST payload always returns 0); picking an online "
+                f"primary instead, which may not host this test's volume")
         target_node = primary_nodes[0]["uuid"]
 
         deadline = time.time() + 300
@@ -3391,9 +5456,7 @@ class TestLvolSecurityStorageNodeOutage(SecurityTestBase):
                 self.logger.warning(f"shutdown retry raised: {e}")
 
         self.logger.info("TC-SEC-072: Node offline — verifying FIO still running …")
-        procs = self.ssh_obj.find_process_name(self.fio_node, f"fio.*fio_run_{lvol_name}")
-        running = [p for p in procs if p.strip() and "grep" not in p and "fio --name" in p]
-        assert running, "FIO should still be running during outage"
+        self._assert_bg_fio_alive_dual(fio, tc="TC-SEC-072")
         self.logger.info("TC-SEC-072: Node offline + FIO alive PASSED")
 
         # TC-SEC-073: restart node
@@ -3407,10 +5470,26 @@ class TestLvolSecurityStorageNodeOutage(SecurityTestBase):
 
         # TC-SEC-074: wait for FIO and validate
         self.logger.info("TC-SEC-074: Waiting for FIO to complete …")
-        self.common_utils.manage_fio_threads(
-            self.fio_node, self.fio_threads, timeout=self.fio_runtime + 120)
-        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        self._finish_bg_fio_dual(fio, tc="TC-SEC-074")
         self.logger.info("TC-SEC-074: FIO completed without interruption PASSED")
+
+        # TC-SEC-075: enforcement itself must have survived the outage, not
+        # just the I/O. Re-assert the wiring and both placement outcomes; a
+        # reconcile that dropped the node labels on recovery would leave the
+        # volume mountable from anywhere and nothing above would notice.
+        if self.k8s_test:
+            self.logger.info("TC-SEC-075: Re-verifying DHCHAP after outage …")
+            self._k8s_assert_dhchap_wiring(
+                self._dhchap_allowed_nodes, self._dhchap_disallowed_nodes)
+            self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
+            self._dhchap_positive_control.discard(lvol_name)
+            self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                         tc="TC-SEC-075")
+            if denied is not None:
+                self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+                self._assert_host_denied(lvol_name, lvol_id, denied,
+                                         tc="TC-SEC-075")
+            self.logger.info("TC-SEC-075: DHCHAP survived the outage PASSED")
 
         self.logger.info("=== TestLvolSecurityStorageNodeOutage PASSED ===")
 
@@ -3438,32 +5517,38 @@ class TestLvolSecurityMgmtNodeReboot(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityMgmtNodeReboot START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
+
+        if self.k8s_test:
+            # No K8s-native equivalent of rebooting the management node
+            # exists anywhere in the repo: in K8s the control plane IS the
+            # Kubernetes control plane, and rebooting it is out of scope and
+            # unmodelled. Rather than fake-pass, assert the property this
+            # class actually cares about -- that DHCHAP config is persistent
+            # across a control-plane restart -- against the operator, which
+            # is the component that could plausibly wipe it on reconcile.
+            self.logger.warning(
+                f"{TOK_SKIPPED_K8S} TC-SEC-081: rebooting the management node "
+                f"has no K8s equivalent. Substituting an operator restart, "
+                f"which targets the same regression class (a reconcile loop "
+                f"clearing node labels or allowed hosts on restart). "
+                f"{TOK_COVERAGE_LOST}: host-OS-level mgmt reboot not covered.")
+            self._k8s_operator_restart_variant()
+            return
 
         # TC-SEC-080: DHCHAP pool + host + lvol + baseline check
         self.logger.info("TC-SEC-080: Creating DHCHAP pool + lvol …")
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
         assert pool_id, f"Pool {self.pool_name} not found"
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
 
-        lvol_name = f"secmgmt{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secmgmt{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
         # Verify DHCHAP keys in connect string before reboot
-        pre_connect, pre_err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert pre_connect and not pre_err, f"Pre-reboot connect failed: {pre_err}"
-        pre_str = " ".join(pre_connect) if isinstance(pre_connect, list) else str(pre_connect)
-        assert "dhchap" in pre_str.lower(), \
-            f"Expected DHCHAP keys in pre-reboot connect string; got: {pre_str}"
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-080")
         self.logger.info("TC-SEC-080: Pre-reboot DHCHAP keys present PASSED")
 
         # TC-SEC-081: reboot management node
@@ -3474,26 +5559,118 @@ class TestLvolSecurityMgmtNodeReboot(SecurityTestBase):
 
         # TC-SEC-082: verify DHCHAP keys post-reboot
         self.logger.info("TC-SEC-082: Verifying DHCHAP keys post-reboot …")
-        post_connect, post_err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert post_connect and not post_err, \
-            f"Post-reboot connect string failed: {post_err}"
-        post_str = " ".join(post_connect) if isinstance(post_connect, list) else str(post_connect)
-        assert "dhchap" in post_str.lower(), \
-            f"Expected DHCHAP keys in post-reboot connect string; got: {post_str}"
+        self._dhchap_positive_control.discard(lvol_name)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-082")
         self.logger.info("TC-SEC-082: Post-reboot DHCHAP keys preserved PASSED")
 
         # TC-SEC-083: connect, mount, FIO
         self.logger.info("TC-SEC-083: Connecting and running FIO after mgmt reboot …")
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_out.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
         self.logger.info("TC-SEC-083: FIO after mgmt reboot PASSED")
 
         self.logger.info("=== TestLvolSecurityMgmtNodeReboot PASSED ===")
+
+    def _k8s_operator_restart_variant(self):
+        """K8s substitute for TC-SEC-081: restart the operator and assert the
+        DHCHAP configuration is byte-identical afterwards.
+
+        The pre-restart snapshot is asserted NON-EMPTY before the restart --
+        otherwise "unchanged" is trivially true and the test proves nothing.
+        """
+        k8s = self._ensure_k8s_utils()
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        raw_name = f"secmgmt{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-080")
+
+        # Snapshot, and prove the snapshot is meaningful
+        before = {
+            "label": self._dhchap_node_label,
+            "labelled_nodes": sorted(
+                self._k8s_nodes_with_label(self._dhchap_node_label)),
+            "allowed_hosts": sorted(self._get_pool_allowed_hosts(pool_id)),
+            "sc_label": self._k8s_sc_dhchap_label(self._storage_class_name),
+        }
+        assert before["label"], "TC-SEC-080: no pool label to compare"
+        assert before["labelled_nodes"], (
+            "TC-SEC-080: no nodes carry the pool label before the restart — "
+            "an 'unchanged after restart' assertion would be vacuous")
+        assert before["sc_label"], (
+            "TC-SEC-080: StorageClass carries no dhchap_node_label before "
+            "the restart")
+        self.logger.info(f"TC-SEC-080: pre-restart snapshot {before}")
+
+        self.logger.info("TC-SEC-081: Restarting the simplyblock operator …")
+        dep_out, _ = k8s._exec_kubectl(
+            f"kubectl get deployments -n {k8s.namespace} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true")
+        names = [d.strip() for d in (dep_out or "").splitlines() if d.strip()]
+        # Match the simplyblock operator specifically. A bare "operator" in
+        # the name is far too loose: this namespace also carries
+        # `mongodb-kubernetes-operator`, and restarting a third-party operator
+        # mid-suite is collateral damage that has nothing to do with DHCHAP.
+        deps = [d for d in names if d == "simplyblock-operator"]
+        if not deps:
+            deps = [d for d in names
+                    if "operator" in d.lower() and "simplyblock" in d.lower()]
+        if not deps:
+            self.logger.warning(
+                f"{TOK_COVERAGE_LOST} TC-SEC-081: no operator deployment "
+                f"found in namespace {k8s.namespace} — cannot restart it, so "
+                f"config persistence across a control-plane restart is not "
+                f"covered")
+            self.logger.info(
+                "=== TestLvolSecurityMgmtNodeReboot SKIPPED (k8s) ===")
+            return
+        for dep in deps:
+            k8s._exec_kubectl(
+                f"kubectl rollout restart deployment/{dep} "
+                f"-n {k8s.namespace}")
+        for dep in deps:
+            k8s._exec_kubectl(
+                f"kubectl rollout status deployment/{dep} "
+                f"-n {k8s.namespace} --timeout=300s")
+        sleep_n_sec(60)  # let the reconcile loop run at least once
+        self.logger.info(
+            f"TC-SEC-081: Operator restarted ({deps}) PASSED")
+
+        # TC-SEC-082: config must be identical, compared as sets
+        self.logger.info("TC-SEC-082: Verifying DHCHAP config after restart …")
+        after = {
+            "label": self._dhchap_node_label,
+            "labelled_nodes": sorted(
+                self._k8s_nodes_with_label(self._dhchap_node_label)),
+            "allowed_hosts": sorted(self._get_pool_allowed_hosts(pool_id)),
+            "sc_label": self._k8s_sc_dhchap_label(self._storage_class_name),
+        }
+        assert after == before, (
+            f"TC-SEC-082: DHCHAP configuration changed across the operator "
+            f"restart.\n  before={before}\n  after={after}")
+        self._k8s_assert_dhchap_wiring(
+            self._dhchap_allowed_nodes, self._dhchap_disallowed_nodes)
+        self.logger.info("TC-SEC-082: DHCHAP config preserved PASSED")
+
+        # TC-SEC-083: and enforcement still behaves both ways
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+        self._dhchap_positive_control.discard(lvol_name)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-083")
+        if denied is not None:
+            self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+            self._assert_host_denied(lvol_name, lvol_id, denied,
+                                     tc="TC-SEC-083")
+        self.logger.info("TC-SEC-083: Enforcement intact after restart PASSED")
+        self.logger.info(
+            "=== TestLvolSecurityMgmtNodeReboot PASSED (k8s operator-restart "
+            "variant) ===")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3522,65 +5699,58 @@ class TestLvolSecurityHAFailover(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityHAFailover START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
         # TC-SEC-085: DHCHAP pool + host + encrypted HA lvol
         self.logger.info("TC-SEC-085: Creating DHCHAP pool + encrypted HA lvol …")
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
         assert pool_id, f"Pool {self.pool_name} not found"
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
 
-        lvol_name = f"secha{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True,
-            distr_ndcs=1, distr_npcs=1,
-        )
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(5)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secha{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name, encrypt=True)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
         self.logger.info("TC-SEC-085: Encrypted HA lvol PASSED")
 
-        # TC-SEC-086: connect, format, mount, start FIO thread
+        # TC-SEC-086: connect, format, mount, start FIO in the background.
+        # The authorization baseline is asserted BEFORE the failover so that
+        # "DHCHAP preserved" in TC-SEC-089 has something to be preserved
+        # against — the previous version only checked afterwards.
         self.logger.info("TC-SEC-086: Connecting and starting FIO …")
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-086")
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 
         log_file = f"{self.log_path}/{lvol_name}_out.log"
-        fio_thread = threading.Thread(
-            target=self.ssh_obj.run_fio_test,
-            args=(self.fio_node, None, mount_point, log_file),
-            kwargs={
-                "name": f"fio_run_{lvol_name}",
-                "runtime": self.fio_runtime,
-                "rw": "randrw",
-                "bs": "4K",
-                "size": self.fio_size,
-                "nrfiles": 4,
-                "iodepth": 1,
-                "numjobs": 2,
-                "time_based": True,
-            },
-        )
-        fio_thread.start()
-        self.fio_threads.append(fio_thread)
+        fio = self._start_bg_fio_dual(
+            lvol_name, mount_point, log_file,
+            runtime=self.fio_runtime, rw="randrw")
         sleep_n_sec(15)
-        self.logger.info("TC-SEC-086: FIO thread started PASSED")
+        self.logger.info("TC-SEC-086: FIO started PASSED")
 
         # TC-SEC-087: shutdown a primary storage node
         self.logger.info("TC-SEC-087: Shutting down primary storage node …")
         nodes = self.sbcli_utils.get_storage_nodes()
-        primary_nodes = [n for n in nodes["results"]
-                         if not n.get("is_secondary_node") and n.get("lvols", 0) > 0]
-        assert primary_nodes, "No primary storage nodes with lvols found"
+        # Do NOT filter on n["lvols"]: the REST storage-node payload
+        # reports lvols=0 for every node in K8s even when `sbctl sn list`
+        # shows real counts, so this matched nothing and the class died
+        # with "No primary storage nodes with lvols found". Prefer a node
+        # that reports lvols, fall back to any online primary.
+        primaries = [n for n in nodes["results"]
+                     if not n.get("is_secondary_node")]
+        with_lvols = [n for n in primaries if (n.get("lvols") or 0) > 0]
+        primary_nodes = with_lvols or [
+            n for n in primaries if n.get("status") == "online"]
+        assert primary_nodes, (
+            f"No online primary storage node found "
+            f"(primaries={len(primaries)}, with lvols={len(with_lvols)})")
+        if not with_lvols:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE}: no node reported lvols>0 (the K8s "
+                f"REST payload always returns 0); picking an online "
+                f"primary instead, which may not host this test's volume")
         target_node = primary_nodes[0]["uuid"]
 
         deadline = time.time() + 300
@@ -3600,9 +5770,7 @@ class TestLvolSecurityHAFailover(SecurityTestBase):
                 self.logger.warning(f"shutdown retry raised: {e}")
 
         self.logger.info("TC-SEC-087: Node offline — verifying FIO alive …")
-        procs = self.ssh_obj.find_process_name(self.fio_node, f"fio.*fio_run_{lvol_name}")
-        running = [p for p in procs if p.strip() and "grep" not in p and "fio --name" in p]
-        assert running, "FIO should still be running during HA failover"
+        self._assert_bg_fio_alive_dual(fio, tc="TC-SEC-087")
         self.logger.info("TC-SEC-087: Node offline + FIO alive PASSED")
 
         # TC-SEC-088: restart node, settle
@@ -3614,21 +5782,23 @@ class TestLvolSecurityHAFailover(SecurityTestBase):
         sleep_n_sec(120)
         self.logger.info("TC-SEC-088: Node restart PASSED")
 
-        # TC-SEC-089: wait for FIO, validate, check DHCHAP keys
+        # TC-SEC-089: wait for FIO, validate, check DHCHAP survived
         self.logger.info("TC-SEC-089: Waiting for FIO to complete …")
-        self.common_utils.manage_fio_threads(
-            self.fio_node, self.fio_threads, timeout=self.fio_runtime + 120)
-        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        self._finish_bg_fio_dual(fio, tc="TC-SEC-089")
         self.logger.info("TC-SEC-089: FIO completed without interruption")
 
-        # Verify DHCHAP keys still in connect string post-failover
-        post_connect, post_err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert post_connect and not post_err, \
-            f"Post-failover connect string failed: {post_err}"
-        post_str = " ".join(post_connect) if isinstance(post_connect, list) else str(post_connect)
-        assert "dhchap" in post_str.lower(), \
-            f"Expected DHCHAP keys post-failover; got: {post_str}"
-        self.logger.info("TC-SEC-089: DHCHAP keys preserved post-failover PASSED")
+        if self.k8s_test:
+            self._k8s_assert_dhchap_wiring(
+                self._dhchap_allowed_nodes, self._dhchap_disallowed_nodes)
+            self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
+        self._dhchap_positive_control.discard(lvol_name)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-089")
+        if self.k8s_test and denied is not None:
+            self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+            self._assert_host_denied(lvol_name, lvol_id, denied,
+                                     tc="TC-SEC-089")
+        self.logger.info("TC-SEC-089: DHCHAP preserved post-failover PASSED")
 
         self.logger.info("=== TestLvolSecurityHAFailover PASSED ===")
 
@@ -3649,6 +5819,31 @@ class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
     TC-SEC-092  Trigger 30s network interrupt on a storage node
     TC-SEC-093  Wait for interrupt to end; verify FIO completed without errors
     TC-SEC-094  Disconnect + reconnect with DHCHAP creds; verify auth still works
+
+    K8s: SKIPPED. Two reasons, both specific to K8s-native.
+
+    1. The FIO workload and the outage target are the same machine. In
+       docker they are not: FIO runs on a separate client host while the
+       outage hits a storage node. In K8s-native the storage nodes ARE the
+       worker nodes (10.0.0.10-15 == worker-0..5 on the OpenShift bed), the
+       FIO pod is pinned to ``_dhchap_allowed_nodes[0]`` (worker-0) because
+       DHCHAP requires an allowed node, and the outage targets
+       ``primary_nodes[0]`` — very likely the same worker. Blacking out that
+       host kills the FIO pod's own connectivity, so the test would be
+       measuring its own fixture rather than the product.
+
+    2. A full ``iptables -A INPUT/OUTPUT -j DROP`` is far harsher than the
+       ``sn shutdown`` the other outage classes use. Shutdown stops the SPDK
+       service and leaves the worker and its pods alive with HA covering the
+       volume; the blackout also severs kubelet from the API server (the node
+       goes NotReady in ~40s), which makes the liveness check read a stale
+       ``Running`` and leaves the run one failed ``iptables -F`` away from a
+       stranded worker.
+
+    Fixing (1) is easy — pick an outage target whose K8s node differs from
+    the FIO pod's node. It is deliberately not done here: the class has never
+    executed, and it carries the largest blast radius in the suite, so it
+    should be re-enabled on its own rather than inside a full-suite run.
     """
 
     def __init__(self, **kwargs):
@@ -3658,108 +5853,134 @@ class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityNetworkInterrupt START ===")
-        self.fio_node = self.fio_node[0]
+
+        if self.k8s_test:
+            self.logger.warning(
+                f"{TOK_SKIPPED_K8S} TestLvolSecurityNetworkInterrupt: in "
+                f"K8s-native the storage nodes are the worker nodes, so the "
+                f"outage target and the FIO pod's host are the same machine "
+                f"— the blackout would sever the FIO pod's own connectivity "
+                f"and kubelet's link to the API server, and the test would "
+                f"measure its fixture rather than the product. "
+                f"{TOK_COVERAGE_LOST}: fabric-loss survival and DHCHAP "
+                f"re-authentication on reconnect (TC-SEC-092/093/094) are not "
+                f"covered in K8s. Re-enable by selecting an outage target "
+                f"whose K8s node differs from the FIO pod's node, and run it "
+                f"on its own — it has the largest blast radius in the suite.")
+            self.logger.info(
+                "=== TestLvolSecurityNetworkInterrupt SKIPPED (k8s) ===")
+            return
+
+        self._normalize_fio_node()
 
         # TC-SEC-090: DHCHAP pool + host + HA lvol
         self.logger.info("TC-SEC-090: Creating DHCHAP pool + HA lvol …")
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
         assert pool_id, f"Pool {self.pool_name} not found"
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
 
-        lvol_name = f"secnwi{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            distr_ndcs=1, distr_npcs=1,
-        )
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(5)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secnwi{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
-        assert "dhchap-secret" in cs_str.lower(), \
-            f"TC-SEC-090: Expected DHCHAP keys in connect string; got: {cs_str}"
-        self.logger.info("TC-SEC-090: Connect string contains DHCHAP keys")
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-090")
 
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         self.logger.info("TC-SEC-090: HA lvol connected + mounted PASSED")
 
-        # TC-SEC-091: start FIO in thread
-        self.logger.info("TC-SEC-091: Starting FIO thread …")
+        # TC-SEC-091: start FIO in the background
+        self.logger.info("TC-SEC-091: Starting background FIO …")
         log_file = f"{self.log_path}/{lvol_name}_out.log"
-        fio_thread = threading.Thread(
-            target=self.ssh_obj.run_fio_test,
-            args=(self.fio_node, None, mount_point, log_file),
-            kwargs={
-                "name": f"fio_run_{lvol_name}",
-                "runtime": self.fio_runtime,
-                "rw": "randrw",
-                "bs": "4K",
-                "size": self.fio_size,
-                "nrfiles": 4,
-                "iodepth": 1,
-                "numjobs": 2,
-                "time_based": True,
-            },
-        )
-        fio_thread.start()
-        self.fio_threads.append(fio_thread)
+        fio = self._start_bg_fio_dual(
+            lvol_name, mount_point, log_file,
+            runtime=self.fio_runtime, rw="randrw")
         sleep_n_sec(15)
         self.logger.info("TC-SEC-091: FIO running PASSED")
 
-        # TC-SEC-092: trigger 30s network interrupt on a storage node
+        # TC-SEC-092: trigger a 30s network interrupt on a storage node
         self.logger.info("TC-SEC-092: Triggering 30s network interrupt …")
         nodes = self.sbcli_utils.get_storage_nodes()
         primary_nodes = [n for n in nodes["results"]
                          if not n.get("is_secondary_node")]
         assert primary_nodes, "No primary storage nodes found"
         target_node_ip = primary_nodes[0]["mgmt_ip"]
-        active_ifaces = self.ssh_obj.get_active_interfaces(target_node_ip)
-        assert active_ifaces, f"No active interfaces found on {target_node_ip}"
-        self.ssh_obj.disconnect_all_active_interfaces(
-            target_node_ip, active_ifaces, duration_secs=30)
+        target_node_uuid = primary_nodes[0]["uuid"]
+        self._network_outage_dual(target_node_ip, duration=30)
         self.logger.info("TC-SEC-092: Network interrupt triggered PASSED")
 
-        # TC-SEC-093: wait for interrupt to end, then wait for FIO
+        # TC-SEC-093: confirm the outage actually landed, then wait for FIO.
+        # With ctrl-loss-tmo -1 a 30s blip can be completely invisible, so
+        # without this check the whole test could pass having exercised
+        # nothing at all.
+        self.logger.info("TC-SEC-093: Confirming the outage took effect …")
+        observed = False
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            try:
+                detail = self.sbcli_utils.get_storage_node_details(
+                    target_node_uuid)
+                status = detail[0].get("status")
+                if status != "online":
+                    observed = True
+                    self.logger.info(
+                        f"TC-SEC-093: node {target_node_uuid} observed "
+                        f"{status!r} during the interrupt")
+                    break
+            except Exception as exc:
+                # The control plane being unreachable is itself evidence the
+                # outage landed.
+                observed = True
+                self.logger.info(
+                    f"TC-SEC-093: control plane unreachable during the "
+                    f"interrupt ({exc}) — outage confirmed")
+                break
+            sleep_n_sec(5)
+        if not observed:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} TC-SEC-093: the node never left "
+                f"'online' during the 30s interrupt — the recovery "
+                f"assertions below may not be exercising anything")
+
         self.logger.info("TC-SEC-093: Waiting 45s for network recovery …")
         sleep_n_sec(45)
+        self.sbcli_utils.wait_for_storage_node_status(
+            target_node_uuid, "online", timeout=300)
         self.logger.info("TC-SEC-093: Waiting for FIO to complete …")
-        self.common_utils.manage_fio_threads(
-            self.fio_node, self.fio_threads, timeout=self.fio_runtime + 120)
-        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        self._finish_bg_fio_dual(fio, tc="TC-SEC-093")
         self.logger.info("TC-SEC-093: FIO completed without interruption PASSED")
 
-        # TC-SEC-094: disconnect + reconnect to verify DHCHAP still works
-        self.logger.info("TC-SEC-094: Reconnecting with DHCHAP after interrupt …")
-        self.ssh_obj.unmount_path(self.fio_node, mount_point)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id)
-        sleep_n_sec(2)
+        # TC-SEC-094: re-attach and verify auth still works. Re-attach after
+        # a fabric loss is precisely where DHCHAP re-negotiation happens, so
+        # this is the substance of the test rather than a coda.
+        self.logger.info("TC-SEC-094: Re-attaching with DHCHAP after interrupt …")
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
-        # Validate DHCHAP still present in connect string after network interrupt
-        post_cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        post_cs_str = " ".join(post_cs_ls) if isinstance(post_cs_ls, list) else str(post_cs_ls)
-        assert "dhchap-secret" in post_cs_str.lower(), \
-            f"TC-SEC-094: Expected DHCHAP keys in reconnect string; got: {post_cs_str}"
-        self.logger.info("TC-SEC-094: Reconnect string contains DHCHAP keys")
+        self._dhchap_positive_control.discard(lvol_name)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-094")
 
-        lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        assert lvol_device2, "Reconnect after network interrupt failed"
-        mount_point2 = f"{self.mount_path}/{lvol_name}_post"
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device2, mount_path=mount_point2)
+        if self.k8s_test:
+            if denied is not None:
+                self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+                self._assert_host_denied(lvol_name, lvol_id, denied,
+                                         tc="TC-SEC-094")
+            self.logger.info("TC-SEC-094: Post-interrupt re-attach PASSED")
+            self.logger.info("=== TestLvolSecurityNetworkInterrupt PASSED ===")
+            return
+
+        device2, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        assert device2, "Reconnect after network interrupt failed"
+        mount_point2 = self._format_and_mount_dual(
+            lvol_name, device2,
+            mount_point=f"{self.mount_path}/{lvol_name}_post",
+            format_first=False)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point2
         log_file2 = f"{self.log_path}/{lvol_name}_post.log"
-        self._run_fio_and_validate(lvol_name, mount_point2, log_file2, rw="randrw", runtime=30)
+        self._run_fio_dual(lvol_name, mount_point2, log_file2, rw="randrw", runtime=30)
         self.logger.info("TC-SEC-094: Post-interrupt reconnect + FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityNetworkInterrupt PASSED ===")
@@ -3784,73 +6005,129 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
         super().__init__(**kwargs)
         self.test_name = "lvol_security_negative_creation_v2"
 
-    def _assert_cli_error(self, out, err, label):
-        """Assert that at least one of out/err signals a failure."""
-        failure_signals = ("error", "invalid", "failed", "no such", "not found",
-                           "cannot", "unable")
-        combined = (out or "").lower() + (err or "").lower()
-        has_signal = any(s in combined for s in failure_signals)
-        self.logger.info(
-            f"[{label}] out={out!r}, err={err!r}, has_error_signal={has_signal}")
-        assert has_signal or not (out or "").strip(), \
-            f"[{label}] Expected error signal but got: out={out!r} err={err!r}"
-
     def run(self):
         self.logger.info("=== TestLvolSecurityNegativeCreation START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        # Create DHCHAP pool
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        # DHCHAP pool with a real allowedNodes subset in K8s (register=False:
+        # these are negative tests, nothing should start registered)
+        pool_id, allowed, denied = self._setup_pool_and_host(
+            dhchap=True, register=False)
         assert pool_id, f"Pool {self.pool_name} not found"
 
-        # TC-SEC-100: add-host with invalid NQN
+        # TC-SEC-100: add-host with invalid NQN. Asserted on the textual
+        # signal AND on the effect (the NQN did not enter the pool), so it
+        # cannot pass on empty output the way the old helper did.
         self.logger.info("TC-SEC-100: add-host with invalid NQN …")
         invalid_nqn = "not-a-valid-nqn-format-!@#$%"
-        out, err = self.ssh_obj.add_host_to_pool(
-            self.mgmt_nodes[0], pool_id, invalid_nqn)
-        self._assert_cli_error(out, err, "TC-SEC-100")
+        out, err = self._pool_host_op_dual(pool_id, shlex.quote(invalid_nqn))
+        self._assert_cli_rejected(out, err, "TC-SEC-100",
+                                  pool_id=pool_id, host_nqn=invalid_nqn)
         self.logger.info("TC-SEC-100: Invalid NQN rejected PASSED")
 
         # TC-SEC-101: add-host with empty NQN
         self.logger.info("TC-SEC-101: add-host with empty NQN …")
-        out, err = self.ssh_obj.add_host_to_pool(
-            self.mgmt_nodes[0], pool_id, "")
-        self._assert_cli_error(out, err, "TC-SEC-101")
+        out, err = self._pool_host_op_dual(pool_id, "''")
+        self._assert_cli_rejected(out, err, "TC-SEC-101",
+                                  pool_id=pool_id, host_nqn="")
         self.logger.info("TC-SEC-101: Empty NQN rejected PASSED")
 
-        # TC-SEC-102: remove-host with non-existent NQN
+        # TC-SEC-102: remove-host with a non-existent NQN must be a rejection
+        # or a no-op — asserted on the pool's allowed hosts being unchanged.
         self.logger.info("TC-SEC-102: remove-host with non-existent NQN …")
         fake_nqn = f"nqn.2024-01.io.simplyblock:test:fake-{_rand_suffix()}"
-        out, err = self.ssh_obj.remove_host_from_pool(
-            self.mgmt_nodes[0], pool_id, fake_nqn)
-        # Should return error or be a no-op – must not crash
+        before = sorted(self._get_pool_allowed_hosts(pool_id))
+        out, err = self._pool_host_op_dual(pool_id, fake_nqn, remove=True)
         self.logger.info(
             f"TC-SEC-102: remove non-existent NQN result: out={out!r} err={err!r}")
-        self.logger.info("TC-SEC-102: PASSED (no crash)")
+        after = sorted(self._get_pool_allowed_hosts(pool_id))
+        assert before == after, (
+            f"TC-SEC-102: removing a non-existent NQN changed the pool's "
+            f"allowed hosts: {before} -> {after}")
+        self.logger.info("TC-SEC-102: PASSED (no crash, state unchanged)")
 
-        # TC-SEC-103: lvol in non-DHCHAP pool → no DHCHAP keys
+        # TC-SEC-103: a NON-DHCHAP pool must produce no enforcement.
+        #
+        # This case was broken in BOTH modes: it created `plain_pool` but then
+        # called _create_lvol_dual, which still used self.pool_name / the
+        # DHCHAP StorageClass — so it asserted about the DHCHAP pool and only
+        # "passed" because no host was registered. The pool is now actually
+        # switched for the duration of the check.
+        #
+        # In K8s this also becomes a strong control: it proves the negative
+        # assertions elsewhere in the suite are not passing for environmental
+        # reasons, because this volume mounts on the very node the DHCHAP pool
+        # rejects.
         self.logger.info("TC-SEC-103: Creating lvol in non-DHCHAP pool …")
-        plain_pool = f"{self.pool_name}_nodhchap"
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], plain_pool, self.cluster_id, dhchap=False)
-        lvol_name = f"secneg{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, plain_pool)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
-        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+        plain_pool = f"{self.pool_name}-nodh"[:24]
+        saved = (self.pool_name, self._storage_class_name,
+                 self._dhchap_node_label, self._pool_crd_name)
+        try:
+            if self.k8s_test:
+                # Non-DHCHAP pool, and again the operator generates its
+                # StorageClass -- which should carry NO
+                # dhchap_node_label and no allowedTopologies, so its
+                # volumes mount anywhere.
+                self.pool_name = plain_pool
+                self._dhchap_node_label = None
+                self._ensure_pool_and_sc(dhchap=False)
+                sc_label = self._k8s_sc_dhchap_label(
+                    self._storage_class_name)
+                assert not sc_label, (
+                    f"TC-SEC-103: the operator gave a non-DHCHAP pool a "
+                    f"StorageClass carrying dhchap_node_label={sc_label!r} "
+                    f"— a pool without dhchap must produce no enforcement")
+            else:
+                self.ssh_obj.add_storage_pool(
+                    self.mgmt_nodes[0], plain_pool, self.cluster_id,
+                    dhchap=False)
+                self.pool_name = plain_pool
 
-        host_nqn = self._get_client_host_nqn()
-        connect_ls, cerr = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        if connect_ls:
-            connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
-            assert "dhchap" not in connect_str.lower(), \
-                f"Non-DHCHAP pool should not produce DHCHAP keys; got: {connect_str}"
-        self.logger.info("TC-SEC-103: Non-DHCHAP pool has no keys PASSED")
+            raw_name = f"secplain{_rand_suffix()}"
+            lvol_name, lvol_id = self._create_lvol_dual(raw_name)
+            self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+            if self.k8s_test:
+                # No pool label, so the PV must carry no nodeAffinity and the
+                # volume must mount on ANY node — including the one the DHCHAP
+                # pool rejects.
+                k8s = self._ensure_k8s_utils()
+                pvc_name = self._k8s_normalize_name(lvol_name)
+                pv_name = k8s.get_pvc_pv_name(pvc_name)
+                aff_out, _ = k8s._exec_kubectl(
+                    f"kubectl get pv {pv_name} "
+                    f"-o jsonpath='{{.spec.nodeAffinity}}' "
+                    f"2>/dev/null || true")
+                affinity = (aff_out or "").strip()
+                assert "simplyblock.io/pool." not in affinity, (
+                    f"TC-SEC-103: a non-DHCHAP pool's PV {pv_name} carries a "
+                    f"pool nodeAffinity: {affinity!r}")
+                target = denied.node if denied else None
+                if target:
+                    pod = self._k8s_verify_pod_scheduling(
+                        pvc_name, target, expect_success=True,
+                        pod_prefix="plainpool")
+                    self.logger.info(
+                        f"TC-SEC-103: non-DHCHAP volume mounted on {target!r} "
+                        f"— the node the DHCHAP pool rejects. This confirms "
+                        f"the suite's denials are DHCHAP-specific and not "
+                        f"environmental.")
+                    if pod:
+                        self._k8s_release_pod(pod, pvc_name=pvc_name)
+            else:
+                host_nqn = self._get_client_host_nqn()
+                connect_ls, cerr = self._get_connect_str_dual(
+                    lvol_id, host_nqn=host_nqn)
+                assert connect_ls, (
+                    f"TC-SEC-103: expected a connect string from a "
+                    f"non-DHCHAP pool; err={cerr!r}")
+                connect_str = " ".join(connect_ls)
+                assert "dhchap" not in connect_str.lower(), \
+                    f"Non-DHCHAP pool should not produce DHCHAP keys; got: {connect_str}"
+            self.logger.info("TC-SEC-103: Non-DHCHAP pool has no keys PASSED")
+        finally:
+            (self.pool_name, self._storage_class_name,
+             self._dhchap_node_label, self._pool_crd_name) = saved
 
         self.logger.info("=== TestLvolSecurityNegativeCreation PASSED ===")
 
@@ -3876,79 +6153,119 @@ class TestLvolSecurityNegativeConnect(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityNegativeConnect START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
 
-        lvol_name = f"secnc{_rand_suffix()}"
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secnc{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-SEC-110: unregistered NQN → connect must FAIL
-        # Known behaviour: when pool HAS allowed hosts and a wrong/unregistered
-        # NQN is passed with --host-nqn, the connect command fails (issue #4).
+        # TC-SEC-110: an unregistered host NQN must be refused DHCHAP keys.
+        #
+        # This is one of the two places in the suite that speaks about
+        # AUTHENTICATION rather than node placement: it asks the control
+        # plane for keys as an identity that is not in the pool's allowed
+        # hosts. It is meaningful in K8s too, and it is armed now that
+        # _get_connect_str_dual returns a real error channel — previously the
+        # K8s path hardcoded err="" and this reduced to "no connect line".
         self.logger.info("TC-SEC-110: Connect with unregistered NQN …")
         wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
-        connect_ls, cerr = self._get_connect_str_cli(lvol_id, host_nqn=wrong_nqn)
-        rejected = bool(cerr) or not connect_ls
+        connect_ls, cerr = self._get_connect_str_dual(lvol_id, host_nqn=wrong_nqn)
+        rejected = bool(cerr) or not connect_ls or not any(
+            "dhchap-secret" in c.lower() for c in connect_ls)
         assert rejected, (
-            f"Expected rejection for wrong NQN {wrong_nqn!r} when pool has "
-            f"allowed hosts, but got connect strings: {connect_ls}")
-        self.logger.info("TC-SEC-110: Wrong NQN rejected PASSED")
+            f"Expected rejection (or at least no DHCHAP keys) for "
+            f"unregistered NQN {wrong_nqn!r} when the pool has allowed "
+            f"hosts, but got: {connect_ls}")
+        self.logger.info(
+            f"TC-SEC-110: Unregistered NQN refused keys PASSED "
+            f"(err={cerr!r})")
 
-        # TC-SEC-111: tampered DHCHAP secret → no new device
-        self.logger.info("TC-SEC-111: Tampered DHCHAP secret …")
-        import re
-        connect_auth, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        if connect_auth:
-            tampered = connect_auth[0]
-            if "dhchap-secret" in tampered:
-                tampered = re.sub(
-                    r'(--dhchap-secret[=\s])\S+',
-                    r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
-                    tampered)
-                tampered = re.sub(
-                    r'(--dhchap-ctrl-secret[=\s])\S+',
-                    r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
-                    tampered)
-                initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
-                self.ssh_obj.exec_command(node=self.fio_node, command=tampered)
-                sleep_n_sec(3)
-                final_devices = self.ssh_obj.get_devices(node=self.fio_node)
-                new_devices = [d for d in final_devices if d not in initial_devices]
-                assert not new_devices, \
-                    f"Tampered key should not produce a new device; got: {new_devices}"
-                self.logger.info("TC-SEC-111: Tampered key rejected PASSED")
-            else:
-                self.logger.info("TC-SEC-111: No dhchap-secret in string; skipped")
+        # TC-SEC-111: tampered DHCHAP secret → the connect must fail.
+        #
+        # Docker only. This is the single most security-relevant assertion in
+        # the suite -- it is the only one that proves in-band DH-HMAC-CHAP is
+        # actually negotiated rather than merely configured. It requires
+        # hand-editing an `nvme connect` command line, which a K8s test never
+        # sees: the keys live inside the CSI node plugin.
+        #
+        # IMPORTANT for reading K8s results: without this case, K8s mode
+        # verifies that the pool's allowedNodes restriction is enforced at
+        # mount via the PV's nodeAffinity -- NOT that DHCHAP was negotiated. A
+        # pool with dhchap:false carrying the same node label would satisfy
+        # every other K8s assertion in this file.
+        if self.k8s_test:
+            self.logger.warning(
+                f"{TOK_SKIPPED_K8S} TC-SEC-111: tampering with a DHCHAP "
+                f"secret requires editing a client-side `nvme connect` "
+                f"command; in CSI mode the test never issues one and the keys "
+                f"are held by the node plugin. {TOK_COVERAGE_LOST}: K8s mode "
+                f"does NOT verify in-band DH-HMAC-CHAP negotiation, only "
+                f"nodeAffinity enforcement of spec.allowedNodes.")
         else:
-            self.logger.info("TC-SEC-111: No connect string; skipped")
+            self.logger.info("TC-SEC-111: Tampered DHCHAP secret …")
+            connect_auth, _ = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
+            assert connect_auth, (
+                "TC-SEC-111: no connect string for the authorized host — "
+                "cannot construct the tampered-secret case")
+            tampered = connect_auth[0]
+            assert "dhchap-secret" in tampered, (
+                f"TC-SEC-111: authorized connect string carries no "
+                f"--dhchap-secret to tamper with: {tampered!r}")
+            tampered = re.sub(
+                r'(--dhchap-secret[=\s])\S+',
+                r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
+                tampered)
+            tampered = re.sub(
+                r'(--dhchap-ctrl-secret[=\s])\S+',
+                r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
+                tampered)
+            initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
+            self.ssh_obj.exec_command(node=self.fio_node, command=tampered)
+            sleep_n_sec(3)
+            final_devices = self.ssh_obj.get_devices(node=self.fio_node)
+            new_devices = [d for d in final_devices if d not in initial_devices]
+            assert not new_devices, \
+                f"Tampered key should not produce a new device; got: {new_devices}"
+            self.logger.info("TC-SEC-111: Tampered key rejected PASSED")
 
         # TC-SEC-112: connect without host-nqn → no DHCHAP keys
         self.logger.info("TC-SEC-112: Connect without host-nqn …")
-        connect_no_nqn, _ = self._get_connect_str_cli(lvol_id, host_nqn=None)
-        if connect_no_nqn:
+        connect_no_nqn, _ = self._get_connect_str_dual(lvol_id, host_nqn=None)
+        if not connect_no_nqn:
+            # A DHCHAP pool may legitimately refuse to hand back any
+            # connect string when no host identity is supplied -- that
+            # is a stronger behaviour than returning a keyless one, and
+            # it still satisfies "no keys without host-nqn".
+            self.logger.info(
+                "TC-SEC-112: no connect string returned without "
+                "--host-nqn (stricter than expected, and acceptable)")
+        else:
             has_dhchap = any("dhchap" in c.lower() for c in connect_no_nqn)
-            assert not has_dhchap, \
-                "Connect without host-nqn must not contain DHCHAP keys"
+            assert not has_dhchap, (
+                "Connect without host-nqn must not contain DHCHAP keys")
+            "Connect without host-nqn must not contain DHCHAP keys"
         self.logger.info("TC-SEC-112: No keys without host-nqn PASSED")
 
-        # TC-SEC-113: delete lvol in DHCHAP pool
+        # TC-SEC-113: delete the volume in a DHCHAP pool.
+        #
+        # Routed through the dual helpers: the previous version called
+        # delete_lvol(lvol_name=...) then asserted get_lvol_id(lvol_name) was
+        # falsy, but in K8s the backend lvol is named after the PV, so that
+        # lookup returned None either way and the case ALWAYS passed.
         self.logger.info("TC-SEC-113: Deleting lvol in DHCHAP pool …")
-        self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=False)
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+        self._delete_lvol_dual(lvol_name, skip_error=False)
         sleep_n_sec(3)
-        gone_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert not gone_id, f"lvol {lvol_name} should be deleted"
-        del self.lvol_mount_details[lvol_name]
+        self._verify_lvol_absent_dual(lvol_name)
+        if self.k8s_test:
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            if pvc_name in self.created_pvcs:
+                self.created_pvcs.remove(pvc_name)
+        self.lvol_mount_details.pop(lvol_name, None)
+        self._dhchap_positive_control.discard(lvol_name)
         self.logger.info("TC-SEC-113: DHCHAP lvol deleted cleanly PASSED")
 
         self.logger.info("=== TestLvolSecurityNegativeConnect PASSED ===")
@@ -3978,48 +6295,39 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityDynamicModification START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
+
+        if self.k8s_test:
+            self._k8s_dynamic_modification(pool_id, allowed, denied)
+            return
 
         second_nqn = f"nqn.2024-01.io.simplyblock:test:second-{_rand_suffix()}"
-        lvol_name = f"secdmod{_rand_suffix()}"
+        raw_name = f"secdmod{_rand_suffix()}"
 
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
         # TC-SEC-120: connect + FIO
         self.logger.info("TC-SEC-120: Initial connect + FIO …")
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_pre.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="write", runtime=20)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="write", runtime=20)
         self.logger.info("TC-SEC-120: Initial FIO PASSED")
 
         # Disconnect
-        self.ssh_obj.unmount_path(self.fio_node, mount_point)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id)
-        sleep_n_sec(2)
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
         # TC-SEC-121: remove NQN_A → no DHCHAP keys
         self.logger.info("TC-SEC-121: Removing NQN_A from pool …")
-        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        self._unregister_host_from_pool(pool_id, host_nqn)
         sleep_n_sec(3)
-        connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        connect_ls, err = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
         if connect_ls:
             cs = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
             assert "dhchap" not in cs.lower(), \
@@ -4028,31 +6336,28 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
 
         # TC-SEC-122: re-add NQN_A → DHCHAP keys present, FIO works
         self.logger.info("TC-SEC-122: Re-adding NQN_A …")
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        self._register_host_to_pool(pool_id, host_nqn)
         sleep_n_sec(3)
-        connect_ls2, err2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        connect_ls2, err2 = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
         assert connect_ls2 and not err2, f"Re-add should restore connect; err={err2}"
         cs2 = " ".join(connect_ls2) if isinstance(connect_ls2, list) else str(connect_ls2)
         assert "dhchap" in cs2.lower(), f"Expected DHCHAP keys after re-add; got: {cs2}"
-        lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device2, mount_path=mount_point)
+        device2, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        self.ssh_obj.mount_path(node=self.fio_node, device=device2, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file2 = f"{self.log_path}/{lvol_name}_readd.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file2, rw="randrw", runtime=20)
+        self._run_fio_dual(lvol_name, mount_point, log_file2, rw="randrw", runtime=20)
         self.logger.info("TC-SEC-122: Re-add FIO PASSED")
 
-        self.ssh_obj.unmount_path(self.fio_node, mount_point)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id)
-        sleep_n_sec(2)
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
         # TC-SEC-123: add NQN_B → both get DHCHAP
         self.logger.info("TC-SEC-123: Adding NQN_B …")
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, second_nqn)
+        self._register_host_to_pool(pool_id, second_nqn)
         sleep_n_sec(3)
-        cs_a, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        cs_b, _ = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
+        cs_a, _ = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
+        cs_b, _ = self._get_connect_str_dual(lvol_id, host_nqn=second_nqn)
         assert cs_a, "NQN_A should get connect string"
         assert cs_b, "NQN_B should get connect string"
         str_a = " ".join(cs_a) if isinstance(cs_a, list) else str(cs_a)
@@ -4065,14 +6370,14 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
         # Known behaviour: pool still HAS allowed hosts (NQN_B), so connecting
         # with removed NQN_A must FAIL (issue #4).
         self.logger.info("TC-SEC-124: Removing NQN_A …")
-        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        self._unregister_host_from_pool(pool_id, host_nqn)
         sleep_n_sec(3)
-        cs_a2, err_a2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_a2, err_a2 = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
         rejected_a = bool(err_a2) or not cs_a2
         assert rejected_a, (
             f"NQN_A should be rejected when pool still has allowed hosts "
             f"(NQN_B); got: cs={cs_a2}")
-        cs_b2, _ = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
+        cs_b2, _ = self._get_connect_str_dual(lvol_id, host_nqn=second_nqn)
         assert cs_b2, "NQN_B should still get connect string"
         str_b2 = " ".join(cs_b2) if isinstance(cs_b2, list) else str(cs_b2)
         assert "dhchap" in str_b2.lower(), f"NQN_B should still have DHCHAP; got: {str_b2}"
@@ -4082,10 +6387,10 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
         # Known behaviour: connect string IS returned but without dhchap
         # keys when pool has no allowed hosts (issue #3).
         self.logger.info("TC-SEC-125: Removing NQN_B …")
-        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, second_nqn)
+        self._unregister_host_from_pool(pool_id, second_nqn)
         sleep_n_sec(3)
-        cs_a3, err_a3 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        cs_b3, err_b3 = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
+        cs_a3, err_a3 = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
+        cs_b3, err_b3 = self._get_connect_str_dual(lvol_id, host_nqn=second_nqn)
         for label, cs, cerr in [("NQN_A", cs_a3, err_a3), ("NQN_B", cs_b3, err_b3)]:
             assert cs and not cerr, \
                 f"{label} should still get connect string when pool has no allowed hosts; err={cerr}"
@@ -4096,14 +6401,97 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
 
         # TC-SEC-126: re-add NQN_A → reconnect + FIO
         self.logger.info("TC-SEC-126: Re-adding NQN_A and running FIO …")
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        self._register_host_to_pool(pool_id, host_nqn)
         sleep_n_sec(3)
-        lvol_device3, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device3, mount_path=mount_point)
+        device3, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        self.ssh_obj.mount_path(node=self.fio_node, device=device3, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file3 = f"{self.log_path}/{lvol_name}_final.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file3, rw="randrw", runtime=20)
+        self._run_fio_dual(lvol_name, mount_point, log_file3, rw="randrw", runtime=20)
         self.logger.info("TC-SEC-126: Final FIO PASSED")
+
+        self.logger.info("=== TestLvolSecurityDynamicModification PASSED ===")
+
+    def _k8s_dynamic_modification(self, pool_id, allowed, denied):
+        """K8s-native multi-host lifecycle: grant, revoke, re-grant.
+
+        The docker version walks six steps over two host NQNs. The K8s
+        analogue is a lifecycle over ``spec.allowedNodes``, and it is trimmed
+        deliberately: the control-plane triple (spec/status, node labels, pool
+        allowed hosts) is re-asserted at EVERY step because that is where the
+        coverage is and it costs seconds, while a runtime pod probe -- which
+        costs a minute -- is spent at only three points. Six probes for one
+        idea is a bad trade.
+
+        Every step waits for observable convergence rather than sleeping: the
+        docker version's ``sleep_n_sec(3)`` after each mutation made all six
+        assertions races against the operator's reconcile loop.
+        """
+        denied = self._require_denied_host(denied, tc="TC-SEC-120")
+        raw_name = f"secdmod{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+        node_b = denied.node
+
+        # TC-SEC-120: baseline — the allowed node can use the volume (probe 1)
+        self.logger.info("TC-SEC-120: Baseline access on the allowed node …")
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-120")
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+        self.logger.info("TC-SEC-120: Baseline PASSED")
+
+        # TC-SEC-121: node B is outside the pool → denied (probe 2)
+        self.logger.info(f"TC-SEC-121: {node_b!r} is not allowed → denied …")
+        self._assert_host_denied(lvol_name, lvol_id, denied, tc="TC-SEC-121")
+        self.logger.info("TC-SEC-121: Unlisted node denied PASSED")
+
+        # TC-SEC-123: grant node B → both nodes labelled, both NQNs registered
+        self.logger.info(f"TC-SEC-123: Granting {node_b!r} …")
+        self._grant_host_dual(pool_id, denied, tc="TC-SEC-123")
+        self._k8s_assert_dhchap_wiring(self._dhchap_allowed_nodes,
+                                       self._dhchap_disallowed_nodes)
+        self._dhchap_positive_control.discard(lvol_name)
+        # probe 3: node B can now actually use the volume
+        self._assert_host_authorized(
+            lvol_name, lvol_id,
+            DhchapHost(node=node_b, nqn=denied.nqn, desc="newly granted"),
+            tc="TC-SEC-123")
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+        self.logger.info("TC-SEC-123: Granted node has access PASSED")
+
+        # TC-SEC-124: revoke node B → it loses access, the other node keeps it
+        self.logger.info(f"TC-SEC-124: Revoking {node_b!r} …")
+        revoked = self._revoke_host_dual(
+            pool_id, DhchapHost(node=node_b, nqn=denied.nqn), tc="TC-SEC-124")
+        self._k8s_assert_dhchap_wiring(self._dhchap_allowed_nodes,
+                                       self._dhchap_disallowed_nodes)
+        if revoked:
+            self._dhchap_positive_control.add(lvol_name)
+            self._assert_host_denied(
+                lvol_name, lvol_id,
+                DhchapHost(node=node_b, nqn=denied.nqn, desc="revoked"),
+                tc="TC-SEC-124", why="revoked from spec.allowedNodes")
+        self.logger.info("TC-SEC-124: Revoked node denied PASSED")
+
+        # TC-SEC-125: emptying allowedNodes entirely is not expressible --
+        # a DHCHAP pool with no allowed node would make its own volumes
+        # unmountable everywhere, and _revoke_host_dual refuses it. The
+        # docker equivalent (pool with zero allowed hosts still returns a
+        # keyless connect string) has no K8s counterpart.
+        self.logger.warning(
+            f"{TOK_SKIPPED_K8S} TC-SEC-125: 'pool with no allowed hosts' is "
+            f"not a valid K8s state — an empty spec.allowedNodes would make "
+            f"every volume in the pool unmountable. {TOK_COVERAGE_LOST}: the "
+            f"keyless-connect-string behaviour is docker-only.")
+
+        # TC-SEC-126: re-grant node B and confirm the state converges again
+        self.logger.info(f"TC-SEC-126: Re-granting {node_b!r} …")
+        self._grant_host_dual(
+            pool_id, DhchapHost(node=node_b, nqn=denied.nqn),
+            tc="TC-SEC-126")
+        self._k8s_assert_dhchap_wiring(self._dhchap_allowed_nodes,
+                                       self._dhchap_disallowed_nodes)
+        self.logger.info("TC-SEC-126: Re-grant converged PASSED")
 
         self.logger.info("=== TestLvolSecurityDynamicModification PASSED ===")
 
@@ -4132,70 +6520,106 @@ class TestLvolSecurityScaleAndRapidOps(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityScaleAndRapidOps START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
 
         # TC-SEC-130: create 10 lvols
         self.logger.info(f"TC-SEC-130: Creating {self.VOLUME_COUNT} lvols …")
         volumes = []
         for i in range(self.VOLUME_COUNT):
-            lvol_name = f"secsc{i}{_rand_suffix()}"
-            out, err = self.ssh_obj.create_sec_lvol(
-                self.mgmt_nodes[0], lvol_name, "1G", self.pool_name)
-            assert not err or "error" not in err.lower(), \
-                f"lvol {lvol_name} creation failed: {err}"
-            sleep_n_sec(1)
-            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+            raw_name = f"secsc{i}{_rand_suffix()}"
+            lvol_name, lvol_id = self._create_lvol_dual(raw_name)
             assert lvol_id, f"Could not find ID for {lvol_name}"
             volumes.append((lvol_name, lvol_id))
             self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
         self.logger.info(f"TC-SEC-130: {self.VOLUME_COUNT} volumes created PASSED")
 
-        # TC-SEC-131: remove host → connect string returned without DHCHAP
-        # Known behaviour: pool has NO allowed hosts after removal, so connect
-        # string IS returned but without dhchap keys (issue #3).
-        self.logger.info("TC-SEC-131: Removing host from pool …")
-        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-        sleep_n_sec(3)
-        for lvol_name, lvol_id in volumes:
-            cs, cerr = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-            assert cs and not cerr, \
-                f"{lvol_name}: should get connect string when pool has no allowed hosts; err={cerr}"
-            s = " ".join(cs) if isinstance(cs, list) else str(cs)
-            assert "dhchap" not in s.lower(), \
-                f"{lvol_name}: should not have DHCHAP after host removal; got: {s}"
-        self.logger.info("TC-SEC-131: All volumes have no DHCHAP PASSED")
+        # TC-SEC-130b (K8s): EVERY volume must individually carry the
+        # enforcement. This is the regression this class exists to catch -- a
+        # CSI parameter dropped on the 7th volume -- and 10 PV reads cost
+        # seconds. An "at least one PV has nodeAffinity" check would be
+        # vacuous by construction.
+        if self.k8s_test:
+            self.logger.info(
+                f"TC-SEC-130: Verifying nodeAffinity on all "
+                f"{self.VOLUME_COUNT} PVs …")
+            for lvol_name, _ in volumes:
+                self._k8s_assert_pv_node_affinity(
+                    self._k8s_normalize_name(lvol_name), tc="TC-SEC-130")
+            self.logger.info(
+                f"TC-SEC-130: all {self.VOLUME_COUNT} PVs carry the pool "
+                f"nodeAffinity PASSED")
 
-        # TC-SEC-132: re-add host → all have DHCHAP
-        self.logger.info("TC-SEC-132: Re-adding host to pool …")
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-        sleep_n_sec(3)
-        for lvol_name, lvol_id in volumes:
-            cs, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-            assert cs and not err, \
-                f"{lvol_name}: should have connect string after re-add; err={err}"
-            s = " ".join(cs) if isinstance(cs, list) else str(cs)
-            assert "dhchap" in s.lower(), \
-                f"{lvol_name}: should have DHCHAP after re-add; got: {s}"
-        self.logger.info("TC-SEC-132: All volumes have DHCHAP PASSED")
+        # TC-SEC-131 / TC-SEC-132: rapid revoke + re-grant must leave the
+        # control plane consistent, asserted on observable convergence rather
+        # than a sleep.
+        if self.k8s_test:
+            self.logger.info("TC-SEC-131: Rapid revoke/re-grant churn …")
+            churn_node = denied.node if denied else None
+            if not churn_node:
+                self.logger.warning(
+                    f"{TOK_COVERAGE_LOST} TC-SEC-131: no spare node to churn "
+                    f"allowedNodes with")
+            else:
+                churn = DhchapHost(node=churn_node, nqn=denied.nqn)
+                self._grant_host_dual(pool_id, churn, tc="TC-SEC-131")
+                self._revoke_host_dual(pool_id, churn, tc="TC-SEC-131")
+                self._k8s_assert_dhchap_wiring(
+                    self._dhchap_allowed_nodes,
+                    self._dhchap_disallowed_nodes)
+                self.logger.info(
+                    "TC-SEC-131/132: churn converged, wiring intact PASSED")
+        else:
+            # Docker: pool has NO allowed hosts after removal, so a connect
+            # string IS returned but without dhchap keys.
+            self.logger.info("TC-SEC-131: Removing host from pool …")
+            self._revoke_host_dual(pool_id, allowed, tc="TC-SEC-131")
+            for lvol_name, lvol_id in volumes:
+                cs, cerr = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
+                assert cs and not cerr, \
+                    f"{lvol_name}: should get connect string when pool has no allowed hosts; err={cerr}"
+                s = " ".join(cs) if isinstance(cs, list) else str(cs)
+                assert "dhchap" not in s.lower(), \
+                    f"{lvol_name}: should not have DHCHAP after host removal; got: {s}"
+            self.logger.info("TC-SEC-131: All volumes have no DHCHAP PASSED")
 
-        # TC-SEC-133: connect one lvol + FIO
+            self.logger.info("TC-SEC-132: Re-adding host to pool …")
+            self._grant_host_dual(pool_id, allowed, tc="TC-SEC-132")
+            for lvol_name, lvol_id in volumes:
+                cs, err = self._get_connect_str_dual(lvol_id, host_nqn=host_nqn)
+                assert cs and not err, \
+                    f"{lvol_name}: should have connect string after re-add; err={err}"
+                s = " ".join(cs) if isinstance(cs, list) else str(cs)
+                assert "dhchap" in s.lower(), \
+                    f"{lvol_name}: should have DHCHAP after re-add; got: {s}"
+            self.logger.info("TC-SEC-132: All volumes have DHCHAP PASSED")
+
+        # TC-SEC-133: use one volume, and prove a DIFFERENT volume is still
+        # rejected on the disallowed node -- a different volume so the
+        # rejection cannot be a ReadWriteOnce multi-attach artefact.
         self.logger.info("TC-SEC-133: Connecting first lvol and running FIO …")
         first_name, first_id = volumes[0]
-        lvol_device, _ = self._connect_and_get_device(first_name, first_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{first_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self._assert_host_authorized(first_name, first_id, allowed,
+                                     tc="TC-SEC-133")
+        device, _ = self._connect_and_get_device_dual(first_name, first_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(first_name, device)
         self.lvol_mount_details[first_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{first_name}_out.log"
-        self._run_fio_and_validate(first_name, mount_point, log_file, rw="randrw", runtime=30,
-                                   fio_size="400M")
+        self._run_fio_dual(first_name, mount_point, log_file, rw="randrw", runtime=30)
         self.logger.info("TC-SEC-133: Scale FIO PASSED")
+
+        if self.k8s_test and denied is not None and len(volumes) > 1:
+            other_name, other_id = volumes[1]
+            self._assert_host_authorized(other_name, other_id, allowed,
+                                         tc="TC-SEC-133")
+            self._disconnect_and_unmount_dual(other_name, other_id, None)
+            self._assert_host_denied(other_name, other_id, denied,
+                                     tc="TC-SEC-133")
+            self.logger.info(
+                "TC-SEC-133: a second volume is rejected on the disallowed "
+                "node PASSED")
 
         self.logger.info("=== TestLvolSecurityScaleAndRapidOps PASSED ===")
 
@@ -4210,9 +6634,18 @@ class TestLvolSecurityResize(SecurityTestBase):
     Creates a DHCHAP+crypto lvol, resizes it, and verifies that DHCHAP
     configuration is unchanged after the resize operation.
 
+    Resize is covered twice, because detached and attached expansion are
+    different contracts and only one of them can be observed on the claim:
+
     TC-SEC-140  Create DHCHAP+crypto lvol (5G), connect, FIO
-    TC-SEC-141  Disconnect, resize to 10G
+    TC-SEC-141  Detached: disconnect, resize 5G -> 10G. Only the CONTROLLER
+                side can finish here, so this asserts the PV, not the PVC.
+    TC-SEC-143  Attach, and assert the deferred NODE-side expansion lands
+                (PVC status.capacity reaches 10Gi, filesystem grows).
+    TC-SEC-144  Attached: resize 10G -> 15G online, under a live mount.
     TC-SEC-142  Verify DHCHAP keys in connect string post-resize; reconnect, FIO
+
+    The cases run in that order; the numbering is historical.
     """
 
     def __init__(self, **kwargs):
@@ -4221,64 +6654,379 @@ class TestLvolSecurityResize(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityResize START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-
-        lvol_name = f"secrsz{_rand_suffix()}"
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
 
         # TC-SEC-140: create DHCHAP+crypto 5G lvol, connect, FIO
         self.logger.info("TC-SEC-140: Creating DHCHAP+crypto 5G lvol …")
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, "5G", self.pool_name,
-            encrypt=True)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secrsz{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name, encrypt=True)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-140")
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_pre.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="write", runtime=20)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="write", runtime=20)
         self.logger.info("TC-SEC-140: Pre-resize FIO PASSED")
 
-        # TC-SEC-141: disconnect, resize to 10G
-        self.ssh_obj.unmount_path(self.fio_node, mount_point)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id)
-        sleep_n_sec(2)
+        # TC-SEC-141: disconnect, resize to 10G.
+        #
+        # Routed through _resize_lvol_dual: in K8s the resize has to go
+        # through the PVC (the CSI driver reconciles from it), and calling
+        # sbcli_utils.resize_lvol directly bypassed the PVC entirely -- the
+        # claim would still say 5Gi and CSI could reconcile the change away.
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
-        self.logger.info("TC-SEC-141: Resizing to 10G …")
-        self.sbcli_utils.resize_lvol(lvol_id, "10G")
-        sleep_n_sec(5)
-        self.logger.info("TC-SEC-141: Resize PASSED")
+        # Snapshot the enforcement config BEFORE the resize, so
+        # "unchanged after resize" has a real baseline.
+        pre_affinity = None
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            pv_name = self._k8s_assert_pv_node_affinity(
+                pvc_name, tc="TC-SEC-140")
+            aff, _ = k8s._exec_kubectl(
+                f"kubectl get pv {pv_name} "
+                f"-o jsonpath='{{.spec.nodeAffinity}}' 2>/dev/null || true")
+            pre_affinity = (aff or "").strip()
+            assert pre_affinity, (
+                "TC-SEC-140: PV has no nodeAffinity before the resize — an "
+                "'unchanged after resize' assertion would be vacuous")
 
-        # TC-SEC-142: verify DHCHAP keys, reconnect, FIO
+        self.logger.info("TC-SEC-141: Resizing to 10G while detached …")
+        self._resize_lvol_dual(lvol_name, "10G")
+        fs_resize_pending = self._assert_resize_detached(
+            lvol_name, lvol_id, "10G", tc="TC-SEC-141")
+        self.logger.info("TC-SEC-141: Detached resize PASSED")
+
+        # TC-SEC-143: the leg TC-SEC-141 cannot finish.
+        #
+        # A detached Filesystem-mode CSI volume stops at the controller side
+        # on purpose: the driver answers ControllerExpandVolume with
+        # node_expansion_required=true, and kubelet only runs
+        # NodeExpandVolume while a pod has the volume mounted. The deferred
+        # half is a real part of the resize contract, and it takes an attach
+        # to observe at all.
+        self._assert_resize_completes_on_attach(
+            lvol_name, lvol_id, "10G", host_nqn=host_nqn,
+            fs_resize_pending=fs_resize_pending, tc="TC-SEC-143")
+        self.logger.info("TC-SEC-143: Deferred node expansion PASSED")
+
+        # TC-SEC-144: resize again, this time WITH the volume attached.
+        #
+        # The online path is a different path, not a repeat: controller and
+        # node expansion run back to back against a live mount, and the
+        # filesystem has to grow underneath a workload rather than at the
+        # next mount.
+        self._assert_resize_attached(
+            lvol_name, lvol_id, "10G", "15G", host_nqn=host_nqn,
+            tc="TC-SEC-144")
+        self.logger.info("TC-SEC-144: Attached (online) resize PASSED")
+
+        # TC-SEC-142: security config must be untouched by the resize
         self.logger.info("TC-SEC-142: Verifying DHCHAP after resize …")
-        post_cs, post_err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert post_cs and not post_err, f"Post-resize connect failed: {post_err}"
-        post_str = " ".join(post_cs) if isinstance(post_cs, list) else str(post_cs)
-        assert "dhchap" in post_str.lower(), \
-            f"Expected DHCHAP keys post-resize; got: {post_str}"
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            pv_name = k8s.get_pvc_pv_name(pvc_name)
+            aff, _ = k8s._exec_kubectl(
+                f"kubectl get pv {pv_name} "
+                f"-o jsonpath='{{.spec.nodeAffinity}}' 2>/dev/null || true")
+            post_affinity = (aff or "").strip()
+            assert post_affinity == pre_affinity, (
+                f"TC-SEC-142: the resize changed the PV's nodeAffinity.\n"
+                f"  before={pre_affinity!r}\n  after={post_affinity!r}")
+            self._dhchap_positive_control.discard(lvol_name)
+            self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                         tc="TC-SEC-142")
+            if denied is not None:
+                self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+                self._assert_host_denied(lvol_name, lvol_id, denied,
+                                         tc="TC-SEC-142")
+            self.logger.info("TC-SEC-142: DHCHAP survived the resize PASSED")
+            self.logger.info("=== TestLvolSecurityResize PASSED ===")
+            return
 
-        lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device2, mount_path=mount_point)
+        self._dhchap_positive_control.discard(lvol_name)
+        self._assert_host_authorized(lvol_name, lvol_id, allowed,
+                                     tc="TC-SEC-142")
+
+        device2, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        self._format_and_mount_dual(lvol_name, device2,
+                                    mount_point=mount_point,
+                                    format_first=False)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file2 = f"{self.log_path}/{lvol_name}_post.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file2, rw="randrw", runtime=20)
+        self._run_fio_dual(lvol_name, mount_point, log_file2, rw="randrw", runtime=20)
         self.logger.info("TC-SEC-142: Post-resize FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityResize PASSED ===")
+
+    # ── resize verification ──────────────────────────────────────────────
+    #
+    # Detached and attached expansion are two different contracts, and the
+    # detached one is the easy thing to assert wrongly. For a Filesystem-mode
+    # CSI volume the driver answers ControllerExpandVolume with
+    # node_expansion_required=true; kubelet then runs NodeExpandVolume only
+    # while a pod has the volume mounted. With nothing attached the claim
+    # parks in FileSystemResizePending and pvc.status.capacity NEVER moves --
+    # that is correct behaviour, not a product failure, so a detached test
+    # has to assert on the PV (controller side) and leave status.capacity to
+    # the attach that follows.
+
+    def _lvol_size_bytes(self, lvol_id):
+        """Backend lvol size in bytes, straight from the control plane."""
+        details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        return int(details[0]["size"])
+
+    def _wait_pod_running_or_explain(self, pod_name, node, why):
+        """Wait for a pod to run, and say what the events showed if it did not.
+
+        ``wait_pod_running`` raises rather than returning False, so the
+        failure arrives without any of the scheduling detail that explains
+        it -- which for these pods is usually the pool's nodeAffinity.
+        """
+        k8s = self._ensure_k8s_utils()
+        try:
+            k8s.wait_pod_running(pod_name, timeout=300)
+        except (TimeoutError, RuntimeError) as exc:
+            events = k8s.get_pod_events(pod_name)
+            raise AssertionError(
+                f"{why}: pod {pod_name} pinned to {node!r} never reached "
+                f"Running ({exc}); events: {events!r}") from exc
+
+    def _assert_resize_detached(self, lvol_name, lvol_id, new_size,
+                                tc="TC-SEC-141"):
+        """Verify a resize issued while the volume is detached.
+
+        Returns True when K8s deferred the filesystem growth to the next
+        attach (the usual Filesystem-mode outcome), so the caller knows
+        whether TC-SEC-143 still has work to observe.
+        """
+        expected = int(_size_to_bytes(new_size) * _SIZE_FLOOR)
+        if not self.k8s_test:
+            deadline = time.time() + 120
+            actual = None
+            while time.time() < deadline:
+                actual = self._lvol_size_bytes(lvol_id)
+                if actual >= expected:
+                    break
+                sleep_n_sec(5)
+            assert actual is not None and actual >= expected, (
+                f"{tc}: lvol {lvol_name} is still {actual} bytes after a "
+                f"resize to {new_size} (floor {expected} bytes) — the control "
+                f"plane did not apply the resize")
+            self.logger.info(
+                f"{tc}: lvol {lvol_name} grew to {actual} bytes while detached")
+            return False
+
+        k8s = self._ensure_k8s_utils()
+        pvc_name = self._k8s_normalize_name(lvol_name)
+        pv_name = k8s.get_pvc_pv_name(pvc_name)
+        assert pv_name, f"{tc}: PVC {pvc_name} has no bound PV"
+
+        k8s_size = _to_k8s_quantity(new_size)
+        assert k8s.wait_pv_capacity(pv_name, k8s_size, timeout=300), (
+            f"{tc}: PV {pv_name} spec.capacity never reached {k8s_size} — "
+            f"ControllerExpandVolume did not succeed. This half of the "
+            f"resize needs no attachment, so a detached volume is no excuse "
+            f"for it")
+        self.logger.info(
+            f"{tc}: PV {pv_name} capacity is {k8s_size} (controller "
+            f"expansion complete while detached)")
+
+        # The backend must agree with what CSI reported.
+        actual = self._lvol_size_bytes(lvol_id)
+        assert actual >= expected, (
+            f"{tc}: PV reports {k8s_size} but the backing lvol is still "
+            f"{actual} bytes — CSI reported a resize the control plane "
+            f"never made")
+
+        conditions = k8s.get_pvc_conditions(pvc_name)
+        cap = k8s.get_pvc_status(pvc_name).get("capacity", "")
+        if "FileSystemResizePending" in conditions:
+            # Expected path. Assert the deferral is real rather than just
+            # logging it: if status.capacity had somehow advanced, the
+            # condition would be stale and TC-SEC-143 would prove nothing.
+            assert cap != k8s_size, (
+                f"{tc}: PVC {pvc_name} is FileSystemResizePending yet "
+                f"status.capacity already reads {cap} — the two disagree")
+            self.logger.info(
+                f"{tc}: PVC {pvc_name} is FileSystemResizePending with "
+                f"status.capacity still {cap!r}; the filesystem grows at the "
+                f"next attach, which TC-SEC-143 asserts")
+            return True
+
+        # No node expansion was asked for (block mode, or a driver that grew
+        # the filesystem itself). Then status.capacity is the completion
+        # signal and it has to land without any attach.
+        assert k8s.wait_pvc_capacity(pvc_name, k8s_size, timeout=300), (
+            f"{tc}: PVC {pvc_name} is not FileSystemResizePending, so no "
+            f"node-side expansion is pending, yet status.capacity never "
+            f"reached {k8s_size} (last: {cap!r})")
+        self.logger.info(
+            f"{tc}: PVC {pvc_name} completed to {k8s_size} without needing "
+            f"a node-side expansion")
+        return False
+
+    def _assert_resize_completes_on_attach(self, lvol_name, lvol_id, new_size,
+                                           host_nqn=None,
+                                           fs_resize_pending=True,
+                                           tc="TC-SEC-143"):
+        """Attach the volume and verify the deferred filesystem growth lands."""
+        k8s_size = _to_k8s_quantity(new_size)
+        if not self.k8s_test:
+            # Docker has no deferred leg -- the lvol is already grown. What
+            # an attach adds is that the client actually sees the new size.
+            device, _ = self._connect_and_get_device_dual(
+                lvol_name, lvol_id, host_nqn=host_nqn)
+            self._assert_device_size(device, new_size, tc=tc)
+            self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+            return
+
+        if not fs_resize_pending:
+            self.logger.info(
+                f"{tc}: nothing deferred — the resize already completed "
+                f"without a node-side expansion")
+            return
+
+        k8s = self._ensure_k8s_utils()
+        pvc_name = self._k8s_normalize_name(lvol_name)
+        node = (self._dhchap_allowed_nodes[0]
+                if self._dhchap_allowed_nodes else None)
+        pod_name = f"grow-{_rand_suffix().lower()}"
+        # Track before creating: a surviving pod holds pvc-protection on the
+        # claim and leaves it Terminating for hours.
+        self.created_pods.append(pod_name)
+        try:
+            # nodeSelector, not nodeName: the StorageClass binds
+            # WaitForFirstConsumer, and only the scheduler triggers that.
+            k8s.create_utility_pod(pod_name, pvc_name, node_selector=node)
+            self._wait_pod_running_or_explain(
+                pod_name, node,
+                f"{tc}: the deferred filesystem expansion cannot be observed "
+                f"without a pod holding the volume")
+            assert k8s.wait_pvc_capacity(pvc_name, k8s_size, timeout=300), (
+                f"{tc}: PVC {pvc_name} status.capacity never reached "
+                f"{k8s_size} even with the volume mounted on {node!r} — "
+                f"NodeExpandVolume did not complete")
+            fs_bytes = k8s.get_mount_size_bytes(pod_name)
+            assert fs_bytes >= _size_to_bytes(new_size) * _FS_SIZE_FLOOR, (
+                f"{tc}: the claim reports {k8s_size} but the filesystem in "
+                f"{pod_name} is only {fs_bytes} bytes — the block device grew "
+                f"and the filesystem did not")
+            self.logger.info(
+                f"{tc}: PVC {pvc_name} reached {k8s_size} on attach; "
+                f"filesystem is {fs_bytes} bytes")
+        finally:
+            self._k8s_release_pod(pod_name, pvc_name=pvc_name)
+
+    def _assert_resize_attached(self, lvol_name, lvol_id, old_size, new_size,
+                                host_nqn=None, tc="TC-SEC-144"):
+        """Verify an ONLINE resize: grow the volume while a pod holds it."""
+        k8s_size = _to_k8s_quantity(new_size)
+        expected = int(_size_to_bytes(new_size) * _SIZE_FLOOR)
+        if not self.k8s_test:
+            device, _ = self._connect_and_get_device_dual(
+                lvol_name, lvol_id, host_nqn=host_nqn)
+            try:
+                self._resize_lvol_dual(lvol_name, new_size)
+                deadline = time.time() + 120
+                actual = None
+                while time.time() < deadline:
+                    actual = self._lvol_size_bytes(lvol_id)
+                    if actual >= expected:
+                        break
+                    sleep_n_sec(5)
+                assert actual is not None and actual >= expected, (
+                    f"{tc}: lvol {lvol_name} is still {actual} bytes after an "
+                    f"online resize to {new_size}")
+                self._assert_device_size(device, new_size, tc=tc)
+                self.logger.info(
+                    f"{tc}: lvol {lvol_name} grew to {actual} bytes while "
+                    f"connected")
+            finally:
+                self._disconnect_and_unmount_dual(lvol_name, lvol_id, None)
+            return
+
+        k8s = self._ensure_k8s_utils()
+        pvc_name = self._k8s_normalize_name(lvol_name)
+        node = (self._dhchap_allowed_nodes[0]
+                if self._dhchap_allowed_nodes else None)
+        pod_name = f"online-{_rand_suffix().lower()}"
+        self.created_pods.append(pod_name)
+        try:
+            k8s.create_utility_pod(pod_name, pvc_name, node_selector=node)
+            self._wait_pod_running_or_explain(
+                pod_name, node,
+                f"{tc}: an online resize needs a live mount, and there is "
+                f"none")
+            before = k8s.get_mount_size_bytes(pod_name)
+            assert before > 0, (
+                f"{tc}: could not read the filesystem size in {pod_name} "
+                f"before the resize — a 'it grew' assertion would be vacuous")
+
+            self.logger.info(
+                f"{tc}: resizing {pvc_name} {old_size} → {new_size} with the "
+                f"volume mounted on {node!r} …")
+            self._resize_lvol_dual(lvol_name, new_size)
+
+            # Online there is no detached half: status.capacity is the
+            # completion signal and it must land without any remount.
+            assert k8s.wait_pvc_capacity(pvc_name, k8s_size, timeout=300), (
+                f"{tc}: PVC {pvc_name} status.capacity never reached "
+                f"{k8s_size} while mounted on {node!r} — an online expansion "
+                f"has both an attached node and a live kubelet, so nothing "
+                f"is deferred here")
+            pending = k8s.get_pvc_conditions(pvc_name)
+            assert "FileSystemResizePending" not in pending, (
+                f"{tc}: PVC {pvc_name} is still FileSystemResizePending after "
+                f"reporting {k8s_size} while attached")
+
+            after = k8s.get_mount_size_bytes(pod_name)
+            assert after > before, (
+                f"{tc}: the filesystem in {pod_name} did not grow during the "
+                f"online resize ({before} → {after} bytes) — the pod is still "
+                f"seeing the old size, so the expansion is not usable without "
+                f"a remount")
+            self.logger.info(
+                f"{tc}: filesystem grew live under the mount, "
+                f"{before} → {after} bytes")
+
+            actual = self._lvol_size_bytes(lvol_id)
+            assert actual >= expected, (
+                f"{tc}: PVC reports {k8s_size} but the backing lvol is still "
+                f"{actual} bytes")
+        finally:
+            self._k8s_release_pod(pod_name, pvc_name=pvc_name)
+
+    def _assert_device_size(self, device, expected_size, tc=""):
+        """Docker: the connected block device reflects the new size."""
+        expected = int(_size_to_bytes(expected_size) * _SIZE_FLOOR)
+        deadline = time.time() + 120
+        actual = 0
+        while time.time() < deadline:
+            out, _ = self.ssh_obj.exec_command(
+                self.fio_node, f"lsblk -bndo SIZE {device}")
+            try:
+                actual = int((out or "").strip().splitlines()[0])
+            except (ValueError, IndexError):
+                actual = 0
+            if actual >= expected:
+                self.logger.info(
+                    f"{tc}: device {device} reports {actual} bytes")
+                return
+            sleep_n_sec(5)
+        raise AssertionError(
+            f"{tc}: device {device} still reports {actual} bytes, expected at "
+            f"least {expected} ({expected_size}) — the client never saw the "
+            f"resize")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4303,47 +7051,53 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityWithBackup START ===")
+
+        # The mode check MUST come first. It used to sit after an
+        # ssh_obj.exec_command availability probe, so in K8s this class
+        # hard-errored before it could reach any skip.
+        if self.k8s_test:
+            self.logger.warning(
+                f"{TOK_SKIPPED_K8S} TestLvolSecurityWithBackup: every step "
+                f"here is raw `sbcli backup` over SSH with a CLI-named "
+                f"restore target, and `backup restore --lvol --pool` has no "
+                f"PVC/VolumeSnapshot representation. K8s backup/restore is "
+                f"already covered by e2e/e2e_tests/backup/test_backup_restore.py. "
+                f"{TOK_COVERAGE_LOST}: 'a restored volume still carries "
+                f"DHCHAP' is not asserted in K8s — the one missing check is "
+                f"nodeAffinity on the restored PV, which belongs in the "
+                f"backup suite rather than duplicated here.")
+            self.logger.info(
+                "=== TestLvolSecurityWithBackup SKIPPED (k8s) ===")
+            return
+
         # Check backup feature availability
         out, err = self.ssh_obj.exec_command(
             self.mgmt_nodes[0], f"{self.base_cmd} backup list 2>&1 | head -5")
         if "command not found" in (out or "").lower() or "error" in (err or "").lower():
+            self.logger.warning(
+                f"{TOK_COVERAGE_LOST}: backup feature not available on this "
+                f"cluster — DHCHAP-after-restore not exercised")
             self.logger.info("Backup feature not available – SKIPPED")
             return
 
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
-
-        lvol_name = f"secbck{_rand_suffix()}"
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
 
         # TC-SEC-150: create lvol, write data, snapshot + backup
         self.logger.info("TC-SEC-150: Creating DHCHAP+crypto lvol …")
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        raw_name = f"secbck{_rand_suffix()}"
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name, encrypt=True)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        # Use ext4 explicitly: xfs restored volumes share the source UUID
-        # and cannot be connected on the same client as the source (known issue #2).
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_w.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="write", runtime=20)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="write", runtime=20)
 
-        self.ssh_obj.unmount_path(self.fio_node, mount_point)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id)
+        self._disconnect_and_unmount_dual(lvol_name, lvol_id, mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
         snap_name = f"snap{lvol_name[-6:]}"
@@ -4400,18 +7154,18 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
 
         # TC-SEC-153: verify DHCHAP + connect + FIO
         self.logger.info("TC-SEC-153: Verifying restored lvol DHCHAP …")
-        rest_cs, rest_err = self._get_connect_str_cli(restored_id, host_nqn=host_nqn)
+        rest_cs, rest_err = self._get_connect_str_dual(restored_id, host_nqn=host_nqn)
         assert rest_cs and not rest_err, f"Restored connect failed: {rest_err}"
         rest_str = " ".join(rest_cs) if isinstance(rest_cs, list) else str(rest_cs)
         assert "dhchap" in rest_str.lower(), \
             f"Expected DHCHAP keys for restored lvol; got: {rest_str}"
 
-        rest_device, _ = self._connect_and_get_device(restored_name, restored_id, host_nqn=host_nqn)
+        rest_device, _ = self._connect_and_get_device_dual(restored_name, restored_id, host_nqn=host_nqn)
         rest_mount = f"{self.mount_path}/{restored_name}"
         self.ssh_obj.mount_path(node=self.fio_node, device=rest_device, mount_path=rest_mount)
         self.lvol_mount_details[restored_name]["Mount"] = rest_mount
         log_file2 = f"{self.log_path}/{restored_name}_out.log"
-        self._run_fio_and_validate(restored_name, rest_mount, log_file2, rw="randrw", runtime=20)
+        self._run_fio_dual(restored_name, rest_mount, log_file2, rw="randrw", runtime=20)
         self.logger.info("TC-SEC-153: Restored lvol FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityWithBackup PASSED ===")
@@ -4438,25 +7192,21 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityMultiClientConcurrent START ===")
-        self.fio_node = self.fio_node[0]
+        self._normalize_fio_node()
 
-        self.ssh_obj.add_storage_pool(
-            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
-        host_nqn = self._get_client_host_nqn()
-        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
-        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        pool_id, allowed, denied = self._setup_pool_and_host(dhchap=True)
+        host_nqn = _as_nqn(allowed)
 
         wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
-        lvol_name = f"secmc{_rand_suffix()}"
+        raw_name = f"secmc{_rand_suffix()}"
+
+        if self.k8s_test:
+            self._k8s_multi_client_concurrent(pool_id, allowed, denied)
+            return
 
         # TC-SEC-160: create lvol
         self.logger.info("TC-SEC-160: Creating DHCHAP lvol …")
-        out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
-        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
-        sleep_n_sec(3)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-        assert lvol_id
+        lvol_name, lvol_id = self._create_lvol_dual(raw_name)
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
         # TC-SEC-161: concurrent requests
@@ -4465,7 +7215,7 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
 
         def _req(nqn, key):
             try:
-                cs, cerr = self._get_connect_str_cli(lvol_id, host_nqn=nqn)
+                cs, cerr = self._get_connect_str_dual(lvol_id, host_nqn=nqn)
                 results[key] = (cs, cerr)
             except Exception as e:
                 results[key] = (None, str(e))
@@ -4497,13 +7247,246 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
 
         # TC-SEC-163: connect + FIO
         self.logger.info("TC-SEC-163: Connecting and running FIO …")
-        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
-        mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
-        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        device, _ = self._connect_and_get_device_dual(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = self._format_and_mount_dual(lvol_name, device)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_out.log"
-        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
+        self._run_fio_dual(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
         self.logger.info("TC-SEC-163: FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityMultiClientConcurrent PASSED ===")
+
+    def _k8s_multi_client_concurrent(self, pool_id, allowed, denied):
+        """K8s: an authorized and an unauthorized client, concurrently.
+
+        TWO separate PVCs, deliberately. Pointing two pods at the SAME PVC
+        would be the ReadWriteOnce case, so the rejection on the second node
+        would be ``Multi-Attach error for volume`` -- which proves nothing
+        whatsoever about DHCHAP and is exactly how this class would produce a
+        right-answer-for-the-wrong-reason pass. (``_assert_host_denied`` also
+        rejects a Multi-Attach event outright, so a regression back to one PVC
+        fails loudly rather than silently.)
+        """
+        denied = self._require_denied_host(denied, tc="TC-SEC-160")
+
+        self.logger.info("TC-SEC-160: Creating two DHCHAP volumes …")
+        good_name, good_id = self._create_lvol_dual(f"secmcok{_rand_suffix()}")
+        bad_name, bad_id = self._create_lvol_dual(f"secmcno{_rand_suffix()}")
+        for n, i in ((good_name, good_id), (bad_name, bad_id)):
+            self.lvol_mount_details[n] = {"ID": i, "Mount": None}
+        self._k8s_assert_pv_node_affinity(
+            self._k8s_normalize_name(good_name), tc="TC-SEC-160")
+        self._k8s_assert_pv_node_affinity(
+            self._k8s_normalize_name(bad_name), tc="TC-SEC-160")
+
+        # Positive controls first: both volumes are mountable on an allowed
+        # node, so the denial below cannot be an unmountable-volume artefact.
+        self.logger.info("TC-SEC-161: Establishing positive controls …")
+        self._assert_host_authorized(good_name, good_id, allowed,
+                                     tc="TC-SEC-161")
+        self._disconnect_and_unmount_dual(good_name, good_id, None)
+        self._assert_host_authorized(bad_name, bad_id, allowed,
+                                     tc="TC-SEC-161")
+        self._disconnect_and_unmount_dual(bad_name, bad_id, None)
+
+        # TC-SEC-162: concurrent attach from an allowed and a disallowed node
+        self.logger.info(
+            f"TC-SEC-162: Concurrent attach — {allowed.node!r} (allowed) vs "
+            f"{denied.node!r} (disallowed) …")
+        results = {}
+
+        def _attach(name, lvol_id, host, expect_allowed, key):
+            try:
+                if expect_allowed:
+                    self._assert_host_authorized(
+                        name, lvol_id, host, tc="TC-SEC-162")
+                else:
+                    self._assert_host_denied(
+                        name, lvol_id, host, tc="TC-SEC-162")
+                results[key] = None
+            except BaseException as exc:      # noqa: BLE001 - re-raised below
+                results[key] = exc
+
+        t_good = threading.Thread(
+            target=_attach, args=(good_name, good_id, allowed, True, "good"))
+        t_bad = threading.Thread(
+            target=_attach, args=(bad_name, bad_id, denied, False, "bad"))
+        t_good.start()
+        t_bad.start()
+        t_good.join()
+        t_bad.join()
+
+        for key, label in (("good", "authorized node"),
+                           ("bad", "unauthorized node")):
+            exc = results.get(key, RuntimeError(f"{key}: no result"))
+            if exc is not None:
+                raise AssertionError(
+                    f"TC-SEC-162: concurrent attach from the {label} did not "
+                    f"behave as expected: {exc!r}") from exc
+        self.logger.info(
+            "TC-SEC-162: authorized attach succeeded and unauthorized attach "
+            "was denied, concurrently PASSED")
+
+        # TC-SEC-163: I/O on the authorized volume
+        self.logger.info("TC-SEC-163: Running FIO on the authorized volume …")
+        self._run_fio_dual(good_name, None, None, rw="randrw", runtime=30,
+                           node_name=allowed.node)
+        self.logger.info("TC-SEC-163: FIO PASSED")
+
+        self.logger.info("=== TestLvolSecurityMultiClientConcurrent PASSED ===")
+
+
+class TestDhchapPodScheduling(SecurityTestBase):
+    """
+    K8s-only: verifies that a pod consuming a PVC from a DHCHAP pool with
+    ``allowedNodes`` mounts successfully when pinned to an allowed node, is
+    rejected (FailedMount) when pinned to a disallowed node, and that a
+    second pod re-attaching the same PVC to a (possibly different) allowed
+    node still works.
+
+    TC-DHCHAP-SCHED-001  Create DHCHAP pool with allowedNodes = subset of workers
+    TC-DHCHAP-SCHED-002  Create PVC from DHCHAP pool StorageClass
+    TC-DHCHAP-SCHED-003  Pod #1 pinned to an allowed node → mounts successfully
+    TC-DHCHAP-SCHED-004  Delete Pod #1, Pod #2 pinned to an allowed node → mounts
+    TC-DHCHAP-SCHED-006  Pod pinned to a disallowed node → FailedMount, rejected
+    TC-DHCHAP-SCHED-005  Cleanup
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "dhchap_pod_scheduling"
+
+    def run(self):
+        self.logger.info("=== TestDhchapPodScheduling START ===")
+
+        if not self.k8s_test:
+            self.logger.info(
+                "TestDhchapPodScheduling: skipping — pod scheduling "
+                "verification is a K8s-only concept")
+            self.logger.info("=== TestDhchapPodScheduling SKIPPED (Docker) ===")
+            return
+
+        self._normalize_fio_node()
+        k8s = self._ensure_k8s_utils()
+
+        # ── TC-DHCHAP-SCHED-001: pool + allowedNodes ─────────────────────
+        self.logger.info(
+            "TC-DHCHAP-SCHED-001: Creating DHCHAP pool with allowedNodes …")
+        allowed_node_names, disallowed_node_names = \
+            self._k8s_setup_dhchap_pool_subset()
+        self.logger.info(
+            f"  Allowed nodes: {allowed_node_names}; "
+            f"disallowed: {disallowed_node_names}")
+        pool_id = self._get_pool_id()
+        assert pool_id, f"Pool {self.pool_name} not found"
+        # Prove the four enforcement links before trusting any pod outcome.
+        self._k8s_assert_dhchap_wiring(
+            allowed_node_names, disallowed_node_names)
+        self.logger.info("TC-DHCHAP-SCHED-001: Pool + wiring PASSED")
+
+        # ── TC-DHCHAP-SCHED-002: create PVC ──────────────────────────────
+        self.logger.info("TC-DHCHAP-SCHED-002: Creating PVC …")
+        raw_name = f"dhsched{_rand_suffix()}"
+        pvc_name, lvol_id = self._create_lvol_dual(raw_name, size="5G")
+        self._k8s_assert_pv_node_affinity(pvc_name, tc="TC-DHCHAP-SCHED-002")
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-002: PVC {pvc_name} bound (lvol={lvol_id})")
+
+        # ── TC-DHCHAP-SCHED-003: Pod #1 pinned to an allowed node ───────
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-003: Pinning Pod #1 to allowed node "
+            f"{allowed_node_names[0]!r} …")
+        try:
+            pod_name_1 = self._k8s_verify_pod_scheduling(
+                pvc_name, allowed_node_names[0], expect_success=True,
+                pod_prefix="dhsched-pod1")
+        except DhchapUnsupportedByHost as exc:
+            self.logger.warning(f"TC-DHCHAP-SCHED-003: {exc}")
+            self.logger.info(
+                f"=== TestDhchapPodScheduling {TOK_SKIPPED_K8S} "
+                f"(host kernel has no in-band NVMe auth) ===")
+            return
+        # Confirm the pin actually took, and that the filesystem the
+        # StorageClass asked for is what got created.
+        landed = k8s.get_pod_node_name(pod_name_1)
+        assert landed == allowed_node_names[0], (
+            f"TC-DHCHAP-SCHED-003: pod was pinned to "
+            f"{allowed_node_names[0]!r} but landed on {landed!r}")
+        self._k8s_assert_fs_type(pod_name_1, self._fs_type,
+                                 tc="TC-DHCHAP-SCHED-003")
+        self._dhchap_positive_control.add(pvc_name)
+        self.logger.info("TC-DHCHAP-SCHED-003: Pod #1 on allowed node PASSED")
+
+        # Write known data so the re-attach below proves the volume is USABLE
+        # across allowed nodes, not merely mountable.
+        marker = f"dhchap-{_rand_suffix()}"
+        wrote_marker = False
+        try:
+            # exec_in_pod already wraps the command in `sh -c`, so pass the
+            # bare shell line. It returns (stdout, stderr).
+            _, werr = k8s.exec_in_pod(
+                pod_name_1,
+                f"echo {marker} > /spdkvol/marker.txt && sync")
+            if werr and werr.strip():
+                self.logger.warning(
+                    f"{TOK_WEAK_EVIDENCE} TC-DHCHAP-SCHED-003: writing the "
+                    f"marker file reported: {werr!r}")
+            else:
+                wrote_marker = True
+        except Exception as exc:
+            self.logger.warning(
+                f"{TOK_WEAK_EVIDENCE} TC-DHCHAP-SCHED-003: could not write a "
+                f"marker file: {exc}")
+
+        # ── TC-DHCHAP-SCHED-004: Delete Pod #1, Pod #2 on allowed node ──
+        self.logger.info(f"TC-DHCHAP-SCHED-004: Deleting pod {pod_name_1} …")
+        self._k8s_release_pod(pod_name_1, pvc_name=pvc_name)
+
+        pod_2_target = allowed_node_names[-1]
+        self.logger.info(
+            f"TC-DHCHAP-SCHED-004: Pinning Pod #2 (same PVC) to allowed "
+            f"node {pod_2_target!r} …")
+        pod_name_2 = self._k8s_verify_pod_scheduling(
+            pvc_name, pod_2_target, expect_success=True,
+            pod_prefix="dhsched-pod2")
+        if wrote_marker:
+            out, rerr = k8s.exec_in_pod(pod_name_2, "cat /spdkvol/marker.txt")
+            assert marker in (out or ""), (
+                f"TC-DHCHAP-SCHED-004: data written on "
+                f"{allowed_node_names[0]!r} is not readable on "
+                f"{pod_2_target!r} — the volume re-attached but the data did "
+                f"not survive. got out={out!r} err={rerr!r}")
+            self.logger.info(
+                f"TC-DHCHAP-SCHED-004: marker survived the re-attach to "
+                f"{pod_2_target!r}")
+        self.logger.info("TC-DHCHAP-SCHED-004: Pod #2 on allowed node PASSED")
+
+        # Release before the denial case, and WAIT for the volume to actually
+        # detach. Deleting the pod is not enough: the VolumeAttachment
+        # outlives it, so the denial pod below would attach-fail with
+        # Multi-Attach instead of being rejected by nodeAffinity. Exactly what
+        # failed in CI run 093822 — 31s after the pod was gone the volume was
+        # still attached to the previous node.
+        self._k8s_release_pod(pod_name_2, pvc_name=pvc_name)
+
+        # ── TC-DHCHAP-SCHED-006: Pod pinned to a disallowed node ────────
+        if disallowed_node_names:
+            self.logger.info(
+                f"TC-DHCHAP-SCHED-006: Pinning Pod #3 (same PVC) to "
+                f"DISALLOWED node {disallowed_node_names[0]!r} …")
+            self._k8s_verify_pod_scheduling(
+                pvc_name, disallowed_node_names[0], expect_success=False,
+                pod_prefix="dhsched-pod3-bad")
+            self.logger.info(
+                "TC-DHCHAP-SCHED-006: Pod on disallowed node correctly "
+                "rejected PASSED")
+        else:
+            self.logger.warning(
+                f"{TOK_COVERAGE_LOST} TC-DHCHAP-SCHED-006: only one "
+                f"schedulable worker — the disallowed-node rejection, which "
+                f"is the whole point of this class, was not exercised")
+
+        self.logger.info(
+            "=== TestDhchapPodScheduling PASSED (allowedNodes enforcement "
+            "at mount via PV nodeAffinity; in-band DHCHAP negotiation is "
+            "covered by TestLvolSecurityNegativeConnect in docker mode) ===")

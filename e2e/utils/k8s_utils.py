@@ -193,7 +193,12 @@ class K8sUtils:
         return [n.strip() for n in out.strip().splitlines() if n.strip()]
 
     def detect_openshift(self) -> bool:
-        """Return True if the cluster is OpenShift (``oc`` CLI available).
+        """Return True if the cluster is OpenShift.
+
+        Checks for the ``openshift-apiserver`` namespace which only
+        exists on OpenShift clusters.  This avoids false positives on
+        machines where the ``oc`` CLI is installed but the target
+        cluster is not OpenShift (e.g. Talos).
 
         The result is cached after the first call.
         """
@@ -201,16 +206,38 @@ class K8sUtils:
             return self._is_openshift
         try:
             out, _ = self._exec_kubectl(
-                "oc version --client 2>/dev/null && echo OC_OK || echo OC_NO",
+                "kubectl get namespace openshift-apiserver "
+                "--no-headers 2>/dev/null && echo OCP_YES || echo OCP_NO",
                 supress_logs=True,
             )
-            self._is_openshift = "OC_OK" in out
+            self._is_openshift = "OCP_YES" in out
         except Exception:
             self._is_openshift = False
         self.logger.info(
             f"[K8sUtils] Platform detection: openshift={self._is_openshift}"
         )
         return self._is_openshift
+
+    def detect_talos(self) -> bool:
+        """Return True if the cluster nodes run Talos Linux.
+
+        Checks the ``osImage`` field of the first node.  The result is
+        cached after the first call.
+        """
+        if hasattr(self, "_is_talos"):
+            return self._is_talos
+        try:
+            out, _ = self._exec_kubectl(
+                "kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.osImage}'",
+                supress_logs=True,
+            )
+            self._is_talos = "Talos" in (out or "")
+        except Exception:
+            self._is_talos = False
+        self.logger.info(
+            f"[K8sUtils] Platform detection: talos={self._is_talos}"
+        )
+        return self._is_talos
 
     # ── SPDK pod operations ──────────────────────────────────────────────────
 
@@ -353,7 +380,7 @@ class K8sUtils:
             kexec = (
                 f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} --"
             )
-            rpc_base = f"{kexec} python spdk/scripts/rpc.py -s {sock}"
+            rpc_base = f"{kexec} sudo python spdk/scripts/rpc.py -s {sock}"
 
             # 1. Get bdevs
             bdev_out, _ = self._exec_kubectl(f"{rpc_base} bdev_get_bdevs", supress_logs=True)
@@ -658,11 +685,20 @@ class K8sUtils:
                                 max_size_mb: int = 500) -> list[str]:
         """Collect host-level core dumps from a K8s node.
 
-        **Primary path**: uses the already-running SPDK pod (privileged)
-        to access the host filesystem via ``/proc/1/root/``.
+        Cores land on the NODE at ``/var/lib/systemd/coredump/``, because the
+        host's ``core_pattern`` pipes to ``systemd-coredump``. They are never
+        written inside the SPDK container.
 
-        **Fallback**: if the SPDK pod is not running, deploys a
-        platform-aware temporary pod/debug session.
+        This used to try the running SPDK pod first, reading
+        ``/proc/1/root/var/lib/systemd/coredump``. That cannot work: the SPDK
+        pod does not set ``hostPID``, so PID 1 in its namespace is its own
+        entrypoint and ``/proc/1/root`` resolves to the *container* root. The
+        probe always found an empty directory, wrote a "Host core dumps"
+        listing reading ``total 0``, and returned before the working paths
+        below could run, so real cores sat uncollected on the hosts (run
+        ``k8s_native_resilient_failover-20260906-112437``: four cores on the
+        nodes, none collected). That path is removed; host access now always
+        goes through a debug pod.
 
         Parameters
         ----------
@@ -681,28 +717,10 @@ class K8sUtils:
         """
         saved: list[str] = []
         os.makedirs(local_dir, exist_ok=True)
-        host_coredump_dir = "/proc/1/root/var/lib/systemd/coredump"
 
-        # ── Try via running SPDK pod ──────────────────────────────────────
-        try:
-            pod_name = self.get_spdk_pod_name(node_ip)
-        except Exception:
-            pod_name = None
-
-        if pod_name:
-            try:
-                saved = self._collect_host_core_dumps_via_spdk(
-                    pod_name, node_ip, local_dir, host_coredump_dir,
-                    max_size_mb,
-                )
-                return saved
-            except Exception as exc:
-                self.logger.warning(
-                    f"[coredump] SPDK pod collection failed for "
-                    f"{node_ip}: {exc}, trying fallback"
-                )
-
-        # ── Fallback ──────────────────────────────────────────────────────
+        # ── Host access via a debug pod. OpenShift uses `oc debug node/`;
+        #    everything else gets a privileged pod that hostPath-mounts the
+        #    coredump directory. ────────────────────────────────────────────
         try:
             node_name = self._get_k8s_node_name(node_ip)
         except Exception as exc:
@@ -721,174 +739,6 @@ class K8sUtils:
                 f"[coredump] Fallback collection failed for "
                 f"{node_ip} ({node_name}): {exc}"
             )
-        return saved
-
-    def _collect_host_core_dumps_via_spdk(
-        self, pod_name: str, node_ip: str, local_dir: str,
-        host_coredump_dir: str, max_size_mb: int,
-    ) -> list[str]:
-        """Collect host core dumps using the running SPDK pod.
-
-        The SPDK pod is privileged and can read the host filesystem
-        via ``/proc/1/root/``.
-        """
-        saved: list[str] = []
-        kexec = (
-            f"kubectl exec {pod_name} -c spdk-container "
-            f"-n {self.namespace} --"
-        )
-        label = node_ip.replace(".", "_")
-
-        # 1. List host core dumps
-        out, _ = self._exec_kubectl(
-            f"{kexec} bash -c "
-            f"'ls -la {host_coredump_dir}/ 2>/dev/null || echo EMPTY'",
-            supress_logs=True,
-        )
-        listing_path = os.path.join(local_dir, f"coredump_listing_{label}.txt")
-        with open(listing_path, "w") as f:
-            f.write(f"# Host core dumps on {node_ip} (via SPDK pod {pod_name})\n")
-            f.write("# Path: /var/lib/systemd/coredump/\n\n")
-            f.write(out)
-        saved.append(listing_path)
-
-        if "EMPTY" in out or not out.strip():
-            self.logger.info(
-                f"[coredump] No host-level core dumps on {node_ip}"
-            )
-            return saved
-
-        # Parse core file names from ls output
-        core_files = []
-        for line in out.strip().splitlines():
-            parts = line.split()
-            if parts and "core" in line.lower() and not line.startswith("total"):
-                fname = parts[-1]
-                core_files.append(fname)
-
-        if core_files:
-            self.logger.warning(
-                f"[coredump] HOST CORE DUMPS on {node_ip}: {core_files}"
-            )
-
-        # 2. Try coredumpctl list (best-effort)
-        try:
-            out, _ = self._exec_kubectl(
-                f"{kexec} bash -c "
-                f"'chroot /proc/1/root coredumpctl list --no-pager "
-                f"2>/dev/null || echo COREDUMPCTL_UNAVAILABLE'",
-                supress_logs=True,
-                timeout=60,
-            )
-            if "COREDUMPCTL_UNAVAILABLE" not in out and out.strip():
-                fpath = os.path.join(
-                    local_dir, f"coredumpctl_list_{label}.txt"
-                )
-                with open(fpath, "w") as f:
-                    f.write(out)
-                saved.append(fpath)
-                self.logger.info(
-                    f"[coredump] Saved coredumpctl list for {node_ip}"
-                )
-        except Exception as exc:
-            self.logger.info(
-                f"[coredump] coredumpctl list unavailable on {node_ip}: {exc}"
-            )
-
-        # 3. Try coredumpctl info (best-effort, contains stack traces)
-        if core_files:
-            try:
-                out, _ = self._exec_kubectl(
-                    f"{kexec} bash -c "
-                    f"'chroot /proc/1/root coredumpctl info --no-pager "
-                    f"2>/dev/null || true'",
-                    supress_logs=True,
-                    timeout=120,
-                )
-                if out and out.strip():
-                    fpath = os.path.join(
-                        local_dir, f"coredumpctl_info_{label}.txt"
-                    )
-                    with open(fpath, "w") as f:
-                        f.write(out)
-                    saved.append(fpath)
-                    self.logger.info(
-                        f"[coredump] Saved coredumpctl info for {node_ip}"
-                    )
-            except Exception as exc:
-                self.logger.info(
-                    f"[coredump] coredumpctl info unavailable on "
-                    f"{node_ip}: {exc}"
-                )
-
-        # 4. Copy actual core dump files under size threshold
-        for fname in core_files:
-            host_path = f"{host_coredump_dir}/{fname}"
-            try:
-                size_out, _ = self._exec_kubectl(
-                    f"{kexec} bash -c "
-                    f"'stat -c %s {shlex.quote(host_path)} 2>/dev/null "
-                    f"|| echo 0'",
-                    supress_logs=True,
-                )
-                size_bytes = int(size_out.strip() or "0")
-                size_mb = size_bytes / (1024 * 1024)
-                self.logger.info(
-                    f"[coredump] {node_ip}: {fname} = {size_mb:.1f} MB"
-                )
-                if max_size_mb > 0 and size_mb > max_size_mb:
-                    self.logger.warning(
-                        f"[coredump] Skipping copy of {fname} on {node_ip} "
-                        f"({size_mb:.1f} MB > {max_size_mb} MB limit)"
-                    )
-                    continue
-            except Exception:
-                self.logger.warning(
-                    f"[coredump] Cannot stat {fname} on {node_ip}"
-                )
-                continue
-
-            safe_name = fname.replace(":", "_")
-            local_path = os.path.join(local_dir, f"{label}_{safe_name}")
-            tmp_path = f"/tmp/coredump_{safe_name}"
-            try:
-                # Copy from host path (via /proc/1/root) to temp in container
-                self._exec_kubectl(
-                    f"{kexec} bash -c "
-                    f"'cp {shlex.quote(host_path)} {tmp_path}'",
-                    supress_logs=True,
-                    timeout=600,
-                )
-                # kubectl cp from container temp to local
-                self._exec_kubectl(
-                    f"kubectl cp -n {self.namespace} "
-                    f"{pod_name}:{tmp_path} -c spdk-container "
-                    f"{shlex.quote(local_path)}",
-                    supress_logs=True,
-                    timeout=600,
-                )
-                self._exec_kubectl(
-                    f"{kexec} rm -f {tmp_path}", supress_logs=True
-                )
-                if os.path.exists(local_path):
-                    self.logger.info(
-                        f"[coredump] Copied host core dump {fname} from "
-                        f"{node_ip} ({size_mb:.1f} MB) -> {local_path}"
-                    )
-                    saved.append(local_path)
-            except Exception as exc:
-                self.logger.warning(
-                    f"[coredump] Failed to copy {fname} from "
-                    f"{node_ip}: {exc}"
-                )
-                # Clean up temp file on failure
-                try:
-                    self._exec_kubectl(
-                        f"{kexec} rm -f {tmp_path}", supress_logs=True
-                    )
-                except Exception:
-                    pass
-
         return saved
 
     def _collect_host_core_dumps_fallback(
@@ -1235,8 +1085,25 @@ class K8sUtils:
                              ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
                              compression: bool = False, encryption: bool = False,
                              fabric: str = "tcp",
-                             max_namespace_per_subsys: int = 1):
-        """Create a simplyblock CSI StorageClass."""
+                             max_namespace_per_subsys: int = 1,
+                             dhchap_node_label: str = None):
+        """Create a simplyblock CSI StorageClass.
+
+        dhchap_node_label: the pool's node label key
+            (``simplyblock.io/pool.<ns>.<cluster>.<pool>``). Required for a
+            DHCHAP pool: without it the CSI driver provisions the volume with
+            no ``nodeAffinity``, so any node mounts it and allowedNodes is not
+            enforced at all. With it, the driver writes a matching
+            nodeAffinity onto the PV and a non-allowed node fails to mount.
+            Deliberately paired with ``volumeBindingMode: Immediate`` below and
+            NOT with ``allowedTopologies`` — the operator's own generated class
+            uses allowedTopologies, which only resolves once the CSI node
+            driver has re-registered and picked the label up as a topology key.
+        """
+        dhchap_param = (
+            f"  dhchap_node_label: {dhchap_node_label}\n"
+            if dhchap_node_label else ""
+        )
         yaml_content = (
             f"allowVolumeExpansion: true\n"
             f"apiVersion: storage.k8s.io/v1\n"
@@ -1247,6 +1114,7 @@ class K8sUtils:
             f"  cluster_id: \"{cluster_id}\"\n"
             f"  compression: \"{str(compression)}\"\n"
             f"  csi.storage.k8s.io/fstype: {fs_type}\n"
+            f"{dhchap_param}"
             f"  distr_ndcs: \"{ndcs}\"\n"
             f"  distr_npcs: \"{npcs}\"\n"
             f"  encryption: \"{str(encryption)}\"\n"
@@ -1412,6 +1280,97 @@ class K8sUtils:
             "phase": parts[0] if parts else "",
             "capacity": parts[1] if len(parts) > 1 else "",
         }
+
+    def get_pv_capacity(self, pv_name: str) -> str:
+        """Return a PV's ``spec.capacity.storage`` (e.g. ``'10Gi'``), or ''."""
+        out, _ = self._exec_kubectl(
+            f"kubectl get pv {pv_name} "
+            f"-o jsonpath='{{.spec.capacity.storage}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out.strip()
+
+    def get_pvc_conditions(self, name: str, namespace: str = None) -> list:
+        """Return the PVC's condition *types* as a list of strings.
+
+        The one that matters for expansion is ``FileSystemResizePending``:
+        the external resizer sets it once ``ControllerExpandVolume`` has
+        succeeded but the driver asked for node-side expansion too.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pvc {name} -n {ns} "
+            f"-o jsonpath='{{.status.conditions[*].type}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out.split()
+
+    def wait_pv_capacity(self, pv_name: str, expected: str,
+                         timeout: int = 300) -> bool:
+        """Poll until a PV's ``spec.capacity.storage`` equals *expected*.
+
+        This is the CONTROLLER side of a CSI expansion, and the only side that
+        can complete while the volume is detached.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cap = self.get_pv_capacity(pv_name)
+            if cap == expected:
+                self.logger.info(
+                    f"[K8sUtils] PV {pv_name!r} capacity is {cap}")
+                return True
+            time.sleep(5)
+        self.logger.warning(
+            f"[K8sUtils] PV {pv_name!r} capacity never reached {expected} "
+            f"within {timeout}s (last: {self.get_pv_capacity(pv_name)!r})")
+        return False
+
+    def wait_pvc_capacity(self, name: str, expected: str, timeout: int = 300,
+                          namespace: str = None) -> bool:
+        """Poll until a PVC's ``status.capacity.storage`` equals *expected*.
+
+        This is the NODE side of a CSI expansion. For a Filesystem-mode volume
+        the driver returns ``node_expansion_required: true`` and kubelet only
+        runs ``NodeExpandVolume`` while some pod has the volume mounted -- so
+        on a DETACHED claim this never converges, by design. Use
+        :meth:`wait_pv_capacity` there instead.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get pvc {name} -n {ns} "
+                f"-o jsonpath='{{.status.capacity.storage}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            last = out.strip()
+            if last == expected:
+                self.logger.info(
+                    f"[K8sUtils] PVC {name!r} status.capacity is {last}")
+                return True
+            time.sleep(5)
+        self.logger.warning(
+            f"[K8sUtils] PVC {name!r} status.capacity never reached "
+            f"{expected} within {timeout}s (last: {last!r})")
+        return False
+
+    def get_mount_size_bytes(self, pod_name: str, mount_path: str = "/spdkvol",
+                             namespace: str = None) -> int:
+        """Return the size in bytes of *mount_path*'s filesystem inside a pod.
+
+        Reads the filesystem as the workload sees it, which is what a
+        node-side expansion actually has to change -- a grown block device
+        with an ungrown filesystem is not a usable resize.
+        """
+        out, _ = self.exec_in_pod(
+            pod_name, f"df -B1 {mount_path} | tail -1 | awk '{{print $2}}'",
+            namespace=namespace,
+        )
+        try:
+            return int((out or "").strip())
+        except ValueError:
+            return 0
 
     def get_pvc_volume_handle(self, name: str, namespace: str = None) -> str:
         """Return the CSI volumeHandle (lvol ID) backing a bound PVC, or ''."""
@@ -1616,6 +1575,44 @@ class K8sUtils:
             f"[K8sUtils] VolumeSnapshot '{name}' not ready within {timeout}s"
         )
 
+    def get_volume_snapshot_handle(self, name: str, namespace: str = None) -> str:
+        """Return the backend snapshot UUID for a VolumeSnapshot, or ''.
+
+        Resolves VolumeSnapshot → boundVolumeSnapshotContent →
+        VolumeSnapshotContent.status.snapshotHandle.  The CSI snapshotHandle
+        may be a composite ``cluster:node:snap_uuid``; the bare UUID (last
+        ``:``-separated segment) is returned so it matches ``sbcli snapshot
+        list``.
+        """
+        ns = namespace or self.namespace
+        content, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshot {name} -n {ns} -o jsonpath="
+            f"'{{.status.boundVolumeSnapshotContentName}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        content = content.strip()
+        if not content:
+            return ""
+        handle, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshotcontent {content} -o jsonpath="
+            f"'{{.status.snapshotHandle}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        handle = handle.strip()
+        if not handle:
+            return ""
+        return handle.rsplit(":", 1)[-1] if ":" in handle else handle
+
+    def get_volume_snapshot_phase(self, name: str, namespace: str = None) -> str:
+        """Return VolumeSnapshot readyToUse status string ('' if absent)."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshot {name} -n {ns} "
+            f"-o jsonpath='{{.status.readyToUse}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out.strip()
+
     def delete_volume_snapshot(self, name: str, namespace: str = None,
                                wait: bool = False):
         """Delete a VolumeSnapshot.
@@ -1650,7 +1647,9 @@ class K8sUtils:
                        image: str = "dockerpinata/fio:2.1",
                        cleanup_before_fio: bool = False,
                        avoid_node: str = None,
-                       warmup_config: str = None):
+                       warmup_config: str = None,
+                       node_name: str = None,
+                       node_selector: str = None):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
@@ -1667,6 +1666,10 @@ class K8sUtils:
                 bs, randseed, filenames, size as the main config) before the
                 main randrw test.  This ensures a later verify_only pass can
                 verify the entire file, not just the blocks randrw touched.
+            node_name: hard-pin the job's pod to this node via ``spec.nodeName``,
+                bypassing the scheduler (including StorageClass allowedTopologies).
+                Mutually exclusive with avoid_node / client-node affinity, which
+                are skipped when this is set.
         """
         ns = namespace or self.namespace
         # Indent fio_config for YAML embedding (each line indented by 8 spaces)
@@ -1709,7 +1712,18 @@ class K8sUtils:
             init_containers = "      initContainers:\n" + "".join(init_containers_list)
         node_affinity_block = ""
         tolerations_block = ""
-        client_nodes_exist = self.has_client_nodes()
+        node_name_line = f"      nodeName: {node_name}\n" if node_name else ""
+        if node_selector and node_name:
+            raise ValueError(
+                "create_fio_job: pass node_name OR node_selector, not both")
+        if node_selector:
+            # nodeSelector keeps the scheduler in the loop, which a
+            # WaitForFirstConsumer StorageClass requires in order to bind.
+            node_name_line = (
+                "      nodeSelector:\n"
+                f"        kubernetes.io/hostname: {node_selector}\n")
+        client_nodes_exist = (
+            not node_name and not node_selector and self.has_client_nodes())
         if client_nodes_exist:
             # Hard-pin FIO pods to client-role nodes
             node_affinity_block = (
@@ -1732,7 +1746,7 @@ class K8sUtils:
                 f"[K8sUtils] Client nodes detected — FIO job '{job_name}' "
                 f"pinned to client nodes (with toleration)"
             )
-        elif avoid_node:
+        elif not node_name and not node_selector and avoid_node:
             # No client nodes — at least avoid the primary storage node
             node_affinity_block = (
                 f"        nodeAffinity:\n"
@@ -1774,6 +1788,7 @@ class K8sUtils:
             f"      labels:\n"
             f"        app: fio-benchmark\n"
             f"    spec:\n"
+            f"{node_name_line}"
             f"      affinity:\n"
             f"        podAntiAffinity:\n"
             f"          preferredDuringSchedulingIgnoredDuringExecution:\n"
@@ -1905,6 +1920,25 @@ class K8sUtils:
                 break
 
         return {"phase": phase, "reason": reason, "message": message}
+
+    def get_pod_events(self, pod_name: str, namespace: str = None) -> str:
+        """Return ``<reason>: <message>`` lines for events on a pod.
+
+        Catches things ``get_pod_status_detail`` can't see, like a
+        ``FailedMount`` warning event (kubelet's volume manager failing
+        ``NodeStageVolume``), which is a Pod event, not a container
+        waiting-state reason.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get events -n {ns} "
+            f"--field-selector involvedObject.name={pod_name} "
+            f"--sort-by=.lastTimestamp "
+            f"-o jsonpath='{{range .items[*]}}{{.reason}}: {{.message}}{{\"\\n\"}}{{end}}' "
+            f"2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out or ""
 
     def get_pod_logs(self, pod_name: str, namespace: str = None,
                      tail: int = 200) -> str:
@@ -2530,12 +2564,28 @@ class K8sUtils:
             if not logs:
                 continue
             logs_lower = logs.lower()
-            # Check for FIO numeric error codes (e.g. err=110, err=5)
-            err_match = re.search(r'\berr=([1-9]\d*)\b', logs)
-            if err_match:
+            # FIO numeric error codes (e.g. err=110, err=5). Report ALL of
+            # them plus a sample of the io_u lines: one error code alone says
+            # nothing about how much of the volume was affected, and the
+            # read/write split is the first thing needed to tell a failover
+            # path problem from a data-placement one.
+            #
+            # Note this check is reached even when the Job status is
+            # "succeeded" -- FIO can exit 0 for the Job while having reported
+            # I/O errors internally, which is exactly how a cluster-wide
+            # write failure once looked like a single unlucky volume.
+            err_codes = sorted(set(re.findall(r'\berr= ?([1-9]\d*)\b', logs)))
+            if err_codes:
+                io_u = re.findall(r'io_u error[^\n]*', logs)
+                reads = sum(1 for line in io_u if "read offset" in line)
+                writes = sum(1 for line in io_u if "write offset" in line)
+                sample = chr(10).join(f"      {line}" for line in io_u[:3])
                 raise RuntimeError(
                     f"FIO Job '{job_name}' pod '{pod_name}' reported "
-                    f"err={err_match.group(1)}"
+                    f"err={','.join(err_codes)} "
+                    f"({len(io_u)} io_u error line(s): {reads} read, "
+                    f"{writes} write)"
+                    + (f"{chr(10)}{sample}" if sample else "")
                 )
             fail_words = ["error", "fail", "interrupt", "terminate"]
             for word in fail_words:
@@ -2893,13 +2943,39 @@ class K8sUtils:
 
     def create_utility_pod(self, pod_name: str, pvc_name: str,
                            mount_path: str = "/spdkvol",
-                           namespace: str = None):
-        """Create an alpine utility pod that mounts a PVC for checksum operations."""
+                           namespace: str = None,
+                           node_name: str = None,
+                           node_selector: str = None):
+        """Create an alpine utility pod that mounts a PVC for checksum operations.
+
+        node_name: hard-pin the pod to this node via ``spec.nodeName``, bypassing
+            the scheduler entirely (including any StorageClass allowedTopologies
+            restriction). Used to deliberately test scheduling a pod onto a node
+            outside a DHCHAP pool's allowedNodes. When set, the client-node
+            affinity/toleration block below is skipped — nodeName already forces
+            exact placement.
+        node_selector: pin via ``spec.nodeSelector`` on
+            ``kubernetes.io/hostname`` instead, which keeps the SCHEDULER in the
+            loop. Required for a StorageClass using
+            ``volumeBindingMode: WaitForFirstConsumer`` -- with nodeName the
+            scheduler never runs, so the claim stays at "waiting for first
+            consumer" and the pod never starts whether the node is allowed or
+            not, making a negative assertion pass vacuously. Mutually exclusive
+            with node_name.
+        """
         ns = namespace or self.namespace
+        node_name_line = f"  nodeName: {node_name}\n" if node_name else ""
+        if node_selector and node_name:
+            raise ValueError(
+                "create_utility_pod: pass node_name OR node_selector, not both")
+        if node_selector:
+            node_name_line = (
+                "  nodeSelector:\n"
+                f"    kubernetes.io/hostname: {node_selector}\n")
         # Build tolerations + nodeAffinity to match FIO job scheduling
         tolerations_block = ""
         node_affinity_block = ""
-        if self.has_client_nodes():
+        if not node_name and not node_selector and self.has_client_nodes():
             node_affinity_block = (
                 "    nodeAffinity:\n"
                 "      requiredDuringSchedulingIgnoredDuringExecution:\n"
@@ -2928,8 +3004,12 @@ class K8sUtils:
             f"  name: {pod_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
+            f"{node_name_line}"
             f"{affinity_block}"
             f"{tolerations_block}"
+            f"  securityContext:\n"
+            f"    seLinuxOptions:\n"
+            f"      type: spc_t\n"
             f"  containers:\n"
             f"  - name: alpine\n"
             f"    image: alpine:3\n"
@@ -3031,6 +3111,215 @@ class K8sUtils:
             )
         else:
             self.delete_resource("pod", pod_name, namespace=ns)
+
+    def operator_storage_class_name(self, pool_crd_name: str,
+                                    cluster_cr_name: str = None,
+                                    namespace: str = None) -> str:
+        """Return the StorageClass name the operator generates for a pool.
+
+        Documented format: ``simplyblock-{namespace}-{clusterName}-{poolName}``
+        where poolName is the StoragePool CRD's metadata.name. Verified on
+        OpenShift 2026-09-04.
+        """
+        ns = namespace or self.namespace
+        if not cluster_cr_name:
+            out, _ = self._exec_kubectl(
+                f"kubectl get storageclusters -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true",
+                supress_logs=True,
+            )
+            names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
+            cluster_cr_name = names[0] if names else "simplyblock-cluster"
+        return f"simplyblock-{ns}-{cluster_cr_name}-{pool_crd_name}"
+
+    def wait_storage_class_exists(self, sc_name: str, timeout: int = 300) -> bool:
+        """Wait for the operator to generate *sc_name*."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get storageclass {sc_name} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if (out or "").strip():
+                self.logger.info(
+                    f"[K8sUtils] operator StorageClass {sc_name!r} is present")
+                return True
+            time.sleep(5)
+        self.logger.warning(
+            f"[K8sUtils] operator StorageClass {sc_name!r} did not appear "
+            f"within {timeout}s")
+        return False
+
+    def get_csi_topology_keys(self, node_name: str,
+                              driver: str = "csi.simplyblock.io") -> list:
+        """Return the topology keys the CSI node plugin registered on a node."""
+        out, _ = self._exec_kubectl(
+            f"kubectl get csinode {node_name} -o "
+            f"jsonpath='{{.spec.drivers[?(@.name==\"{driver}\")].topologyKeys}}' "
+            f"2>/dev/null || true",
+            supress_logs=True,
+        )
+        raw = (out or "").strip()
+        if not raw.startswith("["):
+            return []
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+
+    def restart_csi_node_driver(self, expect_topology_key: str = None,
+                                expect_on_nodes: list = None,
+                                timeout: int = 420) -> bool:
+        """Re-register the CSI node driver so it picks up new node labels.
+
+        The node plugin snapshots node labels as topology keys at REGISTRATION
+        time only. A DHCHAP pool created afterwards labels its allowed nodes,
+        but that label is not yet a topology domain -- so the operator's
+        generated StorageClass, whose ``allowedTopologies`` keys off exactly
+        that label, fails to provision with::
+
+            ProvisioningFailed: topology map[topology.kubernetes.io/zone:...]
+            from selected node "worker-0" is not in requisite:
+            [map[simplyblock.io/pool....:allowed]]
+
+        Restarting the daemonset makes every plugin re-register and report the
+        pool label. Verified on OpenShift 2026-09-04: afterwards the allowed
+        nodes carry the pool label as a topology key and non-allowed nodes do
+        not.
+
+        This is a workaround for a product gap, not a normal operation -- the
+        operator ideally triggers the re-register itself after labelling, or
+        omits allowedTopologies (dhchap_node_label alone already enforces at
+        mount via the PV's nodeAffinity).
+        """
+        ns = self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get ds -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true")
+        names = [n.strip() for n in (out or "").splitlines() if n.strip()]
+        ds = next((n for n in names
+                   if "csi" in n.lower() and "node" in n.lower()), None)
+        if not ds:
+            self.logger.warning(
+                f"[K8sUtils] no CSI node daemonset found in {ns}; "
+                f"cannot re-register (daemonsets={names})")
+            return False
+
+        self.logger.info(f"[K8sUtils] restarting CSI node daemonset {ds!r}")
+        self._exec_kubectl(f"kubectl rollout restart daemonset {ds} -n {ns}")
+        self._exec_kubectl(
+            f"kubectl rollout status daemonset {ds} -n {ns} --timeout={timeout}s")
+
+        if not expect_topology_key:
+            return True
+
+        deadline = time.time() + 180
+        pending = list(expect_on_nodes or [])
+        while time.time() < deadline and pending:
+            still = [n for n in pending
+                     if expect_topology_key not in self.get_csi_topology_keys(n)]
+            if not still:
+                pending = []
+                break
+            pending = still
+            time.sleep(5)
+        if pending:
+            self.logger.warning(
+                f"[K8sUtils] after re-register, {expect_topology_key!r} is "
+                f"still not a topology key on {pending}")
+            return False
+        self.logger.info(
+            f"[K8sUtils] {expect_topology_key!r} is now a CSI topology key on "
+            f"{expect_on_nodes}")
+        return True
+
+    def get_volume_attachments(self, pv_name: str = None) -> list:
+        """Return VolumeAttachments, optionally filtered to a single PV.
+
+        Each entry is ``{"name", "pv", "node", "attached"}``. VolumeAttachment
+        is cluster-scoped, so no namespace applies.
+        """
+        out, _ = self._exec_kubectl(
+            "kubectl get volumeattachments -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        if not (out or "").strip():
+            return []
+        try:
+            items = json.loads(out).get("items", [])
+        except (json.JSONDecodeError, AttributeError):
+            return []
+        result = []
+        for va in items:
+            spec = va.get("spec", {}) or {}
+            pv = (spec.get("source", {}) or {}).get("persistentVolumeName", "")
+            if pv_name and pv != pv_name:
+                continue
+            result.append({
+                "name": (va.get("metadata", {}) or {}).get("name", ""),
+                "pv": pv,
+                "node": spec.get("nodeName", ""),
+                "attached": bool((va.get("status", {}) or {}).get("attached")),
+            })
+        return result
+
+    def wait_volume_detached(self, pv_name: str, timeout: int = 180) -> bool:
+        """Block until no VolumeAttachment references *pv_name*.
+
+        Deleting a pod does NOT detach its volume: the Pod object goes away
+        while the VolumeAttachment survives until kubelet finishes unmounting
+        and the CSI controller completes ``ControllerUnpublishVolume``. A new
+        pod created against the same ReadWriteOnce claim in that window fails
+        with ``FailedAttachVolume: Multi-Attach error ... already exclusively
+        attached to one node``, which has nothing to do with what the test was
+        trying to observe.
+
+        ``delete_pod(wait=True)`` waits only for the Pod, so any caller that
+        moves a volume between nodes has to wait for this as well. That
+        knowledge previously lived inline in
+        ``e2e_tests/upgrade_tests/k8s_major_upgrade.py`` and nowhere else.
+
+        Returns True once detached, False on timeout. Deliberately does not
+        force-delete the VolumeAttachment: removing one that is genuinely in
+        use can strand the volume. Callers decide what a timeout means.
+        """
+        if not pv_name:
+            return True
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            attachments = self.get_volume_attachments(pv_name)
+            if not attachments:
+                self.logger.info(
+                    f"[K8sUtils] PV '{pv_name}' fully detached")
+                return True
+            last = attachments
+            time.sleep(3)
+        self.logger.warning(
+            f"[K8sUtils] PV '{pv_name}' still has VolumeAttachment(s) after "
+            f"{timeout}s: {last}. A pod created for this claim on another "
+            f"node will hit 'Multi-Attach error'."
+        )
+        return False
+
+    def delete_pod_and_wait_detached(self, pod_name: str, pvc_name: str = None,
+                                     namespace: str = None,
+                                     timeout: int = 180) -> bool:
+        """Delete a pod and wait until its volume is genuinely detached.
+
+        The safe way to hand a ReadWriteOnce volume from one node to the next.
+        Returns True when the volume is detached (or there was nothing to wait
+        for); False if the attachment outlived the timeout.
+        """
+        ns = namespace or self.namespace
+        self.delete_pod(pod_name, namespace=ns, wait=True)
+        if not pvc_name:
+            return True
+        pv_name = self.get_pvc_pv_name(pvc_name, namespace=ns)
+        if not pv_name:
+            return True
+        return self.wait_volume_detached(pv_name, timeout=timeout)
 
     def wait_for_per_node_config(self, worker_node: str,
                                   configmap_name: str = "simplyblock-node-per-node-config",
@@ -3193,6 +3482,31 @@ class K8sSbcliUtils:
             self.logger.warning(f"[_run_json] JSON parse error from: {cmd}\n  raw={raw[:200]}\n  error={e}")
             return []
 
+    @staticmethod
+    def _cli_output_is_error(stdout: str, stderr: str) -> bool:
+        """Return True if a sbcli/kubectl-exec result indicates a failure.
+
+        ``exec_sbcli`` discards the exit code, so failures surface either as a
+        non-empty stderr (``command terminated with exit code N`` from kubectl,
+        or the sbcli ``Error:`` line) or as an ``Error``/``Traceback`` string
+        printed to stdout.  Mirrors how the REST ``SbcliUtils`` raises on a
+        non-2xx response.
+        """
+        blob = f"{stdout or ''}\n{stderr or ''}"
+        markers = (
+            "command terminated with exit code",
+            "Error:",
+            "Traceback (most recent call last)",
+            "usage:",  # argparse rejected the arguments
+        )
+        return any(m in blob for m in markers)
+
+    def _raise_if_cli_error(self, stdout: str, stderr: str, context: str = ""):
+        """Raise RuntimeError when a CLI result indicates failure."""
+        if self._cli_output_is_error(stdout, stderr):
+            detail = (stderr or "").strip() or (stdout or "").strip()
+            raise RuntimeError(f"sbcli command failed ({context}): {detail}")
+
     # ── lvol methods ──────────────────────────────────────────────────────────
 
     def list_lvols(self):
@@ -3255,8 +3569,20 @@ class K8sSbcliUtils:
             cmd += f" --fabric {shlex.quote(fabric)}"
         if crypto:
             cmd += " --encrypt"
+        # Namespace packing flags (parity with SbcliUtils REST body):
+        #   max_namespace_per_subsys -> --max-namespace-per-subsys <N>
+        #   namespace=True           -> --namespaced true
+        # Without these the CLI creates an independent subsystem per lvol
+        # (distinct NQN) instead of packing namespaces into a shared one.
+        if max_namespace_per_subsys is not None:
+            cmd += f" --max-namespace-per-subsys {int(max_namespace_per_subsys)}"
+        if namespace:
+            cmd += " --namespaced true"
 
-        self.k8s.exec_sbcli(cmd)
+        out, err = self.k8s.exec_sbcli(cmd)
+        # CLI write ops do not raise on failure the way the REST client does;
+        # surface an error so negative tests observe the expected exception.
+        self._raise_if_cli_error(out, err, context=f"lvol add {lvol_name}")
 
     def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
         """Delete lvol by name, retrying the delete command periodically
@@ -3320,7 +3646,8 @@ class K8sSbcliUtils:
             self.delete_lvol(lvol_name=name)
 
     def resize_lvol(self, lvol_id, new_size):
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol resize {lvol_id} {new_size}")
+        out, err = self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol resize {lvol_id} {new_size}")
+        self._raise_if_cli_error(out, err, context=f"lvol resize {lvol_id}")
 
     # ── storage node methods ──────────────────────────────────────────────────
 
@@ -3446,7 +3773,8 @@ class K8sSbcliUtils:
         return self.list_storage_pools().get(pool_name)
 
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
-                         max_r_mbytes=0, max_w_mbytes=0):
+                         max_r_mbytes=0, max_w_mbytes=0, dhchap=False, allowed_nodes=None,
+                         storage_class_parameters=None):
         """Use an existing pool if any exist; only create via kubectl if none exist.
 
         Returns the actual pool name to use (may differ from *pool_name* if an
@@ -3461,21 +3789,195 @@ class K8sSbcliUtils:
         # 1. Check if sbcli already sees a pool
         existing = self.list_storage_pools()
         self.logger.info(f"[pool] existing pools (sbcli): {list(existing.keys())}")
-        if existing:
+        ns = self.k8s.namespace
+        # Blind reuse is only safe for a caller that asked for nothing in
+        # particular. A caller passing storage_class_parameters is asking for
+        # a specific StorageClass shape (encryption, filesystem, ...), and
+        # those are immutable once the class exists -- handing back an
+        # arbitrary existing pool silently gives it the wrong one. That is how
+        # a "non-DHCHAP pool" request came back as the DHCHAP pool, whose
+        # StorageClass carries dhchap_node_label.
+        if existing and not dhchap and not allowed_nodes and not storage_class_parameters:
             actual = next(iter(existing))
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
-        # 2. Check if StoragePool CRDs exist (operator may still be reconciling)
-        ns = self.k8s.namespace
-        out, _ = self.k8s._exec_kubectl(
-            f"kubectl get storagepools -n {ns} --no-headers "
-            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
-        )
-        existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
+        dedicated = bool(dhchap or allowed_nodes or storage_class_parameters)
+        if existing and dedicated:
+            # A caller with a specific dhchap/allowedNodes requirement must
+            # NOT get an arbitrary existing pool handed back — reuse is only
+            # safe here if that pool's own StoragePool CRD already has the
+            # exact same dhchap + allowedNodes config. Other, non-DHCHAP
+            # tests share pools freely via the blind-reuse path above; this
+            # only narrows behavior for callers that actually asked for
+            # security enforcement.
+            wanted_nodes = sorted(allowed_nodes or [])
+            crd_json, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepools -n {ns} -o json 2>/dev/null || true"
+            )
+            try:
+                crds = json.loads(crd_json).get("items", []) if crd_json.strip() else []
+            except (json.JSONDecodeError, AttributeError):
+                crds = []
+            matched = False
+            for crd in crds:
+                spec = crd.get("spec", {})
+                wanted_scp = {
+                    k: ("true" if v is True else "false" if v is False else str(v))
+                    for k, v in (storage_class_parameters or {}).items()
+                }
+                have_scp = {
+                    k: ("true" if v is True else "false" if v is False else str(v))
+                    for k, v in (spec.get("storageClassParameters") or {}).items()
+                }
+                if (bool(spec.get("dhchap")) == bool(dhchap)
+                        and sorted(spec.get("allowedNodes", []) or []) == wanted_nodes
+                        and have_scp == wanted_scp):
+                    actual = next(iter(existing))
+                    self.logger.info(
+                        f"[pool] Existing CRD '{crd['metadata']['name']}' "
+                        f"already matches requested dhchap={dhchap} "
+                        f"allowedNodes={wanted_nodes} — reusing pool "
+                        f"'{actual}'")
+                    return actual
+            if not matched:
+                # HACK: suffix the pool name with a timestamp so it cannot
+                # collide with (or be shadowed by) the pool other tests are
+                # sharing. This exists only because the blind-reuse path
+                # above is load-bearing for every non-DHCHAP caller — they
+                # rely on being handed whatever pool already exists, so we
+                # cannot simply delete leftovers. A cleaner design would be
+                # one pool per test with no cross-test sharing at all; that
+                # is a bigger change than this fix.
+                pool_name = f"{pool_name}-{int(time.time()) % 10000}"
+                self.logger.info(
+                    f"[pool] No existing pool matches dhchap={dhchap} "
+                    f"allowedNodes={wanted_nodes} — creating dedicated pool "
+                    f"'{pool_name}'")
+
+        k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+
+        # The operator derives a node label from this CRD name:
+        #   simplyblock.io/pool.<ns>.<StorageCluster CR>.<CRD name>
+        # A Kubernetes label key's name part (everything after the "/") is
+        # capped at 63 chars, and the CSI driver writes that key into every
+        # provisioned PV's nodeAffinity — so if it overflows, the PV is
+        # rejected outright ("name part must be no more than 63 characters")
+        # and the PVC never binds. Budget the CRD name against the real
+        # namespace and cluster CR name and truncate rather than emit a name
+        # that cannot be enforced.
+        if dedicated:
+            sc_out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storageclusters -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+            )
+            sc_names = [s.strip() for s in (sc_out or "").strip().splitlines() if s.strip()]
+            cluster_cr = sc_names[0] if sc_names else "simplyblock-cluster"
+            # len("pool.") + ns + "." + cluster_cr + "."
+            fixed = 5 + len(ns) + 1 + len(cluster_cr) + 1
+            budget = 63 - fixed
+            if budget < 8:
+                self.logger.warning(
+                    f"[pool] namespace '{ns}' + cluster CR '{cluster_cr}' "
+                    f"leave only {budget} chars for the pool label name — "
+                    f"DHCHAP enforcement cannot be expressed as a label here")
+            elif len(k8s_resource_name) > budget:
+                truncated = k8s_resource_name[:budget].rstrip("-")
+                self.logger.warning(
+                    f"[pool] CRD name '{k8s_resource_name}' would make the "
+                    f"operator's pool label exceed the 63-char limit "
+                    f"({fixed + len(k8s_resource_name)} > 63) — truncating to "
+                    f"'{truncated}'")
+                k8s_resource_name = truncated
+                pool_name = k8s_resource_name
+
+        # 2. Check whether the CRD this call actually wants already exists.
+        #    For a dedicated (dhchap/allowedNodes) request this MUST be
+        #    scoped to our own resource name — checking "does any StoragePool
+        #    CRD exist in the namespace" would find an unrelated leftover
+        #    pool's CRD and skip creating ours entirely, then step 4 below
+        #    would hand back whichever pool the operator lists first (often
+        #    the unrelated one), silently dropping the dhchap/allowedNodes
+        #    request. Non-dedicated calls keep the original "any CRD" check.
+        if dedicated:
+            crd_out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepool {k8s_resource_name} -n {ns} "
+                f"--no-headers -o custom-columns=NAME:.metadata.name "
+                f"2>/dev/null || true"
+            )
+            existing_crds = [k8s_resource_name] if crd_out.strip() else []
+        else:
+            out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepools -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+            )
+            existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
+
+        # 2b. If CRDs exist, check if they're stuck in Terminating.
+        #     Previous test runs may have initiated deletion but finalizers
+        #     blocked completion.  Wait up to 120s for them to disappear,
+        #     then force-remove finalizers if still stuck.
+        if existing_crds:
+            term_out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storagepools -n {ns} --no-headers "
+                f"-o custom-columns="
+                f"NAME:.metadata.name,DEL:.metadata.deletionTimestamp "
+                f"2>/dev/null || true"
+            )
+            terminating = []
+            for line in (term_out or "").strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] != "<none>" and parts[0] in existing_crds:
+                    terminating.append(parts[0])
+
+            if terminating:
+                self.logger.warning(
+                    f"[pool] Found Terminating StoragePool CRDs: "
+                    f"{terminating} — waiting for deletion to complete"
+                )
+                deadline = time.time() + 120
+                while time.time() < deadline:
+                    check_out, _ = self.k8s._exec_kubectl(
+                        f"kubectl get storagepools -n {ns} --no-headers "
+                        f"-o custom-columns=NAME:.metadata.name "
+                        f"2>/dev/null || true"
+                    )
+                    remaining = [
+                        r.strip() for r in
+                        (check_out or "").strip().splitlines()
+                        if r.strip() and r.strip() in existing_crds
+                    ]
+                    if not remaining:
+                        self.logger.info(
+                            "[pool] All Terminating CRDs deleted")
+                        break
+                    sleep_n_sec(5)
+                else:
+                    # Force-remove finalizers on stuck CRDs
+                    self.logger.warning(
+                        "[pool] CRDs still stuck after 120s — "
+                        "removing finalizers to unblock deletion"
+                    )
+                    for crd_name in terminating:
+                        try:
+                            self.k8s._exec_kubectl(
+                                f"kubectl patch storagepool {crd_name} "
+                                f"-n {ns} --type merge "
+                                f"-p '{{\"metadata\":{{\"finalizers\":[]}}}}'"
+                            )
+                            self.logger.info(
+                                f"[pool] Removed finalizers from "
+                                f"{crd_name}")
+                        except Exception as e:
+                            self.logger.warning(
+                                f"[pool] Failed to patch {crd_name}: "
+                                f"{e}")
+                    sleep_n_sec(10)
+
+                existing_crds = [c for c in existing_crds if c not in terminating]
 
         if not existing_crds:
-            # 3. No pools at all — create one via kubectl apply
+            # 3. Create the CRD via kubectl apply.
             cid = cluster_id or self.cluster_id
             cluster_details = self.get_cluster_details(cluster_id=cid)
             # sbcli cluster get returns "cluster_name" (not "name")
@@ -3504,8 +4006,6 @@ class K8sSbcliUtils:
                     f"falling back to cluster_name='{cluster_name}' from sbcli"
                 )
 
-            k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
-
             yaml_content = (
                 f"apiVersion: storage.simplyblock.io/v1alpha1\n"
                 f"kind: StoragePool\n"
@@ -3515,9 +4015,26 @@ class K8sSbcliUtils:
                 f"spec:\n"
                 f"  clusterName: {cluster_name}\n"
             )
+            if dhchap:
+                yaml_content += "  dhchap: true\n"
+            if allowed_nodes:
+                yaml_content += "  allowedNodes:\n"
+                for node_name in allowed_nodes:
+                    yaml_content += f"    - {node_name}\n"
+            if storage_class_parameters:
+                # The operator builds the pool's StorageClass from these,
+                # including encryption and csi.storage.k8s.io/fstype. They
+                # are IMMUTABLE once the SC exists (the CRD says to create
+                # a new StoragePool to change them), so a caller wanting
+                # both plain and encrypted volumes needs two pools.
+                yaml_content += "  storageClassParameters:\n"
+                for _k, _v in storage_class_parameters.items():
+                    if isinstance(_v, bool):
+                        _v = "true" if _v else "false"
+                    yaml_content += f"    {_k}: {_v}\n"
 
             self.logger.info(
-                f"[pool] No pools found — creating '{pool_name}' "
+                f"[pool] Creating '{pool_name}' "
                 f"(CRD={k8s_resource_name}, cluster={cluster_name}) via kubectl apply"
             )
             yaml_escaped = yaml_content.replace("'", "'\\''")
@@ -3529,12 +4046,26 @@ class K8sSbcliUtils:
                 f"waiting for operator to reconcile"
             )
 
-        # 4. Wait for operator to reconcile the StoragePool CRD into an actual pool
-        #    visible via sbcli pool list.  Use 300s timeout to handle slow
-        #    reconciliation after pool deletion/recreation cycles.
+        # 4. Wait for operator to reconcile the StoragePool CRD into an actual
+        #    pool visible via sbcli pool list. For a dedicated request, wait
+        #    specifically for a pool name that wasn't already in `existing`
+        #    at the start of this call — an unrelated pool that was already
+        #    there is never a valid answer here, no matter how the dict
+        #    orders. Use 300s timeout to handle slow reconciliation after
+        #    pool deletion/recreation cycles.
+        already_seen = set(existing.keys())
         for attempt in range(60):  # up to 300s
             pools = self.list_storage_pools()
-            if pools:
+            if dedicated:
+                new_pools = [p for p in pools if p not in already_seen]
+                if new_pools:
+                    actual = new_pools[0]
+                    self.logger.info(
+                        f"[pool] Operator reconciled dedicated pool '{actual}' "
+                        f"(attempt {attempt})"
+                    )
+                    return actual
+            elif pools:
                 actual = next(iter(pools))
                 self.logger.info(
                     f"[pool] Operator reconciled pool '{actual}' "
@@ -3721,6 +4252,26 @@ class K8sSbcliUtils:
         """Run ``pool remove-host <pool_id> <nqn>`` via kubectl exec."""
         out = self._run(f"{self.sbcli_cmd} pool remove-host {pool_id} {host_nqn}")
         self.logger.info(f"[remove_host_from_pool] pool={pool_id} nqn={host_nqn}: {out}")
+        return out
+
+    def disable_storage_pool(self, pool_name):
+        """Set a pool's status to Inactive via ``pool disable <pool_id>``."""
+        pool_id = self.get_storage_pool_id(pool_name)
+        if not pool_id:
+            raise RuntimeError(f"Pool {pool_name} not found; cannot disable")
+        out, err = self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool disable {pool_id}")
+        self._raise_if_cli_error(out, err, context=f"pool disable {pool_name}")
+        self.logger.info(f"[pool] Disabled pool '{pool_name}' ({pool_id})")
+        return out
+
+    def enable_storage_pool(self, pool_name):
+        """Set a pool's status to Active via ``pool enable <pool_id>``."""
+        pool_id = self.get_storage_pool_id(pool_name)
+        if not pool_id:
+            raise RuntimeError(f"Pool {pool_name} not found; cannot enable")
+        out, err = self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool enable {pool_id}")
+        self._raise_if_cli_error(out, err, context=f"pool enable {pool_name}")
+        self.logger.info(f"[pool] Enabled pool '{pool_name}' ({pool_id})")
         return out
 
     def delete_storage_pool(self, pool_name):
@@ -3990,9 +4541,10 @@ class K8sSbcliUtils:
     # ── snapshot methods ──────────────────────────────────────────────────────
 
     def add_snapshot(self, lvol_id: str, snapshot_name: str, retry: int = 10):
-        self.k8s.exec_sbcli(
+        out, err = self.k8s.exec_sbcli(
             f"{self.sbcli_cmd} -d snapshot add {lvol_id} {shlex.quote(snapshot_name)}"
         )
+        self._raise_if_cli_error(out, err, context=f"snapshot add {snapshot_name}")
         self.wait_for_snapshot(snapshot_name, present=True, timeout=60)
 
     def list_snapshots(self):
@@ -4085,6 +4637,7 @@ class K8sSbcliUtils:
         out, err = self.k8s.exec_sbcli(
             f"{self.sbcli_cmd} -d snapshot clone {snapshot_id} {shlex.quote(clone_name)}"
         )
+        self._raise_if_cli_error(out, err, context=f"snapshot clone {clone_name}")
         # Poll until the clone appears in lvol list
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -4213,13 +4766,22 @@ class K8sSbcliUtils:
             f"Proceeding to health-check anyway."
         )
 
-    def wait_for_health_status(self, node_id, status, timeout=60, device_id=None):
+    def wait_for_health_status(self, node_id, status, timeout=60, device_id=None,
+                               wait_for_balancing=True):
         """
         K8s equivalent of SbcliUtils.wait_for_health_status.
 
         Before checking the node's ``health_check`` field this method first
         waits for all ``balancing_on_restart`` subtasks to complete (up to
         10 minutes), then polls the node health flag until it matches *status*.
+
+        Pass ``wait_for_balancing=False`` to skip that first step and poll the
+        health flag straight away. ``balancing_on_restart`` *is* data migration,
+        so a test whose purpose is to fire the next outage while migration is
+        still in flight must not call this with the wait enabled -- doing so
+        drains migration on every iteration and quietly defeats the test. The
+        docker equivalent (SbcliUtils.wait_for_health_status) has no such step,
+        which is why this only bites on k8s.
 
         The ``device_id`` branch is not supported in K8s mode (no REST API);
         a warning is logged and the method returns None if device_id is given.
@@ -4232,7 +4794,13 @@ class K8sSbcliUtils:
             return None
 
         # Step 1: wait for balancing_on_restart subtasks to finish
-        self._wait_for_balancing_subtasks(node_id, timeout=600)
+        if wait_for_balancing:
+            self._wait_for_balancing_subtasks(node_id, timeout=600)
+        else:
+            self.logger.info(
+                f"[health_check] node={node_id}: skipping the balancing_on_restart "
+                f"wait at the caller's request"
+            )
 
         # Step 2: poll node health_check flag
         actual_status = None
