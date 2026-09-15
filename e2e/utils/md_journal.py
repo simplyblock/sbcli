@@ -61,6 +61,30 @@ class MdJournalError(RuntimeError):
     """Journal is absent, unhealthy, or reported corruption."""
 
 
+def _last_error(text, limit=300):
+    """Condense a remote stderr dump to the one line that says what went wrong.
+
+    The payload runs `python3 -c` inside the SPDK container, so a failure comes
+    back as a full Python traceback whose middle is a 2000-character hex blob
+    and a run of `^^^^` carets. Embedding that verbatim made the exception
+    message span many lines, and everything downstream that reports a failure --
+    the workflow summary and the Slack message both grep a single line out of
+    output.log -- picked up whichever fragment happened to be last, so a run
+    failed with the message ") . On an lblk cluster ..." and no cause at all.
+
+    A traceback's last non-empty line is the exception itself, which is the part
+    worth keeping: "PermissionError: [Errno 13] Permission denied".
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return "no stderr"
+    # Carets and the hex payload are noise; the exception line is what matters.
+    for line in reversed(lines):
+        if not set(line) <= set("^~ "):
+            return line[:limit]
+    return lines[-1][:limit]
+
+
 def call_rpc(ssh_obj, node, exec_prefix, sock, method, params=None,
              timeout=120, logger=None):
     """Issue a raw JSON-RPC call to an SPDK socket and return the parsed result.
@@ -97,7 +121,17 @@ def call_rpc(ssh_obj, node, exec_prefix, sock, method, params=None,
         "sys.stdout.write(buf.decode())\n"
     )
     b64 = script.encode("utf-8").hex()
-    cmd = (f"{exec_prefix} sh -c \"python3 -c \\\"import binascii;"
+    # sudo inside the container, because the SPDK unix socket is not readable by
+    # the container's default user: without it every call dies on
+    # `s.connect(...)` with "PermissionError: [Errno 13] Permission denied"
+    # before a single byte is sent. This matches what the rest of the suite
+    # already does -- TestClusterBase._rpc_via_docker_exec runs
+    # "sudo python spdk/scripts/rpc.py" inside the container on both platforms.
+    #
+    # Resolved in the container's own shell rather than assumed, so a container
+    # that runs as root and ships no sudo still works.
+    cmd = (f"{exec_prefix} sh -c \"SUDO=; command -v sudo >/dev/null 2>&1 "
+           f"&& SUDO=sudo; \\$SUDO python3 -c \\\"import binascii;"
            f"exec(binascii.unhexlify('{b64}').decode())\\\"\"")
 
     out, err = ssh_obj.exec_command(node, cmd, timeout=timeout + 30,
@@ -105,7 +139,7 @@ def call_rpc(ssh_obj, node, exec_prefix, sock, method, params=None,
     blob = (out or "").strip()
     if not blob:
         raise MdJournalError(
-            f"{method} returned nothing from {node} ({err or 'no stderr'})")
+            f"{method} returned nothing from {node}: {_last_error(err)}")
     try:
         doc = json.loads(blob)
     except ValueError:
