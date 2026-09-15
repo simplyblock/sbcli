@@ -35,6 +35,21 @@ class SbcliUtils:
         # setting this to a positive value (e.g. 1800).
         self.api_recovery_timeout = 0
 
+    def _url(self, api_url):
+        """Join the base and an endpoint with exactly one slash between them.
+
+        Every endpoint in the suite is written with a leading slash today, so
+        rstrip()ing the base in __init__ is on its own enough. But that is a
+        convention, not a guarantee, and the next person to add a call site
+        with "pool" instead of "/pool" would get
+        "http://192.168.10.210pool" -- a worse failure than the one this
+        replaced, and one that only shows up at runtime.
+
+        Normalising both halves costs nothing and makes the join correct for
+        any combination.
+        """
+        return f"{self.cluster_api_url}/{api_url.lstrip('/')}"
+
     @staticmethod
     def _is_transient_error(exc):
         """Return True if *exc* looks like a transient API outage (503,
@@ -66,7 +81,7 @@ class SbcliUtils:
             time.sleep(interval)
             try:
                 resp = requests.get(
-                    self.cluster_api_url + "/storagenode",
+                    self._url("/storagenode"),
                     headers=self.headers,
                     timeout=10,
                 )
@@ -99,7 +114,7 @@ class SbcliUtils:
         """
         print(self.cluster_api_url)
         print(api_url)
-        request_url = self.cluster_api_url + api_url
+        request_url = self._url(api_url)
         print(request_url)
         headers = headers if headers else self.headers
         print(headers)
@@ -159,7 +174,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self._url(api_url)
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
         while retry > 0:
@@ -215,7 +230,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self._url(api_url)
         headers = headers if headers else self.headers
         self.logger.info(f"Calling DELETE for {api_url} with headers: {headers}")
         retry = 10
@@ -274,7 +289,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self._url(api_url)
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
         retry = 5
