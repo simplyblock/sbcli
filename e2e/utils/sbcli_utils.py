@@ -13,7 +13,17 @@ class SbcliUtils:
     def __init__(self, cluster_secret, cluster_api_url, cluster_id):
         self.cluster_id = cluster_id
         self.cluster_secret = cluster_secret
-        self.cluster_api_url = cluster_api_url
+        # Every call site builds a URL as `cluster_api_url + "/some/path"`, so a
+        # base that ends in "/" produces a doubled slash: API_BASE_URL defaults
+        # to "http://192.168.10.210/" in the workflows, which turns "/mgmtnode/"
+        # into "//mgmtnode/". requests sends that verbatim and haproxy forwards
+        # the path untouched, so it arrives at the API as a path that matches no
+        # route -- 404 {"detail":"Not Found"}, ten retries, then the run dies
+        # before a single test starts.
+        #
+        # Normalising here rather than at the five call sites, and rather than in
+        # the workflows, so e2e is correct whichever form of the URL it is handed.
+        self.cluster_api_url = (cluster_api_url or "").rstrip("/")
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"{cluster_id} {cluster_secret}"
