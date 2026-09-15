@@ -84,7 +84,7 @@ on:
         default: false
 
       TEST_CASE:
-        description: "Case id for matrix tests (--case), e.g. dual_graceful_shutdown_container_stop_sep0_drain. Leave empty for non-matrix tests."
+        description: "Case id for matrix tests (--case), e.g. dual_graceful_shutdown_with_container_stop_secondary_await_migration_allpaths. Leave empty for non-matrix tests."
         required: false
         default: ""
 

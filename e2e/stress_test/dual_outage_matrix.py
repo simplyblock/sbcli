@@ -18,10 +18,10 @@ Shape
 -----
     outage types (5)
     pairs with repetition                          = 15
-    x separation {0, 1, 2}                         = 45 topologies
-    x migration {drain, inflight}                  = 90
-    x multipath {nomp, mp}                         = 180 cases per platform
-    run on docker and on k8s-native                = 360 executions
+    x pair distance {secondary, tertiary, quaternary} = 45 topologies
+    x migration {await_migration, during_migration}   = 90
+    x multipath {allpaths, onepathdown}               = 180 per platform
+    run on docker and on k8s-native                   = 360 executions
 
 One driver plus a case table, not 180 leaf classes. Two registered classes,
 `DualOutageMatrixDocker` and `DualOutageMatrixK8s`, each of which sweeps its
@@ -33,16 +33,22 @@ A sweep that dies at case 120 resumes there rather than restarting, via the
 checkpoint in utils/run_state.py. `stress.py --case <id>` still runs exactly
 one case, which is the debugging path once the sweep has found something.
 
-Separation
-----------
-Distance along the secondary chain, which forms a ring
+Pair distance
+-------------
+Which node is taken down alongside the first one, walking the secondary chain
 (`sn_primary_secondary_map[primary] = secondary_node_id`; confirmed on a live
 6-node cluster as worker-0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 0):
 
-    sep 0   B = secondary(A)      A and its own secondary. The case no current
-                                  test can produce.
-    sep 1   B = secondary^2(A)    one node between them (A and its tertiary)
-    sep 2   B = secondary^3(A)    two nodes between them
+    secondary    B is A's own secondary. Both nodes serving the same lvstore
+                 go down together -- the case no current test can produce,
+                 because _pick_outage_nodes exists to forbid exactly this.
+    tertiary     B is A's tertiary; one node sits between them.
+    quaternary   two nodes sit between them.
+
+A case id reads as a sentence: dual_<outage A>_with_<outage B>_<which node>_
+<migration>_<multipath>, e.g.
+
+    dual_graceful_shutdown_with_container_stop_secondary_await_migration_allpaths
 
 Needs >= 6 storage nodes and npcs >= 2; below that the case is skipped with a
 message saying which precondition failed, never silently downgraded.
@@ -69,18 +75,26 @@ OUTAGE_TYPES = (
     "interface_full_network_interrupt",
 )
 
-SEPARATIONS = (0, 1, 2)
+#: How far apart the two victims sit on the secondary chain, named for what
+#: the second victim actually IS rather than for a hop count. "sep0" told a
+#: reader nothing; "secondary" says the pair serves the same lvstore, which is
+#: the whole reason the case exists.
+SEPARATIONS = (
+    (0, "secondary"),      # B is A's own secondary  -- both copies of one lvstore
+    (1, "tertiary"),       # B is A's tertiary       -- one node between them
+    (2, "quaternary"),     # two nodes between them
+)
 
-#: drain  = wait for the migration to finish and assert it did
-#: inflight = do not wait, do not assert (what the rapid no-gap tests do)
-MIGRATION_MODES = ("drain", "inflight")
+#: await_migration = wait for the migration to finish and assert it did
+#: during_migration = do not wait, do not assert (what the rapid no-gap tests do)
+MIGRATION_MODES = ("await_migration", "during_migration")
 
 #: Whether one data NIC is down for the whole case. Losing a path and losing a
 #: node are different failures and they interact: with a NIC already down, the
 #: surviving path carries all the IO while the pair goes away, which is where
 #: a multipath bug shows up as data loss rather than a stall. Both halves are
 #: run because "works with multipath" says nothing about "works without".
-MULTIPATH_MODES = ("nomp", "mp")
+MULTIPATH_MODES = ("allpaths", "onepathdown")
 
 
 def _build_cases():
@@ -95,15 +109,16 @@ def _build_cases():
     """
     cases = []
     for type_a, type_b in itertools.combinations_with_replacement(OUTAGE_TYPES, 2):
-        for sep in SEPARATIONS:
+        for sep, sep_name in SEPARATIONS:
             for migration in MIGRATION_MODES:
                 for mp in MULTIPATH_MODES:
                     cases.append({
-                        "id": "dual_%s_%s_sep%d_%s_%s" % (
-                            type_a, type_b, sep, migration, mp),
+                        "id": "dual_%s_with_%s_%s_%s_%s" % (
+                            type_a, type_b, sep_name, migration, mp),
                         "type_a": type_a,
                         "type_b": type_b,
                         "separation": sep,
+                        "separation_name": sep_name,
                         "migration": migration,
                         "multipath": mp,
                     })
@@ -290,7 +305,8 @@ class _DualOutageMixin:
         case = getattr(self, "_case", None)
         if not case:
             return "off"
-        return "single_nic_down" if case.get("multipath") == "mp" else "off"
+        return ("single_nic_down"
+                if case.get("multipath") == "onepathdown" else "off")
 
     def _apply_multipath_mode(self):
         """Deterministic multipath, replacing the 50/50 coin flip.
@@ -497,11 +513,11 @@ class _DualOutageMixin:
     # ── migration axis ────────────────────────────────────────────────────
     @property
     def wait_for_balancing(self):
-        """drain waits for the migration to finish; inflight does not."""
-        return self._case["migration"] == "drain"
+        """await_migration waits for the migration; during_migration does not."""
+        return self._case["migration"] == "await_migration"
 
     def _should_assert_migration(self):
-        return self._case["migration"] == "drain"
+        return self._case["migration"] == "await_migration"
 
 
 class _DualOutageDocker(_DualOutageMixin,
