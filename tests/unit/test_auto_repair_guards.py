@@ -25,12 +25,17 @@ from simplyblock_core import storage_node_ops
 from simplyblock_core.models.cluster import Cluster
 
 
-def _node(node_id, secondary_node_id="", lvstore="LVS_1"):
+def _node(node_id, secondary_node_id="", tertiary_node_id="", lvstore="LVS_1"):
     node = MagicMock()
     node.get_id.return_value = node_id
     node.secondary_node_id = secondary_node_id
+    node.tertiary_node_id = tertiary_node_id
     node.lvstore = lvstore
     return node
+
+
+def _sent_names(node):
+    return [c.args[0] for c in node.rpc_client.return_value.delete_lvol.call_args_list]
 
 
 class TestSafeDeleteBdevWithoutSecondary(unittest.TestCase):
@@ -86,6 +91,83 @@ class TestSafeDeleteBdevWithoutSecondary(unittest.TestCase):
             secondary.rpc_client.return_value.delete_lvol.call_args.args[0],
             "LVS_1/SNAP_14",
             "the secondary is addressed with the primary's lvstore name")
+
+
+class TestSafeDeleteBdevReachesEveryReplica(unittest.TestCase):
+    """The normal delete path fans out to secondary AND tertiary
+    (lvol_controller.py:2235 tears subsystems down tertiary -> secondary ->
+    primary; :2310 issues a sync delete per non-leader). auto_repair deleted on
+    two of three nodes, stranding the blob on the tertiary -- where nothing
+    finds it again, because auto_repair only ever dumps a node's OWN lvstore
+    and the tertiary holds a replica of the primary's.
+    """
+
+    @staticmethod
+    def _run(primary, lookups):
+        db = MagicMock()
+        db.get_storage_node_by_id.side_effect = lambda nid: lookups[nid]
+        primary.rpc_client.return_value.delete_lvol.return_value = (True, None)
+        primary.rpc_client.return_value.bdev_lvol_get_lvol_delete_status.return_value = 0
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+                patch.object(storage_node_ops.time, "sleep"):
+            return storage_node_ops.safe_delete_bdev("SNAP_14", "node-a")
+
+    def _trio(self, secondary_ok=True, tertiary_ok=True):
+        primary = _node("node-a", secondary_node_id="node-b", tertiary_node_id="node-c")
+        secondary = _node("node-b")
+        tertiary = _node("node-c")
+        secondary.rpc_client.return_value.delete_lvol.return_value = (secondary_ok, None)
+        tertiary.rpc_client.return_value.delete_lvol.return_value = (tertiary_ok, None)
+        return primary, secondary, tertiary
+
+    def test_tertiary_receives_the_sync_delete(self):
+        primary, secondary, tertiary = self._trio()
+
+        result = self._run(primary, {"node-a": primary, "node-b": secondary,
+                                     "node-c": tertiary})
+
+        self.assertTrue(result)
+        self.assertEqual(_sent_names(secondary), ["LVS_1/SNAP_14"])
+        self.assertEqual(_sent_names(tertiary), ["LVS_1/SNAP_14"],
+                         "the tertiary replica must be deleted too")
+        for peer in (secondary, tertiary):
+            self.assertTrue(
+                peer.rpc_client.return_value.delete_lvol.call_args.kwargs["sync"],
+                "replica legs are sync deletes")
+
+    def test_a_failed_secondary_does_not_skip_the_tertiary(self):
+        """The primary's blob is already gone by this point, so bailing out on
+        the first failed peer strands the rest with nothing scheduled."""
+        primary, secondary, tertiary = self._trio(secondary_ok=False)
+
+        result = self._run(primary, {"node-a": primary, "node-b": secondary,
+                                     "node-c": tertiary})
+
+        self.assertFalse(result, "a failed peer leg must still be reported")
+        self.assertEqual(_sent_names(tertiary), ["LVS_1/SNAP_14"],
+                         "the tertiary leg must run even after the secondary failed")
+
+    def test_missing_peer_record_is_skipped_not_fatal(self):
+        primary = _node("node-a", secondary_node_id="node-b", tertiary_node_id="gone")
+        secondary = _node("node-b")
+        secondary.rpc_client.return_value.delete_lvol.return_value = (True, None)
+
+        def _get(nid):
+            if nid == "gone":
+                raise KeyError(nid)
+            return {"node-a": primary, "node-b": secondary}[nid]
+
+        db = MagicMock()
+        db.get_storage_node_by_id.side_effect = _get
+        primary.rpc_client.return_value.delete_lvol.return_value = (True, None)
+        primary.rpc_client.return_value.bdev_lvol_get_lvol_delete_status.return_value = 0
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+                patch.object(storage_node_ops.time, "sleep"):
+            result = storage_node_ops.safe_delete_bdev("SNAP_14", "node-a")
+
+        self.assertTrue(result)
+        self.assertEqual(_sent_names(secondary), ["LVS_1/SNAP_14"])
 
 
 class TestAutoRepairRestoresClusterStatus(unittest.TestCase):

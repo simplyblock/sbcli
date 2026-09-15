@@ -14568,13 +14568,29 @@ def safe_delete_bdev(name, node_id):
 
     db_controller = DBController()
     primary_node = db_controller.get_storage_node_by_id(node_id)
-    # secondary_node_id is "" on a node with no secondary (ha_type single), and
-    # a blank id is a KeyError by contract -- see tests/unit/test_blank_id_
-    # lookups.py. Every other caller guards it; this one did not, so the first
-    # orphan on such a node aborted the whole repair with a traceback.
-    secondary_node = (
-        db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
-        if primary_node.secondary_node_id else None)
+    # Every replica peer, in the role order lvol_controller uses. A blank id
+    # means the role is not wired up (ha_type single has no secondary), and a
+    # blank id is a KeyError by contract -- see tests/unit/test_blank_id_
+    # lookups.py -- so each needs guarding; every other caller does this and
+    # this one did not, so the first orphan on such a node aborted the whole
+    # repair with a traceback.
+    #
+    # The tertiary leg matters for the same reason the secondary one does: the
+    # normal delete path fans out to EVERY replica (lvol_controller.py:2235
+    # tears subsystems down tertiary -> secondary -> primary, and :2310 issues
+    # a sync delete or a durable FN_LVOL_SYNC_DEL task per non-leader). Deleting
+    # on two of three nodes left the blob alive on the tertiary, where nothing
+    # would ever find it again -- auto_repair dumps a node's OWN lvstore, and
+    # the tertiary holds a replica of the primary's.
+    peer_nodes = []
+    for role_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+        if not role_id:
+            continue
+        try:
+            peer_nodes.append(db_controller.get_storage_node_by_id(role_id))
+        except KeyError:
+            logger.warning(f"Replica peer {role_id} of {primary_node.get_id()} "
+                           f"has no record; skipping its delete leg")
     bdev_name = f"{primary_node.lvstore}/{name}"
     logger.info(f"deleting from primary: {bdev_name}")
     ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
@@ -14602,18 +14618,27 @@ def safe_delete_bdev(name, node_id):
                 return False
 
             logger.info(f"deletion completed on primary: {bdev_name}")
-            if secondary_node is None:
-                logger.info(f"no secondary for {primary_node.get_id()}; "
+            if not peer_nodes:
+                logger.info(f"no replica peers for {primary_node.get_id()}; "
                             f"deletion completed: {bdev_name}")
                 return True
-            logger.info(f"deleting from secondary: {bdev_name}")
-            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, sync=True)
-            if not ret:
-                logger.error(f"Failed to delete bdev: {bdev_name} from node: {secondary_node.get_id()}")
-                return False
-            else:
-                logger.info(f"deletion completed on secondary: {bdev_name}")
-            return True
+
+            # Every peer is attempted even when an earlier one fails. Same
+            # reasoning as the sync-delete loop in lvol_controller ("Never
+            # abort the loop -- the remaining non-leaders must still be
+            # processed"): the primary's blob is already gone by this point, so
+            # a peer skipped here is a replica stranded with nothing scheduled
+            # to clean it.
+            all_deleted = True
+            for peer in peer_nodes:
+                logger.info(f"deleting from peer {peer.get_id()}: {bdev_name}")
+                ret, _ = peer.rpc_client().delete_lvol(bdev_name, sync=True)
+                if not ret:
+                    logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}")
+                    all_deleted = False
+                else:
+                    logger.info(f"deletion completed on peer {peer.get_id()}: {bdev_name}")
+            return all_deleted
         else:
             logger.error(f"failed to delete bdev: {bdev_name}, status code: {ret}")
             return False
