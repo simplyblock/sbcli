@@ -3884,9 +3884,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not spdk_proxy_image:
             spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
         # Initial storage-MCP maxUnavailable for the first-time CPU-topology
-        # reboots = the configured parallel-add count (StorageNodeSet
-        # spec.maxParallelNodeAdds), read straight from the CR. cluster_activate
-        # later narrows the pool to the cluster's fault tolerance.
+        # reboots = the configured parallel-add count (StorageCluster
+        # spec.storageNodes.maxParallelNodeAdds), read straight from the CR.
+        # cluster_activate later narrows the pool to the cluster's fault
+        # tolerance.
         mcp_max_unavailable = utils.get_max_parallel_node_adds_from_cr(
             cr_name, cr_namespace, cr_plural)
         try:

@@ -3294,14 +3294,20 @@ def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bo
         return False
 
 
-def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storagenodesets"):
-    """Read spec.maxParallelNodeAdds from the node's StorageNodeSet CR.
+def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storageclusters"):
+    """Read spec.storageNodes.maxParallelNodeAdds from the StorageCluster CR.
 
     This is the operator-facing knob for how many storage nodes are added — and
     thus rebooted for the first-time CPU-topology apply — in parallel. We use it
     to seed the storage MCP's initial maxUnavailable so those reboots roll in
     one wave instead of a serialized, one-at-a-time queue (cluster_activate
     later narrows the pool to the cluster's fault tolerance).
+
+    The knob moved twice in the operator's CRD redesign: off the retired
+    StorageNodeSet and onto StorageCluster, and from the top of the spec into the
+    storageNodes block. Both spellings are read, newest first, so a control plane
+    talking to either generation of operator finds it; reading only the old one
+    returned None everywhere and serialized every node reboot of a fresh cluster.
 
     Read directly from the CR rather than via an operator-injected env, so it
     works without any operator/deployment change. Returns None when the CR
@@ -3314,19 +3320,22 @@ def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storage
         load_kube_config_with_fallback()
         api = client.CustomObjectsApi()
         cr = api.get_namespaced_custom_object(
-            group="storage.simplyblock.io",
-            version="v1alpha1",
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
             namespace=cr_namespace,
-            plural=cr_plural or "storagenodesets",
+            plural=cr_plural or "storageclusters",
             name=cr_name,
         )
-        value = (cr.get("spec") or {}).get("maxParallelNodeAdds")
+        spec = cr.get("spec") or {}
+        value = (spec.get("storageNodes") or {}).get("maxParallelNodeAdds")
+        if value is None:
+            value = spec.get("maxParallelNodeAdds")
         if value is None:
             return None
         return max(int(value), 1)
     except ApiException as e:
         if e.status == 404:
-            logger.info(f"StorageNodeSet {cr_name} not found in {cr_namespace} "
+            logger.info(f"StorageCluster {cr_name} not found in {cr_namespace} "
                         f"(non-OpenShift or CR absent); using default parallel-add")
         else:
             logger.warning(f"Failed to read maxParallelNodeAdds from CR "
