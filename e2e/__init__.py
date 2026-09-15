@@ -99,7 +99,7 @@ from stress_test.dual_outage_matrix import (
     DualOutageMatrixDocker,
     DualOutageMatrixK8s,
 )
-from stress_test.lblk_tests import (
+from e2e_tests.lblk.test_lblk import (
     LblkFunctionalDocker,
     LblkFunctionalK8s,
     LblkIntegrityDocker,
@@ -110,6 +110,10 @@ from stress_test.lblk_tests import (
     LblkJournalRecoveryK8s,
     LblkUnfencedJournalDocker,
     LblkUnfencedJournalK8s,
+)
+from stress_test.lblk_stress import (
+    LblkStressDocker,
+    LblkStressK8s,
 )
 from stress_test.product_limits_stress import (
     ProductLimits_Docker,
@@ -477,6 +481,8 @@ ALL_TESTS = [
     LblkJournalRecoveryK8s,
     LblkUnfencedJournalDocker,
     LblkUnfencedJournalK8s,
+    LblkStressDocker,
+    LblkStressK8s,
     ProductLimits_Docker,
     ProductLimits_K8s,
     ProductLimits_70TiB_Docker,
@@ -768,16 +774,8 @@ def get_stress_tests():
         LargeScaleLvolK8s,
         DualOutageMatrixDocker,
         DualOutageMatrixK8s,
-        LblkFunctionalDocker,
-        LblkFunctionalK8s,
-        LblkIntegrityDocker,
-        LblkIntegrityK8s,
-        LblkDeviceFaultDocker,
-        LblkDeviceFaultK8s,
-        LblkJournalRecoveryDocker,
-        LblkJournalRecoveryK8s,
-        LblkUnfencedJournalDocker,
-        LblkUnfencedJournalK8s,
+        LblkStressDocker,
+        LblkStressK8s,
         ProductLimits_Docker,
         ProductLimits_K8s,
         ProductLimits_70TiB_Docker,
@@ -983,6 +981,29 @@ def get_load_tests():
         TestLvolOutageLoadTest
     ]
     return tests
+
+
+def get_lblk_tests():
+    """Functional and integration coverage for lblk (non-NVMe) clusters.
+
+    Every one of these asserts device_mode == "lblk" first and fails fast if
+    not, so pointing this at an NVMe cluster reports a precondition error
+    rather than quietly passing against the wrong storage path.
+
+    The open-ended soak is LblkStress* in get_stress_tests().
+    """
+    return [
+        LblkFunctionalDocker,
+        LblkFunctionalK8s,
+        LblkIntegrityDocker,
+        LblkIntegrityK8s,
+        LblkDeviceFaultDocker,
+        LblkDeviceFaultK8s,
+        LblkJournalRecoveryDocker,
+        LblkJournalRecoveryK8s,
+        LblkUnfencedJournalDocker,
+        LblkUnfencedJournalK8s,
+    ]
 
 
 def get_parity_tests():
