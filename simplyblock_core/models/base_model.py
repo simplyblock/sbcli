@@ -499,6 +499,17 @@ class BaseNodeObject(BaseModel):
     #: (see remove_storage_node, which admits this status).
     STATUS_REMOVED_FAILED = 'removed_failed'
 
+    #: Statuses meaning "this node is on its way out of the cluster". A node in
+    #: any of them has had its SPDK shut down by the removal flow, so work that
+    #: has to execute ON it can never run and must not be queued against it.
+    DEPARTING_STATUSES: ClassVar[tuple] = (
+        STATUS_PENDING_REMOVAL,
+        STATUS_MIGRATING_LVOLS,
+        STATUS_IN_REMOVAL,
+        STATUS_REMOVED,
+        STATUS_REMOVED_FAILED,
+    )
+
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,
         STATUS_OFFLINE: 1,
