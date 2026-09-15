@@ -15,7 +15,9 @@ an artefact of the test.
 from stress_test.continuous_failover_ha_multi_outage_all_nodes import (
     RandomMultiClientMultiFailoverAllNodesTest,
 )
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest
+from stress_test.continuous_k8s_native_failover import (
+    K8sNativeResilientFailoverTest,
+)
 from utils.md_journal import assert_journal_enabled, scan_log_for_corruption
 from utils.raw_device_verify import RawDeviceVerifier
 
@@ -126,7 +128,19 @@ class _LblkStressMixin:
 
 
 class LblkStressDocker(_LblkStressMixin, RandomMultiClientMultiFailoverAllNodesTest):
-    """lblk soak on docker."""
+    """lblk soak on docker: the multi-client, multi-node, multi-outage loop.
+
+    Same iteration shape as RandomMultiClientMultiFailoverAllNodesTest -- every
+    outage type, every node, round after round -- with the raw crc32c bracket
+    added around each one.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Otherwise this inherits the parent's name and its logs land in
+        # "<nfs>/n_plus_k_failover_multi_client_ha_all_nodes-<ts>/", where an
+        # lblk soak is indistinguishable from an NVMe one after the fact.
+        self.test_name = "lblk_stress_multi_outage_docker"
 
     def _spdk_exec_prefix(self, node_ip, rpc_port):
         return f"sudo docker exec spdk_{rpc_port}"
@@ -135,8 +149,20 @@ class LblkStressDocker(_LblkStressMixin, RandomMultiClientMultiFailoverAllNodesT
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
 
-class LblkStressK8s(_LblkStressMixin, K8sNativeFailoverTest):
-    """lblk soak on k8s-native."""
+class LblkStressK8s(_LblkStressMixin, K8sNativeResilientFailoverTest):
+    """lblk soak on k8s-native: the resilient multi-outage loop.
+
+    On the resilient base rather than the plain K8sNativeFailoverTest, because
+    that one keeps permanent PVCs, snapshots and clones alive across the whole
+    run. Without them, PVC provisioning blocks whenever
+    ``ndcs + npcs > online_nodes``, so a degraded cluster drops to zero IO and
+    the iterations that follow prove nothing about the journal. Keeping IO on
+    permanent volumes is what makes a multi-iteration lblk soak meaningful.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lblk_stress_multi_outage_k8s"
 
     def _spdk_exec_prefix(self, node_ip, rpc_port):
         pod = self.k8s_utils.get_spdk_pod_for_node(node_ip)
