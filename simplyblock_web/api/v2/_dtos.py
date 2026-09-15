@@ -335,6 +335,8 @@ class SnapshotDTO(BaseModel):
     migrating: bool
     lvol: util.UrlPath | None
     created_at: datetime
+    group_id: str
+    group_seq: int
 
 
     @staticmethod
@@ -357,6 +359,8 @@ class SnapshotDTO(BaseModel):
             used_size=model.used_size,
             migrating=is_migrating,
             created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            group_id=model.group_id,
+            group_seq=model.group_seq,
             lvol=str(
                 request.url_for(
                     #"clusters:pools:volumes:detail",
@@ -504,6 +508,8 @@ class VolumeDTO(BaseModel):
     capacity: CapacityStatDTO
     rep_info: dict | None = None
     from_source: bool = True
+    group_id: str = ""
+    group_seq: int = 0
 
     @staticmethod
     def from_model(
@@ -516,6 +522,18 @@ class VolumeDTO(BaseModel):
         active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
         _db = DBController()
         eff_policy = _db.get_policy_for_lvol(model)
+        # Surface consistency-group membership (design §10): the migration
+        # webhook (§9.5) reads group_id to decide whether a volume is a member.
+        # group_id is the denormalized field on the volume; group_seq is the
+        # group's latest generation, resolved only for an actual member.
+        _grp_seq = 0
+        if model.group_id:
+            try:
+                _grp_seq = _db.get_consistency_group_by_id(model.group_id).last_group_seq
+            except KeyError:
+                # Missing/deleted consistency-group record is tolerated here;
+                # keep default group_seq=0 for non-resolvable membership.
+                _grp_seq = 0
         return VolumeDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(cluster_id),
@@ -574,6 +592,8 @@ class VolumeDTO(BaseModel):
             ),
             rep_info=rep_info,
             from_source=model.from_source,
+            group_id=model.group_id,
+            group_seq=_grp_seq,
         )
 
 
@@ -694,6 +714,62 @@ class ReplicationPolicyDTO(BaseModel):
             group_lvs_name=group.lvs_name if group is not None else "",
             group_last_seq=group.last_group_seq if group is not None else 0,
         )
+
+
+class ConsistencyGroupDTO(BaseModel):
+    """A standalone consistency group summary (design §10)."""
+    id: UUID
+    cluster_id: UUID
+    name: str
+    node_id: util.OptionalUUID = None
+    lvs_name: str = ""
+    member_count: int
+    last_group_seq: int
+
+    @staticmethod
+    def from_model(model: ConsistencyGroup):
+        current = sum(1 for m in (model.members or {}).values()
+                      if m.get("removed_seq", 0) == 0)
+        return ConsistencyGroupDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            name=model.group_name,
+            node_id=UUID(model.node_id) if model.node_id else None,
+            lvs_name=model.lvs_name,
+            member_count=current,
+            last_group_seq=model.last_group_seq,
+        )
+
+
+class ConsistencyGroupMemberDTO(BaseModel):
+    """One current member of a consistency group (design §10 /members)."""
+    lvol_id: str
+    joined_seq: int
+    removed_seq: int
+    node_id: str
+    lvs_name: str
+    online: bool
+
+
+class ConsistencyGroupMemberJoinDTO(BaseModel):
+    """Request body for the late join of an existing volume (design §4.5)."""
+    lvol_id: str
+
+
+class ConsistencyGroupGenerationMemberDTO(BaseModel):
+    lvol_id: str
+    snapshot_id: str
+    ready: bool
+
+
+class ConsistencyGroupGenerationDTO(BaseModel):
+    """One generation of a consistency group (design §6.3)."""
+    group_seq: int
+    created_at: int
+    expected: int
+    present: int
+    complete: bool
+    members: list[ConsistencyGroupGenerationMemberDTO]
 
 
 class ReplicationRelationshipDTO(BaseModel):
