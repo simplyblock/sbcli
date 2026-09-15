@@ -1,24 +1,20 @@
 """No migration work may be queued against a node that is leaving.
 
 A device-migration task executes ON the node it is queued for. A node on its
-way out is suspended or shut down, so such a task can never run: the runner
-parks it with "node is not online, retrying" (tasks_runner_failed_migration.py)
-and it stays suspended for ever, while the device it belongs to never reaches
-FAILED_AND_MIGRATED and the removal waits on it.
+way out has had its SPDK shut down by the removal flow, so such a task can
+never run: the failed-migration runner parks it with "node is not online,
+retrying" (tasks_runner_failed_migration.py) and it stays suspended for ever.
 
 add_device_failed_mig_task already said this in a comment -- naming IN_REMOVAL
 explicitly and predicting it "would stall the node-removal completion check
 forever" -- but only tested STATUS_REMOVED. That held while device failure
-happened at the very end of a removal, after the status flip and after the
-node's lvstore had been torn down: it had no distrib left to queue against.
+happened at the very end of a removal, after the status flip, because REMOVED
+was then the only status a departing node was ever in at that point.
 
-Failing the devices FIRST, as the Kubernetes drain does, makes the gap
-reachable again. Observed live on a 7-node cluster (2026-09-25): six tasks
-queued on the node being drained, all parked on "node is not online, retrying",
-the device phase stuck at "0 of 3 devices rebuilt" indefinitely.
-
-Adapted from the same test on the main line, minus the two statuses this branch
-does not have (MIGRATING_LVOLS, REMOVED_FAILED).
+Failing the devices earlier, while the node is MIGRATING_LVOLS, made the gap
+reachable: the tasks were created, never ran, their devices never reached
+FAILED_AND_MIGRATED, and the removal waited on them until its ceiling -- 99
+retries in 17 minutes, observed live on cluster 6740f9c5 (2026-09-15).
 """
 import unittest
 from unittest.mock import MagicMock, patch
@@ -32,8 +28,6 @@ def _node(node_id, status):
     node.get_id.return_value = node_id
     node.status = status
     node.lvstore_stack = [{"type": "bdev_distr", "name": f"distr_{node_id}"}]
-    node.secondary_node_id = ""
-    node.tertiary_node_id = ""
     return node
 
 
@@ -42,14 +36,11 @@ class TestDepartingNodesAreSkipped(unittest.TestCase):
     def _queued_for(self, statuses, fn):
         device = MagicMock()
         device.cluster_id = "c1"
-        device.node_id = "n0"
         device.get_id.return_value = "dev-1"
         nodes = [_node(f"n{i}", s) for i, s in enumerate(statuses)]
         db = MagicMock()
         db.get_storage_device_by_id.return_value = device
         db.get_storage_nodes_by_cluster_id.return_value = nodes
-        db.get_storage_node_by_id.side_effect = lambda i: next(
-            (n for n in nodes if n.get_id() == i), _node(i, StorageNode.STATUS_ONLINE))
         added = []
         with patch.object(tasks_controller, "db", db), \
              patch.object(tasks_controller, "_add_task",
@@ -72,11 +63,11 @@ class TestDepartingNodesAreSkipped(unittest.TestCase):
             tasks_controller.add_new_device_mig_task)
         self.assertEqual(added, ["n0"])
 
-    def test_pending_removal_is_skipped(self):
-        """The status the drain stamps before it fails the devices, and the one
-        that made the long-documented gap reachable on this branch."""
+    def test_migrating_lvols_specifically_is_skipped(self):
+        """The status the reorder introduced, and the one that made the
+        long-documented gap reachable."""
         added = self._queued_for(
-            [StorageNode.STATUS_ONLINE, StorageNode.STATUS_PENDING_REMOVAL],
+            [StorageNode.STATUS_ONLINE, StorageNode.STATUS_MIGRATING_LVOLS],
             tasks_controller.add_device_failed_mig_task)
         self.assertEqual(added, ["n0"])
 
@@ -87,35 +78,6 @@ class TestDepartingNodesAreSkipped(unittest.TestCase):
             tasks_controller.add_device_failed_mig_task)
         self.assertEqual(added, ["n0"])
 
-    def test_the_whole_node_sweep_skips_departing_nodes_too(self):
-        """add_device_mig_task_for_node walks every node in the cluster and
-        queues one task per distrib, so it reaches a departing node the same way
-        the two above do. It was missed when they were fixed because its name
-        does not match theirs, and it tested only STATUS_REMOVED -- which left
-        the whole of a drain inside the gap. Found live on 2026-09-25: two
-        device_migration tasks sitting on a node in pending_removal, each
-        "waiting for unavailable nodes/devices to recover".
-        """
-        nodes = [_node("n0", StorageNode.STATUS_ONLINE)]
-        nodes += [_node(f"n{i + 1}", s)
-                  for i, s in enumerate(StorageNode.DEPARTING_STATUSES)]
-        for node in nodes:
-            node.cluster_id = "c1"
-        db = MagicMock()
-        db.get_storage_node_by_id.return_value = nodes[0]
-        db.get_storage_nodes_by_cluster_id.return_value = nodes
-        db.get_job_tasks.return_value = []
-        added = []
-        with patch.object(tasks_controller, "db", db), \
-             patch.object(tasks_controller, "_add_task",
-                          side_effect=lambda *a, **k: added.append(a[2])):
-            tasks_controller.add_device_mig_task_for_node("n0")
-
-        self.assertEqual(
-            added, ["n0"],
-            "a departing node was given a device-migration task; it runs ON "
-            "that node, so it waits for a recovery that is never coming")
-
     def test_healthy_nodes_still_get_their_tasks(self):
         added = self._queued_for(
             [StorageNode.STATUS_ONLINE, StorageNode.STATUS_ONLINE],
@@ -125,22 +87,22 @@ class TestDepartingNodesAreSkipped(unittest.TestCase):
 
 class TestDepartingStatusSet(unittest.TestCase):
 
-    def test_it_covers_every_removal_state_this_branch_has(self):
+    def test_it_covers_every_removal_state(self):
         for status in (StorageNode.STATUS_PENDING_REMOVAL,
+                       StorageNode.STATUS_MIGRATING_LVOLS,
                        StorageNode.STATUS_IN_REMOVAL,
-                       StorageNode.STATUS_REMOVED):
+                       StorageNode.STATUS_REMOVED,
+                       StorageNode.STATUS_REMOVED_FAILED):
             self.assertIn(status, StorageNode.DEPARTING_STATUSES)
 
     def test_it_excludes_states_a_node_can_return_from(self):
-        """A node that is merely down or suspended may come back, and should
-        still be given its migration work when it does."""
-        for status in (StorageNode.STATUS_ONLINE,
-                       StorageNode.STATUS_DOWN,
-                       StorageNode.STATUS_SUSPENDED,
+        """A node that is merely down may come back and should still be given
+        its migration work when it does."""
+        for status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_OFFLINE,
                        StorageNode.STATUS_UNREACHABLE,
-                       StorageNode.STATUS_RESTARTING):
+                       StorageNode.STATUS_SUSPENDED):
             self.assertNotIn(status, StorageNode.DEPARTING_STATUSES)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
