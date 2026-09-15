@@ -2025,6 +2025,19 @@ def node_config_device_count(node) -> int:
     return len(node.get("lblk_devices") or []) or len(node.get("ssd_pcis") or [])
 
 
+def lblk_device_serials(lblk_devices) -> set[str]:
+    """Serials of an lblk device list — the stable identity of an lblk node
+    slot's device set. Device NAMES can move across reboots, serials cannot
+    (detect_lblk_devices synthesises one when the hardware has none), so
+    serials are what identifies a slot to anything that has to find it again:
+    persist_node_config's matcher, add-node's ownership classification.
+
+    Takes the list itself, so it serves both a node-config entry's
+    ``lblk_devices`` and a StorageNode record's.
+    """
+    return {e["serial"] for e in (lblk_devices or []) if e.get("serial")}
+
+
 # Sys-memory sizing intent (see generate_automated_deployment_config):
 # "RAM 4GB min. Plus 0.2% of the storage." The nvme path nominally adds the
 # FULL device capacity but in practice always measures 0 — capacity is read
