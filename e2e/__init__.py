@@ -119,6 +119,8 @@ from e2e_tests.lblk.test_lblk import (
 from stress_test.lblk_stress import (
     LblkStressDocker,
     LblkStressK8s,
+    LblkMultiOutageStressDocker,
+    LblkResilientStressK8s,
 )
 from stress_test.product_limits_stress import (
     ProductLimits_Docker,
@@ -488,6 +490,8 @@ ALL_TESTS = [
     LblkUnfencedJournalK8s,
     LblkStressDocker,
     LblkStressK8s,
+    LblkMultiOutageStressDocker,
+    LblkResilientStressK8s,
     ProductLimits_Docker,
     ProductLimits_K8s,
     ProductLimits_70TiB_Docker,
@@ -781,6 +785,8 @@ def get_stress_tests():
         DualOutageMatrixK8s,
         LblkStressDocker,
         LblkStressK8s,
+        LblkMultiOutageStressDocker,
+        LblkResilientStressK8s,
         ProductLimits_Docker,
         ProductLimits_K8s,
         ProductLimits_70TiB_Docker,
