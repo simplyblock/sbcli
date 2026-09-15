@@ -4974,16 +4974,36 @@ class RemovalCursor:
         self._task = task
         params = (task.function_params if task is not None else None) or {}
         self.step = params.get("step")
-        self.data = params.get("step_data") or {}
-        self.entered_at = params.get("step_entered_at") or time.time()
+        # Keyed BY step, not a single bag cleared on transition. The
+        # orchestrator is re-entrant: every pass replays the steps from the top
+        # (recheck -> devices -> drain), so a bag that reset whenever the step
+        # changed was wiped on every pass. The drain then forgot the migration
+        # it had already started and tried to start it again -- "An active
+        # migration for <lvol> already exists targeting a different node"
+        # (2026-09-15, cluster a6e7569d). Per-step namespaces survive that
+        # replay, which is the whole point of persisting them.
+        self._all_data = params.get("step_data") or {}
+        self._entered = params.get("step_entered_at") or {}
+
+    @property
+    def data(self):
+        """Scratch for the current step. Survives both a retry and the
+        orchestrator replaying earlier steps ahead of it."""
+        return self._all_data.setdefault(self.step or "", {})
+
+    @property
+    def entered_at(self):
+        return self._entered.get(self.step or "") or time.time()
 
     def enter(self, step, message):
         """Mark ``step`` as the one now running and log it unchanged."""
         logger.info(message)
-        if step != self.step:
-            self.step = step
-            self.data = {}
-            self.entered_at = time.time()
+        self.step = step
+        # Stamped once, the first time this step is entered: re-entering on a
+        # later pass must not restart its clock, or a step retried every few
+        # seconds could never age out of its budget.
+        self._entered.setdefault(step, time.time())
+        self._all_data.setdefault(step, {})
         self._persist()
 
     def elapsed(self):
@@ -5001,8 +5021,8 @@ class RemovalCursor:
             return
         params = self._task.function_params or {}
         params["step"] = self.step
-        params["step_data"] = self.data
-        params["step_entered_at"] = self.entered_at
+        params["step_data"] = self._all_data
+        params["step_entered_at"] = self._entered
         self._task.function_params = params
 
     def save(self):
