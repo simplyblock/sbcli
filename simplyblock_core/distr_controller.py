@@ -94,6 +94,17 @@ def _persist_target_device_event(device, status, target_node):
     db_controller.atomic_update(node, _mutate)
 
 
+#: Nodes that can actually receive a status event. A departing node's SPDK is
+#: stopped and its mgmt hostname no longer resolves, so an event addressed to
+#: it cannot land; DOWN is included because only its client-facing LVS port is
+#: fenced -- SPDK and its RPC channel are alive.
+_EVENT_RECIPIENT_STATUSES = (
+    StorageNode.STATUS_ONLINE,
+    StorageNode.STATUS_SUSPENDED,
+    StorageNode.STATUS_DOWN,
+)
+
+
 def send_node_status_event(node, node_status, target_node=None):
     db_controller = DBController()
     node_id = node.get_id()
@@ -117,7 +128,7 @@ def send_node_status_event(node, node_status, target_node=None):
                 skipped_nodes.append(node)
 
     for node in snodes:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,  StorageNode.STATUS_DOWN]:
+        if node.status not in _EVENT_RECIPIENT_STATUSES:
             continue
         node_found_same_host = False
         for n in skipped_nodes:
@@ -154,7 +165,21 @@ def send_dev_status_event(device, status, target_node=None):
 
     results = []
     for node in snodes:
-        if node.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        # Same positive condition as send_node_status_event above, not an
+        # exclusion list. Written as [OFFLINE, REMOVED] this skipped no
+        # in-flight removal status, so every device event was also fanned out
+        # to a node whose SPDK the removal had already stopped. That send can
+        # only fail, and the caller's gate is `all(results)` -- so the failure
+        # is not merely wasted, it is indistinguishable from a real peer that
+        # refused the event.
+        #
+        # tasks_runner_port_allow uses that gate as its positive confirmation
+        # before touching hublvols, leadership or the port. A node recovering
+        # while another was being removed therefore parked forever on
+        # "Local device status for <dev> not applied by all distribs, retry
+        # task" -- the unreachable "peer" being the node on its way out
+        # (cluster a6e7569d, 2026-09-15).
+        if node.status not in _EVENT_RECIPIENT_STATUSES:
             logger.info(f"skipping node: {node.get_id()} with status: {node.status}")
             continue
         node_found_same_host = False
