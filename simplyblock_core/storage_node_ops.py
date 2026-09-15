@@ -5111,11 +5111,28 @@ def _pick_drain_target(snode, lvol, tried, db_controller):
     diversity is deliberately not a factor: a migrated volume joins the target's
     EXISTING lvstore, whose replica topology it does not change.
 
-    Excluded: every node already tried for this unit, and the departing node
-    itself. The departing node is normally filtered out anyway (drain runs after
-    shutdown, so it is not ONLINE), but saying so here does not rely on that.
+    Excluded: every node already tried for this unit, the departing node
+    itself, and the node currently standing in as the migration's source. The
+    departing node is normally filtered out anyway (drain runs after shutdown,
+    so it is not ONLINE), but saying so here does not rely on that.
+
+    The third exclusion is the one that is easy to miss. The drain runs after
+    the node is down, so the migration reads from a replica instead
+    (migration_controller.resolve_source_node). That replica is a perfectly
+    good-looking placement candidate -- it is ONLINE and has capacity -- but
+    choosing it makes the source and the destination the same node, and
+    create_migration rejects it: "Cannot migrate to node <x>: source primary
+    <y> is offline and <x> is currently serving as the fallback source for this
+    volume" (cluster a6e7569d, 2026-09-15). Asking the resolver rather than
+    re-deriving which replica it will pick keeps one owner of that rule.
     """
     exclude = list(tried) + [snode.get_id()]
+    try:
+        exclude.append(migration_controller.resolve_source_node(snode).get_id())
+    except ValueError:
+        # No replica online either. Nothing to exclude, and create_migration
+        # will raise the real, more specific error.
+        pass
     candidates = lvol_controller._get_next_3_nodes(
         snode.cluster_id, lvol.size,
         namespaced=bool(getattr(lvol, "max_namespace_per_subsys", 1) > 1),

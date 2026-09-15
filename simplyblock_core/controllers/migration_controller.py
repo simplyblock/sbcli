@@ -504,11 +504,40 @@ def get_snapshot_chain(lvol_id, source_node_id=None):
     return result
 
 
+def resolve_source_node(primary_node):
+    """Which node will actually serve source-side RPCs for a migration off
+    *primary_node*: itself when reachable, otherwise its first online replica
+    (secondary, then tertiary).
+
+    Public because callers need the answer BEFORE they choose a target -- the
+    node standing in as the source cannot also be the destination. Asking here
+    rather than re-deriving it keeps one owner of the rule; a second copy would
+    be free to disagree with the one the migration actually uses.
+
+    Raises ValueError if the primary is unreachable and no replica is online.
+    """
+    if primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        return primary_node
+
+    for replica_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+        if not replica_id:
+            continue
+        try:
+            replica = db.get_storage_node_by_id(replica_id)
+        except KeyError:
+            continue
+        if replica.status == StorageNode.STATUS_ONLINE:
+            return replica
+
+    raise ValueError(
+        f"Source node is not online (status={primary_node.status}) "
+        f"and no online secondary/tertiary replica is available")
+
+
 def _resolve_active_source_node(primary_node, target_node_id):
     """
     Decide which node the migration will actually issue source-side RPCs
-    against: *primary_node* itself when reachable, otherwise its online
-    secondary, otherwise its online tertiary.
+    against, and refuse a target that is that node.
 
     This is called exactly once, at create time (create_migration /
     create_batch_migration). The result is persisted as
@@ -520,24 +549,7 @@ def _resolve_active_source_node(primary_node, target_node_id):
     online either. Raises PreconditionError if the resolved node is the
     same as target_node_id (can't migrate a replica onto itself).
     """
-    if primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
-        active_node = primary_node
-    else:
-        active_node = None
-        for replica_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
-            if not replica_id:
-                continue
-            try:
-                replica = db.get_storage_node_by_id(replica_id)
-            except KeyError:
-                continue
-            if replica.status == StorageNode.STATUS_ONLINE:
-                active_node = replica
-                break
-        if active_node is None:
-            raise ValueError(
-                f"Source node is not online (status={primary_node.status}) "
-                f"and no online secondary/tertiary replica is available")
+    active_node = resolve_source_node(primary_node)
 
     if active_node.get_id() == target_node_id:
         raise PreconditionError(

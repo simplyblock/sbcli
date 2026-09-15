@@ -295,3 +295,73 @@ class TestClusterStaysActiveUntilTeardown(unittest.TestCase):
         restore a status it never changed."""
         src = self._source()
         self.assertIn("if shrink_marked:", src)
+
+
+class TestDrainTargetExcludesTheActingSource(unittest.TestCase):
+    """The drain runs after the node is down, so the migration reads from a
+    replica instead. That replica looks like an ideal target -- ONLINE, has
+    capacity -- but picking it makes source and destination the same node and
+    create_migration refuses:
+
+        Cannot migrate to node d5785628: source primary a1b050f1 is offline
+        and d5785628 is currently serving as the fallback source for this
+        volume
+
+    Observed on cluster a6e7569d (2026-09-15): the drain proposed the acting
+    source on every pass and could never start. Excluded by asking
+    migration_controller.resolve_source_node, not by re-deriving which replica
+    it would choose.
+    """
+
+    def _pick(self, candidates, source_node_id, tried=()):
+        snode = MagicMock()
+        snode.get_id.return_value = "departing"
+        snode.cluster_id = "c1"
+        lvol = MagicMock()
+        lvol.size = 1024
+        lvol.max_namespace_per_subsys = 1
+        acting = MagicMock()
+        acting.get_id.return_value = source_node_id
+        with patch.object(storage_node_ops.lvol_controller, "_get_next_3_nodes",
+                          return_value=list(candidates)), \
+             patch.object(storage_node_ops.migration_controller,
+                          "resolve_source_node", return_value=acting):
+            return storage_node_ops._pick_drain_target(
+                snode, lvol, list(tried), MagicMock())
+
+    def test_the_acting_source_is_not_offered(self):
+        self.assertEqual(self._pick(["d5785628", "b30f8f0c"], "d5785628"),
+                         "b30f8f0c")
+
+    def test_a_normal_candidate_is_still_offered(self):
+        self.assertEqual(self._pick(["b30f8f0c", "c968ea0b"], "d5785628"),
+                         "b30f8f0c")
+
+    def test_already_tried_and_the_source_are_both_excluded(self):
+        self.assertEqual(
+            self._pick(["d5785628", "b30f8f0c", "c968ea0b"], "d5785628",
+                       tried=["b30f8f0c"]),
+            "c968ea0b")
+
+    def test_exhausting_the_candidates_returns_none(self):
+        self.assertIsNone(self._pick(["d5785628"], "d5785628"))
+
+    def test_the_departing_node_is_still_excluded(self):
+        self.assertIsNone(self._pick(["departing"], "d5785628"))
+
+    def test_no_online_replica_does_not_break_the_pick(self):
+        """resolve_source_node raises when nothing can serve as source;
+        create_migration will report that properly, so just don't exclude."""
+        snode = MagicMock()
+        snode.get_id.return_value = "departing"
+        snode.cluster_id = "c1"
+        lvol = MagicMock()
+        lvol.size = 1024
+        lvol.max_namespace_per_subsys = 1
+        with patch.object(storage_node_ops.lvol_controller, "_get_next_3_nodes",
+                          return_value=["b30f8f0c"]), \
+             patch.object(storage_node_ops.migration_controller,
+                          "resolve_source_node", side_effect=ValueError("none")):
+            self.assertEqual(
+                storage_node_ops._pick_drain_target(snode, lvol, [], MagicMock()),
+                "b30f8f0c")
