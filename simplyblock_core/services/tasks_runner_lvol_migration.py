@@ -2714,6 +2714,48 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     return True, False, None
 
 
+def _delete_source_intermediates(migration):
+    """Delete the intermediate snapshots THIS migration took on the source.
+
+    Rolling back the target is only half a rollback. _take_intermediate_snapshot
+    creates real snapshots on the SOURCE ("_mig_<id>_r<n>") whose entire purpose
+    is to shrink the delta that has to be transferred. Once the migration is
+    abandoned they have no purpose left, and nothing else removes them: the
+    success path cleans them up from _handle_cleanup_source, which an aborted
+    migration never reaches.
+
+    Leaving them is blocking, not untidy. remove_storage_node refuses a node
+    that has snapshots, so a failed drain left an orphan on the very node being
+    removed and permanently prevented the operator re-drive that
+    STATUS_REMOVED_FAILED exists to offer -- with no command able to clear it
+    (`volume migrate-cleanup` is scoped to the target). Cluster a6e7569d,
+    2026-09-15, twice: "Can not remove node ...: 1 snapshot(s) present. Remove
+    them first."
+
+    Only migration-created snapshots are touched -- ``intermediate_snaps``,
+    never the rest of ``snap_migration_plan``, which carries the user's own.
+    Best-effort by design: a snapshot that will not delete must not trap the
+    migration in cleanup for ever, so a failure is logged and the rollback
+    still completes.
+    """
+    for snap_uuid in list(migration.intermediate_snaps or []):
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            continue  # already gone
+        if snap.deleted:
+            continue
+        try:
+            snapshot_controller.delete(snap_uuid, force_delete=True)
+            logger.info(
+                f"cleanup_target: deleted source intermediate snapshot "
+                f"{snap.snap_name or snap_uuid} ({snap_uuid})")
+        except Exception as e:
+            logger.warning(
+                f"cleanup_target: could not delete source intermediate snapshot "
+                f"{snap_uuid} (leaving it; it will block a node removal): {e}")
+
+
 def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=None):
     """
     Roll back a failed or cancelled migration: remove any partially-created
@@ -2914,6 +2956,8 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
                 logger.warning(
                     f"delete target snapshot bdev {bdev_name} (transient, will retry): {e}")
                 return False, True, None
+
+    _delete_source_intermediates(migration)
 
     migration.transfer_context = {}
     migration.target_lvol_bdev = ""
