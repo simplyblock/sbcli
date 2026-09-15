@@ -1,3 +1,8 @@
+# First, and before any test module: a few tests import the product for its
+# constants, and e2e runs from e2e/ where the repo root is not on sys.path.
+# See _product_path.py -- this used to work only by accident.
+import _product_path  # noqa: F401
+
 from e2e_tests.single_node_outage import (
     TestSingleNodeOutage,
     TestHASingleNodeOutage
