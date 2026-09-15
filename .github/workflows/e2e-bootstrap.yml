@@ -285,6 +285,19 @@ jobs:
       CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
       NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS || '' }}
 
+      # Every host this run touches, for the lab lock. Duplicates and blanks are
+      # fine -- lab_lock.sh dedupes and sorts. MNODES is normally also BASTION_IP.
+      LAB_HOSTS: >-
+        ${{ inputs.MNODES || '192.168.10.210' }}
+        ${{ inputs.BASTION_IP || '192.168.10.210' }}
+        ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204' }}
+        ${{ inputs.CLIENTNODES || '192.168.10.165 192.168.10.166' }}
+        ${{ inputs.NEW_NODE_IPS || '' }}
+      # Not workflow inputs: a workflow may declare at most 25 of them and this
+      # one is at the cap. Flip LOCK_DISABLE here to bypass the lock for a run.
+      LOCK_GRACE_SECONDS: "120"
+      LOCK_DISABLE: "false"
+
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -401,6 +414,27 @@ jobs:
         run: |
           set -euxo pipefail
           [[ -n "${SSH_PASSWORD}" ]] || (echo "ERROR: secrets.SSH_PASSWORD required" && exit 1)
+
+      - name: Check out the lab lock
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/actions/lab-lock
+            e2e/lab_lock.sh
+          sparse-checkout-cone-mode: false
+
+      # Last step before anything is destroyed, so a run that fails the cheap
+      # validation above never reserves the hosts. The action's post step
+      # releases them when this job ends, cancellations included.
+      - name: Acquire lab host lock
+        uses: ./.github/actions/lab-lock
+        with:
+          mode: acquire
+          hosts: ${{ env.LAB_HOSTS }}
+          job: bootstrap-and-e2e
+          label: ${{ inputs.RUN_LABEL }}
+          disabled: ${{ env.LOCK_DISABLE }}
+          grace-seconds: ${{ env.LOCK_GRACE_SECONDS }}
 
       # ============================================================
       # PRE-BOOTSTRAP CLEANUP (remote ops only)
