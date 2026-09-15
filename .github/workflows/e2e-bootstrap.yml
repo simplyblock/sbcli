@@ -916,12 +916,18 @@ jobs:
             RESET_EXTRA_CLUSTER_ARGS="${RESET_EXTRA_CLUSTER_ARGS} --is-single-node"
           fi
 
+          # --opt=value, not --opt value. argparse treats any token starting
+          # with a dash as an option, so `--extra_sn_args --lblk` fails with
+          # "expected one argument". Multi-word values happen to survive the
+          # separated form because argparse exempts anything containing a
+          # space -- which is why --extra_cluster_args "--device-mode lblk"
+          # worked and a lone --lblk did not. The = form has no such edge.
           EXTRA_ARGS=()
           if [[ -n "${RESET_EXTRA_CLUSTER_ARGS}" ]]; then
-            EXTRA_ARGS+=(--extra_cluster_args "${RESET_EXTRA_CLUSTER_ARGS}")
+            EXTRA_ARGS+=("--extra_cluster_args=${RESET_EXTRA_CLUSTER_ARGS}")
           fi
           if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
-            EXTRA_ARGS+=(--extra_sn_args "${EXTRA_SN_ARGS}")
+            EXTRA_ARGS+=("--extra_sn_args=${EXTRA_SN_ARGS}")
           fi
 
           python3 -u e2e.py \
