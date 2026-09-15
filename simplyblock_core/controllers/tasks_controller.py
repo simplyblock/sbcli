@@ -342,6 +342,36 @@ def add_device_mig_task_for_node(node_id):
     sub_tasks = []
     node = db.get_storage_node_by_id(node_id)
     cluster_id = node.cluster_id
+
+    # Not while a node is leaving. A rebalance spreads data across the CURRENT
+    # placement, and a removal is in the middle of changing it: the departing
+    # node's slots are already marked dead (storage_ID=-1) in every peer's
+    # cluster map, so the rebalance migrations run against them and fail --
+    # "mig error: 576" -- with max_retry=-1, i.e. for ever.
+    #
+    # That is not merely wasted work, because it deadlocks the removal that
+    # made it pointless. An unfinished balancing master keeps the cluster in
+    # REBALANCING, and migration_controller.create_migration refuses to run
+    # there ("Cluster ... is rebalancing; wait for it to finish before
+    # migrating") -- so the removal's own volume drain can never start, the
+    # node can never finish leaving, and the placement the rebalance is
+    # waiting on can never settle. Observed live on cluster a6e7569d
+    # (2026-09-15): two subtasks, 182 retries in ~20 minutes, progress
+    # restarting from zero each lap.
+    #
+    # Skipping is safe: the node whose recovery triggered this is ONLINE and
+    # serving either way, and the removal re-balances what it moves as it goes.
+    # The next legitimate trigger after the removal settles rebalances against
+    # a topology that has stopped moving.
+    departing = [n.get_id() for n in db.get_storage_nodes_by_cluster_id(cluster_id)
+                 if n.status in StorageNode.DEPARTING_STATUSES]
+    if departing:
+        logger.info(
+            f"Skipping cluster rebalance for {node_id}: node removal in "
+            f"progress ({', '.join(departing)}); the placement it would "
+            f"balance against is still changing")
+        return False
+
     master_task = None
     for task in  db.get_job_tasks(cluster_id):
         if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
