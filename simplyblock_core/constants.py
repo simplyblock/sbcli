@@ -745,7 +745,7 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
 CR_GROUP = "storage.simplyblock.io"
-CR_VERSION  = "v1alpha1"
+CR_VERSION  = "v1alpha2"
 
 # Grafana alert rules read from the cluster event log rather than from Thanos,
 # provisioned by `sbctl cluster event-alerts`. The plugin id is both the folder
