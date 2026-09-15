@@ -457,23 +457,9 @@ class BaseNodeObject(BaseModel):
     #: a node carrying it may still be up and serving, and treating a live peer
     #: as gone would skip the port-block that keeps it from writing.
     REMOVAL_SHUT_DOWN_STATUSES: ClassVar[tuple] = (
+        STATUS_MIGRATING_LVOLS,
         STATUS_IN_REMOVAL,
         STATUS_REMOVED,
-    )
-
-    #: Statuses meaning "this node is on its way out of the cluster" -- it will
-    #: not serve again under this identity, so work that has to execute ON it
-    #: must not be queued against it.
-    #:
-    #: Listed once and derived everywhere, so a consumer asking "is this node
-    #: leaving?" reads one of these two rather than spelling the statuses out.
-    #: Hand-written copies of this list are how a removal ended up RPC-ing a
-    #: node whose pod was already gone.
-    #:
-    DEPARTING_STATUSES: ClassVar[tuple] = (
-        STATUS_PENDING_REMOVAL,
-        STATUS_MIGRATING_LVOLS,
-    ) + REMOVAL_SHUT_DOWN_STATUSES + (
         STATUS_REMOVED_FAILED,
     )
 
@@ -488,13 +474,16 @@ class BaseNodeObject(BaseModel):
     #: Kubernetes drain; MIGRATING_LVOLS, by the removal itself) silently failed
     #: them, and each one stalled a drain until it was found.
     #:
-    #: Not the inverse of DEPARTING_STATUSES: IN_REMOVAL, REMOVED and
-    #: REMOVED_FAILED are departing too, but their SPDK is stopped, so they
-    #: belong to REMOVAL_SHUT_DOWN_STATUSES and must never appear here.
+    #: Not the inverse of DEPARTING_STATUSES, and deliberately disjoint from
+    #: REMOVAL_SHUT_DOWN_STATUSES: MIGRATING_LVOLS, IN_REMOVAL, REMOVED and
+    #: REMOVED_FAILED are departing too, but the removal has already stopped
+    #: their SPDK, so they can neither serve nor be read from and must never
+    #: appear here. MIGRATING_LVOLS in particular looks like it belongs -- the
+    #: name says work is in flight -- but the CLI removal shuts the node down
+    #: before stamping it.
     DRAINING_STATUSES: ClassVar[tuple] = (
         STATUS_SUSPENDED,
         STATUS_PENDING_REMOVAL,
-        STATUS_MIGRATING_LVOLS,
     )
 
     #: Statuses in which a node can still act as the *source* of a live volume
@@ -516,6 +505,20 @@ class BaseNodeObject(BaseModel):
     #: added later cannot be a valid drain state and an invalid migration
     #: source at the same time.
     MIGRATION_SOURCE_STATUSES: ClassVar[tuple] = (STATUS_ONLINE,) + DRAINING_STATUSES
+    #: Statuses meaning "this node is on its way out of the cluster" -- it will
+    #: not serve again under this identity, so work that has to execute ON it
+    #: must not be queued against it.
+    #:
+    #: Listed once and derived everywhere, including from the set above: every
+    #: consumer asking "is this node leaving?" reads one of these two rather
+    #: than spelling statuses out. Six such lists existed by hand and five
+    #: still named only IN_REMOVAL when MIGRATING_LVOLS and REMOVED_FAILED were
+    #: added, which is how a removal ended up RPC-ing a node whose pod was
+    #: already gone, and shipping a status string the data plane could not
+    #: decode (cluster a6e7569d, 2026-09-15).
+    DEPARTING_STATUSES: ClassVar[tuple] = (
+        STATUS_PENDING_REMOVAL,) + REMOVAL_SHUT_DOWN_STATUSES
+
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,

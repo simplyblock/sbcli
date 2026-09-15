@@ -6319,11 +6319,12 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         #  affected targets=[(1, 'a91a2d46...')]". Harmless only because the
         # missing name short-circuited the call; with a name recorded it would
         # have issued jc_replace_jm at the dead pod this filter exists to
-        # avoid. IN_REMOVAL is listed too, on the same grounds as REMOVED:
-        # such a node is down and its rpc_client cannot resolve.
+        # avoid. Every REMOVAL_SHUT_DOWN status qualifies on the same grounds
+        # as REMOVED: the removal has already stopped that node's SPDK, so its
+        # rpc_client cannot resolve. PENDING_REMOVAL is excluded on purpose --
+        # a node is put in it before the shutdown step runs.
         live_nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
-                      if n.status not in (StorageNode.STATUS_REMOVED,
-                                          StorageNode.STATUS_IN_REMOVAL)
+                      if n.status not in StorageNode.REMOVAL_SHUT_DOWN_STATUSES
                       and n.get_id() != removed_node.get_id()]
 
         def _pick_replacement(primary):
@@ -10478,12 +10479,16 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
 #: PENDING_REMOVAL is also deliberately absent. node_removal_orchestrate sets
 #: it *before* phase 1 shuts the node down, so the node is still up and serving
 #: then; treating it as gone would skip a port-block it still needs.
+#: Derived from REMOVAL_SHUT_DOWN_STATUSES, never listed by hand: this tuple
+#: named only IN_REMOVAL out of the removal states, so a peer sitting in
+#: MIGRATING_LVOLS fell through to the JM-quorum path below and was voted
+#: "connected" on 0/0 -- the abstain-from-all case the docstring predicts.
+#: The lvol-migration runner then spent two retry rounds on a SnodeAPI
+#: hostname that no longer resolves (a1b050f1 / bd4qf, 2026-09-15 17:23).
 _PEER_DISCONNECTED_STATUSES = (
     StorageNode.STATUS_OFFLINE,
-    StorageNode.STATUS_REMOVED,
     StorageNode.STATUS_UNREACHABLE,
-    StorageNode.STATUS_IN_REMOVAL,
-)
+) + StorageNode.REMOVAL_SHUT_DOWN_STATUSES
 
 
 def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):

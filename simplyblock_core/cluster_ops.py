@@ -3177,8 +3177,7 @@ def _grace_shutdown_skipped(node) -> bool:
 
     See the rationale in cluster_grace_shutdown's loop.
     """
-    return node.status in (StorageNode.STATUS_REMOVED,
-                           StorageNode.STATUS_IN_REMOVAL)
+    return node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES
 
 
 def cluster_grace_shutdown(cl_id) -> None:
@@ -3197,11 +3196,14 @@ def cluster_grace_shutdown(cl_id) -> None:
         # activation or startup acts on nodes whose devices are already
         # failed_and_migrated and which own no lvstore.
         #
-        # IN_REMOVAL is skipped because node_removal_orchestrate has already
-        # shut that node down and owns the rest of its lifecycle.
-        # PENDING_REMOVAL is deliberately NOT skipped -- the node is still up
-        # and serving at that point, so a full-cluster shutdown must stop it
-        # like any other member.
+        # IN_REMOVAL, MIGRATING_LVOLS and REMOVED_FAILED are skipped because
+        # node_removal_orchestrate has already shut those nodes down and owns
+        # the rest of their lifecycle -- that is exactly the
+        # REMOVAL_SHUT_DOWN_STATUSES set. PENDING_REMOVAL is deliberately NOT
+        # skipped, and is the one departing status left out of that set: it is
+        # stamped when the removal is requested, before the shutdown step runs,
+        # so the node may still be up and serving and a full-cluster shutdown
+        # must stop it like any other member.
         if _grace_shutdown_skipped(node):
             logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
             continue
