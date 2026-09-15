@@ -20,6 +20,7 @@ TestMultiNodeOutage*. The open-ended soak lives in stress_test/lblk_stress.py.
 """
 
 import random
+import re
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
@@ -32,6 +33,11 @@ from utils.md_journal import (
     set_drain_paused,
 )
 from utils.raw_device_verify import RawDeviceVerifier
+
+
+def _snake_case(name):
+    """LblkFunctionalDocker -> lblk_functional_docker."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
 class LblkPreconditionError(RuntimeError):
@@ -52,6 +58,16 @@ class _LblkBase(TestClusterBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
+        # TestClusterBase defaults test_name to "" and builds the run's log
+        # directory as f"{test_name}-{timestamp}". Leaving it unset put every
+        # lblk run in "<nfs>/-20260915-201040" -- a leading dash and no way to
+        # tell one test's logs from another's, and the "Logs Path:" line the
+        # workflow summary greps came back nameless too.
+        #
+        # Derived from the class rather than hardcoded in each of the ten leaf
+        # classes, so a new one cannot be added without a name by forgetting a
+        # line. Same source as the test_name already passed at setup().
+        self.test_name = _snake_case(type(self).__name__)
         self._verifier = None
         self._lblk_devices = {}      # lvol_name -> (client, /dev/nvmeXnY)
         self._journal_lvs = None
