@@ -7,7 +7,7 @@ from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.controllers import (health_controller, lvol_events, tasks_controller, lvol_controller,
-                                           snapshot_controller)
+                                           snapshot_controller, storage_events)
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
@@ -168,6 +168,18 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
     except KeyError:
         return  # already finalised by another pass
 
+    if not lvol.bdev_stack:
+        # RECORD-ONLY retirement (see the empty-stack branch in check_node): a
+        # retired landing volume's stack was emptied on purpose because its
+        # blob lives on as the converted, chained snapshot. Nothing is owed on
+        # any node — and the teardown gate below could never pass for it, since
+        # the bdev is SUPPOSED to still be there.
+        logger.info(
+            f"LVol {lvol.get_id()}: empty bdev stack, retiring the record only")
+        lvol_events.lvol_delete(lvol)
+        lvol.remove(db.kv_store)
+        return
+
     snode = db.get_storage_node_by_id(lvol.node_id)
     sec_nodes = []
     for sec_id in lvol.nodes[1:]:
@@ -296,21 +308,59 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
     # run-20260807 "0 leftovers without this leg" observation was drawn from
     # create-rollback objects and does not hold for the regular delete path.
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
-    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        # Check if any non-leader node needs sync lock
-        for nln in non_leader_nodes:
-            if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-                primary_node.lvol_del_sync_lock()
-                break
-        with snapshot_controller.lvstore_op_lock(
-                cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
-            ret = lvol_controller.delete_lvol_from_node(
-                lvol.get_id(), primary_node.get_id(), sync=True,
-                force=leader_independent)
-        if not ret:
-            logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
+    lvol_bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
-    lvol_bdev_name=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    # THE GATE. The leader's sync delete is the only operation that removes the
+    # blob metadata and unregisters the bdev, and until this was added the
+    # record removal below did not depend on it in any way: the whole block was
+    # skipped when the leader was merely unreachable or restarting, a failure
+    # was logged and stepped over, and delete_lvol_from_node answered "True"
+    # for nodes it had decided not to touch. Each of those dropped the FDB
+    # record while the lvol was still live in SPDK, with nothing left to find
+    # it by. Anything short of a confirmed teardown now keeps the record
+    # in_deletion so the next monitor pass retries it.
+    if primary_node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+                                   StorageNode.STATUS_DOWN]:
+        logger.warning(
+            f"LVol {lvol.get_id()}: leader {primary_node.get_id()[:8]} is "
+            f"{primary_node.status}; cannot complete the sync delete of "
+            f"{lvol_bdev_name}. Keeping the record in_deletion for the next pass")
+        return
+
+    # Check if any non-leader node needs sync lock
+    for nln in non_leader_nodes:
+        if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+            primary_node.lvol_del_sync_lock()
+            break
+    with snapshot_controller.lvstore_op_lock(
+            cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
+        ret = lvol_controller.delete_lvol_from_node(
+            lvol.get_id(), primary_node.get_id(), sync=True,
+            force=leader_independent)
+    if ret is not lvol_controller.NodeTeardown.DONE:
+        logger.error(
+            f"Failed to delete lvol from primary_node node: {primary_node.get_id()} "
+            f"({getattr(ret, 'value', ret)}); keeping the record in_deletion")
+        if ret is lvol_controller.NodeTeardown.FAILED:
+            # Durable retry in case this monitor process dies before the next
+            # pass; the record stays either way.
+            tasks_controller.add_lvol_sync_del_task(
+                cluster.get_id(), primary_node.get_id(), lvol_bdev_name, lvol.node_id)
+        return
+
+    # Post-condition, not just an acknowledged RPC: confirm the bdev is really
+    # gone from the leader. A tri-state probe — "could not ask" is not "clean".
+    absent = lvol_controller.lvol_bdev_absent_on_node(lvol, primary_node)
+    if absent is not True:
+        logger.error(
+            f"LVol {lvol.get_id()}: sync delete of {lvol_bdev_name} reported "
+            f"success but the bdev is "
+            f"{'still present' if absent is False else 'unverifiable'} on "
+            f"{primary_node.get_id()[:8]}; keeping the record in_deletion")
+        return
+
+    peers_owing: list[str] = []
+    peers_cleared: list[str] = []
     for sec_node in non_leader_nodes:
         if sec_node.get_id() in lvol.sync_deleted_nodes:
             # The API delete call already completed this node's sync leg
@@ -336,14 +386,36 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
         # sneaked in between async and sync delete").
         with snapshot_controller.lvstore_op_lock(
                 cluster.get_id(), lvol.lvs_name, node_id=sec_node.get_id()):
-            snapshot_controller.sync_delete_on_peer(
+            cleared = snapshot_controller.sync_delete_on_peer(
                 sec_node, lvol_bdev_name, primary_node.get_id())
+        # sync_delete_on_peer returns True for "nothing is owed here" — which
+        # covers both a successful delete and a peer that is gone (its
+        # registration dies with the process and is not rebuilt). False means a
+        # LIVE peer still carries the registration; it has a durable retry
+        # task, but until that lands the bdev is present in SPDK, so the record
+        # must not go yet. This return value was previously discarded.
+        (peers_cleared if cleared else peers_owing).append(sec_node.get_id())
+
+    if peers_cleared:
+        # Remember the peers that are done, so a retry pass does not re-walk a
+        # replica blob tree that is already clean.
+        db.atomic_update(
+            db.get_lvol_by_id(lvol.get_id()),
+            lambda x: x.sync_deleted_nodes.extend(
+                n for n in peers_cleared if n not in x.sync_deleted_nodes))
 
     # Release the primary's del-sync gate — see the note in
     # snapshot_monitor.process_snap_delete_finish: it is set whenever a peer
     # looks down, it blocks creation on this node, and only the sync-del task
     # runner clears it. Reset keeps it only while sync-del tasks are pending.
     primary_node.lvol_del_sync_lock_reset()
+
+    if peers_owing:
+        logger.warning(
+            f"LVol {lvol.get_id()}: {lvol_bdev_name} still registered on live "
+            f"peers {[n[:8] for n in peers_owing]}; their sync-delete tasks are "
+            f"queued. Keeping the record in_deletion until they drain")
+        return
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
@@ -559,6 +631,21 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                     break
 
                 if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
+                    if ret == 0:
+                        # "Not found" is an answer ABOUT THE NODE WE ASKED, not
+                        # about the cluster. When leadership has moved to a peer
+                        # whose registration was never created (the miss
+                        # try_repair_lvol_on_non_leader exists to repair), that
+                        # peer truthfully answers 0 while the blob is alive on
+                        # the real owner. This used to finish the delete and drop
+                        # the record on the strength of it; the teardown gate in
+                        # process_lvol_delete_finish now re-resolves the leader
+                        # and confirms before anything is removed — log which
+                        # node answered so the misdirection is traceable.
+                        logger.info(
+                            f"LVol {lvol.get_id()}: {leader_node.get_id()[:8]} "
+                            f"reports no such lvol; verifying teardown before "
+                            f"finalising")
                     process_lvol_delete_finish(cluster, lvol)
 
                 elif ret == 1:  # Async lvol deletion is in progress or queued
@@ -740,6 +827,66 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
     return deletions_processed
 
 
+#: Wall-clock of the last orphan-reconciliation sweep.
+_last_orphan_sweep = 0.0
+
+
+def _orphan_sweep_due() -> bool:
+    """True at most once per LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC."""
+    global _last_orphan_sweep
+    now = time.time()
+    if now - _last_orphan_sweep < constants.LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC:
+        return False
+    _last_orphan_sweep = now
+    return True
+
+
+def sweep_orphan_objects(cluster, snodes):
+    """Report lvstore blobs that no FDB record claims. DETECT ONLY.
+
+    The gap this closes is not that the comparison did not exist — it is
+    ``storage_node_ops.auto_repair``'s — but that nothing ever ran it.
+    auto_repair is an operator-invoked CLI command that prints to stdout, so
+    every path that dropped a record while its blob survived leaked silently
+    and permanently: the bdev is re-registered from lvstore metadata on the
+    next node restart, and nothing in FDB or the cluster log points at it.
+    Four such volumes accumulated unnoticed in R26.3, one with no cluster-log
+    trace at all.
+
+    Deliberately does NOT delete. A blob this sweep cannot correlate is the one
+    whose ownership it understands least, and a false positive would destroy
+    live data. auto_repair remains the (interactive, ref-count-aware) way to
+    remove them; raising the alarm while the leak is fresh is this sweep's job.
+    """
+    from simplyblock_core import storage_node_ops
+
+    for snode in snodes:
+        if snode.status != StorageNode.STATUS_ONLINE or not snode.lvstore:
+            continue
+        try:
+            orphans = storage_node_ops.find_orphan_lvstore_blobs(snode.get_id())
+        except Exception as e:
+            logger.warning(
+                f"Orphan sweep: could not reconcile {snode.get_id()[:8]}: {e}")
+            continue
+
+        if not orphans:
+            continue
+
+        detail = ", ".join(
+            f"{o['name']} (blobid={o['blobid']}, ref={o['ref']})" for o in orphans)
+        logger.error(
+            f"ORPHANED LVSTORE OBJECTS on node {snode.get_id()} "
+            f"({snode.lvstore}): {len(orphans)} blob(s) exist in SPDK with no "
+            f"record in the database — {detail}. They hold capacity and are "
+            f"re-registered on every restart. Not deleted automatically: "
+            f"inspect with `sbctl sn auto-repair --validate-only`")
+        try:
+            storage_events.snode_orphaned_objects(snode, orphans)
+        except Exception:
+            logger.exception("Orphan sweep: could not log the cluster event")
+
+
 # get DB controller
 db = db_controller.DBController()
 
@@ -786,6 +933,14 @@ def main():
                 workers = max(1, min(constants.LVOL_MONITOR_NODE_WORKERS, len(snodes)))
                 with ThreadPoolExecutor(max_workers=workers) as ex:
                     deletions_in_flight += sum(ex.map(_sweep, snodes))
+
+            # After the per-node sweep, so an object this cycle just finished
+            # deleting is not reported as an orphan.
+            if constants.LVOL_MONITOR_ORPHAN_CHECK and _orphan_sweep_due():
+                try:
+                    sweep_orphan_objects(cluster, snodes)
+                except Exception as e:
+                    logger.error(f"Orphan sweep failed: {e}")
 
         # Adaptive cadence: while deletes are draining, every full-interval
         # sleep adds up to 30s of latency PER CHAIN HOP (a clone must fully

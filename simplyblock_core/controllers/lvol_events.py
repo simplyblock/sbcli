@@ -9,22 +9,44 @@ logger = logging.getLogger()
 
 def _lvol_event(lvol, message, caused_by, event):
     db_controller = DBController()
+    snode = None
+    cluster = None
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     except Exception as e:
         logger.error(e)
         logger.error(f"Error fetching related objects for lvol event: {message}")
-        return
+
+    # Fall back to the POOL's cluster when the node record is unreachable.
+    # Dropping the event outright meant a volume whose node record was gone
+    # produced no create, delete or status entry in the cluster log at all —
+    # so the volumes that leaked through exactly that path (force delete with a
+    # missing node record) were also the ones with no trace to investigate.
+    # The event is the audit record; it must not depend on the node still
+    # existing.
+    cluster_id = snode.cluster_id if snode is not None else None
+    if cluster_id is None:
+        try:
+            cluster_id = db_controller.get_pool_by_id(lvol.pool_uuid).cluster_id
+        except Exception:
+            logger.error(
+                f"No cluster could be resolved for lvol {lvol.get_id()}; "
+                f"event not logged: {message}")
+            return
 
     ec.log_event_cluster(
-        cluster_id=snode.cluster_id,
+        cluster_id=cluster_id,
         domain=ec.DOMAIN_CLUSTER,
         event=event,
         db_object=lvol,
         caused_by=caused_by,
         message=message,
         node_id=lvol.get_id())
+
+    if snode is None or cluster is None:
+        return  # the CR bookkeeping below needs both
+
     if cluster.mode == "kubernetes":
         pool = db_controller.get_pool_by_id(lvol.pool_uuid)
         

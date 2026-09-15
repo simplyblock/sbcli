@@ -1593,6 +1593,12 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
         if error:
+            # The record was persisted by claim_lvol_ns_slot above. Leaving it
+            # on a failed clone strands an in_creation zombie holding a
+            # namespace slot and pool capacity until the monitor's stale sweep
+            # notices; the guarded rollback releases it, or keeps it when the
+            # attempt left a blob behind.
+            lvol_controller.rollback_create_record(lvol)
             return False, error
         lvol.nodes = [snode.get_id()]
         lvol.lvol_uuid = lvol_bdev['uuid']
@@ -1623,7 +1629,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = (f"No leader available for LVS {lvol.lvs_name} — "
                    f"rejecting clone until leadership is re-established")
             logger.error(msg)
-            db_controller.release_lvol_ns_slot(lvol)
+            lvol_controller.rollback_create_record(lvol)
             return False, msg
 
         # Assign each non-leader a stable index so its subsystem is created
@@ -1649,7 +1655,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             if action == "reject":
                 msg = f"Cannot clone: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
                 logger.error(msg)
-                db_controller.release_lvol_ns_slot(lvol)
+                lvol_controller.rollback_create_record(lvol)
                 return False, msg
             elif action == "proceed":
                 secondary_nodes.append(candidate)
@@ -1677,8 +1683,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
                     if error:
                         logger.error(error)
-                        if lvol.status != LVol.STATUS_IN_DELETION:
-                            db_controller.release_lvol_ns_slot(lvol)
+                        lvol_controller.rollback_create_record(lvol)
                         return False, error
                     lvol.lvol_uuid = lvol_bdev['uuid']
                     lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
@@ -1691,12 +1696,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                             secondary_index=secondary_index_map[sec.get_id()])
                     if error:
                         logger.error(error)
-                        if lvol.status != LVol.STATUS_IN_DELETION:
-                            db_controller.release_lvol_ns_slot(lvol)
+                        lvol_controller.rollback_create_record(lvol)
                         return False, error
         except PreconditionError as e:
-            if lvol.status != LVol.STATUS_IN_DELETION:
-                db_controller.release_lvol_ns_slot(lvol)
+            lvol_controller.rollback_create_record(lvol)
             return False, str(e)
 
     lvol.status = LVol.STATUS_ONLINE

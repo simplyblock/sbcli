@@ -198,6 +198,28 @@ LVOL_MONITOR_SUBSYS_CHECK = str(
 LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC = int(
     os.getenv("LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC", "300"))
 
+# Orphan reconciliation: report lvstore objects that no FDB record claims.
+#
+# Nothing compared SPDK's inventory against the database, so every way a
+# record could be dropped while its blob survived produced a PERMANENT,
+# invisible leak — the bdev is re-registered from lvstore metadata on the next
+# node restart and there is nothing left in FDB or the cluster log pointing at
+# it. Four such volumes were found by hand in R26.3.
+#
+# DETECT ONLY. The sweep never deletes: a false positive would destroy live
+# data, and the object it cannot correlate is exactly the one whose ownership
+# it understands least. It logs and raises a cluster event so the leak is
+# visible while it is still cheap to investigate.
+#
+# Set LVOL_MONITOR_ORPHAN_CHECK=0 to disable.
+LVOL_MONITOR_ORPHAN_CHECK = str(
+    os.getenv("LVOL_MONITOR_ORPHAN_CHECK", "1")).lower() in ("1", "true", "yes")
+
+# One full lvol+snapshot read per cluster per sweep, plus one RPC per node, so
+# this runs far less often than the subsystem check.
+LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC = int(
+    os.getenv("LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC", "1800"))
+
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
 # Shorter interval + lower ceiling for node/device restart tasks.  Restart
