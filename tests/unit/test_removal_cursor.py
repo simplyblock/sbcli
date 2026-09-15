@@ -59,17 +59,36 @@ class TestCursorRecordsPosition(unittest.TestCase):
         self.assertEqual(
             storage_node_ops.RemovalCursor(task).data["migrations"], ["m1", "m2"])
 
-    def test_advancing_clears_the_previous_step_data(self):
-        """Scratch belongs to one step; carrying it forward would let a later
-        step read a stale predecessor's bookkeeping as its own."""
+    def test_each_step_keeps_its_own_scratch(self):
+        """Scratch is namespaced per step rather than one bag cleared on
+        transition. The orchestrator replays earlier steps on every pass, so a
+        bag that reset on change was wiped before the step that owned it ever
+        read it back -- the drain restarted a migration it had already started
+        (2026-09-15)."""
         task = _task()
         cur = storage_node_ops.RemovalCursor(task)
-        cur.enter("relocate_hosted", "phase 3b")
-        cur.data["planned"] = ["x"]
+        cur.enter("drain_lvols", "drain")
+        cur.data["migrations"] = ["m1"]
         cur.save()
         cur.enter("finalize", "phase 4")
-        self.assertEqual(cur.data, {})
-        self.assertEqual(task.function_params["step_data"], {})
+        self.assertEqual(cur.data, {}, "the new step starts with its own empty scratch")
+        cur.enter("drain_lvols", "drain")
+        self.assertEqual(cur.data, {"migrations": ["m1"]},
+                         "returning to a step restores what it saved")
+
+    def test_replaying_the_earlier_steps_does_not_wipe_a_later_one(self):
+        """Exactly the live failure: every pass walks recheck -> devices ->
+        drain, and the drain must still find its own bookkeeping."""
+        task = _task()
+        cur = storage_node_ops.RemovalCursor(task)
+        for step in ("recheck_conditions", "migrate_devices", "drain_lvols"):
+            cur.enter(step, step)
+        cur.data["migrations"] = ["m1"]
+        cur.save()
+        resumed = storage_node_ops.RemovalCursor(task)
+        for step in ("recheck_conditions", "migrate_devices", "drain_lvols"):
+            resumed.enter(step, step)
+        self.assertEqual(resumed.data, {"migrations": ["m1"]})
 
     def test_re_entering_the_same_step_keeps_its_data(self):
         """A retry re-enters the step it failed on; its scratch must not be

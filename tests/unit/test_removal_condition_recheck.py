@@ -98,14 +98,14 @@ class TestRecheckIsBounded(unittest.TestCase):
         """Otherwise a step retried every few seconds could never age out."""
         cur = storage_node_ops._NullCursor()
         cur.enter("recheck_conditions", "re-check")
-        cur.entered_at -= 600
+        cur._entered["recheck_conditions"] -= 600
         cur.enter("recheck_conditions", "re-check")
         self.assertGreater(cur.elapsed(), 500)
 
     def test_advancing_to_a_new_step_does_restart_it(self):
         cur = storage_node_ops._NullCursor()
         cur.enter("recheck_conditions", "re-check")
-        cur.entered_at -= 600
+        cur._entered["recheck_conditions"] -= 600
         cur.enter("drain_lvols", "drain")
         self.assertLess(cur.elapsed(), 5)
 
