@@ -15,9 +15,32 @@ MIGRATION_WAIT_UNAVAILABLE_KEY = "wait_unavailable_before_retry"
 
 
 def _cluster_unavailable_state(cluster_id):
+    """Nodes/devices a suspended migration is waiting to see recover.
+
+    A node that is LEAVING must never appear here. This list is a wait
+    condition -- _migration_retry_allowed holds the task suspended until
+    something in it recovers -- so listing a node that is being removed is
+    waiting for an event that cannot happen.
+
+    It deadlocked the removal it was waiting on (2026-09-15, cluster
+    a6e7569d). Recovering a node kicked off balancing_on_restart with 10
+    device_migration subtasks; every one of them suspended on
+    "waiting for unavailable nodes/devices to recover: ['node:a1b050f1']" --
+    the node under removal. The master task never finished, so the cluster
+    stayed ACTIVE-REBALANCING, so create_migration refused ("Cluster is
+    rebalancing; wait for it to finish before migrating"), so the removal's
+    drain could never run, so the node could never finish leaving and
+    "recover". Each side waited for the other.
+
+    IN_CREATION is excluded for the opposite reason: not gone, not yet
+    arrived. Devices are covered by their own REMOVED / FAILED_AND_MIGRATED
+    skip below.
+    """
     unavailable = []
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]:
+        if node.status == StorageNode.STATUS_IN_CREATION:
+            continue
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             unavailable.append(f"node:{node.get_id()}")
