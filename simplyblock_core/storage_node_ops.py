@@ -5344,6 +5344,30 @@ class RemovalCursor:
         """
         return max(0.0, time.time() - (self.entered_at or time.time()))
 
+    def clear_clock(self):
+        """Forget how long the current step has been waiting.
+
+        Call this the moment a bounded wait SUCCEEDS. The budget these steps
+        are measured against means "this has been unmet continuously for too
+        long", but the clock is stamped on first entry and the orchestrator
+        replays every step on every pass -- so without this it measures
+        "wall time since the removal first reached this step", and every
+        minute spent legitimately elsewhere is charged against the wait.
+
+        That ended a removal on its first good pass (2026-09-15). The
+        condition re-check had passed repeatedly and the drain had just
+        started its migration; the migration briefly fenced the target, the
+        next re-check saw that peer down for ~13 seconds, and because the
+        step clock had been running for 46 minutes -- nearly all of it with
+        the conditions fine, blocked on an unrelated rebalance deadlock --
+        the 30-minute budget was already spent and the removal gave up
+        instantly instead of retrying.
+
+        A step that keeps failing never calls this, so it still ages out.
+        """
+        if self.step and self._entered.pop(self.step, None) is not None:
+            self._persist()
+
     def _persist(self):
         if self._task is None:
             return
@@ -5451,6 +5475,11 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
                     f"[REMOVAL] {node_id}: conditions not met ({reason}); "
                     f"nothing torn down, retrying")
                 return False
+            # Conditions are met: this wait is over. The budget is for a
+            # condition that STAYS unmet, so the next time one fails it starts
+            # a fresh 30 minutes rather than inheriting however long the
+            # removal has been running. See RemovalCursor.clear_clock.
+            cursor.clear_clock()
 
             # Devices first, then volumes. Rebuilding this node's data onto its
             # peers is what makes the cluster whole again; the volume drain that

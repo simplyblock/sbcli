@@ -155,3 +155,75 @@ class TestGivingUpNamesTheStep(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheWaitClockMeasuresTheWaitNotTheRemoval(unittest.TestCase):
+    """A bounded wait's budget means "this has been unmet continuously for too
+    long". The clock is stamped on first entry and the orchestrator replays
+    every step on every pass, so without clear_clock() it measures wall time
+    since the removal first reached the step -- charging the wait for every
+    minute spent legitimately elsewhere.
+
+    That ended a removal on its first good pass (2026-09-15 20:10:05). The
+    condition re-check had passed repeatedly and the drain had just started its
+    migration; the migration briefly fenced the target, the next re-check saw
+    that peer down for ~13s, and because the step clock had run for 46 minutes
+    -- nearly all of it with conditions fine, blocked on an unrelated rebalance
+    deadlock -- the 30-minute budget was already spent and it gave up at once.
+    """
+
+    def _cursor(self):
+        task = MagicMock()
+        task.function_params = {}
+        return storage_node_ops.RemovalCursor(task)
+
+    def test_a_passing_check_resets_the_clock(self):
+        c = self._cursor()
+        with patch.object(storage_node_ops.time, "time", return_value=1000.0):
+            c.enter("recheck_conditions", "msg")
+        with patch.object(storage_node_ops.time, "time", return_value=3800.0):
+            self.assertGreater(c.elapsed(), 2700)   # 46 min, would give up
+            c.clear_clock()
+        # Next entry starts a fresh budget.
+        with patch.object(storage_node_ops.time, "time", return_value=3801.0):
+            c.enter("recheck_conditions", "msg")
+        with patch.object(storage_node_ops.time, "time", return_value=3811.0):
+            self.assertLess(c.elapsed(), 30)
+
+    def test_a_step_that_keeps_failing_still_ages_out(self):
+        """clear_clock is only called on success, so a genuinely stuck
+        condition still hits its budget."""
+        c = self._cursor()
+        with patch.object(storage_node_ops.time, "time", return_value=1000.0):
+            c.enter("recheck_conditions", "msg")
+        for t in (1100.0, 1500.0, 2000.0):
+            with patch.object(storage_node_ops.time, "time", return_value=t):
+                c.enter("recheck_conditions", "msg")   # re-entry, no reset
+        with patch.object(storage_node_ops.time, "time", return_value=2900.0):
+            self.assertGreaterEqual(c.elapsed(), 1800)
+
+    def test_clear_clock_persists(self):
+        c = self._cursor()
+        with patch.object(storage_node_ops.time, "time", return_value=1000.0):
+            c.enter("recheck_conditions", "msg")
+        self.assertIn("recheck_conditions",
+                      c._task.function_params["step_entered_at"])
+        c.clear_clock()
+        self.assertNotIn("recheck_conditions",
+                         c._task.function_params["step_entered_at"])
+
+    def test_clear_clock_is_harmless_when_already_clear(self):
+        c = self._cursor()
+        c.clear_clock()
+        c.step = "recheck_conditions"
+        c.clear_clock()
+
+    def test_it_only_clears_the_current_step(self):
+        c = self._cursor()
+        with patch.object(storage_node_ops.time, "time", return_value=1000.0):
+            c.enter("recheck_conditions", "m")
+            c.enter("drain_lvols", "m")
+        c.clear_clock()   # current step is drain_lvols
+        stamps = c._task.function_params["step_entered_at"]
+        self.assertIn("recheck_conditions", stamps)
+        self.assertNotIn("drain_lvols", stamps)
