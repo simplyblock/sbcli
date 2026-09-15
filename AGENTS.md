@@ -28,7 +28,9 @@ uv lock --check                     # CI: fail if uv.lock is stale
 Dependency groups (PEP 735) replace the old `*-requirements.txt` files: `test`, `types`,
 `generate`. Install one with `uv sync --group test`. The `e2e/` entry points are standalone
 PEP 723 scripts -- each declares its own interpreter and dependencies inline and runs via the
-`#!/usr/bin/env -S uv run --script` shebang, so they need no separate requirements file.
+`#!/usr/bin/env -S uv run --script` shebang, so they need no separate requirements file. See
+**`e2e/AGENTS.md`** before touching that tree -- the harness is a black-box client of the cluster
+under test and must not import the package.
 
 ## Testing
 
@@ -193,6 +195,8 @@ simplyblock_web/AGENTS.md         ← Web API-specific instructions
 simplyblock_web/CLAUDE.md          ← `@AGENTS.md`
 tests/AGENTS.md                   ← Test-suite layout, tiers, fixtures
 tests/CLAUDE.md                    ← `@AGENTS.md`
+e2e/AGENTS.md                     ← E2E harness: black-box invariant, PEP 723 execution model
+e2e/CLAUDE.md                      ← `@AGENTS.md`
 docker/AGENTS.md                  ← Container image: stages, cache policy, Dockerfile constraints
 docker/CLAUDE.md                   ← `@AGENTS.md`
 
