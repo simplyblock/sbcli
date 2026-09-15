@@ -47,6 +47,11 @@ Every entry point is a [PEP 723](https://peps.python.org/pep-0723/) script:
 uv provisions the interpreter and the dependencies on first run. There is **no
 `requirements.txt`** and no shared virtualenv — do not reintroduce either.
 
+The one entry point that is not Python is `lab_lock.sh`, which reserves the lab hosts a CI run
+touches. It is shell because its payload is a snippet executed *on* the locked hosts over ssh,
+which may have nothing installed on them beyond coreutils — the hosts are what the workflow
+wipes. See `.github/actions/lab-lock/README.md`.
+
 - Invoke scripts directly (`./e2e.py`), never `python3 e2e.py` — the latter silently bypasses the
   declared environment and picks up whatever the host interpreter happens to have.
 - CI only needs uv on `PATH`; workflows install it with `python3 -m pip install --upgrade pip uv`
