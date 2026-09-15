@@ -14677,7 +14677,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
 
     for blob in out_blobid_dict_keys:
         if blob not in (lvols_blobid_dict_keys + snaps_blobid_dict_keys):
-            if out_blobid_dict[blob]["name"] == "hublvol":
+            if out_blobid_dict[blob]["name"] in ["hublvol", "transferhub"]:
                 continue
             else:
                 # all blob ID in spdk but not in mgmt
@@ -14688,7 +14688,14 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
                     inconsistent_dict[blob] = out_blobid_dict[blob]
                     inconsistent_dict[blob]["type"] = "lvol|clone"
             if blob in snaps_blobid_dict_keys:
-                if out_blobid_dict[blob]["name"] != snaps_blobid_dict[blob]["name"] or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]:
+                # snap_bdev is stored qualified ("<lvstore>/<name>", see
+                # snapshot_controller.create_snapshot); the lvstore dump names
+                # the blob bare. lvol_bdev is bare on both sides, so only this
+                # branch qualifies -- comparing the two shapes raw flagged
+                # every snapshot on the node as inconsistent, which
+                # --force-remove-inconsistent would then have deleted.
+                if (f"{snode.lvstore}/{out_blobid_dict[blob]['name']}" != snaps_blobid_dict[blob]["name"]
+                        or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]):
                     inconsistent_dict[blob] = out_blobid_dict[blob]
                     inconsistent_dict[blob]["type"] = "snap"
 
