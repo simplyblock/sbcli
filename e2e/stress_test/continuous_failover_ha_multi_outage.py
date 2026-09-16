@@ -452,6 +452,40 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             f"topology: {self.parent_to_children}")
         return created
 
+    # Multipath axis. `random` keeps the historical 50/50 behaviour so
+    # existing runs do not silently lose coverage; the dual-outage matrix sets
+    # this explicitly per case.
+    MULTIPATH_MODE = "random"
+
+    def _multipath_selected(self):
+        """Whether to take the single-NIC-down path this iteration.
+
+        Split out so a skip says which precondition failed. The old single log
+        line covered both "fewer than 2 data NICs" and "lost the coin flip",
+        which meant a run with no multipath coverage was indistinguishable from
+        one whose hardware could not provide it.
+        """
+        mode = getattr(self, "MULTIPATH_MODE", "random")
+        if mode == "off":
+            self.logger.info("[multipath] skipped: MULTIPATH_MODE=off")
+            return False
+        if not self._is_multipath_enabled():
+            self.logger.info(
+                "[multipath] skipped: MULTIPATH_MODE=%s but not every node has "
+                "2+ data NICs", mode)
+            return False
+        if mode == "random":
+            picked = random.random() < 0.5
+            self.logger.info(
+                "[multipath] enabled and %s this iteration (MULTIPATH_MODE="
+                "random)", "selected" if picked else "not selected")
+            return picked
+        if mode == "single_nic_down":
+            self.logger.info("[multipath] single_nic_down (always on)")
+            return True
+        self.logger.info("[multipath] mode %r takes no action here", mode)
+        return False
+
     def perform_n_plus_k_outages(self):
         """
         Select K outage nodes such that no two are in a primary/secondary
@@ -464,8 +498,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         """
         # ── Multipath: optionally disable one data NIC on ALL nodes ──────
         use_multipath_outage = False
-        if self._is_multipath_enabled() and random.random() < 0.5:
-            self.logger.info("Multipath detected and selected — disabling one data NIC on all nodes")
+        if self._multipath_selected():
             self.multipath_nic_disabled = True
             nic_plans = self._disconnect_single_data_nic_all_nodes()
             self.log_outage_event(
@@ -1373,6 +1406,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.sn_primary_secondary_map[result["uuid"]] = result["secondary_node_id"]
         self.logger.info(f"Secondary node map: {self.sn_primary_secondary_map}")
 
+        # --resume re-enters mid-run rather than rebuilding from scratch.
+        resumed_at = self.resume_point()
+        if resumed_at:
+            iteration = resumed_at
+            self.adopt_existing_objects()
+            self.resume_reattach_clients()
+
         if not self.spdk_mem_thread:
             self.spdk_mem_thread = threading.Thread(
                 target=self._spdk_mem_stats_worker,
@@ -1388,6 +1428,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         sleep_n_sec(30)
 
         while True:
+            # Checkpoint before the iteration's work, so a kill anywhere inside
+            # it resumes at this iteration rather than silently skipping it.
+            self.checkpoint(iteration)
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
 

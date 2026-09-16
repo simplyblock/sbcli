@@ -823,14 +823,18 @@ jobs:
           test -f sbcli/e2e/e2e.py
           test -f sbcli/e2e/logs/cleanup.py
 
-      - name: Install Python deps (best-effort)
+      # Pins the interpreter the suite actually runs on. The workflows invoke
+      # e2e as a bare `python3`, so which Python that is depends on the runner:
+      # actions-runner2 ran the suite for hours while actions-runner-3, on an
+      # older Python, died at import on a PEP 604 annotation. This puts a 3.11
+      # venv first on PATH so every later `python3` resolves to it, fetching a
+      # standalone interpreter only if the host has none. It never modifies or
+      # replaces a Python the host already has.
+      - name: Ensure Python 3.11 for e2e
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
-            pip install -r sbcli/e2e/requirements.txt
-          fi
+          bash sbcli/e2e/scripts/ensure_python.sh
 
       - name: Cleanup logs before e2e
         shell: bash
@@ -912,12 +916,18 @@ jobs:
             RESET_EXTRA_CLUSTER_ARGS="${RESET_EXTRA_CLUSTER_ARGS} --is-single-node"
           fi
 
+          # --opt=value, not --opt value. argparse treats any token starting
+          # with a dash as an option, so `--extra_sn_args --lblk` fails with
+          # "expected one argument". Multi-word values happen to survive the
+          # separated form because argparse exempts anything containing a
+          # space -- which is why --extra_cluster_args "--device-mode lblk"
+          # worked and a lone --lblk did not. The = form has no such edge.
           EXTRA_ARGS=()
           if [[ -n "${RESET_EXTRA_CLUSTER_ARGS}" ]]; then
-            EXTRA_ARGS+=(--extra_cluster_args "${RESET_EXTRA_CLUSTER_ARGS}")
+            EXTRA_ARGS+=("--extra_cluster_args=${RESET_EXTRA_CLUSTER_ARGS}")
           fi
           if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
-            EXTRA_ARGS+=(--extra_sn_args "${EXTRA_SN_ARGS}")
+            EXTRA_ARGS+=("--extra_sn_args=${EXTRA_SN_ARGS}")
           fi
 
           python3 -u e2e.py \

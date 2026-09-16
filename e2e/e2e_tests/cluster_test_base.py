@@ -296,6 +296,300 @@ class TestClusterBase:
             )
             time.sleep(20)
 
+    def _should_wipe_existing_objects(self):
+        """False when this run is resuming and must adopt, not destroy.
+
+        Checked at every wipe site rather than only in the base setup(),
+        because eleven classes replace setup() without calling super(): a
+        single base-class guard would be silently bypassed by most of the
+        tests that need it most.
+        """
+        return not getattr(self, "resume_requested", False)
+
+    # ── resume ────────────────────────────────────────────────────────────
+    #
+    # A stress run is 5 to 27 hours and leaves its objects behind on purpose
+    # (stress.py passes delete_lvols=False). Without a checkpoint, a failure at
+    # iteration 15 costs a full re-run. See utils/run_state.py for why the name
+    # prefixes, not the iteration counter, are what make adoption possible.
+
+    #: Whether --resume can actually re-enter this test mid-run.
+    #:
+    #: True for the iteration-shaped loops: an iteration is self-contained, so
+    #: re-entering at N is the same as having arrived there. False for
+    #: phase-shaped tests such as mass-create, where phase N+1 consumes the
+    #: in-memory registry phase N built -- resuming there needs those
+    #: registries rebuilt from the cluster first, and a resumed run with an
+    #: empty registry would "delete 0 lvols" and report success. Refusing is
+    #: better than that.
+    RESUME_SUPPORTED = True
+    RESUME_UNSUPPORTED_REASON = ""
+
+    def _resume_state(self):
+        """The RunState for this (test, cluster). Built lazily, because
+        nfs_log_base and cluster_id are set during setup(), not at __init__."""
+        if getattr(self, "_run_state_obj", None) is None:
+            from utils.run_state import RunState
+            self._run_state_obj = RunState(
+                nfs_log_base=self.nfs_log_base,
+                test_name=type(self).__name__,
+                cluster_id=self.cluster_id,
+                logger=self.logger,
+            )
+        return self._run_state_obj
+
+    def resume_prefixes(self):
+        """The random name prefixes this test uses, as {attr: value}.
+
+        Override when a suite names its objects differently. The default covers
+        the three schemes in the tree; anything absent is simply skipped.
+        """
+        out = {}
+        for attr in ("lvol_base", "clone_base", "snap_base", "lvol_name",
+                     "pool_name"):
+            val = getattr(self, attr, None)
+            if val:
+                out[attr] = val
+        return out
+
+    def resume_inventory(self):
+        """What this test created, as {kind: [names]}.
+
+        Names only: sizes, UUIDs and device paths are re-derived at adoption
+        time. A persisted UUID the cluster has since recycled is worse than no
+        UUID at all, because it reads as authoritative.
+        """
+        def _names(attr):
+            val = getattr(self, attr, None)
+            if isinstance(val, dict):
+                return sorted(val)
+            if isinstance(val, (list, set, tuple)):
+                return sorted(str(v) for v in val)
+            return []
+
+        return {
+            "lvols": _names("lvol_devices") or _names("_lvol_registry"),
+            "clones": _names("clone_devices") or _names("_clone_registry"),
+            "snapshots": (_names("snapshot_names")
+                          or _names("_snapshot_registry")),
+        }
+
+    def checkpoint(self, iteration=None, **extra):
+        """Persist enough to adopt later. Safe to call every iteration; it
+        never raises, because a checkpoint that kills a 20-hour run would cost
+        more than the resume it enables."""
+        self._checkpoint_iter = iteration or (
+            getattr(self, "_checkpoint_iter", 0) + 1)
+        inv = self.resume_inventory()
+        fields = dict(
+            iter=self._checkpoint_iter,
+            iteration=self._checkpoint_iter,
+            lvols=inv.get("lvols"),
+            clones=inv.get("clones"),
+            snapshots=inv.get("snapshots"),
+        )
+        fields.update(self.resume_prefixes())
+        fields.update(extra)
+        return self._resume_state().save(
+            run_dir=getattr(self, "docker_logs_path", None), **fields)
+
+    def resume_point(self):
+        """The iteration to re-enter at, or None to start fresh.
+
+        None unless --resume was passed AND a checkpoint exists for this exact
+        cluster. A checkpoint from another cluster is refused rather than
+        adopted: adopting by name across clusters would bind the run to
+        whatever happened to share a prefix.
+        """
+        if not getattr(self, "resume_requested", False):
+            return None
+        if not getattr(self, "RESUME_SUPPORTED", True):
+            self.logger.warning(
+                "[resume] %s does not support resuming: %s. Starting fresh.",
+                type(self).__name__,
+                getattr(self, "RESUME_UNSUPPORTED_REASON", "") or "unspecified")
+            return None
+        doc = self._resume_state().load()
+        if not doc:
+            return None
+        self._resumed_from = doc
+        # Restoring the prefixes is the whole feature: they are random per
+        # process, so without them this run cannot recognise its own objects.
+        for attr in ("lvol_base", "clone_base", "snap_base", "lvol_name",
+                     "pool_name"):
+            if doc.get(attr):
+                setattr(self, attr, doc[attr])
+        self._checkpoint_iter = doc.get("iter") or 0
+        self.logger.info(
+            "[resume] %s re-entering at iteration %s (checkpoint written %s)",
+            type(self).__name__, doc.get("iter"), doc.get("updated_at"))
+        return doc.get("iter")
+
+    def adopt_existing_objects(self):
+        """Reconcile the checkpoint's inventory against the live cluster.
+
+        Missing objects are reported, not fatal: a node that died mid-delete
+        can legitimately leave the cluster short, and refusing to resume there
+        throws away the point of resuming.
+        """
+        doc = getattr(self, "_resumed_from", None)
+        if not doc:
+            return {}
+        from utils.run_state import adopt_by_prefix, reconcile
+        try:
+            live = [lv.get("lvol_name") for lv in
+                    (self.sbcli_utils.list_lvols() or [])]
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[resume] could not list lvols: %s", exc)
+            return {}
+
+        prefix = doc.get("lvol_base") or doc.get("lvol_name") or ""
+        adopted = adopt_by_prefix(live, prefix)
+        reconcile(doc.get("lvols"), adopted, self.logger, kind="lvol")
+        self.logger.info("[resume] adopted %d lvol(s) matching %r",
+                         len(adopted), prefix)
+        return {"lvols": adopted}
+
+    def resume_mount_without_format(self, name, device, client_node,
+                                    fs_type=None, expected_ns_id=None):
+        """Mount an adopted volume, explicitly skipping mkfs.
+
+        The create path formats; doing that here would wipe the data this run
+        is resuming onto. Returns the mount point, or None when the device
+        could not be claimed safely.
+        """
+        mnt = "%s/%s" % (self.mount_path, name)
+        try:
+            self._assert_device_unclaimed(client_node, device, name,
+                                          expected_ns_id=expected_ns_id)
+        except Exception as exc:                      # noqa: BLE001
+            # Refusing one volume is survivable; mounting the wrong namespace
+            # over live data is not.
+            self.logger.error(
+                "[resume] refusing to mount %s on %s: %s", name, device, exc)
+            return None
+        self.ssh_obj.mount_path(node=client_node, device=device,
+                                mount_path=mnt)
+        self.logger.info("[resume] mounted %s at %s without mkfs",
+                         device, mnt)
+        return mnt
+
+    def resume_reconnect_one(self, lvol_name, client_node):
+        """Connect one adopted lvol and return its new /dev node, or None.
+
+        Mirrors the create path's connect step, minus the format: the device is
+        found by diffing get_devices() around the connect, which is how the
+        create path identifies a freshly surfaced namespace.
+        """
+        try:
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                lvol_name=lvol_name)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[resume] no connect string for %s: %s",
+                                lvol_name, exc)
+            return None, None
+
+        initial = self.ssh_obj.get_devices(node=client_node)
+        for c in connect_ls:
+            _, err = self.ssh_obj.exec_command(node=client_node, command=c)
+            if err:
+                self.logger.warning("[resume] connect failed for %s: %s",
+                                    lvol_name, err)
+                return None, None
+        final = self.ssh_obj.get_devices(node=client_node)
+        new_dev = next(("/dev/%s" % d.strip()
+                        for d in final if d not in initial), None)
+        if not new_dev:
+            self.logger.warning("[resume] %s did not surface a device",
+                                lvol_name)
+        return new_dev, connect_ls
+
+    def resume_reattach_clients(self, runtime=None):
+        """Reconnect, remount without formatting, and restart FIO.
+
+        Best-effort per volume: a resumed run that cannot remount one volume is
+        still far more useful than no resume at all, so failures are reported
+        and the run continues. Never raises.
+        """
+        if not getattr(self, "_resumed_from", None):
+            return {}
+
+        doc = self._resumed_from
+        report = {"connected": 0, "mounted": 0, "skipped": 0, "fio": False}
+
+        clients = getattr(self, "fio_node", None) or []
+        if not clients:
+            self.logger.warning(
+                "[resume] no client node available; cannot remount. The run "
+                "will continue against whatever is already attached.")
+            return report
+
+        details = getattr(self, "lvol_mount_details", None)
+        if details is None:
+            details = self.lvol_mount_details = {}
+
+        for i, name in enumerate(doc.get("lvols") or []):
+            client = clients[i % len(clients)]
+            d = details.setdefault(name, {
+                "ID": None, "Command": None, "Mount": None, "Device": None,
+                "MD5": None, "FS": doc.get("fs_type") or "xfs",
+                "Log": "%s/%s.log" % (getattr(self, "log_path", "."), name),
+                "snapshots": [],
+                "iolog_base_path": "%s/%s_fio_iolog" % (
+                    getattr(self, "log_path", "."), name),
+                "Client": client,
+            })
+            if d.get("Mount"):
+                continue
+
+            device = d.get("Device")
+            if not device:
+                device, connect_ls = self.resume_reconnect_one(name, client)
+                if not device:
+                    report["skipped"] += 1
+                    continue
+                d["Device"] = device
+                d["Command"] = connect_ls
+                report["connected"] += 1
+
+            mnt = self.resume_mount_without_format(
+                name, device, client, fs_type=d.get("FS"))
+            if mnt:
+                d["Mount"] = mnt
+                report["mounted"] += 1
+            else:
+                report["skipped"] += 1
+
+        # FIO fresh, never restored mid-stream: the previous process's FIO died
+        # with it, and a resumed run with no IO exercises outages against an
+        # idle cluster.
+        kicker = getattr(self, "_kick_fio_for_all", None)
+        if callable(kicker):
+            try:
+                kicker(runtime) if runtime else kicker()
+                report["fio"] = True
+                self.logger.info("[resume] FIO restarted")
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning("[resume] FIO restart failed: %s", exc)
+        else:
+            self.logger.warning(
+                "[resume] %s has no _kick_fio_for_all -- outages would run "
+                "against an idle cluster; start IO before trusting this run",
+                type(self).__name__)
+
+        self.logger.info(
+            "[resume] reattach: %d connected, %d mounted, %d skipped, FIO=%s",
+            report["connected"], report["mounted"], report["skipped"],
+            report["fio"])
+        return report
+
+
+    def resume_finished_clean(self):
+        """Drop the checkpoint on a clean finish, so the next run starts fresh
+        rather than adopting a completed one."""
+        if getattr(self, "_run_state_obj", None) is not None:
+            self._run_state_obj.clear()
+
     def setup(self):
         """Contains setup required to run the test case
         """
@@ -427,24 +721,37 @@ class TestClusterBase:
             self.disconnect_lvols()
             sleep_n_sec(2)
         # Order: clones → snapshots → parent lvols → pools
-        self.sbcli_utils.delete_all_clones()
-        sleep_n_sec(2)
-        if self.k8s_test:
-            self.sbcli_utils.delete_all_snapshots()
-        elif self.mgmt_nodes:
-            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-        sleep_n_sec(2)
-        self.sbcli_utils.delete_all_lvols()
-        sleep_n_sec(2)
-        if not self.k8s_test:
-            self.sbcli_utils.delete_all_storage_pools()
+        #
+        # ...unless this run is resuming. A stress run is 5 to 27 hours
+        # and leaves its objects behind on purpose (stress.py passes
+        # delete_lvols=False), so this wipe is exactly what makes a late
+        # failure cost a full re-run. The k8s branch below already skips
+        # pool deletion for a related reason; this is that precedent,
+        # widened to every object.
+        if self._should_wipe_existing_objects():
+            self.sbcli_utils.delete_all_clones()
+            sleep_n_sec(2)
+            if self.k8s_test:
+                self.sbcli_utils.delete_all_snapshots()
+            elif self.mgmt_nodes:
+                self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+            sleep_n_sec(2)
+            self.sbcli_utils.delete_all_lvols()
+            sleep_n_sec(2)
+            if not self.k8s_test:
+                self.sbcli_utils.delete_all_storage_pools()
+            else:
+                # In K8s mode, avoid deleting pools during setup — the StoragePool CRD
+                # reconciliation is async and deleting+recreating pools between
+                # tests causes long waits or failures.  Tests create pools via
+                # _add_pool_dual() which reuses existing pools.
+                self.logger.info(
+                    "[setup] K8s mode: skipping pool deletion (will reuse existing pool)"
+                )
         else:
-            # In K8s mode, avoid deleting pools during setup — the StoragePool CRD
-            # reconciliation is async and deleting+recreating pools between
-            # tests causes long waits or failures.  Tests create pools via
-            # _add_pool_dual() which reuses existing pools.
             self.logger.info(
-                "[setup] K8s mode: skipping pool deletion (will reuse existing pool)"
+                "[setup] resume active: keeping existing clones, snapshots, "
+                "lvols and pools so they can be adopted"
             )
         aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
         aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)
