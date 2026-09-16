@@ -782,6 +782,23 @@ def add_device_failed_mig_task(device_id):
             if bdev['type'] == "bdev_distr":
                 _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
                           max_retry=-1, function_params={'distr_name': bdev['name']})
+
+    # add device migration tasks for device host distribs on other nodes (secondary) in case the host is in removal process
+    device_node = db.get_storage_node_by_id(device.node_id)
+    if device_node.status in StorageNode.DEPARTING_STATUSES and device_node.status != StorageNode.STATUS_REMOVED:
+        secondary_node = db.get_storage_node_by_id(device_node.secondary_node_id)
+        if secondary_node and secondary_node.status not in StorageNode.DEPARTING_STATUSES:
+            for bdev in device_node.lvstore_stack:
+                if bdev['type'] == "bdev_distr":
+                    _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, secondary_node.get_id(), device.get_id(),
+                              max_retry=-1, function_params={'distr_name': bdev['name']})
+        else:
+            tertiary_node = db.get_storage_node_by_id(device_node.tertiary_node_id)
+            if tertiary_node and tertiary_node.status not in StorageNode.DEPARTING_STATUSES:
+                for bdev in device_node.lvstore_stack:
+                    if bdev['type'] == "bdev_distr":
+                        _add_task(JobSchedule.FN_FAILED_DEV_MIG, device.cluster_id, tertiary_node.get_id(), device.get_id(),
+                                  max_retry=-1, function_params={'distr_name': bdev['name']})
     return True
 
 
