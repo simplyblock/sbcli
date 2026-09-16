@@ -27,6 +27,7 @@ from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 from utils.md_journal import (
     MdJournalError,
+    call_rpc,
     assert_journal_enabled,
     get_stats,
     scan_log_for_corruption,
@@ -554,6 +555,26 @@ class _LblkJournalRecovery(_LblkBase):
                 self.sbcli_utils.add_lvol(lvol_name=name, pool_name=pool,
                                           size="1G")
                 staged.append(name)
+            # Only the lvols that landed on the PAUSED lvstore are evidence.
+            # The drain is paused per-lvstore, but placement is the cluster's
+            # choice, so most of these ten land elsewhere and their metadata
+            # was written through normally. Asserting on all ten would pass
+            # whatever the journal did.
+            all_lvols = self.sbcli_utils.list_lvols() or {}
+            staged_here = []
+            for name in staged:
+                if name not in all_lvols:
+                    continue
+                det = self.sbcli_utils.get_lvol_details(
+                    lvol_id=all_lvols[name])[0]
+                if det.get("node_id") == node["uuid"]:
+                    staged_here.append(name)
+            if not staged_here:
+                raise LblkPreconditionError(
+                    f"[lblk] none of the {len(staged)} lvols landed on the "
+                    f"node whose drain is paused ({node['uuid']}), so nothing "
+                    f"is staged in its ring and the kill would prove nothing.")
+
             stats = get_stats(self.ssh_obj, ip, prefix, sock, lvs_name=lvs,
                               logger=self.logger)
             if stats.get("used_slots", 0) < 2:
@@ -561,9 +582,10 @@ class _LblkJournalRecovery(_LblkBase):
                     "[lblk] only %s slot(s) in the ring after pausing the "
                     "drain; recovery may have nothing to replay",
                     stats.get("used_slots"))
-            self.logger.info("[lblk] killing %s with %s entries in the ring "
-                             "holding %d staged lvols", node["uuid"],
-                             stats.get("used_slots"), len(staged))
+            self.logger.info("[lblk] killing %s with %s entries in the ring; "
+                             "%d of %d staged lvols live on its lvstore %s: %s",
+                             node["uuid"], stats.get("used_slots"),
+                             len(staged_here), len(staged), lvs, staged_here)
             self.ssh_obj.stop_spdk_process(ip, node["rpc_port"], self.cluster_id)
         finally:
             # Best effort only: the container is gone, so this normally fails.
@@ -576,14 +598,20 @@ class _LblkJournalRecovery(_LblkBase):
                 self.logger.info("[lblk] drain resume skipped (expected, the "
                                  "container is gone): %s", exc)
 
+        # Wait for the kill to REGISTER before waiting for the recovery.
+        # wait_for_storage_node_status(..., "online") returns immediately if the
+        # node is still reported online, and right after a kill it is: the
+        # control plane has not noticed yet. Skipping this step made the whole
+        # restart-and-verify sequence run in 62ms against a node that had never
+        # gone down, so every assertion after it was vacuous.
+        self._wait_for_node_down(node["uuid"])
         self.sbcli_utils.restart_node(node_uuid=node["uuid"])
         self.sbcli_utils.wait_for_storage_node_status(node["uuid"], "online",
                                                       timeout=900)
 
         # The actual assertion. Metadata written before the crash has to
-        # survive it -- that is the journal's whole job, and these ten lvols
-        # are metadata that existed only in the ring.
-        self.assert_staged_lvols_survived(staged)
+        # survive it -- that is the journal's whole job.
+        self.assert_staged_lvols_survived(staged_here, ip, node["rpc_port"], lvs)
 
         # Corroboration from the journal's own counters: the ring should have
         # drained on the way back up.
@@ -600,7 +628,36 @@ class _LblkJournalRecovery(_LblkBase):
         self.logger.info("[lblk] journal recovery: %d staged lvols survived "
                          "the kill and data is intact", len(staged))
 
-    def assert_staged_lvols_survived(self, staged):
+    def _wait_for_node_down(self, node_uuid, timeout=300):
+        """Block until the control plane stops reporting the node online.
+
+        Killing the SPDK process does not change the node's status
+        immediately -- the monitor has to notice. Asking "is it online?" in
+        that window gets "yes", about the process we just killed, so any wait
+        for "online" returns instantly and everything after it runs against a
+        node that never went down.
+        """
+        for _ in range(timeout // 5):
+            try:
+                det = self.sbcli_utils.get_storage_node_details(
+                    storage_node_id=node_uuid)[0]
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.info("[lblk] node lookup failed while waiting for "
+                                 "it to go down (%s); treating as down", exc)
+                return "unreachable"
+            status = det.get("status")
+            if status != "online":
+                self.logger.info("[lblk] node %s left online: status=%s",
+                                 node_uuid, status)
+                return status
+            sleep_n_sec(5)
+        raise MdJournalError(
+            f"[lblk] node {node_uuid} was still reported online {timeout}s "
+            f"after its SPDK process was killed. The kill did not take, so "
+            f"there is no crash to recover from and the rest of this test "
+            f"would pass without testing anything.")
+
+    def assert_staged_lvols_survived(self, staged, ip, rpc_port, lvs):
         """Every lvol created while the drain was paused must still exist.
 
         This replaces scraping SPDK's log for "md journal recovery: N entries".
@@ -615,17 +672,43 @@ class _LblkJournalRecovery(_LblkBase):
         proves the metadata actually came back, which is the guarantee the
         journal exists to provide on a device with no atomic-write guarantee.
         """
-        # list_lvols returns {lvol_name: id}, so the keys are the names.
+        # The control-plane list is checked first, but it is NOT the evidence:
+        # /lvol reads FoundationDB, which still holds these whatever the
+        # lvstore did. The on-node check below is what proves the blobs came
+        # back.
         present = set(self.sbcli_utils.list_lvols() or {})
         missing = [n for n in staged if n not in present]
         if missing:
             raise MdJournalError(
                 f"[lblk] {len(missing)} of {len(staged)} lvols created while "
-                f"the drain was paused did not survive the kill: {missing[:5]}."
-                f" Their metadata was in the journal ring and nowhere else, so "
-                f"the ring was not replayed.")
-        self.logger.info("[lblk] all %d staged lvols survived the kill",
-                         len(staged))
+                f"the drain was paused are gone from the control plane after "
+                f"the kill: {missing[:5]}")
+
+        bdevs = call_rpc(self.ssh_obj, ip,
+                         self._spdk_exec_prefix(ip, rpc_port),
+                         self._spdk_sock(rpc_port), "bdev_get_bdevs",
+                         logger=self.logger) or []
+        names = {b.get("name") for b in bdevs}
+        aliases = {a for b in bdevs for a in (b.get("aliases") or [])}
+        on_node = names | aliases
+
+        absent = []
+        for name in staged:
+            det = self.sbcli_utils.get_lvol_details(
+                lvol_id=self.sbcli_utils.get_lvol_id(name))[0]
+            # bdev_get_bdevs reports the lvol as "<lvs>/<LVOL_n>" in aliases
+            # and "<LVOL_n>" as the name, so accept either spelling.
+            bdev, base = det.get("lvol_bdev"), det.get("base_bdev")
+            if bdev not in on_node and base not in on_node:
+                absent.append(f"{name} ({base})")
+        if absent:
+            raise MdJournalError(
+                f"[lblk] {len(absent)} of {len(staged)} lvols staged on {lvs} "
+                f"are in the control plane but their bdevs are NOT on the "
+                f"restarted node: {absent[:5]}. Their metadata existed only in "
+                f"the journal ring, so the ring did not replay.")
+        self.logger.info("[lblk] all %d lvols staged on %s came back on the "
+                         "node after the kill", len(staged), lvs)
         return len(staged)
 
 
