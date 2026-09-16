@@ -143,14 +143,14 @@ class PromClient:
             except Exception:
                 raise PromClientException(f"Error parsing history string: {history}")
         end_time = datetime.now()
-        data_out: list[tuple] = []
+        data_out: list[dict] = []
         metrics = self.client.get_metric_range_data(
             metric_key, label_config=params, start_time=start_time, end_time=end_time)
         for m in metrics:
             mt_info = m["metric"]
             mt_values = m["values"]
             mt_values_list = [v for i, v in enumerate(mt_values)]
-            data_out.append((mt_info, mt_values_list))
+            data_out.append({"key": metric_key,"metric": mt_info, "values": mt_values_list})
         return data_out
 
     def get_node_filesystem_metrics(self, history=None):
@@ -165,9 +165,9 @@ class PromClient:
             for metric in metrics_lst:
                 params[metric] = ""
                 response_list = self.get_raw_metric(f"node_filesystem_{metric}", params, history)
-                for m, v in response_list:
-                    node_name = m["instance"]
-                    node_stats[node_name] = {metric: v}
+                for m_data in response_list:
+                    node_name = m_data["metric"]["instance"]
+                    node_stats[node_name] = {metric: m_data["values"]}
         except Exception as e:
             logger.error(f"Error getting node filesystem metrics: {e}")
             return []
@@ -182,10 +182,10 @@ class PromClient:
         try:
             for metric in metrics_lst:
                 params[metric] = ""
-                response_list= self.get_raw_metric(f"http_request_duration_{metric}", params, history)
-                for m, v in response_list:
-                    node_name = m["instance"]
-                    api_stats[node_name] = {metric: v}
+                response_list = self.get_raw_metric(f"http_request_duration_{metric}", params, history)
+                for m_data in response_list:
+                    node_name = m_data["metric"]["instance"]
+                    api_stats[node_name] = {metric: m_data["values"]}
         except Exception as e:
             logger.error(f"Error getting API metrics: {e}")
             return []
