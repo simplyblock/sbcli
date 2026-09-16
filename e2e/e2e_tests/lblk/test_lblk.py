@@ -209,6 +209,58 @@ class _LblkBase(TestClusterBase):
                 raise MdJournalError(
                     f"[lblk] metadata corruption on {ip} ({context}): {fatal}")
 
+    def assert_journal_recovered(self, ip, prefix, min_entries=1):
+        """Fail unless SPDK reports replaying entries from the ring.
+
+        Without this the recovery test proves only that a killed node comes
+        back and its data still verifies -- which a cluster with no journal at
+        all would also manage. The replay is the thing under test, so it has to
+        be read out of SPDK's own log rather than assumed from a clean verify.
+
+        SPDK emits one of (blob_md_journal.c):
+            "md journal recovery: N entries to drain (tail=T head=H)"
+            "md journal recovery: ring empty"
+            "md journal recovery: ring fully valid, order ambiguous"
+            "md journal recovery failed: ..."
+        "ring empty" is the dangerous one: it is not an error, the node comes up
+        healthy, and the run would have proved nothing.
+        """
+        out, _ = self.ssh_obj.exec_command(
+            node=ip,
+            command=f"{prefix} tail -n 8000 /var/log/spdk.log 2>/dev/null || true",
+            supress_logs=True)
+        text = out or ""
+
+        if "md journal recovery failed" in text:
+            line = next((ln for ln in text.splitlines()
+                         if "md journal recovery failed" in ln), "")
+            raise MdJournalError(f"[lblk] journal recovery failed on {ip}: {line.strip()}")
+
+        drained = re.findall(r"md journal recovery: (\d+) entries to drain"
+                             r"(?: \(tail=(\d+) head=(\d+)\))?", text)
+        if drained:
+            total = sum(int(n) for n, _t, _h in drained)
+            self.logger.info("[lblk] journal recovery on %s replayed %d "
+                             "entries across %d lvstore(s): %s",
+                             ip, total, len(drained), drained)
+            if total < min_entries:
+                raise MdJournalError(
+                    f"[lblk] journal recovery on {ip} replayed {total} "
+                    f"entries, expected at least {min_entries}")
+            return total
+
+        if "md journal recovery: ring empty" in text:
+            raise MdJournalError(
+                f"[lblk] journal recovery on {ip} found an EMPTY ring. The "
+                f"node was killed with entries in it, so either they never "
+                f"reached the disk or recovery did not read them. The node "
+                f"comes up healthy either way, which is why this is checked "
+                f"rather than inferred from a clean data verify.")
+
+        raise MdJournalError(
+            f"[lblk] no 'md journal recovery:' line on {ip} after restart. "
+            f"Either the log rotated past it or recovery did not run.")
+
     # ── outages, through the API rather than the stress helpers ───────────
     def _journal_heads(self):
         """lvstore -> mem_head, sampled on every node.
@@ -538,8 +590,14 @@ class _LblkJournalRecovery(_LblkBase):
         self.sbcli_utils.wait_for_storage_node_status(node["uuid"], "online",
                                                       timeout=900)
         self._scan_spdk_logs("journal recovery")
+        # The exec prefix has to be rebuilt: the container the node was killed
+        # in is gone, and the restarted one is what carries the recovery log.
+        replayed = self.assert_journal_recovered(
+            ip, self._spdk_exec_prefix(ip, node["rpc_port"]),
+            min_entries=1)
         self._verify_all("after journal recovery")
-        self.logger.info("[lblk] journal recovery replayed and data intact")
+        self.logger.info("[lblk] journal recovery replayed %d entries and "
+                         "data is intact", replayed)
 
 
 # ── integration: the documented open gap ──────────────────────────────────
