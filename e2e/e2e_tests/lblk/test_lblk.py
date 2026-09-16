@@ -539,15 +539,23 @@ class _LblkJournalRecovery(_LblkBase):
         self._create_and_connect(f"lblkjr{random.randint(100, 999)}", pool)
         self._stamp_all()
 
-        ip, prefix, sock, lvs = self._journal_lvs
-        node = next(n for n in self.sbcli_utils.get_storage_nodes()["results"]
-                    if n.get("mgmt_ip") == ip)
+        # Pause the drain on EVERY lvstore, then pick the victim afterwards
+        # from where the lvols actually landed.
+        #
+        # Pausing one lvstore and hoping meant placement decided whether the
+        # test worked: the cluster places an lvol where it likes, so one run
+        # staged 2 of 10 on the paused node and the next staged 0 and could
+        # not run at all. Pausing everything first removes the guess -- every
+        # node's ring holds whatever it received.
+        paused = []
+        for t_ip, t_port, t_prefix, t_sock, t_lvs in self._journal_targets():
+            if not t_lvs:
+                continue
+            set_drain_paused(self.ssh_obj, t_ip, t_prefix, t_sock, True,
+                             lvs_name=t_lvs, logger=self.logger)
+            paused.append((t_ip, t_port, t_prefix, t_sock, t_lvs))
+        self.logger.info("[lblk] drain paused on %d lvstore(s)", len(paused))
 
-        set_drain_paused(self.ssh_obj, ip, prefix, sock, True,
-                         lvs_name=lvs, logger=self.logger)
-        # These lvols ARE the evidence. Created while the drain is paused, so
-        # their metadata sits in the ring rather than on disk; if the journal
-        # does not replay, they do not come back.
         staged = []
         try:
             for i in range(10):
@@ -555,25 +563,34 @@ class _LblkJournalRecovery(_LblkBase):
                 self.sbcli_utils.add_lvol(lvol_name=name, pool_name=pool,
                                           size="1G")
                 staged.append(name)
-            # Only the lvols that landed on the PAUSED lvstore are evidence.
-            # The drain is paused per-lvstore, but placement is the cluster's
-            # choice, so most of these ten land elsewhere and their metadata
-            # was written through normally. Asserting on all ten would pass
-            # whatever the journal did.
+
+            # Group by owning node, then kill whichever holds the most. Those
+            # lvols' metadata is in that node's ring and nowhere else.
             all_lvols = self.sbcli_utils.list_lvols() or {}
-            staged_here = []
+            by_node = {}
             for name in staged:
                 if name not in all_lvols:
                     continue
                 det = self.sbcli_utils.get_lvol_details(
                     lvol_id=all_lvols[name])[0]
-                if det.get("node_id") == node["uuid"]:
-                    staged_here.append(name)
-            if not staged_here:
+                by_node.setdefault(det.get("node_id"), []).append(name)
+            if not by_node:
                 raise LblkPreconditionError(
-                    f"[lblk] none of the {len(staged)} lvols landed on the "
-                    f"node whose drain is paused ({node['uuid']}), so nothing "
-                    f"is staged in its ring and the kill would prove nothing.")
+                    f"[lblk] none of the {len(staged)} staged lvols is "
+                    f"readable back from the control plane, so there is "
+                    f"nothing to stage.")
+            self.logger.info("[lblk] staged lvols per node: %s",
+                             {k: len(v) for k, v in by_node.items()})
+
+            victim_uuid = max(by_node, key=lambda k: len(by_node[k]))
+            staged_here = by_node[victim_uuid]
+            node = next(n for n in
+                        self.sbcli_utils.get_storage_nodes()["results"]
+                        if n.get("uuid") == victim_uuid)
+            ip = node["mgmt_ip"]
+            prefix = self._spdk_exec_prefix(ip, node["rpc_port"])
+            sock = self._spdk_sock(node["rpc_port"])
+            lvs = node.get("lvstore")
 
             stats = get_stats(self.ssh_obj, ip, prefix, sock, lvs_name=lvs,
                               logger=self.logger)
@@ -588,15 +605,22 @@ class _LblkJournalRecovery(_LblkBase):
                              len(staged_here), len(staged), lvs, staged_here)
             self.ssh_obj.stop_spdk_process(ip, node["rpc_port"], self.cluster_id)
         finally:
-            # Best effort only: the container is gone, so this normally fails.
-            # The restart is what actually clears the pause -- a fresh process
-            # comes up unpaused.
-            try:
-                set_drain_paused(self.ssh_obj, ip, prefix, sock, False,
-                                 lvs_name=lvs, logger=self.logger)
-            except Exception as exc:                  # noqa: BLE001
-                self.logger.info("[lblk] drain resume skipped (expected, the "
-                                 "container is gone): %s", exc)
+            # Resume EVERY lvstore that was paused, not just the victim's. A
+            # paused drain fills its ring and then metadata writes block behind
+            # it, so leaving the three survivors paused would degrade the
+            # cluster for the rest of the run and for teardown.
+            #
+            # The victim's own resume is expected to fail -- its container is
+            # gone -- and the restart is what actually clears that one, since a
+            # fresh process comes up unpaused.
+            for r_ip, _r_port, r_prefix, r_sock, r_lvs in paused:
+                try:
+                    set_drain_paused(self.ssh_obj, r_ip, r_prefix, r_sock,
+                                     False, lvs_name=r_lvs, logger=self.logger)
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.info("[lblk] drain resume on %s skipped "
+                                     "(expected for the killed node): %s",
+                                     r_lvs, exc)
 
         # Wait for the kill to REGISTER before waiting for the recovery.
         # wait_for_storage_node_status(..., "online") returns immediately if the
