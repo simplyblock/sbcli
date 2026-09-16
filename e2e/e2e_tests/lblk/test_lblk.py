@@ -210,6 +210,61 @@ class _LblkBase(TestClusterBase):
                     f"[lblk] metadata corruption on {ip} ({context}): {fatal}")
 
     # ── outages, through the API rather than the stress helpers ───────────
+    def _journal_heads(self):
+        """lvstore -> mem_head, sampled on every node.
+
+        mem_head advances monotonically as entries are appended. used_slots is
+        the wrong thing to watch: the drain runs continuously and returns it to
+        ~0 between samples, which is exactly why the first passing lblk run
+        reported 0/8192 slots used and looked as though the journal had never
+        been touched.
+        """
+        heads = {}
+        for ip, prefix, sock, lvs in self._journal_targets():
+            if not lvs:
+                continue
+            try:
+                st = get_stats(self.ssh_obj, ip, prefix, sock,
+                               lvs_name=lvs, logger=None)
+                heads[lvs] = (st or {}).get("mem_head")
+            except MdJournalError as exc:
+                self.logger.warning("[md-journal] could not sample %s: %s",
+                                    lvs, exc)
+        return heads
+
+    def _metadata_churn(self, lvol_name, tag):
+        """Snapshot + clone, and report what it did to the journal.
+
+        Snapshot and clone are the metadata-heavy operations, so this is what
+        actually puts entries in the ring. Without it an lblk run exercises the
+        data path only and the journal -- the whole reason the mode is safe on
+        a device with no atomic-write guarantee -- is never written to.
+        """
+        before = self._journal_heads()
+
+        snap = f"snap{tag}{random.randint(100, 999)}"
+        snap_id = self._create_snapshot_dual(lvol_name, snap)
+        clone = f"clone{tag}{random.randint(100, 999)}"
+        self._create_clone_dual(snap_id, clone, size=self.LVOL_SIZE)
+
+        after = self._journal_heads()
+        moved = {k: (before.get(k), v) for k, v in after.items()
+                 if before.get(k) != v}
+        if moved:
+            self.logger.info("[md-journal] %s: head advanced on %d lvstore(s): "
+                             "%s", tag, len(moved), moved)
+        else:
+            # Deliberately not fatal. That metadata operations must advance the
+            # ring is a reasonable expectation, not a contract this suite has
+            # verified, and failing the run on it would be inventing one. If
+            # this line shows up on every run, escalate it -- it would mean the
+            # journal is enabled and inert.
+            self.logger.warning(
+                "[md-journal] %s: snapshot+clone advanced NO lvstore head "
+                "(before=%s after=%s). The journal is enabled but may not be "
+                "receiving entries.", tag, before, after)
+        return snap, clone
+
     def _any_storage_node(self):
         nodes = self.sbcli_utils.get_storage_nodes()["results"]
         if len(nodes) < 2:
@@ -291,11 +346,15 @@ class _LblkIntegrity(_LblkBase):
     def run(self):
         self._init_lblk()
         self.assert_cluster_is_lblk()
+        self.assert_devices_are_aio()
         self.assert_journals_live()
 
         pool = self._add_pool_dual()
+        names = []
         for i in range(2):
-            self._create_and_connect(f"lblkint{i}{random.randint(100, 999)}", pool)
+            name = f"lblkint{i}{random.randint(100, 999)}"
+            self._create_and_connect(name, pool)
+            names.append(name)
         self._stamp_all()
 
         # Steady state first. Nothing in the suite does this today: every other
@@ -305,14 +364,24 @@ class _LblkIntegrity(_LblkBase):
         self._verify_all("steady state")
         self._scan_spdk_logs("steady state")
 
-        for outage in self.OUTAGE_TYPES:
+        # Metadata before any fault, so the ring is non-empty going into the
+        # first outage. A snapshot/clone taken only after an outage would leave
+        # recovery replaying an empty journal, which proves nothing.
+        self._metadata_churn(names[0], "steady")
+        self._verify_all("after snapshot+clone")
+        self._scan_spdk_logs("after snapshot+clone")
+
+        for n, outage in enumerate(self.OUTAGE_TYPES):
             self._churn_all(runtime=30)
+            # Alternate which lvol carries the metadata work so both the
+            # primary and the secondary lvstore see some.
+            self._metadata_churn(names[n % len(names)], f"o{n}")
             self._outage_and_recover(self._any_storage_node(), outage)
             self._verify_all(f"after {outage}")
             self._scan_spdk_logs(f"after {outage}")
 
-        self.logger.info("[lblk] integrity held across %d outage types",
-                         len(self.OUTAGE_TYPES))
+        self.logger.info("[lblk] integrity held across %d outage types, with "
+                         "snapshot+clone before each", len(self.OUTAGE_TYPES))
 
 
 # ── integration: device faults with no NVMe equivalent ────────────────────
