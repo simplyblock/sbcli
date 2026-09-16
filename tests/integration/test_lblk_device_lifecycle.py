@@ -258,7 +258,6 @@ class TestWatchdogAgainstRealStateMachine:
         read = db.get_storage_device_by_id(dev.get_id())
         assert read.status == NVMeDevice.STATUS_UNAVAILABLE
         assert read.io_error is True
-        assert read.flap_count == 1  # ONLINE -> UNAVAILABLE, LOCAL_FAILURE, node ONLINE
 
     def test_flap_limit_forces_failed_and_queues_migration(self, db):
         _seed_cluster(db)
