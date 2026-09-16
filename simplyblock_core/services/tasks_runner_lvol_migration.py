@@ -478,6 +478,7 @@ def _get_target_secondary_node(tgt_node, src_node_id):
       - No secondary configured   → (None, None)   skip silently
       - Secondary STATUS_ONLINE   → (sec_node, None) register on secondary
       - Secondary STATUS_OFFLINE  → (None, None)   administratively down, skip
+      - Secondary leaving (REMOVAL_SHUT_DOWN_STATUSES) → (None, None) skip
       - Secondary STATUS_SUSPENDED and node == src_node → (sec_node, None)
         overlap drain: source is being drained but is still the target's
         secondary; migration must continue through it
@@ -497,6 +498,19 @@ def _get_target_secondary_node(tgt_node, src_node_id):
         return sec, None
     if sec.status == StorageNode.STATUS_OFFLINE:
         return None, None
+    if sec.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        # Treated like OFFLINE, not like an unknown state. A node the removal
+        # has shut down cannot register anything and is not coming back, so
+        # blocking the migration on it blocks it for ever -- and because this
+        # is the TARGET's replica, it blocks migrations between two entirely
+        # healthy nodes for the whole duration of any node removal. The removal
+        # re-places the replica itself. Live 2026-09-16, cluster 5aaf0a5d:
+        # "Target secondary node b1d65620 is in state 'migrating_lvols';
+        # cannot create on target primary", suspended indefinitely.
+        logger.info(
+            f"target secondary {sec.get_id()[:8]} is {sec.status} (leaving the "
+            f"cluster); skipping it rather than blocking the migration")
+        return None, None
     if sec.status == StorageNode.STATUS_SUSPENDED and src_node_id and sec.get_id() == src_node_id:
         return sec, None
     return None, (
@@ -514,6 +528,7 @@ def _get_target_tertiary_node(tgt_node, src_node_id):
       - No tertiary configured    → (None, None)   skip silently
       - Tertiary STATUS_ONLINE    → (ter_node, None) register on tertiary
       - Tertiary STATUS_OFFLINE   → (None, None)   administratively down, skip
+      - Tertiary leaving (REMOVAL_SHUT_DOWN_STATUSES) → (None, None) skip
       - Tertiary STATUS_SUSPENDED and node == src_node → (ter_node, None)
         overlap drain: source is being drained but is still the target's
         tertiary; migration must continue through it
@@ -531,6 +546,12 @@ def _get_target_tertiary_node(tgt_node, src_node_id):
     if ter.status == StorageNode.STATUS_ONLINE:
         return ter, None
     if ter.status == StorageNode.STATUS_OFFLINE:
+        return None, None
+    if ter.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        # Same reasoning as the secondary above.
+        logger.info(
+            f"target tertiary {ter.get_id()[:8]} is {ter.status} (leaving the "
+            f"cluster); skipping it rather than blocking the migration")
         return None, None
     if ter.status == StorageNode.STATUS_SUSPENDED and src_node_id and ter.get_id() == src_node_id:
         return ter, None
