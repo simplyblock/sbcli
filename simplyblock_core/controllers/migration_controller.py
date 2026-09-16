@@ -1178,6 +1178,32 @@ def create_migration(lvol_id, target_node_id,
     if src_node.tertiary_node_id:
         src_node_ids.add(src_node.tertiary_node_id)
 
+    # A target replica that is being removed is not a usable entry. Its SPDK is
+    # stopped and its mgmt hostname no longer resolves, so every RPC in the
+    # tgt_entries loop below raises -- and unlike the pre-registration above,
+    # that loop is not tolerant: one unreachable replica fails the entire
+    # create_migration.
+    #
+    # The blast radius is wider than the removal's own drain. The replica set
+    # belongs to the TARGET, so a migration between two perfectly healthy nodes
+    # is refused whenever the target happens to list the departing node as its
+    # secondary or tertiary. Live 2026-09-16 on cluster 5aaf0a5d: migrating a
+    # volume from healthy rpksz to healthy zqhjg died with
+    # "Could not reach remote" against 94dtj, the node under removal, which was
+    # involved only as the target's replica.
+    #
+    # Skipping is also the correct end state: a departing node cannot hold a
+    # replica of anything, and the removal's own relocation re-places it.
+    def _usable_replica(node):
+        if node is None:
+            return None
+        if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+            logger.info(
+                f"create_migration: skipping target replica {node.get_id()[:8]} "
+                f"(status={node.status}); it is leaving the cluster")
+            return None
+        return node
+
     tgt_sec_node = None
     if lvol.ha_type != "single" and tgt_node.secondary_node_id:
         tgt_sec_node = (_pre_sec_node if _pre_sec_node is not None else None)
@@ -1186,6 +1212,7 @@ def create_migration(lvol_id, target_node_id,
                 tgt_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
             except KeyError:
                 pass
+    tgt_sec_node = _usable_replica(tgt_sec_node)
 
     tgt_ter_node = None
     if tgt_node.tertiary_node_id:
@@ -1195,6 +1222,7 @@ def create_migration(lvol_id, target_node_id,
                 tgt_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
             except KeyError:
                 pass
+    tgt_ter_node = _usable_replica(tgt_ter_node)
 
     tgt_node_ids = {target_node_id}
     if tgt_sec_node is not None:
