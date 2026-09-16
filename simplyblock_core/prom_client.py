@@ -149,7 +149,7 @@ class PromClient:
         for m in metrics:
             mt_info = m["metric"]
             mt_values = m["values"]
-            mt_values_list = [v for i, v in enumerate(mt_values)]
+            mt_values_list = [v[1] for v in mt_values]
             data_out.append({"key": metric_key,"metric": mt_info, "values": mt_values_list})
         return data_out
 
@@ -167,7 +167,10 @@ class PromClient:
                 response_list = self.get_raw_metric(f"node_filesystem_{metric}", params, history)
                 for m_data in response_list:
                     node_name = m_data["metric"]["instance"]
-                    node_stats[node_name] = {metric: m_data["values"]}
+                    if node_name not in node_stats:
+                        node_stats[node_name] = {metric: m_data["values"]}
+                    else:
+                        node_stats[node_name][metric] = m_data["values"]
         except Exception as e:
             logger.error(f"Error getting node filesystem metrics: {e}")
             return []
@@ -185,7 +188,10 @@ class PromClient:
                 response_list = self.get_raw_metric(f"http_request_duration_{metric}", params, history)
                 for m_data in response_list:
                     node_name = m_data["metric"]["instance"]
-                    api_stats[node_name] = {metric: m_data["values"]}
+                    if node_name not in api_stats:
+                        api_stats[node_name] = {metric: m_data["values"]}
+                    else:
+                        api_stats[node_name][metric] = m_data["values"]
         except Exception as e:
             logger.error(f"Error getting API metrics: {e}")
             return []
