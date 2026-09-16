@@ -372,7 +372,6 @@ jobs:
           done
           echo "NDCS=${_ndcs:-2}" >> $GITHUB_ENV
           echo "DEVICE_CLASS=${_device_class:-NVMe}" >> $GITHUB_ENV
-          echo "DEVICE_CLASS=${_device_class:-NVMe}" >> $GITHUB_ENV
           echo "NPCS=${_npcs:-2}" >> $GITHUB_ENV
           echo "BS=${_bs:-4096}" >> $GITHUB_ENV
           echo "CHUNK_BS=${_chunk_bs:-4096}" >> $GITHUB_ENV
