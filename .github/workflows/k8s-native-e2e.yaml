@@ -356,6 +356,7 @@ jobs:
           PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
           # Parse into local vars first, then apply defaults
           _ndcs="" _npcs="" _bs="" _chunk_bs="" _partitions="" _jm_count=""
+          _device_class=""
           for pair in $(echo "$PARAMS" | tr ',' ' '); do
             key=$(echo "$pair" | cut -d= -f1)
             val=$(echo "$pair" | cut -d= -f2)
@@ -366,9 +367,12 @@ jobs:
               chunk_bs)   _chunk_bs="$val" ;;
               partitions) _partitions="$val" ;;
               jm_count)   _jm_count="$val" ;;
+              device_class) _device_class="$val" ;;
             esac
           done
           echo "NDCS=${_ndcs:-2}" >> $GITHUB_ENV
+          echo "DEVICE_CLASS=${_device_class:-NVMe}" >> $GITHUB_ENV
+          echo "DEVICE_CLASS=${_device_class:-NVMe}" >> $GITHUB_ENV
           echo "NPCS=${_npcs:-2}" >> $GITHUB_ENV
           echo "BS=${_bs:-4096}" >> $GITHUB_ENV
           echo "CHUNK_BS=${_chunk_bs:-4096}" >> $GITHUB_ENV
@@ -903,6 +907,41 @@ jobs:
           if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
             PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
           fi
+          # lblk and the NVMe PCIe selectors are mutually exclusive: the
+
+          # StorageNodeSet CEL rule rejects enableLblk alongside
+
+          # pcieAllowList/pcieDenyList/pcieModel/driveSizeRange/deviceNames.
+
+          # It tests size(...) > 0, so blanking is enough -- the keys may stay.
+
+          #
+
+          # Must come after the pcieModel conditional above, which would
+
+          # otherwise overwrite the blanking.
+
+          # NVMe unless cluster_params says otherwise, defaulted where it is used so
+
+          # it holds however the value arrived. deviceClass is a required enum
+
+          # (NVMe|LogicalBlock); an empty one is rejected at apply.
+
+          DEVICE_CLASS="${DEVICE_CLASS:-NVMe}"
+
+          LBLK_YAML=""
+
+          if [ "${DEVICE_CLASS}" = "LogicalBlock" ]; then
+
+            LBLK_YAML="  enableLblk: true"
+
+            DRIVE_SIZE_RANGE=""
+
+            PCIE_MODEL_YAML=""
+
+            echo "lblk mode: PCIe selectors blanked, enableLblk set"
+
+          fi
 
           # Build workerNodes YAML list from comma-separated input
           WORKER_YAML=""
@@ -925,34 +964,58 @@ jobs:
               snapshotBackups: true
               withCompression: false"
           fi
+          # ---- v1alpha2 backup is NOT a rename of the v1alpha1 block --------
+          # v1alpha1 took localEndpoint/localTesting/secondaryTarget/
+          # snapshotBackups/withCompression and let the control plane derive the
+          # bucket. v1alpha2's BackupStoreSpec takes endpoint/bucket/prefix/
+          # region/credentialsSecretRef, and bucket is REQUIRED.
+          #
+          # Our bucket is simplyblock-backup-${CLUSTER_ID}, and CLUSTER_ID does
+          # not exist until the control plane has created the cluster -- after
+          # this CR is applied. So the value cannot be supplied here.
+          #
+          # Failing loudly rather than emitting the old keys: unknown fields are
+          # PRUNED by the apiserver, not rejected, so the old block would apply
+          # cleanly and leave a cluster with no backup store configured while
+          # every backup test ran against it and reported nonsense.
+          if [ -n "${BACKUP_SPEC}" ]; then
+            echo "::error::Backup on k8s is not yet migrated to the v1alpha2 CRD."
+            echo "v1alpha2 BackupStoreSpec requires an explicit 'bucket'; ours is"
+            echo "derived from CLUSTER_ID, which does not exist until after this CR"
+            echo "is applied. Emitting the v1alpha1 keys would be silently pruned."
+            echo "Owner decision needed before backup k8s runs can work on main."
+            exit 1
+          fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)
           VAULT_SETTINGS=""
           ENCRYPTION_POOL_YAML=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
-            VAULT_SETTINGS="  hashicorpVaultSettings:
-              baseURL: \"https://openbao.vault:8200\""
+            VAULT_SETTINGS="  kms:
+                vault:
+                  baseURL: \"https://openbao.vault:8200\""
             ENCRYPTION_POOL_YAML="---
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StoragePool
           metadata:
             name: encryption-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
+            clusterRef: simplyblock-cluster
             storageClassParameters:
               encryption: true"
           fi
 
           echo "=== Custom resource YAML to apply ==="
           cat <<EOF
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StorageCluster
           metadata:
             name: simplyblock-cluster
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
+            deviceClass: ${DEVICE_CLASS}
             enableNodeAffinity: true
             stripe:
               dataChunks: ${NDCS}
@@ -969,13 +1032,13 @@ jobs:
             vcpuCount: ${VCPU_COUNT}
 
           ---
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
+            clusterRef: simplyblock-cluster
           ${ENCRYPTION_POOL_YAML}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
@@ -989,6 +1052,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
           ${PCIE_MODEL_YAML}
+          ${LBLK_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
@@ -1009,13 +1073,14 @@ jobs:
 
           echo "=== Applying custom resources ==="
           cat <<EOF | kubectl apply -f -
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StorageCluster
           metadata:
             name: simplyblock-cluster
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
+            deviceClass: ${DEVICE_CLASS}
             enableNodeAffinity: true
             stripe:
               dataChunks: ${NDCS}
@@ -1032,13 +1097,13 @@ jobs:
             vcpuCount: ${VCPU_COUNT}
 
           ---
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
+            clusterRef: simplyblock-cluster
           ${ENCRYPTION_POOL_YAML}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
@@ -1052,6 +1117,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
           ${PCIE_MODEL_YAML}
+          ${LBLK_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:

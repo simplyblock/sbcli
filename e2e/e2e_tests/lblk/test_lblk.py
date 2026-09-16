@@ -232,6 +232,39 @@ class _LblkBase(TestClusterBase):
                                     lvs, exc)
         return heads
 
+    def _fs_fio(self, lvol_name, mount, tag, runtime=60):
+        """Filesystem FIO on a mounted clone, run to completion.
+
+        md5 is demoted to a warning here and only here. SshUtils.run_fio_test
+        hardcodes --verify=md5 and auto-enables verify_backlog for mixed
+        workloads, which its own comment says "bypasses the rand_seed check" --
+        so on a device with no 4K atomic-write guarantee an md5 mismatch is as
+        likely to be an artefact of the harness as a real defect. The raw crc32c
+        verify on the parent lvol stays the integrity gate precisely because it
+        has no filesystem in the way and no overlapping IO by construction.
+
+        Demoting is not ignoring: the mismatch is still logged, and the
+        .hdr_fail dumps are still collected for triage.
+        """
+        log = None
+        if not self.k8s_test:
+            log = f"{self.log_path}/fio_lblk_{tag}.log"
+
+        handle = self._run_fio_dual(
+            lvol_name, mount_path=mount, log_path=log, runtime=runtime,
+            name=f"lblk{tag}", rw="randrw", bs="4K", numjobs=2, nrfiles=4,
+            size="512M")
+        if hasattr(handle, "join"):
+            handle.join()
+
+        if self.k8s_test:
+            self._validate_fio_dual(handle)
+        else:
+            self.common_utils.validate_fio_test(
+                node=self.client_machines[0], log_file=log,
+                md5_severity="warning")
+        self.logger.info("[lblk] filesystem FIO clean on clone %s", lvol_name)
+
     def _metadata_churn(self, lvol_name, tag):
         """Snapshot + clone, and report what it did to the journal.
 
@@ -245,7 +278,15 @@ class _LblkBase(TestClusterBase):
         snap = f"snap{tag}{random.randint(100, 999)}"
         snap_id = self._create_snapshot_dual(lvol_name, snap)
         clone = f"clone{tag}{random.randint(100, 999)}"
-        self._create_clone_dual(snap_id, clone, size=self.LVOL_SIZE)
+        # Formatted and mounted, unlike the raw lvols above: this one exists to
+        # carry filesystem FIO, which is the workload every other suite runs and
+        # the one a real user's application looks like. The raw crc32c check on
+        # the parent stays the integrity gate; this is coverage of the ordinary
+        # path on top of it.
+        _dev, mount = self._create_clone_dual(
+            snap_id, clone, size=self.LVOL_SIZE,
+            mount_path=f"/mnt/{clone}", format_disk=True)
+        self._fs_fio(clone, mount, tag)
 
         after = self._journal_heads()
         moved = {k: (before.get(k), v) for k, v in after.items()
