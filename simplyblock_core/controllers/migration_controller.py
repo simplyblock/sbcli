@@ -474,6 +474,74 @@ def get_snapshot_chain(lvol_id, source_node_id=None):
     return result
 
 
+def check_target_viable(lvol_id, target_node_id):
+    """Would a migration of *lvol_id* to *target_node_id* be admitted right now?
+
+    Returns ``(ok, reason)``. Read-only and cheap -- no RPCs, no side effects --
+    so a caller choosing between candidate targets can ask before committing.
+
+    This exists so target selection and target admission cannot disagree.
+    _pick_drain_target used to choose a target, hand it to create_migration, and
+    learn from the exception that it was never eligible -- spending one of the
+    drain's ten attempts per target, and NODE_DRAIN_RETRY_WAIT_SEC of wall clock,
+    to discover something knowable for free. Every rule checked here is a rule
+    create_migration or the task runner enforces; this is the same list asked in
+    advance, not a second opinion.
+
+    Deliberately NOT checked: cluster status and rebalance state, which are not
+    properties of the candidate (rejecting one target for them would reject all
+    of them, and the caller should surface that once rather than per node).
+    """
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return False, f"lvol {lvol_id} not found"
+
+    try:
+        tgt = db.get_storage_node_by_id(target_node_id)
+    except KeyError:
+        return False, "target node not found"
+
+    # --- the target itself ---
+    if tgt.status != StorageNode.STATUS_ONLINE:
+        return False, f"target is {tgt.status}, not online"
+    if not tgt.lvstore:
+        return False, "target has no lvstore"
+    if lvol.node_id == target_node_id:
+        return False, "target already hosts this volume"
+
+    # --- the source side: never migrate onto the node acting as source ---
+    try:
+        src = db.get_storage_node_by_id(lvol.node_id)
+    except KeyError:
+        return False, "source node not found"
+    try:
+        if resolve_source_node(src).get_id() == target_node_id:
+            return False, "target is currently serving as the fallback source"
+    except ValueError as e:
+        return False, str(e)
+
+    # --- the target's own replicas, which gate the migration ---
+    # Imported lazily: the runner imports this module, so a module-level import
+    # would close the cycle.
+    from simplyblock_core.services.tasks_runner_lvol_migration import (
+        _get_target_secondary_node, _get_target_tertiary_node)
+    for _get, label in ((_get_target_secondary_node, "secondary"),
+                        (_get_target_tertiary_node, "tertiary")):
+        try:
+            _node, err = _get(tgt, lvol.node_id)
+        except Exception as e:                       # noqa: BLE001 - advisory check
+            return False, f"target {label} check failed: {e}"
+        if err:
+            return False, err
+
+    # --- in-flight work that would refuse us anyway ---
+    if tasks_controller.get_active_node_mig_task(tgt.cluster_id, target_node_id):
+        return False, "target has a data migration in progress"
+
+    return True, ""
+
+
 def resolve_source_node(primary_node):
     """Which node will actually serve source-side RPCs for a migration off
     *primary_node*: itself when reachable, otherwise its first online replica

@@ -19,7 +19,7 @@ Ordered, not filtered: every candidate is still probed, so this cannot select
 a different leader than before -- only the sequence changes.
 """
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from simplyblock_core.controllers import snapshot_controller
 from simplyblock_core.models.storage_node import StorageNode

@@ -4837,8 +4837,28 @@ def _pick_drain_target(snode, lvol, tried, db_controller):
         exclude_ids=exclude)
     for cand in candidates:
         cand_id = cand.get_id() if hasattr(cand, "get_id") else cand
-        if cand_id not in exclude:
-            return cand_id
+        if cand_id in exclude:
+            continue
+        # Ask before committing. _get_next_3_nodes answers "where would a new
+        # volume go?" -- capacity, subsystem slots, load weighting -- which is
+        # the right question for placement and not the whole question for a
+        # migration. A candidate can be a fine placement and still be refused
+        # by create_migration or the task runner: it may be the node acting as
+        # the source, or its own secondary/tertiary may be in a state that
+        # blocks creation on the target primary, or it may already have a data
+        # migration running.
+        #
+        # Learning that from the exception costs one of this unit's ten
+        # attempts against that target plus NODE_DRAIN_RETRY_WAIT_SEC of wall
+        # clock -- 5 minutes to discover something check_target_viable answers
+        # from the DB for free. Ask first and move to the next candidate.
+        ok, reason = migration_controller.check_target_viable(lvol.get_id(), cand_id)
+        if not ok:
+            logger.info(
+                f"[REMOVAL] {snode.get_id()}: skipping drain target "
+                f"{cand_id[:8]} for {lvol.get_id()[:8]}: {reason}")
+            continue
+        return cand_id
     return None
 
 

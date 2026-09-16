@@ -18,7 +18,7 @@ rpksz to healthy zqhjg died with
 against 94dtj, the node under removal, involved only as the target's replica.
 """
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from simplyblock_core.controllers import migration_controller as mc
 from simplyblock_core.models.storage_node import StorageNode
