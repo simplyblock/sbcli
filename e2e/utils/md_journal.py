@@ -48,12 +48,38 @@ JOURNAL_FATAL_MARKERS = (
     "device too small for md journal",
 )
 
-#: Blobstore metadata corruption. If the journal did its job these never appear.
+#: Blobstore metadata corruption that ABORTS the operation reporting it. These
+#: are the real gate: if the journal did its job they never appear.
+#:
+#: Checked against the SPDK source rather than collected by keyword, because
+#: the two CRC messages read almost identically and only one is a defect:
+#:
+#:   blobstore.c:2187  "Metadata page %d crc mismatch for blobid 0x%..."
+#:                     -> blob_load_final(ctx, -EINVAL). The blob fails to load.
+#:
+#:   blobstore.c:1959  "Extenet metadata page %d crc mismatch for blobid 0x%..."
+#:                     (sic, the typo is SPDK's) -> same, an extent page fails.
 BLOBSTORE_CORRUPTION_MARKERS = (
     "crc mismatch for blobid",
+    "extenet metadata page",        # sic: the typo is in the SPDK source
+)
+
+#: Logged at ERRLOG but NOT a defect, so they must not fail a run.
+#:
+#: bs_update_cur_md_page_valid (blobstore.c:14467) is a predicate, not an error
+#: path. It is how the lvstore-update scan walks the md region, and an
+#: unallocated page is simply invalid: the CRC of a zeroed page does not match,
+#: so it logs "Metadata page is all zero." and "crc mismatch for blob." and
+#: returns false. The caller (blobstore.c:14897) then falls straight through to
+#: bs_update_replay_md_chain_cpl and carries on -- nothing propagates.
+#:
+#: Note "for blob." versus the fatal "for blobid 0x...". One trailing word is
+#: the whole difference between a normal scan terminator and a blob that failed
+#: to load, and this scan runs on every failover and restart, so treating them
+#: alike fails every recovery test on a healthy cluster.
+BLOBSTORE_BENIGN_MARKERS = (
     "crc mismatch for blob.",
     "metadata page is all zero",
-    "extenet metadata page",        # sic: the typo is in the SPDK source
 )
 
 
@@ -228,6 +254,10 @@ def scan_log_for_corruption(text, context=""):
     fatal = [m for m in JOURNAL_FATAL_MARKERS if m in low]
     fatal += [m for m in BLOBSTORE_CORRUPTION_MARKERS if m in low]
     info = []
+    # Reported so a run still shows they happened, but never fatal -- see
+    # BLOBSTORE_BENIGN_MARKERS for why the near-identical wording matters.
+    info += [f"benign md scan: {m}" for m in BLOBSTORE_BENIGN_MARKERS
+             if m in low]
     for marker, label in ((LOG_ENABLED, "journal enabled"),
                           (LOG_RECOVERY_EMPTY, "recovery: ring empty"),
                           (LOG_RESCAN, "rescan on takeover")):
