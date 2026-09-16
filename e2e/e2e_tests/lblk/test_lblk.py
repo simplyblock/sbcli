@@ -190,18 +190,40 @@ class _LblkBase(TestClusterBase):
                                  runtime=runtime or self.CHURN_RUNTIME)
 
     def _scan_spdk_logs(self, context):
-        """Fail on blobstore-CRC or journal-fatal lines.
+        """Fail on blobstore-CRC or journal-fatal lines, where readable.
 
         These matter more than the FIO markers: a torn journal entry is dropped
         silently by design, so a broken journal never reports "bad magic". The
         blobstore CRC errors are what it looks like from outside.
+
+        NOT readable on docker. The spdk_<port> container is created with the
+        GELF log driver
+        (simplyblock_web/api/internal/storage_node/docker.py:135) and
+        `docker logs` cannot read GELF -- it returns
+        "configured logging driver does not support reading". The product's own
+        collector goes to Graylog instead, which is more plumbing than a test
+        should carry.
+
+        So this says so out loud rather than scanning an empty string and
+        reporting a clean result. An earlier version read a path that did not
+        exist, swallowed the error with "|| true", and silently passed every
+        run; a check that cannot run must look different from one that ran and
+        found nothing.
         """
         for ip, port, _prefix, _sock, _lvs in self._journal_targets():
-            out, _ = self.ssh_obj.exec_command(
+            out, err = self.ssh_obj.exec_command(
                 node=ip,
                 command=self._spdk_log_cmd(ip, port, tail=4000),
                 supress_logs=True)
-            fatal, info = scan_log_for_corruption(out or "", context)
+            blob = out or ""
+            if not blob.strip() or "does not support reading" in (err or ""):
+                self.logger.warning(
+                    "[lblk] %s: SPDK log NOT SCANNED on %s -- the container "
+                    "logs to GELF and docker cannot read it back. This check "
+                    "is a no-op here; the raw crc32c verify is the gate.",
+                    context, ip)
+                continue
+            fatal, info = scan_log_for_corruption(blob, context)
             if info:
                 self.logger.info("[lblk] %s on %s: %s", context, ip,
                                  ", ".join(info))
@@ -209,57 +231,6 @@ class _LblkBase(TestClusterBase):
                 raise MdJournalError(
                     f"[lblk] metadata corruption on {ip} ({context}): {fatal}")
 
-    def assert_journal_recovered(self, ip, rpc_port, min_entries=1):
-        """Fail unless SPDK reports replaying entries from the ring.
-
-        Without this the recovery test proves only that a killed node comes
-        back and its data still verifies -- which a cluster with no journal at
-        all would also manage. The replay is the thing under test, so it has to
-        be read out of SPDK's own log rather than assumed from a clean verify.
-
-        SPDK emits one of (blob_md_journal.c):
-            "md journal recovery: N entries to drain (tail=T head=H)"
-            "md journal recovery: ring empty"
-            "md journal recovery: ring fully valid, order ambiguous"
-            "md journal recovery failed: ..."
-        "ring empty" is the dangerous one: it is not an error, the node comes up
-        healthy, and the run would have proved nothing.
-        """
-        out, _ = self.ssh_obj.exec_command(
-            node=ip,
-            command=self._spdk_log_cmd(ip, rpc_port, tail=8000),
-            supress_logs=True)
-        text = out or ""
-
-        if "md journal recovery failed" in text:
-            line = next((ln for ln in text.splitlines()
-                         if "md journal recovery failed" in ln), "")
-            raise MdJournalError(f"[lblk] journal recovery failed on {ip}: {line.strip()}")
-
-        drained = re.findall(r"md journal recovery: (\d+) entries to drain"
-                             r"(?: \(tail=(\d+) head=(\d+)\))?", text)
-        if drained:
-            total = sum(int(n) for n, _t, _h in drained)
-            self.logger.info("[lblk] journal recovery on %s replayed %d "
-                             "entries across %d lvstore(s): %s",
-                             ip, total, len(drained), drained)
-            if total < min_entries:
-                raise MdJournalError(
-                    f"[lblk] journal recovery on {ip} replayed {total} "
-                    f"entries, expected at least {min_entries}")
-            return total
-
-        if "md journal recovery: ring empty" in text:
-            raise MdJournalError(
-                f"[lblk] journal recovery on {ip} found an EMPTY ring. The "
-                f"node was killed with entries in it, so either they never "
-                f"reached the disk or recovery did not read them. The node "
-                f"comes up healthy either way, which is why this is checked "
-                f"rather than inferred from a clean data verify.")
-
-        raise MdJournalError(
-            f"[lblk] no 'md journal recovery:' line on {ip} after restart. "
-            f"Either the log rotated past it or recovery did not run.")
 
     # ── outages, through the API rather than the stress helpers ───────────
     def _journal_heads(self):
@@ -573,11 +544,16 @@ class _LblkJournalRecovery(_LblkBase):
 
         set_drain_paused(self.ssh_obj, ip, prefix, sock, True,
                          lvs_name=lvs, logger=self.logger)
+        # These lvols ARE the evidence. Created while the drain is paused, so
+        # their metadata sits in the ring rather than on disk; if the journal
+        # does not replay, they do not come back.
+        staged = []
         try:
             for i in range(10):
-                self.sbcli_utils.add_lvol(
-                    lvol_name=f"lblkjrtmp{i}{random.randint(100, 999)}",
-                    pool_name=pool, size="1G")
+                name = f"lblkjrtmp{i}{random.randint(100, 999)}"
+                self.sbcli_utils.add_lvol(lvol_name=name, pool_name=pool,
+                                          size="1G")
+                staged.append(name)
             stats = get_stats(self.ssh_obj, ip, prefix, sock, lvs_name=lvs,
                               logger=self.logger)
             if stats.get("used_slots", 0) < 2:
@@ -585,29 +561,72 @@ class _LblkJournalRecovery(_LblkBase):
                     "[lblk] only %s slot(s) in the ring after pausing the "
                     "drain; recovery may have nothing to replay",
                     stats.get("used_slots"))
-            self.logger.info("[lblk] killing %s with %s entries in the ring",
-                             node["uuid"], stats.get("used_slots"))
+            self.logger.info("[lblk] killing %s with %s entries in the ring "
+                             "holding %d staged lvols", node["uuid"],
+                             stats.get("used_slots"), len(staged))
             self.ssh_obj.stop_spdk_process(ip, node["rpc_port"], self.cluster_id)
         finally:
-            # Never leave the drain paused: the ring fills and metadata writes
-            # block behind it.
+            # Best effort only: the container is gone, so this normally fails.
+            # The restart is what actually clears the pause -- a fresh process
+            # comes up unpaused.
             try:
                 set_drain_paused(self.ssh_obj, ip, prefix, sock, False,
                                  lvs_name=lvs, logger=self.logger)
             except Exception as exc:                  # noqa: BLE001
-                self.logger.warning("[lblk] could not resume the drain: %s", exc)
+                self.logger.info("[lblk] drain resume skipped (expected, the "
+                                 "container is gone): %s", exc)
 
         self.sbcli_utils.restart_node(node_uuid=node["uuid"])
         self.sbcli_utils.wait_for_storage_node_status(node["uuid"], "online",
                                                       timeout=900)
+
+        # The actual assertion. Metadata written before the crash has to
+        # survive it -- that is the journal's whole job, and these ten lvols
+        # are metadata that existed only in the ring.
+        self.assert_staged_lvols_survived(staged)
+
+        # Corroboration from the journal's own counters: the ring should have
+        # drained on the way back up.
+        after = get_stats(self.ssh_obj, ip,
+                          self._spdk_exec_prefix(ip, node["rpc_port"]),
+                          sock, lvs_name=lvs, logger=self.logger)
+        self.logger.info("[lblk] ring after recovery: %s/%s slots used, "
+                         "disk_head=%s disk_tail=%s",
+                         after.get("used_slots"), after.get("num_slots"),
+                         after.get("disk_head"), after.get("disk_tail"))
+
         self._scan_spdk_logs("journal recovery")
-        # The exec prefix has to be rebuilt: the container the node was killed
-        # in is gone, and the restarted one is what carries the recovery log.
-        replayed = self.assert_journal_recovered(
-            ip, node["rpc_port"], min_entries=1)
         self._verify_all("after journal recovery")
-        self.logger.info("[lblk] journal recovery replayed %d entries and "
-                         "data is intact", replayed)
+        self.logger.info("[lblk] journal recovery: %d staged lvols survived "
+                         "the kill and data is intact", len(staged))
+
+    def assert_staged_lvols_survived(self, staged):
+        """Every lvol created while the drain was paused must still exist.
+
+        This replaces scraping SPDK's log for "md journal recovery: N entries".
+        That log is unreadable from here by design -- the spdk_<port> container
+        is created with the GELF driver
+        (simplyblock_web/api/internal/storage_node/docker.py:135), and
+        `docker logs` cannot read GELF; it errors instead of returning output.
+        The product's own collector goes to Graylog for the same reason.
+
+        Asserting the outcome is better than asserting the log anyway. A
+        replayed entry count proves SPDK said it replayed; a surviving lvol
+        proves the metadata actually came back, which is the guarantee the
+        journal exists to provide on a device with no atomic-write guarantee.
+        """
+        # list_lvols returns {lvol_name: id}, so the keys are the names.
+        present = set(self.sbcli_utils.list_lvols() or {})
+        missing = [n for n in staged if n not in present]
+        if missing:
+            raise MdJournalError(
+                f"[lblk] {len(missing)} of {len(staged)} lvols created while "
+                f"the drain was paused did not survive the kill: {missing[:5]}."
+                f" Their metadata was in the journal ring and nowhere else, so "
+                f"the ring was not replayed.")
+        self.logger.info("[lblk] all %d staged lvols survived the kill",
+                         len(staged))
+        return len(staged)
 
 
 # ── integration: the documented open gap ──────────────────────────────────
