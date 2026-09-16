@@ -32,11 +32,6 @@ def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNod
         raise KeyError(f'No storage node with JM device {id}')
 
 
-# Maximum number of `online → not-online` transitions caused by a local IO
-# error report from the device's home node before the device is force-failed.
-# Counter is per-device and resets only on explicit device restart.
-DEVICE_FLAP_LIMIT = 2
-
 # Allowed values for the `cause` argument of device_set_state.
 #
 # CAUSE_OTHER (default): operator-driven actions (`sn remove_device`) and
@@ -228,68 +223,8 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
             )
             return False
 
-    # Per-device flap counter. Increment ONLY when the device's home node
-    # spontaneously reported an unsolicited failure event against its own
-    # device — IO error or REMOVE/error_open. Anything else (remote-node
-    # observations, node cascades, operator-driven CLI commands, restarts)
-    # uses a different `cause` and is not counted. Belt-and-braces: also
-    # require the home node to currently be online; if the parent node is
-    # already in some non-online state then we are in a node-cascade window
-    # by definition and any device transition is collateral.
-    force_fail = False
-    countable = (
-        device.status == NVMeDevice.STATUS_ONLINE
-        and state not in (
-            NVMeDevice.STATUS_ONLINE,
-            NVMeDevice.STATUS_FAILED,
-            NVMeDevice.STATUS_FAILED_AND_MIGRATED,
-        )
-        and cause == CAUSE_LOCAL_FAILURE
-        and snode.status == StorageNode.STATUS_ONLINE
-    )
-    if countable:
-        # Debounce: error storms fire many error events in quick succession
-        # against a single underlying device problem. We only advance the
-        # counter for transitions that are at least DEVICE_FLAP_DEBOUNCE_SEC
-        # apart, so a single hung-device incident (potentially hundreds of
-        # error_write events) only burns one slot of the budget.
-        now = time.time()
-        if device.last_flap_tsc and (now - device.last_flap_tsc) < DEVICE_FLAP_DEBOUNCE_SEC:
-            logger.info(
-                f"Device {device_id} flap dedup: "
-                f"only {now - device.last_flap_tsc:.1f}s since last flap "
-                f"(< {DEVICE_FLAP_DEBOUNCE_SEC}s window); not counting"
-            )
-        else:
-            next_count = device.flap_count + 1
-            device.last_flap_tsc = now
-            if next_count > DEVICE_FLAP_LIMIT:
-                logger.warning(
-                    f"Device {device_id} exceeded flap limit "
-                    f"({next_count} > {DEVICE_FLAP_LIMIT}); forcing to failed "
-                    f"instead of {state}. Use device-restart to recover."
-                )
-                state = NVMeDevice.STATUS_FAILED
-                force_fail = True
-            else:
-                device.flap_count = next_count
-                logger.info(
-                    f"Device {device_id} flap_count={device.flap_count}/"
-                    f"{DEVICE_FLAP_LIMIT} (online→{state})"
-                )
-
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
-        if cause == CAUSE_DEVICE_RESTART:
-            # Explicit operator-initiated restart is the only path that
-            # forgives prior flapping. Both the counter and the debounce
-            # timestamp are wiped — the device gets a fresh budget.
-            if device.flap_count != 0:
-                logger.info(
-                    f"Device {device_id} flap_count reset on device-restart"
-                )
-            device.flap_count = 0
-            device.last_flap_tsc = 0.0
 
     if state == NVMeDevice.STATUS_REMOVED:
         device.deleted = True
@@ -331,8 +266,6 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
         new_fields = {
             "status": device.status,
             "previous_status": device.previous_status,
-            "flap_count": device.flap_count,
-            "last_flap_tsc": device.last_flap_tsc,
             "retries_exhausted": device.retries_exhausted,
             "repair_attempts": device.repair_attempts,
             "last_repair_tsc": device.last_repair_tsc,
@@ -352,21 +285,6 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
         connect_peers_to_node_devices(snode)
 
     distr_controller.send_dev_status_event(device, device.status)
-
-    if force_fail:
-        # Mirror the post-failed bookkeeping that device_set_failed() does:
-        # remove this device's storage_id from peer cluster maps and queue a
-        # failure-migration task. Wrapped in try/except so a partial cluster
-        # outage doesn't keep the device stuck mid-failure.
-        try:
-            for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-                if node.status == StorageNode.STATUS_ONLINE:
-                    node.rpc_client().distr_replace_id_in_map_prob(
-                        device.cluster_device_order, -1)
-            tasks_controller.add_device_failed_mig_task(device_id)
-        except Exception:
-            logger.exception(
-                f"Post-failed bookkeeping for {device_id} hit an error")
 
     return True
 
