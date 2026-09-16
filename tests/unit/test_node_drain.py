@@ -77,7 +77,9 @@ class TestTargetSelection(unittest.TestCase):
             return ["n5"]
 
         with patch.object(storage_node_ops.lvol_controller,
-                          "_get_next_3_nodes", side_effect=fake_pick):
+                          "_get_next_3_nodes", side_effect=fake_pick),              patch.object(storage_node_ops.migration_controller,
+                          "resolve_source_node", side_effect=ValueError("none")),              patch.object(storage_node_ops.migration_controller,
+                          "check_target_viable", return_value=(True, "")):
             target = storage_node_ops._pick_drain_target(
                 _node("n1"), _lvol("a"), ["n2", "n3"], MagicMock())
 
@@ -325,7 +327,8 @@ class TestDrainTargetExcludesTheActingSource(unittest.TestCase):
         with patch.object(storage_node_ops.lvol_controller, "_get_next_3_nodes",
                           return_value=list(candidates)), \
              patch.object(storage_node_ops.migration_controller,
-                          "resolve_source_node", return_value=acting):
+                          "resolve_source_node", return_value=acting),              patch.object(storage_node_ops.migration_controller,
+                          "check_target_viable", return_value=(True, "")):
             return storage_node_ops._pick_drain_target(
                 snode, lvol, list(tried), MagicMock())
 
@@ -361,7 +364,8 @@ class TestDrainTargetExcludesTheActingSource(unittest.TestCase):
         with patch.object(storage_node_ops.lvol_controller, "_get_next_3_nodes",
                           return_value=["b30f8f0c"]), \
              patch.object(storage_node_ops.migration_controller,
-                          "resolve_source_node", side_effect=ValueError("none")):
+                          "resolve_source_node", side_effect=ValueError("none")),              patch.object(storage_node_ops.migration_controller,
+                          "check_target_viable", return_value=(True, "")):
             self.assertEqual(
                 storage_node_ops._pick_drain_target(snode, lvol, [], MagicMock()),
                 "b30f8f0c")
