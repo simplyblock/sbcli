@@ -54,7 +54,7 @@ class _LblkStressMixin:
                 f"[lblk-stress] cluster device_mode is {mode!r}, not 'lblk'. "
                 f"This soak would exercise the NVMe path instead.")
         self.assert_devices_are_aio()
-        for ip, prefix, sock, lvs in self._journal_targets():
+        for ip, _port, prefix, sock, lvs in self._journal_targets():
             if lvs:
                 assert_journal_enabled(self.ssh_obj, ip, prefix, sock,
                                        lvs_name=lvs, logger=self.logger)
@@ -96,7 +96,7 @@ class _LblkStressMixin:
         for node in self.sbcli_utils.get_storage_nodes()["results"]:
             ip, port = node.get("mgmt_ip"), node.get("rpc_port")
             if ip and port:
-                out.append((ip, self._spdk_exec_prefix(ip, port),
+                out.append((ip, port, self._spdk_exec_prefix(ip, port),
                             self._spdk_sock(port), node.get("lvstore")))
         return out
 
@@ -123,10 +123,10 @@ class _LblkStressMixin:
                                   context=context)
 
     def _scan_spdk_logs(self, context):
-        for ip, prefix, _sock, _lvs in self._journal_targets():
+        for ip, port, _prefix, _sock, _lvs in self._journal_targets():
             out, _ = self.ssh_obj.exec_command(
                 node=ip,
-                command=f"{prefix} tail -n 4000 /var/log/spdk.log 2>/dev/null || true",
+                command=self._spdk_log_cmd(ip, port, tail=4000),
                 supress_logs=True)
             fatal, _info = scan_log_for_corruption(out or "", context)
             if fatal:
@@ -172,6 +172,10 @@ class _LblkDockerPlatform:
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
+    def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
+        # stdout, not a file in the container -- see _LblkDockerMixin.
+        return f"sudo docker logs --tail {tail} spdk_{rpc_port} 2>&1"
+
 
 class LblkStressDocker(_LblkStressMixin, _LblkDockerPlatform,
                        RandomMultiClientMultiFailoverAllNodesTest):
@@ -198,6 +202,11 @@ class _LblkK8sPlatform:
 
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
+
+    def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
+        pod = self.k8s_utils.get_spdk_pod_for_node(node_ip)
+        return (f"kubectl logs {pod} -c spdk-container "
+                f"-n {self.namespace} --tail={tail} 2>&1")
 
 
 class LblkStressK8s(_LblkStressMixin, _LblkK8sPlatform, K8sNativeFailoverTest):

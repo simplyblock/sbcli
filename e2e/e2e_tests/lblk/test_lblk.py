@@ -123,13 +123,13 @@ class _LblkBase(TestClusterBase):
         return seen
 
     def _journal_targets(self):
-        """(node_ip, exec_prefix, sock, lvs_name) for each storage node."""
+        """(node_ip, rpc_port, exec_prefix, sock, lvs_name) per storage node."""
         out = []
         for node in self.sbcli_utils.get_storage_nodes()["results"]:
             ip, port = node.get("mgmt_ip"), node.get("rpc_port")
             if not ip or not port:
                 continue
-            out.append((ip, self._spdk_exec_prefix(ip, port),
+            out.append((ip, port, self._spdk_exec_prefix(ip, port),
                         self._spdk_sock(port), node.get("lvstore")))
         return out
 
@@ -140,7 +140,7 @@ class _LblkBase(TestClusterBase):
         4K atomic write, which is the whole reason these tests exist.
         """
         checked = 0
-        for ip, prefix, sock, lvs in self._journal_targets():
+        for ip, _port, prefix, sock, lvs in self._journal_targets():
             if not lvs:
                 continue
             stats = assert_journal_enabled(self.ssh_obj, ip, prefix, sock,
@@ -196,10 +196,10 @@ class _LblkBase(TestClusterBase):
         silently by design, so a broken journal never reports "bad magic". The
         blobstore CRC errors are what it looks like from outside.
         """
-        for ip, prefix, _sock, _lvs in self._journal_targets():
+        for ip, port, _prefix, _sock, _lvs in self._journal_targets():
             out, _ = self.ssh_obj.exec_command(
                 node=ip,
-                command=f"{prefix} tail -n 4000 /var/log/spdk.log 2>/dev/null || true",
+                command=self._spdk_log_cmd(ip, port, tail=4000),
                 supress_logs=True)
             fatal, info = scan_log_for_corruption(out or "", context)
             if info:
@@ -209,7 +209,7 @@ class _LblkBase(TestClusterBase):
                 raise MdJournalError(
                     f"[lblk] metadata corruption on {ip} ({context}): {fatal}")
 
-    def assert_journal_recovered(self, ip, prefix, min_entries=1):
+    def assert_journal_recovered(self, ip, rpc_port, min_entries=1):
         """Fail unless SPDK reports replaying entries from the ring.
 
         Without this the recovery test proves only that a killed node comes
@@ -227,7 +227,7 @@ class _LblkBase(TestClusterBase):
         """
         out, _ = self.ssh_obj.exec_command(
             node=ip,
-            command=f"{prefix} tail -n 8000 /var/log/spdk.log 2>/dev/null || true",
+            command=self._spdk_log_cmd(ip, rpc_port, tail=8000),
             supress_logs=True)
         text = out or ""
 
@@ -272,7 +272,7 @@ class _LblkBase(TestClusterBase):
         been touched.
         """
         heads = {}
-        for ip, prefix, sock, lvs in self._journal_targets():
+        for ip, _port, prefix, sock, lvs in self._journal_targets():
             if not lvs:
                 continue
             try:
@@ -397,6 +397,12 @@ class _LblkDockerMixin:
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
+    def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
+        # SPDK logs to the container's stdout, not to a file inside it. The
+        # product's own collector proves it: collect_logs.py pulls these by
+        # container_name out of Graylog rather than reading any path.
+        return f"sudo docker logs --tail {tail} spdk_{rpc_port} 2>&1"
+
 
 class _LblkK8sMixin:
     """Reach SPDK through the pod."""
@@ -407,6 +413,11 @@ class _LblkK8sMixin:
 
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
+
+    def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
+        pod = self.k8s_utils.get_spdk_pod_for_node(node_ip)
+        return (f"kubectl logs {pod} -c spdk-container "
+                f"-n {self.namespace} --tail={tail} 2>&1")
 
 
 # ── functional ────────────────────────────────────────────────────────────
@@ -593,8 +604,7 @@ class _LblkJournalRecovery(_LblkBase):
         # The exec prefix has to be rebuilt: the container the node was killed
         # in is gone, and the restarted one is what carries the recovery log.
         replayed = self.assert_journal_recovered(
-            ip, self._spdk_exec_prefix(ip, node["rpc_port"]),
-            min_entries=1)
+            ip, node["rpc_port"], min_entries=1)
         self._verify_all("after journal recovery")
         self.logger.info("[lblk] journal recovery replayed %d entries and "
                          "data is intact", replayed)
