@@ -553,8 +553,10 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                             rec = db.get_snapshot_by_id(snap_id)
                             db.unindex_snapshot(rec)
                             rec.remove(db.kv_store)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(
+                                "Best-effort rollback cleanup failed for snapshot %s: %s",
+                                snap_id, e)
                     return None, f"Failed to register group snapshot on {sec.get_id()}"
 
             snap = SnapShot()
