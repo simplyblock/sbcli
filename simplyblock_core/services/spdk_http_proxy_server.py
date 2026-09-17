@@ -11,6 +11,7 @@ Importing this module has no side effects: configuration is read by
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import functools
 import hmac
@@ -577,10 +578,8 @@ def _log_task_death(task: "asyncio.Task[None]") -> None:
 
 
 def _close(writer: asyncio.StreamWriter) -> None:
-    try:
+    with contextlib.suppress(OSError):
         writer.close()
-    except OSError:
-        pass
 
 
 def require_authorization(request: Request) -> None:
