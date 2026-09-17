@@ -365,13 +365,6 @@ jobs:
           set +e
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
 
-          # Run the operator's own cleanup script first if available
-          for NAMESPACE in ${NS_C1} ${NS_C2}; do
-            if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
-              bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
-            fi
-          done
-
           # Run full 12-phase cleanup for each namespace.
           # Handles Helm R25+R26, CRs, CRDs, cert-manager, kube-system,
           # snapshots, PVCs/PVs, node cleanup, labels, CSI hostpath, namespace finalization.
@@ -383,6 +376,15 @@ jobs:
               -e "$CLUSTER_ENV" \
               -w "${ALL_WORKERS}" \
               -c "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/"
+          done
+
+          # The operator's own cleanup, second: it picks up whatever the
+          # 12-phase pass above could not resolve. Ours runs first so it does
+          # not inherit half-removed state.
+          for NAMESPACE in ${NS_C1} ${NS_C2}; do
+            if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
+              bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
+            fi
           done
 
       # ── Label worker nodes ──────────────────────────────────────────────

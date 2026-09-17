@@ -483,8 +483,36 @@ jobs:
           # Remove Helm release secrets in case uninstall left a broken/pending state
           kubectl delete secret -n vault -l name=openbao,owner=helm 2>/dev/null || true
           kubectl delete namespace vault --wait=false 2>/dev/null || true
+
+          # Orphaned aggregated APIServices are WHY this namespace hangs.
+          # The namespace controller will not finalize while it cannot
+          # enumerate every API group, and helm uninstall leaves
+          # simplyblock's own metrics APIService behind because it is
+          # cluster-scoped. One dead APIService blocks EVERY namespace
+          # deletion on the cluster, not just this one -- vault sat
+          # Terminating for 25h on exactly that.
+          for a in $(kubectl get apiservice -o json 2>/dev/null \
+            | jq -r '.items[] | select((.status.conditions // [])
+                | map(select(.type=="Available" and .status!="True"))
+                | length > 0) | .metadata.name'); do
+            echo "Removing unavailable APIService: ${a}"
+            kubectl delete apiservice "${a}" --timeout=30s 2>/dev/null || true
+          done
+
           echo "Waiting for vault namespace to be deleted..."
-          kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
+          kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null
+
+          # Last resort. Everything above addresses why it hangs; this makes
+          # sure it does not STAY hung, because a Terminating vault blocks
+          # the next run's KMS install and someone ends up clearing it by
+          # hand every time.
+          if kubectl get namespace vault >/dev/null 2>&1; then
+            echo "vault still Terminating; force-finalizing"
+            kubectl get namespace vault -o json \
+              | jq 'del(.spec.finalizers[])' \
+              | kubectl replace --raw /api/v1/namespaces/vault/finalize -f - || true
+            kubectl wait --for=delete namespace/vault --timeout=60s 2>/dev/null || true
+          fi
           echo "=== KMS cleanup complete ==="
 
       # ── Remove stale labels from previous runs ──────────────────────────────
