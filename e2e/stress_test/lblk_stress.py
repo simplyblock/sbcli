@@ -197,16 +197,24 @@ class _LblkK8sPlatform:
     """SPDK access for the k8s-native soaks."""
 
     def _spdk_exec_prefix(self, node_ip, rpc_port):
-        pod = self.k8s_utils.get_spdk_pod_for_node(node_ip)
-        return f"kubectl exec {pod} -c spdk-container -n {self.namespace} --"
+        # The stress base's _ensure_k8s_utils() only VALIDATES -- it returns
+        # None, unlike TestClusterBase's, which returns the object. So call it
+        # for the check and then read self.k8s_utils. The method is
+        # get_spdk_pod_name; get_spdk_pod_for_node never existed.
+        self._ensure_k8s_utils()
+        k8s = self.k8s_utils
+        pod = k8s.get_spdk_pod_name(node_ip)
+        return f"kubectl exec {pod} -c spdk-container -n {k8s.namespace} --"
 
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
     def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
-        pod = self.k8s_utils.get_spdk_pod_for_node(node_ip)
+        self._ensure_k8s_utils()
+        k8s = self.k8s_utils
+        pod = k8s.get_spdk_pod_name(node_ip)
         return (f"kubectl logs {pod} -c spdk-container "
-                f"-n {self.namespace} --tail={tail} 2>&1")
+                f"-n {k8s.namespace} --tail={tail} 2>&1")
 
 
 class LblkStressK8s(_LblkStressMixin, _LblkK8sPlatform, K8sNativeFailoverTest):

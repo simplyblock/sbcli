@@ -459,8 +459,14 @@ class _LblkK8sMixin:
     """Reach SPDK through the pod."""
 
     def _spdk_exec_prefix(self, node_ip, rpc_port):
-        pod = self.k8s_utils.get_spdk_pod_for_node(node_ip)
-        return f"kubectl exec {pod} -c spdk-container -n {self.namespace} --"
+        # _ensure_k8s_utils(), not self.k8s_utils -- the base reaches K8sUtils
+        # through sbcli_utils.k8s and there is no k8s_utils attribute at all.
+        # And the method is get_spdk_pod_name; get_spdk_pod_for_node does not
+        # exist. Both were invented, so every k8s lblk run died here before
+        # reaching a single assertion.
+        k8s = self._ensure_k8s_utils()
+        pod = k8s.get_spdk_pod_name(node_ip)
+        return f"kubectl exec {pod} -c spdk-container -n {k8s.namespace} --"
 
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
@@ -479,9 +485,10 @@ class _LblkK8sMixin:
             "LblkUnfencedJournalDocker instead.")
 
     def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
-        pod = self.k8s_utils.get_spdk_pod_for_node(node_ip)
+        k8s = self._ensure_k8s_utils()
+        pod = k8s.get_spdk_pod_name(node_ip)
         return (f"kubectl logs {pod} -c spdk-container "
-                f"-n {self.namespace} --tail={tail} 2>&1")
+                f"-n {k8s.namespace} --tail={tail} 2>&1")
 
 
 # ── functional ────────────────────────────────────────────────────────────
