@@ -730,17 +730,27 @@ jobs:
           # size(...) > 0 -- so blanking is enough, the keys may stay.
 
           LBLK_YAML=""
-
           if [ "${DEVICE_MODE}" = "lblk" ]; then
-
             LBLK_YAML="  enableLblk: true"
-
             DRIVE_SIZE_RANGE=""
-
             PCIE_MODEL_YAML=""
-
-            echo "lblk mode: PCIe selectors blanked, enableLblk set"
-
+            # enableJournalDevice is MANDATORY on lblk, not optional as on NVMe.
+            # add-node refuses outright:
+            #   "lblk device mode requires --enable-journal-device (journal on a
+            #    dedicated device); partitioned journal mode is not supported"
+            # ENABLE_JOURNAL_DEVICE is derived above from cluster_params
+            # partitions (inverted, 0 -> true) and the default partitions=1
+            # makes it false, so an lblk run with default parameters is rejected
+            # before a single node joins.
+            #
+            # Forced here rather than asking callers to pass partitions=0,
+            # because partitions has no meaning on lblk: the partitioned journal
+            # IS the mode the backend is refusing.
+            if [ "${ENABLE_JOURNAL_DEVICE}" != "true" ]; then
+              echo "lblk mode: forcing enableJournalDevice true (was ${ENABLE_JOURNAL_DEVICE})"
+            fi
+            ENABLE_JOURNAL_DEVICE="true"
+            echo "lblk mode: PCIe selectors blanked, enableLblk and journal device set"
           fi
 
           WORKER_YAML=""
