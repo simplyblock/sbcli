@@ -355,6 +355,19 @@ def main():
                 test_obj.configure_sysctl_settings()
             test_obj.run()
             passed_cases.append(f"{test.__name__}")
+        except SkippedTestsException as exp:
+            # A scenario that cannot run here is not a defect. Some cases have
+            # no equivalent on a platform (device hot-remove needs the storage
+            # host's sysfs, which kubectl does not reach) and some are
+            # prevented by the environment rather than by the product. Counting
+            # those as failures buries real ones, and leaving them to raise
+            # meant a test could only pass or fail with no way to say
+            # "not applicable".
+            #
+            # Deliberately NOT added to errors: the summary reports anything
+            # that is neither passed nor failed as SKIPPED.
+            logger.warning(f"{test.__name__} SKIPPED: {exp}")
+            skipped_cases += 1
         except Exception as exp:
             tb = traceback.format_exc()
             logger.error(tb)

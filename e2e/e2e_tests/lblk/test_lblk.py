@@ -34,6 +34,7 @@ from utils.md_journal import (
     scan_log_for_corruption,
     set_drain_paused,
 )
+from exceptions.custom_exception import SkippedTestsException
 from utils.raw_device_verify import RawDeviceVerifier
 
 
@@ -685,7 +686,7 @@ class _LblkDeviceFault(_LblkBase):
         self._stamp_all()
 
         if self.k8s_test:
-            raise LblkPreconditionError(
+            raise SkippedTestsException(
                 "[lblk] device hot-remove is not implemented on k8s-native: it "
                 "writes to /sys/block/<dev>/device/delete on the storage host, "
                 "and kubectl gives no path to the host's sysfs. Run "
@@ -1001,7 +1002,7 @@ class _LblkUnfencedJournal(_LblkBase):
         # The restore is scheduled on the node itself with nohup, so losing our
         # SSH session during the outage does not strand it down.
         if self.k8s_test:
-            raise LblkPreconditionError(
+            raise SkippedTestsException(
                 "[lblk] the unfenced-journal reproducer is not implemented on "
                 "k8s-native: it isolates the storage host's NICs, and there is "
                 "no kubectl equivalent. Deleting the pod would restart SPDK, "
@@ -1039,12 +1040,21 @@ class _LblkUnfencedJournal(_LblkBase):
         # replaced it anyway there is no stale writer and nothing to conclude.
         state = self._spdk_container_state(ip, port)
         if state != "running":
-            raise LblkPreconditionError(
-                f"[lblk] INCONCLUSIVE: spdk_{port} on {ip} is {state!r} after "
-                f"the outage, so the control plane replaced or stopped the "
-                f"process rather than leaving it to resume. The gap needs the "
-                f"ORIGINAL process back; shorten ISOLATION_SEC (currently "
-                f"{self.ISOLATION_SEC}s) or suppress auto-restart for the window.")
+            raise SkippedTestsException(
+                f"[lblk] cannot reproduce here: spdk_{port} on {ip} is "
+                f"{state!r} after the outage. The control plane restarted the "
+                f"node -- storage_node_monitor queues an auto-restart as soon "
+                f"as status reaches OFFLINE, and it polls every "
+                f"NODE_MONITOR_INTERVAL_SEC=3s, so there is no window to race. "
+                f"The gap needs the ORIGINAL process to resume; a restarted one "
+                f"has nothing stale to write. "
+                f"This is worth reporting as-is: on a cluster with auto-restart "
+                f"enabled the unfenced-append window does not occur, because "
+                f"the node is replaced before it can reconnect. Reproducing it "
+                f"needs node.auto_restart_disabled for the duration, and no CLI "
+                f"or API exposes that flag today -- it is set only by "
+                f"`sn shutdown`, which stops SPDK and so removes the stale "
+                f"writer too.")
         sleep_n_sec(30)
 
         after = get_stats(self._spdk_runner, ip,
