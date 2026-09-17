@@ -1477,9 +1477,21 @@ jobs:
         run: |
           set -o pipefail
           cd $GITHUB_WORKSPACE/e2e
-          python3 -m venv myenv
-          source myenv/bin/activate
-          python3 -m pip install -r requirements.txt
+          # 3.11, not whatever the runner has. These workflows built their
+          # own venv from the system python, and on a 3.9 runner every one of
+          # them died at import:
+          #   from datetime import datetime, UTC
+          #   ImportError: cannot import name 'UTC' from 'datetime'
+          # UTC landed in 3.11 and cannot be polyfilled, so no amount of
+          # requirements pinning helps. ensure_python.sh fetches a pinned 3.11
+          # through uv and installs requirements into it.
+          #
+          # Its stdout is the interpreter path. Put that venv's bin first so
+          # the plain `python3` calls below resolve to it -- GITHUB_PATH only
+          # affects later steps, and this all runs in one.
+          E2E_PY="$(bash "$GITHUB_WORKSPACE/e2e/scripts/ensure_python.sh" --requirements "$GITHUB_WORKSPACE/e2e/requirements.txt")"
+          export PATH="$(dirname "${E2E_PY}"):${PATH}"
+          python3 -V
 
           export CLUSTER_ID="${{ env.CLUSTER_ID }}"
           export CLUSTER_SECRET="${{ env.CLUSTER_SECRET }}"
