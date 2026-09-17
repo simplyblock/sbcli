@@ -19,6 +19,7 @@ These are finite scenario tests on TestClusterBase, in the same shape as
 TestMultiNodeOutage*. The open-ended soak lives in stress_test/lblk_stress.py.
 """
 
+import os
 import random
 import re
 import shlex
@@ -352,6 +353,28 @@ class _LblkBase(TestClusterBase):
                                     lvs, exc)
         return heads
 
+    #: Environments whose backing devices genuinely lack a 4K atomic write.
+    #: GCP runs on pd-balanced disks, which is the hardware this whole mode
+    #: exists for. The lab's Samsung PM983s and every other setup DO give a 4K
+    #: atomic write, so an md5 mismatch there is a real defect.
+    NON_ATOMIC_ENVS = ("gcp",)
+
+    @property
+    def _md5_severity(self):
+        """Whether an md5 mismatch fails the run or only warns.
+
+        Demoting it everywhere was wrong. run_fio_test hardcodes --verify=md5
+        and enables verify_backlog, which its own comment says bypasses the
+        rand_seed check -- so on a device with no atomic-write guarantee a
+        mismatch really can be an artefact. On a device that DOES guarantee 4K
+        atomicity there is no such excuse, and treating a mismatch as a warning
+        there would hide exactly the corruption these tests are looking for.
+        """
+        env = (os.environ.get("CLUSTER_ENV") or "").strip().lower()
+        if env in self.NON_ATOMIC_ENVS:
+            return "warning"
+        return "error"
+
     def _fs_fio(self, lvol_name, mount, tag, runtime=60):
         """Filesystem FIO on a mounted clone, run to completion.
 
@@ -382,7 +405,7 @@ class _LblkBase(TestClusterBase):
         else:
             self.common_utils.validate_fio_test(
                 node=self.client_machines[0], log_file=log,
-                md5_severity="warning")
+                md5_severity=self._md5_severity)
         self.logger.info("[lblk] filesystem FIO clean on clone %s", lvol_name)
 
     def _metadata_churn(self, lvol_name, tag):
