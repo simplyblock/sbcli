@@ -413,21 +413,39 @@ class _LblkDockerMixin:
         this test wants applied to every thread at once.
         """
         verb = "pause" if freeze else "unpause"
-        out, err = self.ssh_obj.exec_command(
-            node=node_ip, command=f"sudo docker {verb} spdk_{rpc_port}")
-        state, _ = self.ssh_obj.exec_command(
-            node=node_ip,
-            command=f"sudo docker inspect -f '{{{{.State.Status}}}}' spdk_{rpc_port}")
-        state = (state or "").strip()
+        _out, err = self.ssh_obj.exec_command(
+            node=node_ip, command=f"sudo docker {verb} spdk_{rpc_port}",
+            max_retries=1)
+        state = self._spdk_container_state(node_ip, rpc_port)
         want = "paused" if freeze else "running"
-        if state != want:
+
+        # Strict on the way in only. Thawing is best effort because by then the
+        # control plane may have auto-restarted the node and removed the
+        # container out from under us -- raising there would mask whatever the
+        # test was about to report with an unrelated teardown error.
+        if freeze and state != want:
             raise LblkPreconditionError(
-                f"[lblk] docker {verb} of spdk_{rpc_port} on {node_ip} left the "
-                f"container {state!r}, wanted {want!r} ({err or 'no stderr'}). "
-                f"Without a real freeze this test proves nothing.")
+                f"[lblk] docker pause of spdk_{rpc_port} on {node_ip} left the "
+                f"container {state!r}, wanted {want!r} "
+                f"({(err or 'no stderr').splitlines()[-1][:120]}). Without a "
+                f"real freeze this test proves nothing.")
+        if not freeze and state != want:
+            self.logger.warning(
+                "[lblk] unpause of spdk_%s on %s left it %r, not %r -- the "
+                "control plane most likely replaced the container",
+                rpc_port, node_ip, state, want)
+            return state
         self.logger.info("[lblk] spdk_%s on %s is now %s", rpc_port, node_ip,
                          state)
         return state
+
+    def _spdk_container_state(self, node_ip, rpc_port):
+        """docker's own view of the container, or "" when it no longer exists."""
+        out, _ = self.ssh_obj.exec_command(
+            node=node_ip,
+            command=f"sudo docker inspect -f '{{{{.State.Status}}}}' spdk_{rpc_port}",
+            supress_logs=True, max_retries=1)
+        return (out or "").strip()
 
     def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
         # SPDK logs to the container's stdout, not to a file inside it. The
@@ -845,6 +863,7 @@ class _LblkUnfencedJournal(_LblkBase):
                          "(ring head %s)", ip, self.FREEZE_SEC,
                          before.get("mem_head"))
         self._spdk_freeze(ip, port, True)
+        replaced = False
         try:
             # Drive metadata WHILE it is frozen. Without this the ring simply
             # does not move and the comparison below is vacuous: the first run
@@ -860,9 +879,38 @@ class _LblkUnfencedJournal(_LblkBase):
                     self.logger.info("[lblk] lvol create during freeze "
                                      "failed (expected while degraded): %s",
                                      str(exc)[:120])
-            self._wait_for_node_down(node["uuid"], timeout=self.FREEZE_SEC)
+
+            # Thaw as early as the demotion allows. The control plane
+            # auto-restarts a node it considers down, and that REMOVES the
+            # paused container -- the previous run froze for 98s and came back
+            # to "No such container". A replaced process is not a thawed one,
+            # so there is no stale writer left to append and the gap cannot
+            # reproduce. Poll so the window is as short as the demotion needs.
+            for _ in range(self.FREEZE_SEC // 5):
+                sleep_n_sec(5)
+                if self._spdk_container_state(ip, port) != "paused":
+                    replaced = True
+                    self.logger.warning(
+                        "[lblk] the control plane replaced spdk_%s while it "
+                        "was frozen", port)
+                    break
+                det = self.sbcli_utils.get_storage_node_details(
+                    storage_node_id=node["uuid"])[0]
+                if det.get("status") != "online":
+                    self.logger.info("[lblk] node left online after %s: "
+                                     "status=%s", _ * 5, det.get("status"))
+                    break
         finally:
             self._spdk_freeze(ip, port, False)
+
+        if replaced:
+            raise LblkPreconditionError(
+                f"[lblk] INCONCLUSIVE: the control plane restarted the frozen "
+                f"node and replaced spdk_{port} before it could be thawed. The "
+                f"gap needs the ORIGINAL process to resume and append while "
+                f"demoted; a replacement has nothing stale to write. Shorten "
+                f"FREEZE_SEC (currently {self.FREEZE_SEC}s) or suppress "
+                f"auto-restart for the window.")
         sleep_n_sec(30)
 
         after = get_stats(self.ssh_obj, ip,
