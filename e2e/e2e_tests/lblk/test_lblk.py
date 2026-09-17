@@ -21,6 +21,7 @@ TestMultiNodeOutage*. The open-ended soak lives in stress_test/lblk_stress.py.
 
 import random
 import re
+import threading
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
@@ -841,7 +842,10 @@ class _LblkUnfencedJournal(_LblkBase):
     mismatch ever appears during failover, look here first.
     """
 
-    FREEZE_SEC = 90
+    #: How long the leader is cut off. Long enough for its peers to demote it,
+    #: short enough that the control plane does not give up and restart the
+    #: node -- a restarted process is a new one and has nothing stale to write.
+    ISOLATION_SEC = 90
 
     def run(self):
         self._init_lblk()
@@ -859,58 +863,59 @@ class _LblkUnfencedJournal(_LblkBase):
         before = get_stats(self.ssh_obj, ip, prefix, sock, lvs_name=lvs,
                            logger=self.logger)
 
-        self.logger.info("[lblk] freezing the leader on %s for up to %ds "
-                         "(ring head %s)", ip, self.FREEZE_SEC,
-                         before.get("mem_head"))
-        self._spdk_freeze(ip, port, True)
-        replaced = False
-        try:
-            # Drive metadata WHILE it is frozen. Without this the ring simply
-            # does not move and the comparison below is vacuous: the first run
-            # of this test reported head 5 -> 5 and passed having reproduced
-            # nothing. These creates also force the lvstore to fail over, which
-            # is what demotes the frozen node.
-            for i in range(6):
-                try:
-                    self.sbcli_utils.add_lvol(
-                        lvol_name=f"lblkfencetmp{i}{random.randint(100, 999)}",
-                        pool_name=pool, size="1G")
-                except Exception as exc:              # noqa: BLE001
-                    self.logger.info("[lblk] lvol create during freeze "
-                                     "failed (expected while degraded): %s",
-                                     str(exc)[:120])
-
-            # Thaw as early as the demotion allows. The control plane
-            # auto-restarts a node it considers down, and that REMOVES the
-            # paused container -- the previous run froze for 98s and came back
-            # to "No such container". A replaced process is not a thawed one,
-            # so there is no stale writer left to append and the gap cannot
-            # reproduce. Poll so the window is as short as the demotion needs.
-            for _ in range(self.FREEZE_SEC // 5):
-                sleep_n_sec(5)
-                if self._spdk_container_state(ip, port) != "paused":
-                    replaced = True
-                    self.logger.warning(
-                        "[lblk] the control plane replaced spdk_%s while it "
-                        "was frozen", port)
-                    break
-                det = self.sbcli_utils.get_storage_node_details(
-                    storage_node_id=node["uuid"])[0]
-                if det.get("status") != "online":
-                    self.logger.info("[lblk] node left online after %s: "
-                                     "status=%s", _ * 5, det.get("status"))
-                    break
-        finally:
-            self._spdk_freeze(ip, port, False)
-
-        if replaced:
+        # Isolate the node's network rather than pausing its container.
+        #
+        # docker pause did freeze SPDK, but the control plane treats an
+        # unresponsive node as failed and auto-restarts it, which REMOVES the
+        # paused container: the previous run came back to "No such container"
+        # after 98s. A replaced process is not a thawed one, so there was never
+        # a stale writer to observe.
+        #
+        # Dropping the NICs leaves the SPDK process running the whole time. It
+        # simply cannot be reached, so its peers demote it; when the links come
+        # back, the ORIGINAL process resumes still believing it is the leader.
+        # That is the stale writer this gap is about, and it is the same shape
+        # as SPDK's own F3 (stop, lose leadership, resume).
+        #
+        # The restore is scheduled on the node itself with nohup, so losing our
+        # SSH session during the outage does not strand it down.
+        if_names = node.get("if_names") or self.ssh_obj.get_active_interfaces(ip)
+        if not if_names:
             raise LblkPreconditionError(
-                f"[lblk] INCONCLUSIVE: the control plane restarted the frozen "
-                f"node and replaced spdk_{port} before it could be thawed. The "
-                f"gap needs the ORIGINAL process to resume and append while "
-                f"demoted; a replacement has nothing stale to write. Shorten "
-                f"FREEZE_SEC (currently {self.FREEZE_SEC}s) or suppress "
-                f"auto-restart for the window.")
+                f"[lblk] no interfaces found on {ip} to isolate; cannot "
+                f"demote the leader without killing it.")
+        self.logger.info("[lblk] isolating %s (%s) for %ds", ip,
+                         ",".join(if_names), self.ISOLATION_SEC)
+
+        outage = threading.Thread(
+            target=self.ssh_obj.disconnect_all_active_interfaces,
+            args=(ip, if_names, self.ISOLATION_SEC), daemon=True)
+        outage.start()
+
+        # Drive metadata while it is cut off. The lvstore fails over to a peer,
+        # which is what demotes the isolated node.
+        for i in range(6):
+            try:
+                self.sbcli_utils.add_lvol(
+                    lvol_name=f"lblkfencetmp{i}{random.randint(100, 999)}",
+                    pool_name=pool, size="1G")
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.info("[lblk] lvol create during the outage failed "
+                                 "(expected while degraded): %s", str(exc)[:120])
+
+        outage.join(timeout=self.ISOLATION_SEC + 120)
+        self.logger.info("[lblk] links restored on %s", ip)
+
+        # The container must still be the one we isolated. If the control plane
+        # replaced it anyway there is no stale writer and nothing to conclude.
+        state = self._spdk_container_state(ip, port)
+        if state != "running":
+            raise LblkPreconditionError(
+                f"[lblk] INCONCLUSIVE: spdk_{port} on {ip} is {state!r} after "
+                f"the outage, so the control plane replaced or stopped the "
+                f"process rather than leaving it to resume. The gap needs the "
+                f"ORIGINAL process back; shorten ISOLATION_SEC (currently "
+                f"{self.ISOLATION_SEC}s) or suppress auto-restart for the window.")
         sleep_n_sec(30)
 
         after = get_stats(self.ssh_obj, ip,
@@ -924,7 +929,7 @@ class _LblkUnfencedJournal(_LblkBase):
 
         if after.get("drain_demoted") and appended > 0:
             raise MdJournalError(
-                f"[lblk] the thawed node appended {appended} entries to the "
+                f"[lblk] the reconnected node appended {appended} entries to the "
                 f"shared ring while demoted (drain_demoted=True). This is the "
                 f"documented missing leadership fence: a stale writer mutated "
                 f"shared ring structure after losing leadership.")
@@ -934,17 +939,17 @@ class _LblkUnfencedJournal(_LblkBase):
         # reporting a clean result, which is what this test did before.
         if not after.get("drain_demoted"):
             raise LblkPreconditionError(
-                f"[lblk] INCONCLUSIVE: the frozen node was never demoted "
-                f"(drain_demoted=False) after {self.FREEZE_SEC}s frozen, so "
+                f"[lblk] INCONCLUSIVE: the isolated node was never demoted "
+                f"(drain_demoted=False) after {self.ISOLATION_SEC}s cut off, so "
                 f"the missing leadership fence was never exercised. Ring head "
                 f"moved {before.get('mem_head')} -> {after.get('mem_head')}. "
-                f"Freeze for longer, or drive more metadata, before reading "
+                f"Isolate for longer, or drive more metadata, before reading "
                 f"anything into a pass.")
 
         self._scan_spdk_logs("unfenced journal")
         self._verify_all("after leader freeze and thaw")
-        self.logger.info("[lblk] node was demoted and appended nothing while "
-                         "demoted -- fence held this cycle")
+        self.logger.info("[lblk] node was demoted and appended nothing after "
+                         "reconnecting -- fence held this cycle")
 
 
 # ── registered leaf classes ───────────────────────────────────────────────
