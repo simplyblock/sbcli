@@ -385,6 +385,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
         self.init_cluster__upgrade_complete(subparser)
+        self.init_cluster__build_indices(subparser)
+        self.init_cluster__check_indices(subparser)
         self.init_cluster__graceful_shutdown(subparser)
         self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
@@ -593,6 +595,15 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__upgrade_complete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'upgrade-complete', 'Completes a cluster upgrade.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__build_indices(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'build-indices', 'Backfills the database\'s secondary indices.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__check_indices(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'check-indices', 'Verifies the database\'s secondary indices.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--repair', help='Write missing entries and clear orphaned ones instead of only reporting them.', dest='repair', action='store_true')
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
@@ -1554,6 +1565,10 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__update(sub_command, args)
                 elif sub_command in ['upgrade-complete']:
                     ret = self.cluster__upgrade_complete(sub_command, args)
+                elif sub_command in ['build-indices']:
+                    ret = self.cluster__build_indices(sub_command, args)
+                elif sub_command in ['check-indices']:
+                    ret = self.cluster__check_indices(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['restart']:
