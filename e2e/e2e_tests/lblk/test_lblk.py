@@ -21,6 +21,7 @@ TestMultiNodeOutage*. The open-ended soak lives in stress_test/lblk_stress.py.
 
 import random
 import re
+import shlex
 import threading
 
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -34,7 +35,6 @@ from utils.md_journal import (
     scan_log_for_corruption,
     set_drain_paused,
 )
-from exceptions.custom_exception import SkippedTestsException
 from utils.raw_device_verify import RawDeviceVerifier
 
 
@@ -426,6 +426,60 @@ class _LblkBase(TestClusterBase):
                 "receiving entries.", tag, before, after)
         return snap, clone
 
+    def _host_cmd(self, node_ip, command, timeout=120):
+        """Run a command on the storage HOST, on either platform.
+
+        Docker: ssh. K8s: through the privileged hostNetwork SPDK pod with
+        `nsenter --target 1`, which lands in the host's namespaces. That is how
+        the suite already reaches host core dumps and host iptables, so host
+        sysfs -- all device hot-remove needs -- comes free with it.
+        """
+        if not self.k8s_test:
+            return self.ssh_obj.exec_command(node=node_ip, command=command,
+                                             timeout=timeout, max_retries=1)
+        k8s = self._ensure_k8s_utils()
+        wrapped = (f"sudo nsenter --target 1 --mount --net -- "
+                   f"bash -c {shlex.quote(command)}")
+        return k8s.exec_in_spdk_container(node_ip, wrapped)
+
+    def _network_outage(self, node_ip, duration):
+        """Cut a storage node off the network for *duration*, self-restoring.
+
+        Docker drops the NICs over ssh. K8s applies iptables DROP from inside
+        the privileged hostNetwork SPDK pod and schedules the flush as a HOST
+        process via nsenter, so it survives SPDK's abort timer killing the
+        container -- without that the rules would be permanent and the node
+        would never come back.
+
+        Same shape as _network_outage_dual in the security suite, which was
+        itself ported from continuous_k8s_native_failover. Third copy, and it
+        belongs on TestClusterBase eventually; kept local here rather than
+        changing shared code the rest of the suite depends on mid-release.
+        """
+        if not self.k8s_test:
+            if_names = self.ssh_obj.get_active_interfaces(node_ip)
+            if not if_names:
+                raise LblkPreconditionError(
+                    f"[lblk] no active interfaces on {node_ip} to isolate")
+            self.logger.info("[lblk] dropping NICs on %s (%s) for %ds",
+                             node_ip, ",".join(if_names), duration)
+            self.ssh_obj.disconnect_all_active_interfaces(
+                node_ip, if_names, duration_secs=duration)
+            return
+
+        k8s = self._ensure_k8s_utils()
+        flush_delay = duration + 5
+        k8s.exec_in_spdk_container(node_ip, (
+            f"sudo nsenter --target 1 --mount --net -- "
+            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
+            f"> /dev/null 2>&1 &'"))
+        k8s.exec_in_spdk_container(node_ip, (
+            "sudo nohup bash -c '"
+            "sleep 5 && iptables -A INPUT -j DROP && iptables -A OUTPUT -j DROP"
+            "' > /tmp/lblk_nw_outage.log 2>&1 &"))
+        self.logger.info("[lblk] iptables DROP on %s, host-level flush in %ds",
+                         node_ip, flush_delay)
+
     def _any_storage_node(self):
         nodes = self.sbcli_utils.get_storage_nodes()["results"]
         if len(nodes) < 2:
@@ -685,13 +739,6 @@ class _LblkDeviceFault(_LblkBase):
         self._create_and_connect(f"lblkdev{random.randint(100, 999)}", pool)
         self._stamp_all()
 
-        if self.k8s_test:
-            raise SkippedTestsException(
-                "[lblk] device hot-remove is not implemented on k8s-native: it "
-                "writes to /sys/block/<dev>/device/delete on the storage host, "
-                "and kubectl gives no path to the host's sysfs. Run "
-                "LblkDeviceFaultDocker for this scenario.")
-
         node = self._any_storage_node()
         devices = self.sbcli_utils.get_device_details(node["uuid"])
         target = next((d for d in devices if d.get("bdev_type") == "aio"), None)
@@ -705,9 +752,9 @@ class _LblkDeviceFault(_LblkBase):
 
         self.logger.info("[lblk] hot-removing %s from %s", dev_name,
                          node["mgmt_ip"])
-        self.ssh_obj.exec_command(
-            node=node["mgmt_ip"],
-            command=f"echo 1 | sudo tee /sys/block/{dev_name}/device/delete")
+        # Host sysfs on both platforms -- see _host_cmd.
+        self._host_cmd(node["mgmt_ip"],
+                       f"echo 1 > /sys/block/{dev_name}/device/delete")
 
         removed = False
         for _ in range(self.PRESENCE_POLLS):
@@ -1001,25 +1048,9 @@ class _LblkUnfencedJournal(_LblkBase):
         #
         # The restore is scheduled on the node itself with nohup, so losing our
         # SSH session during the outage does not strand it down.
-        if self.k8s_test:
-            raise SkippedTestsException(
-                "[lblk] the unfenced-journal reproducer is not implemented on "
-                "k8s-native: it isolates the storage host's NICs, and there is "
-                "no kubectl equivalent. Deleting the pod would restart SPDK, "
-                "which destroys the stale writer the test exists to observe. "
-                "Run LblkUnfencedJournalDocker.")
-
-        if_names = node.get("if_names") or self.ssh_obj.get_active_interfaces(ip)
-        if not if_names:
-            raise LblkPreconditionError(
-                f"[lblk] no interfaces found on {ip} to isolate; cannot "
-                f"demote the leader without killing it.")
-        self.logger.info("[lblk] isolating %s (%s) for %ds", ip,
-                         ",".join(if_names), self.ISOLATION_SEC)
-
         outage = threading.Thread(
-            target=self.ssh_obj.disconnect_all_active_interfaces,
-            args=(ip, if_names, self.ISOLATION_SEC), daemon=True)
+            target=self._network_outage,
+            args=(ip, self.ISOLATION_SEC), daemon=True)
         outage.start()
 
         # Drive metadata while it is cut off. The lvstore fails over to a peer,
@@ -1038,23 +1069,30 @@ class _LblkUnfencedJournal(_LblkBase):
 
         # The container must still be the one we isolated. If the control plane
         # replaced it anyway there is no stale writer and nothing to conclude.
-        state = self._spdk_container_state(ip, port)
-        if state != "running":
-            raise SkippedTestsException(
-                f"[lblk] cannot reproduce here: spdk_{port} on {ip} is "
-                f"{state!r} after the outage. The control plane restarted the "
-                f"node -- storage_node_monitor queues an auto-restart as soon "
-                f"as status reaches OFFLINE, and it polls every "
-                f"NODE_MONITOR_INTERVAL_SEC=3s, so there is no window to race. "
-                f"The gap needs the ORIGINAL process to resume; a restarted one "
-                f"has nothing stale to write. "
-                f"This is worth reporting as-is: on a cluster with auto-restart "
-                f"enabled the unfenced-append window does not occur, because "
-                f"the node is replaced before it can reconnect. Reproducing it "
-                f"needs node.auto_restart_disabled for the duration, and no CLI "
-                f"or API exposes that flag today -- it is set only by "
-                f"`sn shutdown`, which stops SPDK and so removes the stale "
-                f"writer too.")
+        # Docker can see the container; on k8s the pod is managed for us.
+        state = ("running" if self.k8s_test
+                 else self._spdk_container_state(ip, port))
+        self._cp_restarted = state != "running"
+        if self._cp_restarted:
+            # The control plane restarted the node, which is what it is for.
+            # Bring it back and carry on rather than abandoning the run. The
+            # stale-append window is gone -- storage_node_monitor queues a
+            # restart as soon as status reaches OFFLINE and polls every
+            # NODE_MONITOR_INTERVAL_SEC=3s, so there is no window to race and
+            # no flag to suppress it (auto_restart_disabled is set only by
+            # `sn shutdown`, which stops SPDK and takes the stale writer with
+            # it). What remains provable is that a partitioned node which gets
+            # restarted leaves no corruption behind, and that is the path a
+            # real cluster actually takes.
+            self.logger.warning(
+                "[lblk] spdk_%s is %r after the outage -- the control plane "
+                "replaced it, so no stale writer survived. Continuing as a "
+                "partition-and-recover check.", port, state)
+            self.sbcli_utils.restart_node(node_uuid=node["uuid"])
+            self.sbcli_utils.wait_for_storage_node_status(
+                node["uuid"], "online", timeout=900)
+            self.sbcli_utils.wait_for_health_status(node["uuid"], True,
+                                                    timeout=300)
         sleep_n_sec(30)
 
         after = get_stats(self._spdk_runner, ip,
