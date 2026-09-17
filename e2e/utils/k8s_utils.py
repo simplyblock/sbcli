@@ -4390,12 +4390,34 @@ class K8sSbcliUtils:
     # ── device / node capacity methods ────────────────────────────────────────
 
     def get_device_details(self, storage_node_id):
-        """Return list of device dicts for a storage node."""
+        """Return list of storage-device dicts for a storage node.
+
+        `sbctl sn list-devices --json` does not return a list. It returns
+        {"Storage Devices": [...], "JM Devices": [...]}, so returning it raw
+        made every caller iterate the DICT KEYS -- two strings -- and anything
+        doing dev.get(...) died with "'str' object has no attribute 'get'".
+
+        Unwrapped to the storage devices so this matches the docker side, where
+        /device/list/<id> returns the data devices only. The JM devices are
+        available separately rather than silently mixed in, since a caller
+        counting devices means data devices.
+        """
         data = self._run_json(
             f"{self.sbcli_cmd} sn list-devices {storage_node_id} --json"
         )
         self.logger.info(f"Device Details: {data}")
-        return data
+        if isinstance(data, dict):
+            return data.get("Storage Devices") or []
+        return data or []
+
+    def get_jm_device_details(self, storage_node_id):
+        """Return the JM (journal) devices for a storage node."""
+        data = self._run_json(
+            f"{self.sbcli_cmd} sn list-devices {storage_node_id} --json"
+        )
+        if isinstance(data, dict):
+            return data.get("JM Devices") or []
+        return []
 
     def get_device_capacity(self, device_id):
         """Return capacity records for a device.

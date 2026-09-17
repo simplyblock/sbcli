@@ -112,16 +112,46 @@ class _LblkBase(TestClusterBase):
         seen, bad = 0, []
         for node in self.sbcli_utils.get_storage_nodes()["results"]:
             for dev in self.sbcli_utils.get_device_details(node["uuid"]):
+                if not isinstance(dev, dict):
+                    raise LblkPreconditionError(
+                        f"get_device_details returned {type(dev).__name__} "
+                        f"rather than a device dict: {dev!r}")
                 seen += 1
-                if dev.get("bdev_type") != "aio":
-                    bad.append((dev.get("id"), dev.get("bdev_type")))
+                ok, shown = self._device_is_lblk_backed(dev)
+                if not ok:
+                    bad.append((dev.get("id") or dev.get("UUID"), shown))
         if not seen:
             raise LblkPreconditionError("cluster reports no storage devices")
         if bad:
             raise LblkPreconditionError(
-                f"{len(bad)} of {seen} devices are not AIO bdevs: {bad[:5]}")
-        self.logger.info("[lblk] all %d devices are aio bdevs", seen)
+                f"{len(bad)} of {seen} devices are not lblk-backed: {bad[:5]}")
+        self.logger.info("[lblk] all %d devices are lblk-backed", seen)
         return seen
+
+    @staticmethod
+    def _device_is_lblk_backed(dev):
+        """(is_lblk, what_was_checked) for one device, on either platform.
+
+        The two platforms expose different things, so this cannot just read one
+        field:
+
+        Docker goes through the v1 API and gets the model, including
+        bdev_type -- "aio" on lblk. That is the direct answer, so use it when
+        it is there.
+
+        K8s shells out to `sbctl sn list-devices --json`, whose dicts carry
+        UUID / Name / Size / Serial Number / PCIe / Status and no bdev_type at
+        all. What it does expose is the column named "PCIe", which on lblk
+        holds a device PATH (/dev/nvme2n1, /dev/sdb) rather than a PCI address
+        (0000:00:02.0). That distinction IS the mode: lblk devices are named by
+        path because they are never PCI-bound to SPDK.
+        """
+        bdev_type = dev.get("bdev_type")
+        if bdev_type is not None:
+            return bdev_type == "aio", f"bdev_type={bdev_type!r}"
+
+        path = dev.get("PCIe") or dev.get("device_path") or ""
+        return str(path).startswith("/dev/"), f"PCIe={path!r}"
 
     def _journal_targets(self):
         """(node_ip, rpc_port, exec_prefix, sock, lvs_name) per storage node."""
