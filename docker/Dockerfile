@@ -13,8 +13,8 @@ ARG PYTHON_VERSION=3.14
 # Busts the cache of the OS-package layers below. Those layers are pinned only
 # by package name, so without this they would keep serving whatever `dnf`
 # resolved to the first time and never pick up a security update. CI and
-# build_image.sh pass the current ISO week, giving an upstream fix at most seven
-# days to reach the image. A build that passes nothing keeps this default and so
+# build_image.sh pass the current UTC date, giving an upstream fix at most one
+# day to reach the image. A build that passes nothing keeps this default and so
 # re-uses whatever it has cached.
 ARG CACHE_KEY=local
 
