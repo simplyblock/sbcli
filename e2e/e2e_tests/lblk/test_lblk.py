@@ -453,10 +453,22 @@ class _LblkBase(TestClusterBase):
         if not self.k8s_test:
             log = f"{self.log_path}/fio_lblk_{tag}.log"
 
+        # verify=md5 explicitly. Without it the k8s FIO job moves IO and checks
+        # nothing -- only the docker path had --verify=md5, buried inside
+        # run_fio_test -- so the "formatted" lane was not a data check on k8s
+        # at all.
+        #
+        # verify_fatal follows the hardware. Where a 4K atomic write IS
+        # guaranteed a mismatch is a real defect and should fail the job
+        # outright; on GCP's pd-balanced disks it can be an artefact of
+        # run_fio_test's own verify_backlog, so the mismatch is recorded and
+        # triaged instead of failing the run. Same rule as _md5_severity, one
+        # decision expressed in both places.
+        fatal = self._md5_severity == "error"
         handle = self._run_fio_dual(
             lvol_name, mount_path=mount, log_path=log, runtime=runtime,
             name=f"lblk{tag}", rw="randrw", bs="4K", numjobs=2, nrfiles=4,
-            size="512M")
+            size="512M", verify="md5", verify_fatal=fatal)
         if hasattr(handle, "join"):
             handle.join()
 

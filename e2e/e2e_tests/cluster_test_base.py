@@ -1275,8 +1275,19 @@ class TestClusterBase:
     def _run_fio_dual(self, lvol_name, mount_path=None, log_path=None,
                       runtime=300, name=None, rw="randrw", size="1G",
                       bs="4K", iodepth=1, numjobs=2, nrfiles=8,
-                      time_based=True, **kwargs):
-        """Start FIO. Returns thread (Docker) or job_name str (K8s)."""
+                      time_based=True, verify=None, verify_fatal=False,
+                      **kwargs):
+        """Start FIO. Returns thread (Docker) or job_name str (K8s).
+
+        verify: e.g. "md5" or "crc32c". Opt-in and off by default, so existing
+            callers are unaffected. It is worth knowing that WITHOUT it the k8s
+            job does no data verification at all -- it only moves IO -- while
+            the docker path has always had --verify=md5 hardcoded inside
+            run_fio_test. The two lanes were never checking the same thing.
+        verify_fatal: fail the FIO job itself on a mismatch. Leave False where
+            a mismatch should be reported but not fail the run, which is the
+            case on hardware with no 4K atomic-write guarantee.
+        """
         fio_name = name or f"fio_{lvol_name}"
 
         if self.k8s_test:
@@ -1288,6 +1299,11 @@ class TestClusterBase:
             cm_name = f"fiocfg-{job_name}"
 
             time_cfg = f"time_based\nruntime={runtime}" if time_based else ""
+            verify_cfg = ""
+            if verify:
+                verify_cfg = f"verify={verify}\nverify_state_save=0\n"
+                if verify_fatal:
+                    verify_cfg += "verify_fatal=1\n"
             fio_config = (
                 f"[global]\n"
                 f"ioengine=libaio\n"
@@ -1295,6 +1311,7 @@ class TestClusterBase:
                 f"bs={bs}\n"
                 f"iodepth={iodepth}\n"
                 f"numjobs={numjobs}\n"
+                f"{verify_cfg}"
                 f"{time_cfg}\n"
                 f"\n"
                 f"[{self._k8s_normalize_name(fio_name)[:20]}]\n"
