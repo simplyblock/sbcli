@@ -72,6 +72,7 @@ class _LblkBase(TestClusterBase):
         self.test_name = _snake_case(type(self).__name__)
         self._verifier = None
         self._lblk_devices = {}      # lvol_name -> (client, /dev/nvmeXnY)
+        self._lblk_volumes = []      # names, both platforms
         self._journal_lvs = None
 
     # ── platform hooks ────────────────────────────────────────────────────
@@ -99,6 +100,7 @@ class _LblkBase(TestClusterBase):
     def _init_lblk(self):
         self._verifier = RawDeviceVerifier(self.ssh_obj, self.logger)
         self._lblk_devices = {}
+        self._lblk_volumes = []
         self._journal_lvs = None
 
     # ── preconditions ─────────────────────────────────────────────────────
@@ -206,8 +208,27 @@ class _LblkBase(TestClusterBase):
         return checked
 
     # ── volumes ───────────────────────────────────────────────────────────
+    #: Raw crc32c needs a block device on a client. Docker has one; k8s does
+    #: not -- _connect_and_mount_dual is a documented no-op there and nothing in
+    #: k8s_utils creates a volumeMode: Block PVC. Set False on the k8s mixin, so
+    #: the k8s classes verify through FIO instead of silently skipping the gate.
+    RAW_VERIFY = True
+
     def _create_and_connect(self, name, pool):
-        """Create an lvol and connect it raw -- no filesystem, on purpose."""
+        """Provision a volume the way this platform does it.
+
+        Docker: an lvol, connected raw over NVMe-oF. No filesystem, on purpose,
+        so the crc32c verify sees the device.
+
+        K8s: a PVC. There is no client device to hand back -- volumes are
+        consumed by pods -- so the FIO lane works off the volume name.
+        """
+        if self.k8s_test:
+            self._create_lvol_dual(name, self.LVOL_SIZE, pool_name=pool)
+            self._lblk_volumes.append(name)
+            self.logger.info("[lblk] %s provisioned as a PVC", name)
+            return None, name
+
         self.sbcli_utils.add_lvol(lvol_name=name, pool_name=pool,
                                   size=self.LVOL_SIZE)
         client = (self.fio_node or [self.mgmt_nodes[0]])[0]
@@ -220,20 +241,46 @@ class _LblkBase(TestClusterBase):
         if not dev:
             raise RuntimeError(f"[lblk] {name} did not surface a device on {client}")
         self._lblk_devices[name] = (client, dev)
+        self._lblk_volumes.append(name)
         self.logger.info("[lblk] %s -> %s on %s", name, dev, client)
         return client, dev
 
     def _stamp_all(self):
+        if not self.RAW_VERIFY:
+            return
         for _name, (client, dev) in self._lblk_devices.items():
             self._verifier.stamp(client, dev, region_size=self.VERIFY_REGION)
 
     def _verify_all(self, context):
-        """Raw crc32c verify every volume. This is the gate."""
-        for name, (client, dev) in self._lblk_devices.items():
-            self._verifier.verify(client, dev, region_size=self.VERIFY_REGION,
-                                  context=f"{context} [{name}]")
+        """Prove the data is intact, by whichever means this platform has.
+
+        Docker re-reads the stamped region with crc32c on the raw device. That
+        is the strong check: no filesystem to mask a torn write and no
+        overlapping IO by construction.
+
+        K8s runs FIO against the PVC, which is a filesystem check. Weaker --
+        SshUtils.run_fio_test hardcodes --verify=md5 and enables verify_backlog,
+        so a mismatch can be an artefact -- which is why md5 is demoted to a
+        warning here and the blobstore-CRC scan is what actually gates a run.
+        Saying so rather than skipping quietly: a check that cannot run must not
+        look like one that ran and passed.
+        """
+        if self.RAW_VERIFY:
+            for name, (client, dev) in self._lblk_devices.items():
+                self._verifier.verify(client, dev,
+                                      region_size=self.VERIFY_REGION,
+                                      context=f"{context} [{name}]")
+            return
+
+        for name in self._lblk_volumes:
+            self._fs_fio(name, None, f"{context}-{name}"[:40], runtime=30)
+        self.logger.info("[lblk] %s: FIO verified %d volume(s) through the "
+                         "filesystem (raw crc32c is docker-only)",
+                         context, len(self._lblk_volumes))
 
     def _churn_all(self, runtime=None):
+        if not self.RAW_VERIFY:
+            return
         for _name, (client, dev) in self._lblk_devices.items():
             self._verifier.churn(client, dev,
                                  runtime=runtime or self.CHURN_RUNTIME)
@@ -392,11 +439,27 @@ class _LblkBase(TestClusterBase):
         self.ssh_obj.notify_outage_started([ip])
 
         if outage_type == "graceful_shutdown":
+            # Control-plane API, so it works the same on both platforms.
             self.sbcli_utils.shutdown_node(node_uuid=uuid)
         elif outage_type == "container_stop":
-            self.ssh_obj.stop_spdk_process(ip, node["rpc_port"], self.cluster_id)
+            # Storage nodes are not ssh-reachable on k8s; the pod helper is
+            # what every other k8s test uses for this.
+            if self.k8s_test:
+                self._ensure_k8s_utils().stop_spdk_pod(ip)
+            else:
+                self.ssh_obj.stop_spdk_process(ip, node["rpc_port"],
+                                               self.cluster_id)
         elif outage_type == "storage_node_reboot":
-            self.ssh_obj.reboot_node(ip)
+            if self.k8s_test:
+                # Rebooting a worker is an infrastructure operation with no
+                # kubectl equivalent. Restarting the pod is the closest thing
+                # the suite has, and is named honestly rather than pretending
+                # a node reboot happened.
+                self.logger.info("[lblk] no node-reboot equivalent on k8s; "
+                                 "restarting the SPDK pod instead")
+                self._ensure_k8s_utils().stop_spdk_pod(ip)
+            else:
+                self.ssh_obj.reboot_node(ip)
         else:
             raise ValueError(f"unhandled outage type {outage_type!r}")
 
@@ -490,6 +553,9 @@ class _KubectlRunner:
 
 class _LblkK8sMixin:
     """Reach SPDK through the pod."""
+
+    #: No raw block device on k8s -- see RAW_VERIFY on _LblkBase.
+    RAW_VERIFY = False
 
     @property
     def _spdk_runner(self):
@@ -618,6 +684,13 @@ class _LblkDeviceFault(_LblkBase):
         self._create_and_connect(f"lblkdev{random.randint(100, 999)}", pool)
         self._stamp_all()
 
+        if self.k8s_test:
+            raise LblkPreconditionError(
+                "[lblk] device hot-remove is not implemented on k8s-native: it "
+                "writes to /sys/block/<dev>/device/delete on the storage host, "
+                "and kubectl gives no path to the host's sysfs. Run "
+                "LblkDeviceFaultDocker for this scenario.")
+
         node = self._any_storage_node()
         devices = self.sbcli_utils.get_device_details(node["uuid"])
         target = next((d for d in devices if d.get("bdev_type") == "aio"), None)
@@ -739,7 +812,11 @@ class _LblkJournalRecovery(_LblkBase):
                              "%d of %d staged lvols live on its lvstore %s: %s",
                              node["uuid"], stats.get("used_slots"),
                              len(staged_here), len(staged), lvs, staged_here)
-            self.ssh_obj.stop_spdk_process(ip, node["rpc_port"], self.cluster_id)
+            if self.k8s_test:
+                self._ensure_k8s_utils().stop_spdk_pod(ip)
+            else:
+                self.ssh_obj.stop_spdk_process(ip, node["rpc_port"],
+                                               self.cluster_id)
         finally:
             # Resume EVERY lvstore that was paused, not just the victim's. A
             # paused drain fills its ring and then metadata writes block behind
@@ -923,6 +1000,14 @@ class _LblkUnfencedJournal(_LblkBase):
         #
         # The restore is scheduled on the node itself with nohup, so losing our
         # SSH session during the outage does not strand it down.
+        if self.k8s_test:
+            raise LblkPreconditionError(
+                "[lblk] the unfenced-journal reproducer is not implemented on "
+                "k8s-native: it isolates the storage host's NICs, and there is "
+                "no kubectl equivalent. Deleting the pod would restart SPDK, "
+                "which destroys the stale writer the test exists to observe. "
+                "Run LblkUnfencedJournalDocker.")
+
         if_names = node.get("if_names") or self.ssh_obj.get_active_interfaces(ip)
         if not if_names:
             raise LblkPreconditionError(
