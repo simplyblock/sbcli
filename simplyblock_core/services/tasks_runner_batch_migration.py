@@ -862,10 +862,19 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                     m_tgt_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(m_lvol.lvol_bdev)}"
                 except KeyError:
                     continue
-                if not tgt_rpc.bdev_lvol_set_migration_flag(m_tgt_composite):
-                    logger.warning(
-                        f"Group {group.uuid[:8]}: re-assert migration flag on primary "
-                        f"failed for {m_tgt_composite} (may already be flagged)")
+                # Re-asserting the flag is a write that needs lvstore leadership
+                # (see set_migration_flag_on_primary). This path had no check at
+                # all, and it re-asserts on a target that has just been through a
+                # failed cutover -- precisely when leadership is most likely to
+                # have moved. Skip the member rather than fence the target.
+                _ok, _err = migration_controller.set_migration_flag_on_primary(
+                    tgt_rpc, tgt_node.lvstore, m_tgt_composite, tgt_node.get_id(),
+                    tolerate_flag_failure=True)
+                if not _ok:
+                    logger.error(
+                        f"Group {group.uuid[:8]}: {_err}; skipping replica re-assert "
+                        f"for this member")
+                    continue
                 for _extra_rpc in (tgt_sec_rpc_reflag, tgt_ter_rpc_reflag):
                     if _extra_rpc:
                         try:

@@ -1088,6 +1088,50 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
     return True, ""
 
 
+def set_migration_flag_on_primary(rpc, lvs_name, composite, node_id=None,
+                                  tolerate_flag_failure=False):
+    """Set the migration flag on `composite`, asserting lvstore leadership first.
+
+    ``bdev_lvol_set_migration_flag`` is not a passive metadata bit: it drives the
+    distrib-level special_io machinery for the target bdev (see the re-assert
+    comment in tasks_runner_batch_migration.py). Issued against an lvstore this
+    node does not currently lead, the resulting IO fails, which demotes the
+    lvstore and fences its client ports — taking a healthy node down and
+    surfacing to the control plane as the unhelpful "target node offline".
+
+    Found live 2026-09-16 removing node 0d51a544: the flag was set twice on
+    LVS_7/SNAP_25m, at 18:51:51 and again at 18:51:59. The first went through
+    the create path, which checks leadership; the second reached SPDK via the
+    bdev-reuse path, which did not, and was followed 109 ms later by
+    ``spdk_lvs_queued_failed_IO`` → ``block_port 4436/4437``.
+
+    Guarding the flag rather than only the preceding ``bdev_lvol_create`` is the
+    whole point. They are separate RPCs with other calls in between, so
+    leadership can move after the create is cleared — and on a retry the create
+    is skipped entirely, taking its check with it.
+
+    Only ever call this for the lvstore's PRIMARY. A secondary or tertiary
+    replica is by definition neither primary nor leader, so it must keep setting
+    the flag unguarded; ``_ensure_lvstore_primary_leader`` would reject it.
+
+    `tolerate_flag_failure` keeps the pre-existing "may already be flagged"
+    leniency at call sites that treat a False RPC return as benign. It never
+    softens the leadership check, which is the part that matters.
+
+    Returns (ok: bool, error: str) — error is empty when ok is True.
+    """
+    ok, err = _ensure_lvstore_primary_leader(rpc, lvs_name, node_id)
+    if not ok:
+        return False, f"refusing bdev_lvol_set_migration_flag on {composite}: {err}"
+    if not rpc.bdev_lvol_set_migration_flag(composite):
+        msg = f"bdev_lvol_set_migration_flag failed for {composite}"
+        if tolerate_flag_failure:
+            logger.warning(f"{msg} (may already be flagged)")
+            return True, ""
+        return False, msg
+    return True, ""
+
+
 def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                          host_nqn=None,
@@ -1213,9 +1257,14 @@ def create_migration(lvol_id, target_node_id,
         _tgt_uuid   = _bdev_info[0].get('uuid')
 
     # ── 1c. Set migration flag on TGT-prim ────────────────────────────────────
-    if not tgt_rpc.bdev_lvol_set_migration_flag(composite):
-        logger.warning(f"create_migration: bdev_lvol_set_migration_flag on primary "
-                       f"failed for {composite} (may already be flagged)")
+    # Leadership is re-asserted here rather than relying on the check above:
+    # that one only runs when the bdev had to be created, so it is skipped
+    # entirely on the reuse path, and two registration RPCs may land in between.
+    _ok, _err = set_migration_flag_on_primary(
+        tgt_rpc, tgt_node.lvstore, composite, target_node_id,
+        tolerate_flag_failure=True)
+    if not _ok:
+        raise PreconditionError(f"create_migration: {_err}")
 
     # ── 1d. Register migration bdev on TGT-sec and TGT-ter ───────────────────
     # All HA peers need bdev_lvol_register so they can mirror writes during migration.

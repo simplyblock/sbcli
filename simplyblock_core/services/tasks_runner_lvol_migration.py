@@ -1044,11 +1044,16 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         except Exception as e:
             logger.warning(f"cleanup target lvol {tgt_composite} (non-fatal): {e}")
 
-    # Step 3: migration flag on primary
-    ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_composite)
-    if not ret:
+    # Step 3: migration flag on primary.
+    # Guarded by the leadership check inside set_migration_flag_on_primary, NOT
+    # by the one in the create branch above: that branch is skipped whenever the
+    # bdev is reused on a retry, and the two registration RPCs in between give
+    # leadership room to move even on a first pass.
+    ok, err = migration_controller.set_migration_flag_on_primary(
+        tgt_rpc, tgt_node.lvstore, tgt_composite, tgt_node.get_id())
+    if not ok:
         _cleanup()
-        return None, f"bdev_lvol_set_migration_flag failed for snap {snap_uuid}"
+        return None, f"{err} (snap {snap_uuid})"
 
     # Step 4: get map_id of target bdev — used by bdev_lvol_transfer to route
     # data through the hub instead of a per-snap temp NVMe-oF subsystem.
