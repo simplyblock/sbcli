@@ -324,6 +324,7 @@ jobs:
               chunk_bs)   echo "CHUNK_BS=$val" >> $GITHUB_ENV ;;
               partitions) echo "PARTITIONS=$val" >> $GITHUB_ENV ;;
               jm_count)   echo "JM_COUNT=$val" >> $GITHUB_ENV ;;
+              device_mode) echo "DEVICE_MODE=$val" >> $GITHUB_ENV ;;
               vcpu_count) echo "VCPU_COUNT_PARAM=$val" >> $GITHUB_ENV ;;
             esac
           done
@@ -951,6 +952,34 @@ jobs:
             PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
           fi
 
+          # nvme unless cluster_params says otherwise. Defaulted where it
+
+          # is used, so it holds however the value arrived.
+
+          DEVICE_MODE="${DEVICE_MODE:-nvme}"
+
+          #
+
+          # lblk selectors and the NVMe PCIe selectors are mutually
+
+          # exclusive under the StorageNodeSet CEL rule, which tests
+
+          # size(...) > 0 -- so blanking is enough, the keys may stay.
+
+          LBLK_YAML=""
+
+          if [ "${DEVICE_MODE}" = "lblk" ]; then
+
+            LBLK_YAML="  enableLblk: true"
+
+            DRIVE_SIZE_RANGE=""
+
+            PCIE_MODEL_YAML=""
+
+            echo "lblk mode: PCIe selectors blanked, enableLblk set"
+
+          fi
+
           # Build workerNodes YAML list from comma-separated input
           WORKER_YAML=""
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
@@ -1002,6 +1031,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
+            deviceMode: ${DEVICE_MODE}
             enableNodeAffinity: true
             stripe:
               dataChunks: ${NDCS}
@@ -1038,6 +1068,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
           ${PCIE_MODEL_YAML}
+          ${LBLK_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
@@ -1065,6 +1096,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
+            deviceMode: ${DEVICE_MODE}
             enableNodeAffinity: true
             stripe:
               dataChunks: ${NDCS}
@@ -1101,6 +1133,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
           ${PCIE_MODEL_YAML}
+          ${LBLK_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
