@@ -755,14 +755,30 @@ class _LblkFunctional(_LblkBase):
         self.assert_journals_live()
 
         pool = self._add_pool_dual()
-        name = f"lblkfn{random.randint(1000, 9999)}"
-        client, dev = self._create_and_connect(name, pool)
 
+        # _provision_raw, not _create_and_connect: on k8s the latter makes a
+        # FILESYSTEM PVC and hands back its name, which is not something the
+        # raw verifier can stamp. _provision_raw asks for volumeMode: Block
+        # there and an NVMe-oF device on docker, so both platforms end up
+        # holding a real block device.
+        raw = f"lblkfnraw{random.randint(1000, 9999)}"
+        client, dev = self._provision_raw(raw, pool)
         self._verifier.stamp(client, dev, region_size="1G")
         self._verifier.verify(client, dev, region_size="1G",
-                              context="functional smoke")
+                              context="functional smoke raw")
+
+        # And the ordinary path a user takes, so a passing smoke test means
+        # both shapes of volume work rather than only the one the gate uses.
+        fs = f"lblkfnfs{random.randint(1000, 9999)}"
+        self._create_lvol_dual(fs, self.LVOL_SIZE, pool_name=pool)
+        _d, mount = self._connect_and_mount_dual(fs, mount_path=f"/mnt/{fs}",
+                                                 format_disk=True)
+        self._fs_volumes[fs] = mount
+        self._fs_fio(fs, mount, "fnsmoke", runtime=30)
+
         self._scan_spdk_logs("functional smoke")
-        self.logger.info("[lblk] functional smoke passed")
+        self.logger.info("[lblk] functional smoke passed: raw device and "
+                         "formatted volume both clean")
 
 
 # ── integration: integrity across faults ──────────────────────────────────
