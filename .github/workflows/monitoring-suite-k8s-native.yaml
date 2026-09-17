@@ -311,7 +311,6 @@ jobs:
               chunk_bs)   echo "CHUNK_BS=$val" >> $GITHUB_ENV ;;
               partitions) echo "PARTITIONS=$val" >> $GITHUB_ENV ;;
               jm_count)   echo "JM_COUNT=$val" >> $GITHUB_ENV ;;
-              device_class) echo "DEVICE_CLASS=$val" >> $GITHUB_ENV ;;
             esac
           done
 
@@ -670,41 +669,6 @@ jobs:
           if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
             PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
           fi
-          # lblk and the NVMe PCIe selectors are mutually exclusive: the
-
-          # StorageNodeSet CEL rule rejects enableLblk alongside
-
-          # pcieAllowList/pcieDenyList/pcieModel/driveSizeRange/deviceNames.
-
-          # It tests size(...) > 0, so blanking is enough -- the keys may stay.
-
-          #
-
-          # Must come after the pcieModel conditional above, which would
-
-          # otherwise overwrite the blanking.
-
-          # NVMe unless cluster_params says otherwise, defaulted where it is used so
-
-          # it holds however the value arrived. deviceClass is a required enum
-
-          # (NVMe|LogicalBlock); an empty one is rejected at apply.
-
-          DEVICE_CLASS="${DEVICE_CLASS:-NVMe}"
-
-          LBLK_YAML=""
-
-          if [ "${DEVICE_CLASS}" = "LogicalBlock" ]; then
-
-            LBLK_YAML="  enableLblk: true"
-
-            DRIVE_SIZE_RANGE=""
-
-            PCIE_MODEL_YAML=""
-
-            echo "lblk mode: PCIe selectors blanked, enableLblk set"
-
-          fi
 
           WORKER_YAML=""
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
@@ -715,30 +679,28 @@ jobs:
           VAULT_SETTINGS=""
           ENCRYPTION_POOL_YAML=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
-            VAULT_SETTINGS="  kms:
-                vault:
-                  baseURL: \"https://openbao.vault:8200\""
+            VAULT_SETTINGS="  hashicorpVaultSettings:
+              baseURL: \"https://openbao.vault:8200\""
             ENCRYPTION_POOL_YAML="---
-          apiVersion: storage.simplyblock.io/v1alpha2
+          apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
           metadata:
             name: encryption-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterRef: simplyblock-cluster
+            clusterName: simplyblock-cluster
             storageClassParameters:
               encryption: true"
           fi
 
           cat <<EOF | kubectl apply -f -
-          apiVersion: storage.simplyblock.io/v1alpha2
+          apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageCluster
           metadata:
             name: simplyblock-cluster
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
-            deviceClass: ${DEVICE_CLASS}
             enableNodeAffinity: true
             stripe:
               dataChunks: ${NDCS}
@@ -754,13 +716,13 @@ jobs:
             vcpuCount: ${VCPU_COUNT}
 
           ---
-          apiVersion: storage.simplyblock.io/v1alpha2
+          apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterRef: simplyblock-cluster
+            clusterName: simplyblock-cluster
           ${ENCRYPTION_POOL_YAML}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
@@ -774,7 +736,6 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
           ${PCIE_MODEL_YAML}
-          ${LBLK_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:

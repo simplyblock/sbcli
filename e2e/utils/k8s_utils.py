@@ -27,52 +27,6 @@ from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
 
-def _pool_volume_defaults(dhchap=False, encryption=False, params=None):
-    """Render a v1alpha2 StoragePool ``volumeDefaults`` block.
-
-    v1alpha1 carried a bare ``dhchap`` boolean and a free-form
-    ``storageClassParameters`` string map that the operator turned into the
-    pool's StorageClass. v1alpha2 replaced both with typed fields, so the
-    values have to be translated rather than passed through -- an unknown key
-    is PRUNED by the apiserver rather than rejected, which would leave a pool
-    quietly missing its encryption or its filesystem.
-
-    Returns "" when there is nothing to say, so the caller can concatenate it
-    unconditionally without emitting an empty mapping.
-    """
-    out = {}
-    if dhchap:
-        out["enableDHCHAP"] = "true"
-    if encryption:
-        out["enableEncryption"] = "true"
-
-    for key, val in (params or {}).items():
-        if isinstance(val, bool):
-            val = "true" if val else "false"
-        val = str(val)
-        if key == "encryption":
-            out["enableEncryption"] = val
-        elif key in ("csi.storage.k8s.io/fstype", "fstype"):
-            out["filesystem"] = val
-        elif key == "compression":
-            out["enableCompression"] = val
-        elif key == "replication":
-            out["enableReplication"] = val
-        else:
-            # Deliberately loud. Silently dropping a parameter would produce a
-            # pool that looks right and behaves differently, which is the whole
-            # failure mode this translation exists to avoid.
-            raise ValueError(
-                f"storageClassParameters key {key!r} has no v1alpha2 "
-                f"volumeDefaults equivalent. Map it in _pool_volume_defaults "
-                f"rather than letting the apiserver prune it.")
-
-    if not out:
-        return ""
-    lines = "".join(f"    {k}: {v}\n" for k, v in sorted(out.items()))
-    return f"  volumeDefaults:\n{lines}"
-
-
 class K8sUtils:
     """
     Kubernetes-aware command executor and failover helper.
@@ -4053,24 +4007,31 @@ class K8sSbcliUtils:
                 )
 
             yaml_content = (
-                f"apiVersion: storage.simplyblock.io/v1alpha2\n"
+                f"apiVersion: storage.simplyblock.io/v1alpha1\n"
                 f"kind: StoragePool\n"
                 f"metadata:\n"
                 f"  name: {k8s_resource_name}\n"
                 f"  namespace: {ns}\n"
                 f"spec:\n"
-                f"  clusterRef: {cluster_name}\n"
+                f"  clusterName: {cluster_name}\n"
             )
+            if dhchap:
+                yaml_content += "  dhchap: true\n"
             if allowed_nodes:
                 yaml_content += "  allowedNodes:\n"
                 for node_name in allowed_nodes:
                     yaml_content += f"    - {node_name}\n"
-            # dhchap and the storageClassParameters map both became typed
-            # volumeDefaults in v1alpha2. Emitted as one block because they
-            # share a parent -- two separate "volumeDefaults:" keys would be a
-            # duplicate mapping key and the second would win silently.
-            yaml_content += _pool_volume_defaults(
-                dhchap=dhchap, params=storage_class_parameters)
+            if storage_class_parameters:
+                # The operator builds the pool's StorageClass from these,
+                # including encryption and csi.storage.k8s.io/fstype. They
+                # are IMMUTABLE once the SC exists (the CRD says to create
+                # a new StoragePool to change them), so a caller wanting
+                # both plain and encrypted volumes needs two pools.
+                yaml_content += "  storageClassParameters:\n"
+                for _k, _v in storage_class_parameters.items():
+                    if isinstance(_v, bool):
+                        _v = "true" if _v else "false"
+                    yaml_content += f"    {_k}: {_v}\n"
 
             self.logger.info(
                 f"[pool] Creating '{pool_name}' "
@@ -4241,20 +4202,20 @@ class K8sSbcliUtils:
                 f"falling back to cluster_name='{cluster_name}' from sbcli"
             )
         sc_params = ""
-        # v1alpha2 replaced the free-form storageClassParameters map with typed
-        # volumeDefaults, so encryption is a named boolean rather than a
-        # parameter string. See _pool_volume_defaults.
         if encryption:
-            sc_params = _pool_volume_defaults(encryption=True)
+            sc_params = (
+                "  storageClassParameters:\n"
+                "    encryption: true\n"
+            )
 
         yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha2\n"
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
             f"kind: StoragePool\n"
             f"metadata:\n"
             f"  name: {pool_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  clusterRef: {cluster_name}\n"
+            f"  clusterName: {cluster_name}\n"
             f"{sc_params}"
         )
 

@@ -194,7 +194,6 @@ jobs:
           echo "=== Cross-Cluster Node Validation ==="
           echo "Total worker nodes: ${TOTAL}"
           echo "NDCS=${_ndcs}, NPCS=${_npcs}, min per cluster: ${MIN_PER_CLUSTER}"
-          echo "DEVICE_CLASS=${_device_class:-NVMe}" >> $GITHUB_ENV
 
           if [[ ${TOTAL} -lt ${MIN_TOTAL} ]]; then
             echo "ERROR: Need at least ${MIN_TOTAL} nodes for 2 clusters, got ${TOTAL}"
@@ -226,7 +225,6 @@ jobs:
         run: |
           PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=1,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
           _ndcs="" _npcs="" _bs="" _chunk_bs="" _partitions="" _jm_count=""
-          _device_class=""
           for pair in $(echo "$PARAMS" | tr ',' ' '); do
             key=$(echo "$pair" | cut -d= -f1)
             val=$(echo "$pair" | cut -d= -f2)
@@ -237,7 +235,6 @@ jobs:
               chunk_bs)   _chunk_bs="$val" ;;
               partitions) _partitions="$val" ;;
               jm_count)   _jm_count="$val" ;;
-              device_class) _device_class="$val" ;;
             esac
           done
           echo "NDCS=${_ndcs:-1}" >> $GITHUB_ENV
@@ -731,32 +728,16 @@ jobs:
               secondaryTarget: 0
               snapshotBackups: true
               withCompression: false"
-          # ---- v1alpha2 backup is NOT a rename of the v1alpha1 block --------
-          # This whole workflow is a backup test, so it cannot run until the
-          # v1alpha2 BackupStoreSpec migration is settled. v1alpha2 requires an
-          # explicit 'bucket'; ours is simplyblock-backup-${CLUSTER_ID} and
-          # CLUSTER_ID does not exist until after these CRs are applied.
-          #
-          # Failing loudly rather than emitting the v1alpha1 keys: unknown
-          # fields are PRUNED, not rejected, so the old block would apply
-          # cleanly and leave both clusters with no backup store while every
-          # restore assertion ran against them and reported nonsense.
-          echo "::error::Cross-cluster restore is not yet migrated to the v1alpha2 CRD."
-          echo "v1alpha2 BackupStoreSpec requires an explicit 'bucket'; ours is derived"
-          echo "from CLUSTER_ID, which does not exist until after these CRs are applied."
-          echo "Owner decision needed before this workflow can run on main."
-          exit 1
 
           echo "=== Applying C1 CRDs in ${NS_C1} ==="
           cat <<EOF | kubectl apply -f -
-          apiVersion: storage.simplyblock.io/v1alpha2
+          apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageCluster
           metadata:
             name: simplyblock-cluster
             namespace: ${NS_C1}
           spec:
             fabricType: tcp
-            deviceClass: ${DEVICE_CLASS}
             enableNodeAffinity: true
             stripe:
               dataChunks: ${NDCS}
@@ -772,13 +753,13 @@ jobs:
             vcpuCount: ${VCPU_COUNT}
 
           ---
-          apiVersion: storage.simplyblock.io/v1alpha2
+          apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NS_C1}
           spec:
-            clusterRef: simplyblock-cluster
+            clusterName: simplyblock-cluster
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageNodeSet
@@ -873,14 +854,13 @@ jobs:
 
           echo "=== Applying C2 CRDs in ${NS_C2} ==="
           cat <<EOF | kubectl apply -f -
-          apiVersion: storage.simplyblock.io/v1alpha2
+          apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageCluster
           metadata:
             name: simplyblock-cluster
             namespace: ${NS_C2}
           spec:
             fabricType: tcp
-            deviceClass: ${DEVICE_CLASS}
             enableNodeAffinity: true
             stripe:
               dataChunks: ${NDCS}
@@ -896,13 +876,13 @@ jobs:
             vcpuCount: ${VCPU_COUNT}
 
           ---
-          apiVersion: storage.simplyblock.io/v1alpha2
+          apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NS_C2}
           spec:
-            clusterRef: simplyblock-cluster
+            clusterName: simplyblock-cluster
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageNodeSet
