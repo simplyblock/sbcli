@@ -678,8 +678,15 @@ class RPCClient:
 
         if eui64:
             params['namespace']['eui64'] = eui64
-            params['namespace']['ptpl_file'] = "/mnt/ns_resv"+eui64+".json"
 
+        # ptpl_file is what makes a namespace advertise RESCAP bit 0, i.e.
+        # Persist Through Power Loss reservations. It used to be set only
+        # alongside eui64, which no caller passes, so it never reached the
+        # wire. Punctuation is stripped so one namespace cannot end up with two
+        # reservation files across a restart.
+        ptpl_id = eui64 or nguid or uuid
+        if ptpl_id:
+            params['namespace']['ptpl_file'] = f"/mnt/ns_resv{str(ptpl_id).replace('-', '')}.json"
 
         ret, err = self._request2("nvmf_subsystem_add_ns", params)
         if err and idempotent:
