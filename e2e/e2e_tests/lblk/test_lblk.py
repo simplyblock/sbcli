@@ -79,6 +79,23 @@ class _LblkBase(TestClusterBase):
     # abstract stubs here: a stub on the base would be found first by any leaf
     # that mixes the platform in later, and would shadow the real one.
 
+    @property
+    def _spdk_runner(self):
+        """Whatever reaches SPDK on this platform.
+
+        Anything with .exec_command(node, command, ...). On docker that is ssh
+        to the storage node. On k8s it is kubectl from the runner -- storage
+        nodes there are not ssh-reachable at all, and every other k8s test in
+        the suite goes through kubectl for the same reason. Sending these
+        through ssh_obj produced
+
+          Exception: All usernames failed for 10.0.0.10. Last error: timed out
+
+        on the first RPC. Client-directed work (FIO, nvme connect) still uses
+        ssh_obj, because those are real machines.
+        """
+        return self.ssh_obj
+
     def _init_lblk(self):
         self._verifier = RawDeviceVerifier(self.ssh_obj, self.logger)
         self._lblk_devices = {}
@@ -175,7 +192,7 @@ class _LblkBase(TestClusterBase):
         for ip, _port, prefix, sock, lvs in self._journal_targets():
             if not lvs:
                 continue
-            stats = assert_journal_enabled(self.ssh_obj, ip, prefix, sock,
+            stats = assert_journal_enabled(self._spdk_runner, ip, prefix, sock,
                                            lvs_name=lvs, logger=self.logger)
             checked += 1
             self._journal_lvs = self._journal_lvs or (ip, prefix, sock, lvs)
@@ -243,7 +260,7 @@ class _LblkBase(TestClusterBase):
         found nothing.
         """
         for ip, port, _prefix, _sock, _lvs in self._journal_targets():
-            out, err = self.ssh_obj.exec_command(
+            out, err = self._spdk_runner.exec_command(
                 node=ip,
                 command=self._spdk_log_cmd(ip, port, tail=4000),
                 supress_logs=True)
@@ -279,7 +296,7 @@ class _LblkBase(TestClusterBase):
             if not lvs:
                 continue
             try:
-                st = get_stats(self.ssh_obj, ip, prefix, sock,
+                st = get_stats(self._spdk_runner, ip, prefix, sock,
                                lvs_name=lvs, logger=None)
                 heads[lvs] = (st or {}).get("mem_head")
             except MdJournalError as exc:
@@ -455,8 +472,28 @@ class _LblkDockerMixin:
         return f"sudo docker logs --tail {tail} spdk_{rpc_port} 2>&1"
 
 
+class _KubectlRunner:
+    """Adapter giving K8sUtils the .exec_command shape ssh_obj has.
+
+    The node argument is accepted and ignored: kubectl runs from the runner and
+    already names its target pod, so there is nothing to connect to.
+    """
+
+    def __init__(self, k8s):
+        self._k8s = k8s
+
+    def exec_command(self, node=None, command=None, supress_logs=False,
+                     timeout=300, **_kw):
+        return self._k8s._exec_kubectl(command, supress_logs=supress_logs,
+                                       timeout=timeout)
+
+
 class _LblkK8sMixin:
     """Reach SPDK through the pod."""
+
+    @property
+    def _spdk_runner(self):
+        return _KubectlRunner(self._ensure_k8s_utils())
 
     def _spdk_exec_prefix(self, node_ip, rpc_port):
         # _ensure_k8s_utils(), not self.k8s_utils -- the base reaches K8sUtils
@@ -650,7 +687,7 @@ class _LblkJournalRecovery(_LblkBase):
         for t_ip, t_port, t_prefix, t_sock, t_lvs in self._journal_targets():
             if not t_lvs:
                 continue
-            set_drain_paused(self.ssh_obj, t_ip, t_prefix, t_sock, True,
+            set_drain_paused(self._spdk_runner, t_ip, t_prefix, t_sock, True,
                              lvs_name=t_lvs, logger=self.logger)
             paused.append((t_ip, t_port, t_prefix, t_sock, t_lvs))
         self.logger.info("[lblk] drain paused on %d lvstore(s)", len(paused))
@@ -691,7 +728,7 @@ class _LblkJournalRecovery(_LblkBase):
             sock = self._spdk_sock(node["rpc_port"])
             lvs = node.get("lvstore")
 
-            stats = get_stats(self.ssh_obj, ip, prefix, sock, lvs_name=lvs,
+            stats = get_stats(self._spdk_runner, ip, prefix, sock, lvs_name=lvs,
                               logger=self.logger)
             if stats.get("used_slots", 0) < 2:
                 self.logger.warning(
@@ -714,7 +751,7 @@ class _LblkJournalRecovery(_LblkBase):
             # fresh process comes up unpaused.
             for r_ip, _r_port, r_prefix, r_sock, r_lvs in paused:
                 try:
-                    set_drain_paused(self.ssh_obj, r_ip, r_prefix, r_sock,
+                    set_drain_paused(self._spdk_runner, r_ip, r_prefix, r_sock,
                                      False, lvs_name=r_lvs, logger=self.logger)
                 except Exception as exc:              # noqa: BLE001
                     self.logger.info("[lblk] drain resume on %s skipped "
@@ -738,7 +775,7 @@ class _LblkJournalRecovery(_LblkBase):
 
         # Corroboration from the journal's own counters: the ring should have
         # drained on the way back up.
-        after = get_stats(self.ssh_obj, ip,
+        after = get_stats(self._spdk_runner, ip,
                           self._spdk_exec_prefix(ip, node["rpc_port"]),
                           sock, lvs_name=lvs, logger=self.logger)
         self.logger.info("[lblk] ring after recovery: %s/%s slots used, "
@@ -807,7 +844,7 @@ class _LblkJournalRecovery(_LblkBase):
                 f"the drain was paused are gone from the control plane after "
                 f"the kill: {missing[:5]}")
 
-        bdevs = call_rpc(self.ssh_obj, ip,
+        bdevs = call_rpc(self._spdk_runner, ip,
                          self._spdk_exec_prefix(ip, rpc_port),
                          self._spdk_sock(rpc_port), "bdev_get_bdevs",
                          logger=self.logger) or []
@@ -867,7 +904,7 @@ class _LblkUnfencedJournal(_LblkBase):
         node = next(n for n in self.sbcli_utils.get_storage_nodes()["results"]
                     if n.get("mgmt_ip") == ip)
         port = node["rpc_port"]
-        before = get_stats(self.ssh_obj, ip, prefix, sock, lvs_name=lvs,
+        before = get_stats(self._spdk_runner, ip, prefix, sock, lvs_name=lvs,
                            logger=self.logger)
 
         # Isolate the node's network rather than pausing its container.
@@ -925,7 +962,7 @@ class _LblkUnfencedJournal(_LblkBase):
                 f"{self.ISOLATION_SEC}s) or suppress auto-restart for the window.")
         sleep_n_sec(30)
 
-        after = get_stats(self.ssh_obj, ip,
+        after = get_stats(self._spdk_runner, ip,
                           self._spdk_exec_prefix(ip, port), sock,
                           lvs_name=lvs, logger=self.logger)
         appended = after.get("mem_head", 0) - before.get("mem_head", 0)
