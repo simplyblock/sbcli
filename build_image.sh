@@ -9,7 +9,7 @@ PLATFORMS=${PLATFORMS:-linux/amd64,linux/arm64}
 
 # Matches what CI passes, so a local build lands on the same OS-package layers
 # CI has already cached. Override to force those layers to be rebuilt.
-CACHE_KEY=${CACHE_KEY:-$(date -u +%G-W%V)}
+CACHE_KEY=${CACHE_KEY:-$(date -u +%F)}
 
 docker login -u "${DOCKER_USER}" -p "${DOCKER_PASS}"
 docker buildx build \

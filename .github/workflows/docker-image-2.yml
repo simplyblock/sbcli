@@ -52,10 +52,10 @@ jobs:
         echo "SHA=$SHA" >> $GITHUB_ENV
         echo "SHORT_SHA=$(echo $SHA | head -c 8)" >> $GITHUB_ENV
 
-    # ISO year and week, so the OS-package layers are rebuilt from scratch once
-    # a week and an upstream security fix reaches the image within seven days.
+    # UTC date, so the OS-package layers are rebuilt from scratch once a day
+    # and an upstream security fix reaches the image within 24 hours.
     - name: Set base layer cache key
-      run: echo "CACHE_KEY=$(date -u +%G-W%V)" >> $GITHUB_ENV
+      run: echo "CACHE_KEY=$(date -u +%F)" >> $GITHUB_ENV
 
     - name: Login to Quay.io
       uses: docker/login-action@v4
