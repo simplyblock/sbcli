@@ -1,12 +1,31 @@
 
 from typing import ClassVar
 
+from simplyblock_core.indices import Index, Unique
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class LVol(BaseModel):
 
     _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('pool_uuid'),
+        Index('node_id'),
+        Index('cluster_id'),
+        # Names are unique per POOL, so the constraint below cannot answer a
+        # lookup that has only the name — which `sbctl volume get <name>` and
+        # the v1 "id or name" surfaces legitimately do.
+        Index('lvol_name'),
+        # Indexed by the bare uuid: the field holds a ReplicationPolicy
+        # get_id() ("<cluster>/<uuid>") but every caller resolves a policy from
+        # whichever half it happens to hold.
+        Index('replication_policy_id', extract=lambda lvol: (
+            [(lvol.replication_policy_id.split('/')[-1],)]
+            if lvol.replication_policy_id else []
+        )),
+        Unique(('pool_uuid', 'lvol_name')),
+    )
 
     STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
@@ -30,6 +49,11 @@ class LVol(BaseModel):
     bdev_stack: list = default_factory(list)
     blobid: int = 0
     cloned_from_snap: str = ""
+    #: Denormalized from the volume's node at create time. LVol is reached by
+    #: pool and by node, never by cluster, so without this a per-cluster
+    #: listing had to resolve the cluster's nodes first and filter every lvol
+    #: against that id list — two scans for one query.
+    cluster_id: str = ""
     comp_bdev: str = ""
     crypto_bdev: str = ""
     crypto_key_name: str = ""
@@ -131,6 +155,19 @@ class LVol(BaseModel):
     #: members map remains the authoritative generation-membership record.
     group_id: str = ""
 
+    def place_in_pool(self, pool) -> None:
+        """Put this volume in ``pool`` — which is also what fixes its cluster.
+
+        The three fields move as one: ``pool_uuid`` and ``pool_name`` are what
+        the display paths read, and ``cluster_id`` is denormalized from the
+        pool so a per-cluster listing is a single range read. Assigning them
+        separately is how a volume ends up in a pool but in no cluster, which
+        the by-cluster index would then silently omit.
+        """
+        self.pool_uuid = pool.get_id()
+        self.pool_name = pool.pool_name
+        self.cluster_id = pool.cluster_id
+
     def watch_scope(self):
         return (self.pool_uuid,)
 
@@ -141,15 +178,9 @@ class LVol(BaseModel):
         super().write_to_db(kv_store)
         lvol_mini = LVolMini().from_lvol(self)
         lvol_mini.write_to_db(kv_store)
-        # Maintain the per-pool name index here so every create/update path keeps
-        # it current (used for O(1) name-uniqueness instead of scanning all lvols).
-        from simplyblock_core.db_controller import DBController
-        DBController().index_lvol_name(self)
 
     def remove(self, kv_store):
         super().remove(kv_store)
-        from simplyblock_core.db_controller import DBController
-        DBController().unindex_lvol_name(self)
         try:
             lvol_mini = LVolMini().read_from_db(kv_store, self.uuid)[0]
             lvol_mini.remove(kv_store)

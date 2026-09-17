@@ -1,4 +1,6 @@
+from typing import ClassVar
 
+from simplyblock_core.indices import Index, Unique
 from simplyblock_core.models.base_model import BaseModel, default_factory
 from simplyblock_core.models.lvol_model import LVol, LVolMini
 
@@ -6,6 +8,25 @@ from simplyblock_core.models.lvol_model import LVol, LVolMini
 class SnapShot(BaseModel):
 
     _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('cluster_id'),
+        Index('pool_uuid'),
+        Index('lvol_node_id', extract=lambda snap: (
+            [(snap.lvol.node_id,)] if snap.lvol else []
+        )),
+        Index('lvol_uuid', extract=lambda snap: (
+            [(snap.lvol.get_id(),)] if snap.lvol else []
+        )),
+        Unique(('cluster_id', 'snap_name')),
+        # Creation order within one lvol: the tail is the chain predecessor,
+        # found by a reverse range read of limit 1. Ordered, so its segments
+        # are the fixed-width encoding `encode_value` reserves for that.
+        Index('lvol_snaps', ordered=True, extract=lambda snap: (
+            [(snap.lvol.get_id(), int(snap.created_at or 0), int(snap.vuid or 0))]
+            if snap.lvol else []
+        )),
+    )
 
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'

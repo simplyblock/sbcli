@@ -551,7 +551,6 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                     for snap_id in created_ids:
                         try:
                             rec = db.get_snapshot_by_id(snap_id)
-                            db.unindex_snapshot(rec)
                             rec.remove(db.kv_store)
                         except Exception as e:
                             logger.warning(
@@ -588,7 +587,6 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                 prev.write_to_db()
                 snap.write_to_db()
 
-            db.index_snapshot(snap)
             snapshot_events.snapshot_create(snap)
             created_ids.append(snap.get_id())
             p["snap_id"] = snap.get_id()

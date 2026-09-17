@@ -3,6 +3,7 @@ import time
 from typing import ClassVar
 
 from simplyblock_core import constants
+from simplyblock_core.indices import Index
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
@@ -25,6 +26,11 @@ class LVolMigration(BaseModel):
                      from the target (safe only when no other migrated volume references them).
     5. COMPLETED   – migration finished successfully.
     """
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Index('lvol_id'),
+    )
 
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
