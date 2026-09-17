@@ -1457,13 +1457,6 @@ jobs:
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Setup and Run Tests
-        env:
-          # The md5 gate depends on the hardware. GCP pd-balanced
-          # disks are the genuinely non-4K-atomic devices these
-          # tests exist for; everywhere else the drives do give a 4K
-          # atomic write, so an md5 mismatch there is a real defect
-          # and must fail rather than warn.
-          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
         run: |
           set -o pipefail
           cd $GITHUB_WORKSPACE/e2e
@@ -1518,6 +1511,11 @@ jobs:
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # The md5 gate depends on the hardware. GCP pd-balanced disks
+          # are the genuinely non-4K-atomic devices these tests exist
+          # for; elsewhere the drives do give a 4K atomic write, so an
+          # md5 mismatch is a real defect and must fail, not warn.
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
           SKIP_NFS: ${{ inputs.skip_nfs || 'false' }}
           RUN_DIR_FILE: ${{ env.RUN_DIR_FILE }}
 
