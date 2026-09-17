@@ -4453,7 +4453,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
-def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
+def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
                                      pin_snapshot_id=None):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
@@ -4520,6 +4520,25 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generat
             continue
         return target_snap
     return None
+
+
+def latest_replicated_snapshot(lvol_id):
+    """The newest fully replicated snapshot of *lvol_id*, on the secondary,
+    as a cloneable object (csi-addons P0-6).
+
+    Exposes the same selection ``replicate_lvol_on_target_cluster`` applies
+    internally, without cloning: a test-failover drill (design §14) has to
+    know the safe point BEFORE deciding whether to touch anything, and must
+    never trigger a real fail-over just to find out what it is.
+
+    Returns the target-cluster ``SnapShot``, or ``None`` when nothing has
+    replicated yet. Raises ``KeyError`` when the volume itself does not
+    exist.
+    """
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id)
 
 
 def _evict_stale_namespace(new_lvol, target_node, superseded=None):
@@ -4669,7 +4688,7 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
     Returns (new_lvol, snapshot_used, error).
     """
     for _ in range(attempts):
-        snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
+        snapshot = last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
                                                     generation=generation,
                                                     pin_snapshot_id=pin_snapshot_id)
         if not snapshot:

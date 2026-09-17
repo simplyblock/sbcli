@@ -847,6 +847,45 @@ class ReplicationStatusDTO(BaseModel):
         )
 
 
+class ReplicatedSnapshotDTO(BaseModel):
+    """A fully replicated snapshot on the secondary, addressed as a cloneable
+    object (csi-addons P0-6). ``lvol_id`` is the volume the snapshot belongs
+    to on the SECONDARY cluster, not the source volume the caller asked
+    about, because that is the identity the ordinary CSI clone path resolves
+    a ``dataSource`` against.
+    """
+    snapshot_id: UUID
+    cluster_id: UUID
+    pool_id: util.OptionalUUID = None
+    lvol_id: util.OptionalUUID = None
+    size: util.Unsigned
+    used_size: util.Unsigned
+    created_at: datetime
+    group_id: str = ""
+    group_seq: int = 0
+
+    @staticmethod
+    def from_model(model: SnapShot) -> 'ReplicatedSnapshotDTO':
+        return ReplicatedSnapshotDTO(
+            snapshot_id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            pool_id=UUID(model.pool_uuid) if model.pool_uuid else None,
+            lvol_id=UUID(model.lvol.get_id()) if model.lvol else None,
+            size=model.size,
+            used_size=model.used_size,
+            created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            group_id=model.group_id,
+            group_seq=model.group_seq,
+        )
+
+
+class ReplicatedGenerationDTO(BaseModel):
+    """One complete, fully replicated consistency-group generation (P0-6),
+    every member addressed as a cloneable object on the secondary."""
+    group_seq: int
+    members: list[ReplicatedSnapshotDTO]
+
+
 class FailoverResultDTO(BaseModel):
     lvol_id: UUID
     status: FailoverStatus

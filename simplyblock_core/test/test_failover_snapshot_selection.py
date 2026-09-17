@@ -7,7 +7,7 @@ tasks were still `running`. The selector accepted any snapshot whose
 `target_replicated_snap_uuid` was merely SET, so an unfinished or
 being-deleted target copy could become the fail-over point.
 """
-from simplyblock_core.controllers.lvol_controller import _last_replicated_target_snapshot
+from simplyblock_core.controllers.lvol_controller import last_replicated_target_snapshot
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
@@ -62,7 +62,7 @@ class _FakeDB:
 
 
 def _pick(tasks, snaps):
-    return _last_replicated_target_snapshot(_FakeDB(tasks, snaps), LVOL_ID, CLUSTER_ID)
+    return last_replicated_target_snapshot(_FakeDB(tasks, snaps), LVOL_ID, CLUSTER_ID)
 
 
 def test_picks_newest_completed():

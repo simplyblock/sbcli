@@ -415,7 +415,7 @@ def _resolve_group_failover_generation(policy, volumes):
 
     A generation qualifies when every member still to be failed over has a
     snapshot of it that is FULLY replicated, by the same rules
-    lvol_controller._last_replicated_target_snapshot applies per volume: the
+    lvol_controller.last_replicated_target_snapshot applies per volume: the
     replication task is DONE (a target record alone proves allocation, not
     data), and the target copy still exists and is not being deleted by
     retention.
@@ -506,6 +506,47 @@ def _resolve_group_failover_generation(policy, volumes):
         f"No group generation of policy {policy.policy_name} is fully "
         f"replicated for all {len(pending_ids)} pending member(s); refusing a "
         f"mixed-generation fail-over{missing}")
+
+
+def latest_replicated_generation(policy_id):
+    """The newest consistency-group generation every current member has fully
+    replicated, as cloneable objects on the secondary (csi-addons P0-6).
+
+    Reuses :func:`_resolve_group_failover_generation`'s refusal rule instead
+    of its side effect: a generation qualifies only when every member has a
+    snapshot of it that reached the target and is not being pruned, so a
+    caller (the test-failover drill, design §14) never addresses a
+    mixed-generation cut. Every current member is treated as pending -- this
+    describes present-day, un-failed-over steady state, never a resumed
+    fail-over that already has clones on the peer.
+
+    Returns ``(group_seq, {lvol_id: target_snapshot})``. Raises
+    ``ReplicationConfigError`` when the policy has no consistency group or no
+    generation is fully replicated for every member yet.
+    """
+    policy = db.get_replication_policy_by_id(policy_id)
+    if not getattr(policy, "consistency_group", False):
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} has no consistency group")
+
+    volumes = db.get_lvols_by_replication_policy(policy.get_id())
+    seq, covered = _resolve_group_failover_generation(policy, volumes)
+    if not covered:
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} has no member left to resolve a "
+            f"generation for; every member has already failed over")
+
+    members = {}
+    for lvol_id, source_snap_id in covered.items():
+        source_snap = db.get_snapshot_by_id(source_snap_id)
+        # Re-fetched rather than carried from the scan above: the scan proved
+        # the target copy existed and was not being pruned at THAT instant,
+        # and this is a read with no lock, so a concurrent retention pass
+        # remains possible in the window between. Rare enough, and cheap
+        # enough to just re-raise on, that a lock is not worth taking for a
+        # status read.
+        members[lvol_id] = db.get_snapshot_by_id(source_snap.target_replicated_snap_uuid)
+    return seq, members
 
 
 def _failover_volumes(volumes, what, pinned=None):
