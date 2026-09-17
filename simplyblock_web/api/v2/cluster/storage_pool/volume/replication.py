@@ -66,10 +66,6 @@ def get_status(cluster: Cluster, pool: StoragePool, volume: Volume) -> Replicati
     its conditions and ``lastSyncTime`` from this read on every reconcile.
     """
     info = lvol_controller.get_replication_info(volume.get_id())
-    if info is None:
-        # Only reachable when the volume vanished between the path lookup and
-        # the controller's own resolution.
-        raise HTTPException(404, 'Volume not found')
     return ReplicationStatusDTO.from_info(info)
 
 

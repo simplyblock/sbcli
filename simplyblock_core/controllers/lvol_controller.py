@@ -2784,7 +2784,7 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
     return data
 
 
-def _replication_role(db_controller, lvol):
+def _replication_role(db_controller: DBController, lvol: LVol) -> str:
     """Which end of its replication relationship *lvol* is (csi-addons P0-1).
 
     The newest relationship record involving the volume decides: failed_over
@@ -4522,7 +4522,7 @@ def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generati
     return None
 
 
-def latest_replicated_snapshot(lvol_id):
+def latest_replicated_snapshot(lvol_id: str) -> SnapShot | None:
     """The newest fully replicated snapshot of *lvol_id*, on the secondary,
     as a cloneable object (csi-addons P0-6).
 

@@ -1,6 +1,8 @@
 """Unit tests for the volume replication endpoints and the policy assignment
 folded into the volume PUT."""
 
+from datetime import UTC, datetime
+
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
 
 from tests.unit.web.api.v2 import _factories as factories
@@ -178,7 +180,8 @@ class TestStatus:
         body = response.json()
         assert body['role'] == 'source'
         assert body['state'] == 'in_sync'
-        assert body['last_replicated_at'] == 1758000000
+        assert (datetime.fromisoformat(body['last_replicated_at'])
+                == datetime.fromtimestamp(1758000000, tz=UTC))
         assert body['lag_seconds'] == 42
         assert body['lag_budget_seconds'] == 900
         assert body['outstanding_count'] == 1

@@ -508,7 +508,7 @@ def _resolve_group_failover_generation(policy, volumes):
         f"mixed-generation fail-over{missing}")
 
 
-def latest_replicated_generation(policy_id):
+def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapShot]]:
     """The newest consistency-group generation every current member has fully
     replicated, as cloneable objects on the secondary (csi-addons P0-6).
 

@@ -812,29 +812,31 @@ class ReplicationStatusDTO(BaseModel):
     """
     role: ReplicationRole
     state: ReplicationHealthState
-    #: Creation time (epoch seconds) of the newest fully replicated snapshot;
-    #: null until the first snapshot lands on the peer.
-    last_replicated_at: int | None = None
-    lag_seconds: int | None = None
-    lag_budget_seconds: int | None = None
-    outstanding_count: int = 0
-    outstanding_bytes: int = 0
+    #: Creation time of the newest fully replicated snapshot; null until the
+    #: first snapshot lands on the peer.
+    last_replicated_at: datetime | None = None
+    lag_seconds: util.OptionalUnsigned = None
+    lag_budget_seconds: util.OptionalUnsigned = None
+    outstanding_count: util.Unsigned = 0
+    outstanding_bytes: util.Unsigned = 0
     #: Shipping tasks currently suspended on errors.
-    failing_count: int = 0
+    failing_count: util.Unsigned = 0
     #: Whether any shipping task exhausted its retries and gave up.
     max_retry_reached: bool = False
     #: Size and duration of the last completed shipping cycle.
-    last_cycle_bytes: int | None = None
-    last_cycle_seconds: int | None = None
+    last_cycle_bytes: util.OptionalUnsigned = None
+    last_cycle_seconds: util.OptionalUnsigned = None
     #: A divergence catch-up (fail-back reversal or final cutover) in flight.
     resyncing: bool = False
 
     @staticmethod
     def from_info(info: dict) -> 'ReplicationStatusDTO':
+        last_replicated_at = info.get('last_replicated_at')
         return ReplicationStatusDTO(
             role=info.get('role', 'none'),
             state=info.get('state', 'not_replicating'),
-            last_replicated_at=info.get('last_replicated_at'),
+            last_replicated_at=(datetime.fromtimestamp(last_replicated_at, tz=UTC)
+                                if last_replicated_at is not None else None),
             lag_seconds=info.get('lag_seconds'),
             lag_budget_seconds=info.get('lag_budget_seconds'),
             outstanding_count=info.get('outstanding_count', 0),
