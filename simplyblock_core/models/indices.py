@@ -21,7 +21,7 @@ constraint: two entities carrying the same value collide on one key and the
 write transaction detects it.
 
 Stdlib-only leaf module — importable from ``models/`` without a cycle, exactly
-like :mod:`simplyblock_core.watches`. In particular it does not import ``fdb``:
+like :mod:`simplyblock_core.models.watches`. In particular it does not import ``fdb``:
 the binding injects its API at ``fdb.api_version()`` time and is stubbed out in
 the unit tier, and models must stay importable without it.
 """

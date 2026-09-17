@@ -5,7 +5,11 @@ Core business logic, data models, and background services for the Simplyblock co
 ## Package Structure
 
 - `controllers/` — Business logic per resource domain (lvol, snapshot, backup, device, migration, pool, health, tasks, qos). Each `*_events.py` defines event types for its domain.
-- `models/` — Data models inheriting from `BaseModel` (see below).
+- `models/` — Data models inheriting from `BaseModel` (see below), plus the two stdlib-only
+  modules that define the keyspaces those records live in: `watches.py` (the version index
+  watchers wake on) and `indices.py` (the declared secondary indices). Both are leaves — the
+  models import them, nothing in them imports back — which is what lets a model declare its
+  keys without dragging in `fdb`.
 - `services/` — Background services for monitoring and async task execution (health checks, snapshot/lvol/storage-node monitors, task runners for backup, migration, restart, etc.).
 - `db_controller.py` — Singleton `DBController` wrapping FoundationDB. All data access goes through this class.
 - `rpc_client.py` — JSON-RPC client for communicating with storage node SPDK processes. `Session` construction is pooled by `RPCSessionPool` (keyed on identity + retry; `timeout` stays per-call). `services/spdk_http_proxy_server.py`, the receiving end, supports HTTP/1.1 keep-alive so those pooled connections are actually reused end-to-end. It is a FastAPI app on uvicorn: `create_app()` builds it, importing the module has no side effects, and it exposes a Prometheus endpoint on `/_meta/metrics` (same path as `simplyblock_web`, behind the same basic-auth credentials as the RPCs) alongside a periodic timing summary in its log. Per-request logging follows `simplyblock_web/app.py`: uvicorn's access log is off and an `AccessLogMiddleware` replaces it, enriched with the JSON-RPC method and the id that ties the access line to the request's own `Request:<id>` line.
@@ -26,7 +30,7 @@ All models extend `BaseModel` (`models/base_model.py`). Key conventions:
 
 `db_controller.py` used to answer every non-primary-key lookup by scanning a table
 and filtering it in memory. It now answers them from declared secondary indices
-(`indices.py`, a stdlib-only leaf module importable from `models/` like `watches.py`).
+(`models/indices.py`, a stdlib-only leaf module, like the `models/watches.py` beside it).
 
 **Declaring one.** `_INDEXES` is a plain class attribute on the model, next to the
 fields it indexes — like `_WATCHED`, it stays out of `get_attrs_map()` and is never
@@ -84,8 +88,8 @@ The fallback's predicate and ordering come from the same declaration
 index is therefore: declare it → `sbctl cluster build-indices` (or an upgrade, which runs
 `release_upgrades/database_indices.py`) → it flips to `ready` on its own.
 `sbctl cluster check-indices [--repair]` walks both directions and is safe against a live
-cluster. `index_ops.py` holds the backfill, the verifier and the Prometheus counters
-(`sb_index_queries_total{path="index"|"scan"}` — a `scan` that survives a `ready` flip is a bug).
+cluster. `index_ops.py` holds the backfill and the verifier. A read that falls back to a
+scan logs a warning (rate-limited per index) — one that survives a `ready` flip is a bug.
 
 **When an index is worth it.** It turns a full scan into a range read plus one pipelined
 point read per hit: a win when the result is a small fraction of the table, a mild loss when

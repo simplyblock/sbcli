@@ -8,8 +8,9 @@ import time
 import fdb
 from typing import Any, ClassVar
 
-from simplyblock_core import constants, index_ops, indices, utils, watches
+from simplyblock_core import constants, index_ops, utils
 from simplyblock_core.utils import ttl_cache
+from simplyblock_core.models import indices, watches
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
 from simplyblock_core.models.events import EventObj
@@ -162,7 +163,7 @@ class DBController(metaclass=Singleton):
 
     # ---- Secondary indices ----
     #
-    # One read primitive over the declared indices (simplyblock_core/indices.py)
+    # One read primitive over the declared indices (models/indices.py)
     # and the state that says whether an index may be trusted yet. Everything
     # below this class's `get_*_by_*` helpers is expressed in terms of `query`.
 
@@ -261,7 +262,6 @@ class DBController(metaclass=Singleton):
         """
         idx = indices.get_index(model_cls, index)
         if self.index_state(model_cls, idx) == indices.STATE_READY:
-            index_ops.QUERIES.labels(model_cls.__name__, idx.name, 'index').inc()
             return self._indexed_ids(model_cls, idx, values, limit, reverse)
         return [
             str(obj.get_id()) for obj
@@ -282,15 +282,9 @@ class DBController(metaclass=Singleton):
         """
         idx = indices.get_index(model_cls, index)
         if self.index_state(model_cls, idx) == indices.STATE_READY:
-            index_ops.QUERIES.labels(model_cls.__name__, idx.name, 'index').inc()
             ids = self._indexed_ids(model_cls, idx, values, limit, reverse)
-            found = self.multi_get(model_cls, ids)
-            if len(found) != len(ids):
-                index_ops.DANGLING.labels(model_cls.__name__, idx.name).inc(
-                    len(ids) - len(found))
-            return found
+            return self.multi_get(model_cls, ids)
 
-        index_ops.QUERIES.labels(model_cls.__name__, idx.name, 'scan').inc()
         index_ops.warn_fallback(model_cls, idx, self.index_state(model_cls, idx))
         rows = []
         # id=" " is this codebase's spelling for "the whole class keyspace";

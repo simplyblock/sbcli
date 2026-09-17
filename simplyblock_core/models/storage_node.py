@@ -6,7 +6,7 @@ from uuid import uuid4
 from pydantic import SecretStr
 
 from simplyblock_core import utils, constants
-from simplyblock_core.indices import Index
+from simplyblock_core.models.indices import Index
 from simplyblock_core.models.base_model import BaseNodeObject, BaseModel, default_factory
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace

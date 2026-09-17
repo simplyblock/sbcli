@@ -10,9 +10,9 @@ import pkgutil
 
 import pytest
 
-import simplyblock_core.models
-from simplyblock_core import indices
-from simplyblock_core.indices import Index, Unique
+from simplyblock_core import models
+from simplyblock_core.models import indices
+from simplyblock_core.models.indices import Index, Unique
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -113,7 +113,8 @@ def test_prefix_is_exact_at_the_separator():
     index = Index('pool')
     prefix = index.prefix(Sample, ('abc',))
     assert prefix == b'index/Sample/pool/abc/'
-    assert not index.keys(Sample, Sample({'uuid': 'u', 'pool': 'abcd'})).pop().startswith(prefix)
+    key, = index.keys(Sample, Sample({'uuid': 'u', 'pool': 'abcd'}))
+    assert not key.startswith(prefix)
 
 
 def test_partial_prefix_of_a_composite_index():
@@ -178,7 +179,7 @@ def test_match_paths_agrees_with_the_key_the_index_would_store():
 # --- the shipped declarations -----------------------------------------------
 
 def _model_classes():
-    for module_info in pkgutil.iter_modules(simplyblock_core.models.__path__):
+    for module_info in pkgutil.iter_modules(models.__path__):
         module = importlib.import_module(f'simplyblock_core.models.{module_info.name}')
         for _, cls in inspect.getmembers(module, inspect.isclass):
             if issubclass(cls, BaseModel) and cls.__module__ == module.__name__:

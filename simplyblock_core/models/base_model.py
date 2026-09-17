@@ -7,7 +7,7 @@ from typing import ClassVar, TypeVar, Union, cast, get_args, get_origin
 
 from pydantic import SecretBytes, SecretStr
 
-from simplyblock_core import indices, watches
+from simplyblock_core.models import indices, watches
 
 
 _T = TypeVar('_T')
@@ -98,7 +98,7 @@ class BaseModel:
     # not an annotation: must stay out of get_attrs_map()/to_dict().
     _WATCHED = False
 
-    # Declared secondary indices (see simplyblock_core/indices.py).
+    # Declared secondary indices (see models/indices.py).
     # write_to_db()/remove()/DBController.atomic_update() maintain every entry
     # in the SAME FDB transaction as the entity mutation, so an index can never
     # be left describing a record that was never written. Plain class

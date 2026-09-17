@@ -67,7 +67,7 @@ Two front-ends sit on top of the core and **both call it in-process** — the CL
 Storage nodes are reached via JSON-RPC (`rpc_client.py`).
 
 Lookups that are not "by primary key" go through declared secondary indices
-(`simplyblock_core/indices.py`, maintained in the entity's own FDB transaction) and the
+(`simplyblock_core/models/indices.py`, maintained in the entity's own FDB transaction) and the
 single `DBController.query()` primitive — not through a table scan. See
 **`simplyblock_core/AGENTS.md`** § Secondary Indices before adding a `get_*_by_*` helper
 or a new model field you intend to look records up by.

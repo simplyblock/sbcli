@@ -3,7 +3,7 @@ from typing import ClassVar
 
 from pydantic import SecretStr
 
-from simplyblock_core.indices import Index, Unique
+from simplyblock_core.models.indices import Index, Unique
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
