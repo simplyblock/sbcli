@@ -48,6 +48,30 @@ class LblkPreconditionError(RuntimeError):
     """The cluster is not an lblk cluster, so the run would prove nothing."""
 
 
+class _PodDeviceRunner:
+    """Gives RawDeviceVerifier the two methods it needs, backed by a pod.
+
+    The verifier only ever calls exec_command(node, cmd) and
+    is_block_device(node, device), so it does not need to know whether those
+    land on a client over ssh or in a pod over kubectl. Same trick as
+    _spdk_runner, and it means the docker and k8s raw lanes run byte-identical
+    FIO jobs rather than two implementations that drift.
+    """
+
+    def __init__(self, k8s, pod_name, logger):
+        self._k8s = k8s
+        self._pod = pod_name
+        self.logger = logger
+
+    def exec_command(self, node=None, command=None, timeout=3600, **_kw):
+        return self._k8s.exec_in_pod(self._pod, command, timeout=timeout)
+
+    def is_block_device(self, node, device):
+        out, _ = self._k8s.exec_in_pod(
+            self._pod, f"test -b {device} && echo yes || echo no")
+        return "yes" in (out or "")
+
+
 class _LblkBase(TestClusterBase):
     """Shared lblk assertions, volume setup and raw verification.
 
@@ -75,6 +99,8 @@ class _LblkBase(TestClusterBase):
         self._verifier = None
         self._lblk_devices = {}      # lvol_name -> (client, /dev/nvmeXnY)
         self._lblk_volumes = []      # names, both platforms
+        self._k8s_raw_pods = []      # block-mode pods, k8s only
+        self._fs_volumes = {}        # formatted lvol/PVC -> mount
         self._journal_lvs = None
 
     # ── platform hooks ────────────────────────────────────────────────────
@@ -103,6 +129,8 @@ class _LblkBase(TestClusterBase):
         self._verifier = RawDeviceVerifier(self.ssh_obj, self.logger)
         self._lblk_devices = {}
         self._lblk_volumes = []
+        self._k8s_raw_pods = []
+        self._fs_volumes = {}
         self._journal_lvs = None
 
     # ── preconditions ─────────────────────────────────────────────────────
@@ -210,10 +238,9 @@ class _LblkBase(TestClusterBase):
         return checked
 
     # ── volumes ───────────────────────────────────────────────────────────
-    #: Raw crc32c needs a block device on a client. Docker has one; k8s does
-    #: not -- _connect_and_mount_dual is a documented no-op there and nothing in
-    #: k8s_utils creates a volumeMode: Block PVC. Set False on the k8s mixin, so
-    #: the k8s classes verify through FIO instead of silently skipping the gate.
+    #: Both platforms now run the raw crc32c gate: docker over NVMe-oF to a
+    #: client device, k8s through a volumeMode: Block PVC in a pod. Left as a
+    #: switch so a platform that genuinely cannot do it says so in one place.
     RAW_VERIFY = True
 
     def _create_and_connect(self, name, pool):
@@ -247,6 +274,38 @@ class _LblkBase(TestClusterBase):
         self.logger.info("[lblk] %s -> %s on %s", name, dev, client)
         return client, dev
 
+    def _provision_raw(self, name, pool):
+        """A raw block device to stamp, on either platform.
+
+        Docker connects the lvol over NVMe-oF and uses the client's
+        /dev/nvmeXnY. K8s asks CSI for a volumeMode: Block PVC and attaches it
+        to a pod through volumeDevices, which yields a device with no
+        filesystem on it -- the same thing, reached differently.
+
+        Raw matters because a filesystem journal can absorb or reshape a torn
+        device write, which is exactly the failure these tests look for.
+        """
+        if not self.k8s_test:
+            client, dev = self._create_and_connect(name, pool)
+            return client, dev
+
+        k8s = self._ensure_k8s_utils()
+        pvc = self._k8s_normalize_name(name)
+        k8s.create_pvc(name=pvc, size=self.LVOL_SIZE.replace("G", "Gi"),
+                       storage_class=self._k8s_storage_class_name,
+                       volume_mode="Block")
+        k8s.wait_pvc_bound(pvc)
+        pod = f"rawfio-{pvc}"[:63]
+        device = k8s.create_raw_device_pod(pod, pvc)
+        self._k8s_raw_pods.append(pod)
+        # Point the verifier at the pod instead of a client machine.
+        self._verifier = RawDeviceVerifier(
+            _PodDeviceRunner(k8s, pod, self.logger), self.logger)
+        self._lblk_devices[name] = (pod, device)
+        self._lblk_volumes.append(name)
+        self.logger.info("[lblk] %s -> raw %s in pod %s", name, device, pod)
+        return pod, device
+
     def _stamp_all(self):
         if not self.RAW_VERIFY:
             return
@@ -272,13 +331,14 @@ class _LblkBase(TestClusterBase):
                 self._verifier.verify(client, dev,
                                       region_size=self.VERIFY_REGION,
                                       context=f"{context} [{name}]")
-            return
-
-        for name in self._lblk_volumes:
-            self._fs_fio(name, None, f"{context}-{name}"[:40], runtime=30)
-        self.logger.info("[lblk] %s: FIO verified %d volume(s) through the "
-                         "filesystem (raw crc32c is docker-only)",
-                         context, len(self._lblk_volumes))
+        # Formatted volumes, where the run created any, get the filesystem
+        # lane. Both run when both exist -- they detect different things.
+        for name, mount in (self._fs_volumes or {}).items():
+            self._fs_fio(name, mount, f"{context}-{name}"[:40], runtime=30)
+        if self._lblk_devices or self._fs_volumes:
+            self.logger.info("[lblk] %s: verified %d raw + %d formatted",
+                             context, len(self._lblk_devices),
+                             len(self._fs_volumes or {}))
 
     def _churn_all(self, runtime=None):
         if not self.RAW_VERIFY:
@@ -632,8 +692,8 @@ class _KubectlRunner:
 class _LblkK8sMixin:
     """Reach SPDK through the pod."""
 
-    #: No raw block device on k8s -- see RAW_VERIFY on _LblkBase.
-    RAW_VERIFY = False
+    #: k8s gets the raw lane too, through a volumeMode: Block PVC in a pod.
+    RAW_VERIFY = True
 
     @property
     def _spdk_runner(self):
@@ -706,11 +766,34 @@ class _LblkIntegrity(_LblkBase):
         self.assert_journals_live()
 
         pool = self._add_pool_dual()
-        names = []
+
+        # A mix on purpose, because the two lanes fail differently.
+        #
+        # Raw: fio straight at the block device, crc32c, no filesystem in the
+        # way. This is the gate -- a torn write shows up as a mismatch and
+        # nothing can absorb it.
+        #
+        # Formatted: fio through a filesystem, which is what an application
+        # actually does. Weaker as a detector (a journalling fs can mask or
+        # reshape a torn write, and md5 is only trustworthy where the hardware
+        # gives a 4K atomic write -- see _md5_severity) but it exercises the
+        # path customers run, and a clone of it gets snapshot/clone coverage
+        # too.
+        raw_names, fs_names = [], []
         for i in range(2):
-            name = f"lblkint{i}{random.randint(100, 999)}"
-            self._create_and_connect(name, pool)
-            names.append(name)
+            name = f"lblkraw{i}{random.randint(100, 999)}"
+            self._provision_raw(name, pool)
+            raw_names.append(name)
+        for i in range(2):
+            name = f"lblkfs{i}{random.randint(100, 999)}"
+            self._create_lvol_dual(name, self.LVOL_SIZE, pool_name=pool)
+            _dev, mount = self._connect_and_mount_dual(
+                name, mount_path=f"/mnt/{name}", format_disk=True)
+            self._fs_volumes[name] = mount
+            fs_names.append(name)
+        names = raw_names + fs_names
+        self.logger.info("[lblk] %d raw + %d formatted volume(s)",
+                         len(raw_names), len(fs_names))
         self._stamp_all()
 
         # Steady state first. Nothing in the suite does this today: every other

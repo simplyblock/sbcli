@@ -1176,12 +1176,18 @@ class K8sUtils:
     # ── PVC operations ───────────────────────────────────────────────────────
 
     def create_pvc(self, name: str, size: str, storage_class: str,
-                   namespace: str = None, node_id: str = None):
+                   namespace: str = None, node_id: str = None,
+                   volume_mode: str = None):
         """Create a PersistentVolumeClaim (provisions an lvol via CSI).
 
         Args:
             node_id: If provided, adds ``simplybk/host-id`` annotation to pin
                      the PVC to a specific storage node.
+            volume_mode: ``"Block"`` for a raw device with no filesystem,
+                     consumed through ``volumeDevices``. Omitted means the
+                     cluster default, which is Filesystem. spdkcsi supports
+                     both -- see GetBlock() in
+                     csi-driver/internal/csi/node/publish.go.
         """
         ns = namespace or self.namespace
         annotations = ""
@@ -1190,6 +1196,7 @@ class K8sUtils:
                 f"  annotations:\n"
                 f"    simplybk/host-id: {node_id}\n"
             )
+        mode = f"  volumeMode: {volume_mode}\n" if volume_mode else ""
         yaml_content = (
             f"apiVersion: v1\n"
             f"kind: PersistentVolumeClaim\n"
@@ -1200,13 +1207,62 @@ class K8sUtils:
             f"spec:\n"
             f"  accessModes:\n"
             f"  - ReadWriteOnce\n"
+            f"{mode}"
             f"  resources:\n"
             f"    requests:\n"
             f"      storage: {size}\n"
             f"  storageClassName: {storage_class}\n"
         )
-        self.logger.info(f"[K8sUtils] Creating PVC '{name}' size={size} node={node_id or 'auto'}")
+        self.logger.info(
+            f"[K8sUtils] Creating PVC '{name}' size={size} "
+            f"mode={volume_mode or 'Filesystem'} node={node_id or 'auto'}")
         self.apply_yaml(yaml_content, namespace=ns)
+
+    def create_raw_device_pod(self, pod_name: str, pvc_name: str,
+                              device_path: str = "/dev/rawlblk",
+                              namespace: str = None,
+                              image: str = "dockerpinata/fio:2.1",
+                              timeout: int = 300):
+        """Long-lived pod exposing a Block PVC as a raw device, with fio.
+
+        volumeDevices, not volumeMounts: the latter is filesystem-only and a
+        Block PVC cannot be mounted. The device appears at *device_path* with
+        no filesystem on it at all, which is the point -- a filesystem journal
+        can absorb or reshape a torn write, and these tests exist to catch one.
+
+        Long-lived rather than a Job because the verifier runs stamp, churn and
+        verify as separate commands against the same device, and a Job would
+        exit between them.
+        """
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: Pod\n"
+            f"metadata:\n"
+            f"  name: {pod_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  restartPolicy: Never\n"
+            f"  containers:\n"
+            f"  - name: raw\n"
+            f"    image: {image}\n"
+            f"    command: [\"sleep\", \"infinity\"]\n"
+            f"    securityContext:\n"
+            f"      privileged: true\n"
+            f"    volumeDevices:\n"
+            f"    - name: raw-volume\n"
+            f"      devicePath: {device_path}\n"
+            f"  volumes:\n"
+            f"  - name: raw-volume\n"
+            f"    persistentVolumeClaim:\n"
+            f"      claimName: {pvc_name}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating raw-device pod '{pod_name}' for PVC "
+            f"'{pvc_name}' at {device_path}")
+        self.apply_yaml(yaml_content, namespace=ns)
+        self.wait_pod_running(pod_name, namespace=ns, timeout=timeout)
+        return device_path
 
     def create_clone_pvc(self, name: str, size: str, storage_class: str,
                          snapshot_name: str, namespace: str = None):
@@ -3054,12 +3110,18 @@ class K8sUtils:
         )
 
     def exec_in_pod(self, pod_name: str, command: str,
-                    namespace: str = None) -> tuple:
-        """Execute a command inside a running pod.  Returns (stdout, stderr)."""
+                    namespace: str = None, timeout: int = 300) -> tuple:
+        """Execute a command inside a running pod.  Returns (stdout, stderr).
+
+        timeout is exposed because a raw-device FIO verify runs for minutes and
+        the 300s default would cut it off mid-run, which reads as a failure of
+        the storage rather than of the harness.
+        """
         ns = namespace or self.namespace
         return self._exec_kubectl(
             f"kubectl exec {pod_name} -n {ns} -- "
-            f"sh -c {shlex.quote(command)}"
+            f"sh -c {shlex.quote(command)}",
+            timeout=timeout
         )
 
     def find_files_in_pvc(self, pod_name: str,
