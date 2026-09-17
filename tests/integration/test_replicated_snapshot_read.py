@@ -1,4 +1,4 @@
-"""The latest-replicated-snapshot read (csi-addons Phase 0, P0-6).
+"""The latest-replicated-snapshot read.
 
 A test-failover drill (design §14) has to resolve its test point -- the
 newest fully replicated snapshot, per volume or per consistency-group

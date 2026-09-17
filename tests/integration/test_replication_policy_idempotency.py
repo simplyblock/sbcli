@@ -1,4 +1,4 @@
-"""Idempotent replication-policy attach and detach (csi-addons Phase 0, P0-2).
+"""Idempotent replication-policy attach and detach.
 
 The csi-addons adapter re-drives every verb on each reconcile, so attach and
 detach must be safe to repeat: attaching a volume to the policy it already
@@ -83,8 +83,8 @@ def test_attach_to_the_policy_already_followed_is_a_no_op(db, monkeypatch):
     """Same-policy attach returns success without restarting replication.
 
     Pins existing behavior (the short-circuit in ``attach_policy`` predates
-    P0-2): a restart here would drop the delta base and force a full re-sync,
-    which is exactly what an idempotent re-drive must never do.
+    this change): a restart here would drop the delta base and force a full
+    re-sync, which is exactly what an idempotent re-drive must never do.
     """
     _write_node(db)
     policy = _write_policy(db)

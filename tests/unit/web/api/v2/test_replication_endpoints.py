@@ -264,9 +264,9 @@ class TestCreatePolicy:
 
     def test_rpo_target_reaches_the_controller(self, client, db, cluster, replication_policy,
                                                replication_policy_controller):
-        """The declared RPO objective (csi-addons Phase 0, P0-4): RPO
-        compliance is computed against this target, not the derived lag
-        budget, so it must land on the policy record."""
+        """The declared RPO objective: RPO compliance is computed against
+        this target, not the derived lag budget, so it must land on the
+        policy record."""
         replication_policy_controller.add_policy.return_value = \
             f'{CLUSTER_ID}/{REPLICATION_POLICY_ID}'
 
@@ -367,10 +367,9 @@ class TestPolicyInstance:
 
 
 class TestLatestReplicatedSnapshot:
-    """The per-volume read (csi-addons Phase 0, P0-6): the newest fully
-    replicated snapshot, on the secondary, as a cloneable object. A
-    test-failover drill resolves its test point through this without
-    touching real replication state."""
+    """The per-volume read: the newest fully replicated snapshot, on the
+    secondary, as a cloneable object. A test-failover drill resolves its
+    test point through this without touching real replication state."""
 
     def test_returns_the_target_side_snapshot(self, client, db, cluster, lvol_controller):
         snap = factories.make_snapshot(
@@ -405,8 +404,9 @@ class TestLatestReplicatedSnapshot:
 
 
 class TestLatestReplicatedGeneration:
-    """The consistency-group form of P0-6: one complete generation, every
-    member as a cloneable object on the secondary."""
+    """The consistency-group form of the latest-replicated-snapshot read:
+    one complete generation, every member as a cloneable object on the
+    secondary."""
 
     def test_returns_the_generation_and_its_members(self, client, db, cluster,
                                                      replication_policy,

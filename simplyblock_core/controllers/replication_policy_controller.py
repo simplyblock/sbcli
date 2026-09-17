@@ -273,8 +273,8 @@ def detach_policy(lvol_id):
     lvol = db.get_lvol_by_id(lvol_id)
 
     if not lvol.replication_policy_id:
-        # Idempotent no-op (csi-addons P0-2): there is no policy to detach and
-        # no policy residue to clean. Returning early also keeps a detach from
+        # Idempotent no-op: there is no policy to detach and no policy
+        # residue to clean. Returning early also keeps a detach from
         # reaching through and stopping a LEGACY (start/stop path) replication
         # the volume may be running, which no policy ever owned.
         logger.info("Volume %s follows no replication policy; detach is a no-op", lvol_id)
@@ -510,7 +510,7 @@ def _resolve_group_failover_generation(policy, volumes):
 
 def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapShot]]:
     """The newest consistency-group generation every current member has fully
-    replicated, as cloneable objects on the secondary (csi-addons P0-6).
+    replicated, as cloneable objects on the secondary.
 
     Reuses :func:`_resolve_group_failover_generation`'s refusal rule instead
     of its side effect: a generation qualifies only when every member has a

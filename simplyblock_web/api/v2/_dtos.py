@@ -697,9 +697,9 @@ class ReplicationPolicyDTO(BaseModel):
     mode: ReplicationMode
     keep_replicated: int
     status: ReplicationPolicyStatus
-    #: The declared RPO objective (P0-4); null when the operator declared
-    #: none, in which case the derived lag budget applies.
-    rpo_target_seconds: int | None = None
+    #: The declared RPO objective, in seconds; null when the operator
+    #: declared none, in which case the derived lag budget applies.
+    rpo_target_seconds: util.OptionalUnsigned = None
     consistency_group: bool = False
     #: Pinned placement of the policy's consistency group, set by its first
     #: member: every further member volume must be created on this node/LVS.
@@ -802,7 +802,7 @@ class ReplicationRelationshipDTO(BaseModel):
 
 
 class ReplicationStatusDTO(BaseModel):
-    """The typed steady-state replication status of one volume (P0-1).
+    """The typed steady-state replication status of one volume.
 
     Serves what ``lvol_controller.get_replication_info`` computes, for the
     volume's WHOLE replicated life — unlike ``ReplicationRelationshipDTO``,
@@ -851,10 +851,10 @@ class ReplicationStatusDTO(BaseModel):
 
 class ReplicatedSnapshotDTO(BaseModel):
     """A fully replicated snapshot on the secondary, addressed as a cloneable
-    object (csi-addons P0-6). ``lvol_id`` is the volume the snapshot belongs
-    to on the SECONDARY cluster, not the source volume the caller asked
-    about, because that is the identity the ordinary CSI clone path resolves
-    a ``dataSource`` against.
+    object. ``lvol_id`` is the volume the snapshot belongs to on the
+    SECONDARY cluster, not the source volume the caller asked about, because
+    that is the identity the ordinary CSI clone path resolves a
+    ``dataSource`` against.
     """
     snapshot_id: UUID
     cluster_id: UUID
@@ -864,7 +864,7 @@ class ReplicatedSnapshotDTO(BaseModel):
     used_size: util.Unsigned
     created_at: datetime
     group_id: str = ""
-    group_seq: int = 0
+    group_seq: util.Unsigned = 0
 
     @staticmethod
     def from_model(model: SnapShot) -> 'ReplicatedSnapshotDTO':
@@ -882,9 +882,9 @@ class ReplicatedSnapshotDTO(BaseModel):
 
 
 class ReplicatedGenerationDTO(BaseModel):
-    """One complete, fully replicated consistency-group generation (P0-6),
-    every member addressed as a cloneable object on the secondary."""
-    group_seq: int
+    """One complete, fully replicated consistency-group generation, every
+    member addressed as a cloneable object on the secondary."""
+    group_seq: util.Unsigned
     members: list[ReplicatedSnapshotDTO]
 
 

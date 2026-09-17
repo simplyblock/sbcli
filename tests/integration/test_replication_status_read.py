@@ -1,4 +1,4 @@
-"""The steady-state fields of the typed replication status read (P0-1, P0-4).
+"""The steady-state fields of the typed replication status read.
 
 ``lvol_controller.get_replication_info`` backs the
 ``GET .../volumes/{id}/replication/status`` endpoint the csi-addons adapter
@@ -233,9 +233,9 @@ class TestResyncing:
 class TestLagBudget:
 
     def test_the_declared_rpo_target_replaces_the_derived_budget(self, db, node):
-        """P0-4: with ``rpo_target_seconds`` on the policy, compliance is
-        computed against the operator's declared objective, not the
-        three-intervals heuristic."""
+        """With ``rpo_target_seconds`` on the policy, compliance is computed
+        against the operator's declared objective, not the three-intervals
+        heuristic."""
         policy = _write_policy(db, rpo_target_seconds=600)
         lvol = _write_lvol(db, "rsr-lv-rpo", policy_id=policy.get_id(),
                            do_replicate=True)

@@ -39,10 +39,10 @@ class PolicyParams(BaseModel):
     interval_min: util.Unsigned = 1
     mode: ReplicationMode | None = None
     keep_replicated: Annotated[int, Field(ge=2)] | None = None
-    #: The declared RPO objective in seconds (P0-4). RPO compliance is
-    #: computed against this target rather than the derived lag budget.
-    #: Omitted means no declared objective.
-    rpo_target_seconds: util.Unsigned | None = None
+    #: The declared RPO objective in seconds. RPO compliance is computed
+    #: against this target rather than the derived lag budget. Omitted means
+    #: no declared objective.
+    rpo_target_seconds: util.OptionalUnsigned = None
     #: Group the policy's volumes into ONE crash-consistent unit: snapshots are
     #: taken as atomically frozen generations and the members fail over
     #: together. Decided at creation only — the group record is created with
@@ -78,10 +78,9 @@ def get_relationship_by_lvol(cluster: Cluster, lvol_id: UUID) -> ReplicationRela
          name='clusters:replication:relationships:latest-snapshot')
 def get_latest_replicated_snapshot(cluster: Cluster, lvol_id: UUID) -> ReplicatedSnapshotDTO:
     """The volume's newest fully replicated snapshot, on the secondary, as a
-    cloneable object (csi-addons P0-6). Exists for the volume's whole
-    replicated life: a test-failover drill (design §14) resolves its test
-    point through this read, without touching the real replication state to
-    find out what it is.
+    cloneable object. Exists for the volume's whole replicated life: a
+    test-failover drill (design §14) resolves its test point through this
+    read, without touching the real replication state to find out what it is.
     """
     try:
         snap = lvol_controller.latest_replicated_snapshot(str(lvol_id))
@@ -227,11 +226,11 @@ def failover_policy(cluster: Cluster, policy: ReplicationPolicy) -> list[Failove
 def get_latest_replicated_generation(cluster: Cluster,
                                      policy: ReplicationPolicy) -> ReplicatedGenerationDTO:
     """The consistency group's newest fully replicated generation, every
-    member as a cloneable object on the secondary (csi-addons P0-6, group
-    form). Refused as a 409 when the policy has no consistency group, when no
-    generation is complete for every current member yet, or when members are
-    already split across generations — the same refusal a real group
-    fail-over applies, so a drill never addresses a mixed-generation cut.
+    member as a cloneable object on the secondary. Refused as a 400 when the
+    policy has no consistency group, when no generation is complete for
+    every current member yet, or when members are already split across
+    generations: the same refusal a real group fail-over applies, so a drill
+    never addresses a mixed-generation cut.
     """
     try:
         seq, members = replication_policy_controller.latest_replicated_generation(

@@ -57,7 +57,7 @@ def get_relationship(cluster: Cluster, pool: StoragePool, volume: Volume) -> Rep
 
 @api.get('/status', name='clusters:storage-pools:volumes:replication:status')
 def get_status(cluster: Cluster, pool: StoragePool, volume: Volume) -> ReplicationStatusDTO:
-    """The typed steady-state replication status (csi-addons Phase 0, P0-1).
+    """The typed steady-state replication status.
 
     Unlike the relationship read above, which serves cutover records and 404s
     for a volume's whole healthy replicated life, this endpoint always answers

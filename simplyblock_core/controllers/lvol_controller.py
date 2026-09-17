@@ -2785,7 +2785,7 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
 
 
 def _replication_role(db_controller: DBController, lvol: LVol) -> str:
-    """Which end of its replication relationship *lvol* is (csi-addons P0-1).
+    """Which end of its replication relationship *lvol* is.
 
     The newest relationship record involving the volume decides: failed_over
     trumps the side, because that is the state a DR orchestrator acts on.
@@ -2829,12 +2829,11 @@ def get_replication_info(lvol_id_or_name):
         "last_replication_time": "",
         "last_replication_duration": "",
         "replicated_count": 0,
-        # The typed steady-state status fields (csi-addons P0-1).
-        # last_replicated_at is the newest fully replicated snapshot's
-        # creation time — the truthful lastSyncTime source — and the
-        # last_cycle figures describe THAT snapshot's shipping, numerically,
-        # where the display strings above describe the newest task of any
-        # state.
+        # The typed steady-state status fields. last_replicated_at is the
+        # newest fully replicated snapshot's creation time (the truthful
+        # lastSyncTime source for a DR orchestrator), and the last_cycle
+        # figures describe THAT snapshot's shipping, numerically, where the
+        # display strings above describe the newest task of any state.
         "last_replicated_at": None,
         "last_cycle_seconds": None,
         "last_cycle_bytes": None,
@@ -2915,7 +2914,7 @@ def get_replication_info(lvol_id_or_name):
 
         # A fail-back ships toward the recovered source under
         # replicate_to_source tasks; while one is outstanding the volume is
-        # reconciling a divergence (csi-addons P0-1, the Resyncing condition).
+        # reconciling a divergence.
         out["resyncing"] = out["resyncing"] or any(
             t.function_params.get("replicate_to_source")
             for (t, _) in outstanding_pairs)
@@ -2950,9 +2949,9 @@ def get_replication_info(lvol_id_or_name):
             out["lag"] = utils.strfdelta_seconds(lag_seconds)
             out["last_replicated_at"] = last_replicated_created
 
-            # The last COMPLETED cycle (csi-addons P0-1): what shipped, and
-            # how long it took. The display fields below describe the newest
-            # task of any state, which may still be in flight.
+            # The last COMPLETED cycle: what shipped, and how long it took.
+            # The display fields below describe the newest task of any
+            # state, which may still be in flight.
             last_done_task, last_done_snap = max(
                 replicated_pairs, key=lambda pair: pair[1].created_at)
             out["last_cycle_bytes"] = last_done_snap.used_size
@@ -2993,7 +2992,7 @@ def get_replication_info(lvol_id_or_name):
 
         # Lag budget: three snapshot intervals (one missed cycle is not an
         # incident), floor 5 min so a tiny interval does not flap the verdict.
-        # A declared RPO objective on the volume's policy (P0-4) replaces the
+        # A declared RPO objective on the volume's policy replaces the
         # heuristic: the operator alerts on the target they promised.
         lag_budget = max(3 * interval_sec, 300)
         if lvol.replication_policy_id:
@@ -4524,7 +4523,7 @@ def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generati
 
 def latest_replicated_snapshot(lvol_id: str) -> SnapShot | None:
     """The newest fully replicated snapshot of *lvol_id*, on the secondary,
-    as a cloneable object (csi-addons P0-6).
+    as a cloneable object.
 
     Exposes the same selection ``replicate_lvol_on_target_cluster`` applies
     internally, without cloning: a test-failover drill (design §14) has to

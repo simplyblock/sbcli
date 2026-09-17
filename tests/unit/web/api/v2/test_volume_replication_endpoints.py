@@ -163,10 +163,10 @@ def _status(**overrides):
 
 
 class TestStatus:
-    """The typed steady-state status read (csi-addons Phase 0, P0-1).
+    """The typed steady-state status read.
 
-    The endpoint exists for the volume's whole replicated life — unlike the
-    relationship read, which only has cutover records to serve — so the
+    The endpoint exists for the volume's whole replicated life, unlike the
+    relationship read, which only has cutover records to serve, so the
     csi-addons adapter can derive conditions and ``lastSyncTime`` from it on
     every reconcile.
     """
