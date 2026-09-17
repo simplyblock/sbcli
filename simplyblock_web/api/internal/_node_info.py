@@ -27,7 +27,7 @@ from collections.abc import Callable
 import cpuinfo
 import requests
 
-from simplyblock_core import shell_utils
+from simplyblock_core.utils import shell as shell_utils
 
 
 class StaticNodeInfo(TypedDict):

@@ -10,7 +10,8 @@ from jinja2 import Environment, PackageLoader
 import yaml
 from pydantic import BaseModel, Field
 
-from simplyblock_core import constants, shell_utils, utils as core_utils
+from simplyblock_core import constants, utils as core_utils
+from simplyblock_core.utils import shell as shell_utils
 from simplyblock_core.settings import Settings
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file

@@ -4,7 +4,7 @@ import tempfile
 from string import Template
 
 from simplyblock_core import constants
-from simplyblock_core import shell_utils
+from simplyblock_core.utils import shell as shell_utils
 
 
 logger = logging.getLogger()
