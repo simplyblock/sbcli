@@ -1,7 +1,7 @@
 import datetime
 from typing import ClassVar
 
-from simplyblock_core.indices import Index
+from simplyblock_core.models.indices import Index
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 

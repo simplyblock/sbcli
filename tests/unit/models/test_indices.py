@@ -11,8 +11,8 @@ import pkgutil
 import pytest
 
 import simplyblock_core.models
-from simplyblock_core import indices
-from simplyblock_core.indices import Index, Unique
+from simplyblock_core.models import indices
+from simplyblock_core.models.indices import Index, Unique
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol

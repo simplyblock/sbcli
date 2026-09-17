@@ -1,6 +1,6 @@
 """Backfill, verification and observability for the declared secondary indices.
 
-:mod:`simplyblock_core.indices` defines what an index *is* and
+:mod:`simplyblock_core.models.indices` defines what an index *is* and
 :class:`~simplyblock_core.db_controller.DBController` reads and maintains one.
 This module owns the operations that run over a whole keyspace:
 
@@ -23,7 +23,8 @@ import time
 import fdb
 from prometheus_client import Counter
 
-from simplyblock_core import indices, utils
+from simplyblock_core import utils
+from simplyblock_core.models import indices
 from simplyblock_core.models.base_model import BaseModel
 
 logger = utils.get_logger(__name__)

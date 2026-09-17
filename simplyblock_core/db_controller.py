@@ -8,8 +8,9 @@ import time
 import fdb
 from typing import Any, ClassVar
 
-from simplyblock_core import constants, index_ops, indices, utils, watches
+from simplyblock_core import constants, index_ops, utils
 from simplyblock_core.utils import ttl_cache
+from simplyblock_core.models import indices, watches
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
 from simplyblock_core.models.events import EventObj
@@ -162,7 +163,7 @@ class DBController(metaclass=Singleton):
 
     # ---- Secondary indices ----
     #
-    # One read primitive over the declared indices (simplyblock_core/indices.py)
+    # One read primitive over the declared indices (models/indices.py)
     # and the state that says whether an index may be trusted yet. Everything
     # below this class's `get_*_by_*` helpers is expressed in terms of `query`.
 
