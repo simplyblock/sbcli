@@ -126,7 +126,14 @@ class _LblkBase(TestClusterBase):
         return self.ssh_obj
 
     def _init_lblk(self):
-        self._verifier = RawDeviceVerifier(self.ssh_obj, self.logger)
+        # Docker's verifier reaches a client machine over ssh. K8s has no
+        # ssh-reachable target at all, so it gets no verifier here --
+        # _provision_raw builds one over _PodDeviceRunner once the block pod
+        # exists. Left as None rather than an ssh-backed one that happens to be
+        # unused: an ssh verifier sitting on a k8s object is an invitation for
+        # the next change to call it and hang for a timeout.
+        self._verifier = (None if self.k8s_test
+                          else RawDeviceVerifier(self.ssh_obj, self.logger))
         self._lblk_devices = {}
         self._lblk_volumes = []
         self._k8s_raw_pods = []
