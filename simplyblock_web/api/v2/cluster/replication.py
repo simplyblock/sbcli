@@ -37,6 +37,10 @@ class PolicyParams(BaseModel):
     interval_min: util.Unsigned = 1
     mode: ReplicationMode | None = None
     keep_replicated: Annotated[int, Field(ge=2)] | None = None
+    #: The declared RPO objective in seconds (P0-4). RPO compliance is
+    #: computed against this target rather than the derived lag budget.
+    #: Omitted means no declared objective.
+    rpo_target_seconds: util.Unsigned | None = None
     #: Group the policy's volumes into ONE crash-consistent unit: snapshots are
     #: taken as atomically frozen generations and the members fail over
     #: together. Decided at creation only — the group record is created with
@@ -155,7 +159,8 @@ def create_policy(request: Request, cluster: Cluster, parameters: PolicyParams,
             cluster.get_id(), parameters.policy_name, str(parameters.target_id),
             interval_min=parameters.interval_min, mode=parameters.mode,
             keep_replicated=parameters.keep_replicated,
-            consistency_group=parameters.consistency_group)
+            consistency_group=parameters.consistency_group,
+            rpo_target_seconds=parameters.rpo_target_seconds)
     except ReplicationConfigError as e:
         raise _config_error(e)
     except KeyError as e:

@@ -10,7 +10,7 @@ from simplyblock_core.models.lvol_model import LVol
 
 from .... import util
 from ...._dependencies import Cluster, StoragePool, Volume
-from ...._dtos import ReplicationMode, ReplicationRelationshipDTO, TaskDTO
+from ...._dtos import ReplicationMode, ReplicationRelationshipDTO, ReplicationStatusDTO, TaskDTO
 
 
 api = APIRouter(tags=['replication'])
@@ -53,6 +53,24 @@ def get_relationship(cluster: Cluster, pool: StoragePool, volume: Volume) -> Rep
     if relationship is None:
         raise HTTPException(404, 'Volume has no replication relationship')
     return ReplicationRelationshipDTO(**relationship)
+
+
+@api.get('/status', name='clusters:storage-pools:volumes:replication:status')
+def get_status(cluster: Cluster, pool: StoragePool, volume: Volume) -> ReplicationStatusDTO:
+    """The typed steady-state replication status (csi-addons Phase 0, P0-1).
+
+    Unlike the relationship read above, which serves cutover records and 404s
+    for a volume's whole healthy replicated life, this endpoint always answers
+    for a volume that exists: ``state: not_replicating, role: none`` is the
+    valid answer for an unreplicated volume. The csi-addons adapter derives
+    its conditions and ``lastSyncTime`` from this read on every reconcile.
+    """
+    info = lvol_controller.get_replication_info(volume.get_id())
+    if info is None:
+        # Only reachable when the volume vanished between the path lookup and
+        # the controller's own resolution.
+        raise HTTPException(404, 'Volume not found')
+    return ReplicationStatusDTO.from_info(info)
 
 
 class ReplicationStartParams(BaseModel):

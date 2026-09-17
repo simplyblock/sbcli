@@ -83,6 +83,14 @@ ReplicationState = Literal["replicating", "cutover_pending", "cutover_done", "fa
 
 ReplicationDirection = Literal["to_target", "to_source"]
 
+#: Which end of the relationship this volume is, seen from its own cluster.
+ReplicationRole = Literal["source", "secondary", "failed_over", "none"]
+
+#: The steady-state health verdict ``get_replication_info`` derives.
+ReplicationHealthState = Literal[
+    "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
+]
+
 TaskFunctionName = Literal[
     "device_restart",
     "node_restart",
@@ -689,6 +697,9 @@ class ReplicationPolicyDTO(BaseModel):
     mode: ReplicationMode
     keep_replicated: int
     status: ReplicationPolicyStatus
+    #: The declared RPO objective (P0-4); null when the operator declared
+    #: none, in which case the derived lag budget applies.
+    rpo_target_seconds: int | None = None
     consistency_group: bool = False
     #: Pinned placement of the policy's consistency group, set by its first
     #: member: every further member volume must be created on this node/LVS.
@@ -709,6 +720,7 @@ class ReplicationPolicyDTO(BaseModel):
             mode=cast(ReplicationMode, model.mode),
             keep_replicated=model.keep_replicated,
             status=cast(ReplicationPolicyStatus, model.status),
+            rpo_target_seconds=getattr(model, 'rpo_target_seconds', 0) or None,
             consistency_group=bool(getattr(model, 'consistency_group', False)),
             group_node_id=UUID(group.node_id) if group is not None and group.node_id else None,
             group_lvs_name=group.lvs_name if group is not None else "",
@@ -787,6 +799,52 @@ class ReplicationRelationshipDTO(BaseModel):
     is_source: bool
     active: str | None = None
     active_lvol_id: util.OptionalUUID = None
+
+
+class ReplicationStatusDTO(BaseModel):
+    """The typed steady-state replication status of one volume (P0-1).
+
+    Serves what ``lvol_controller.get_replication_info`` computes, for the
+    volume's WHOLE replicated life — unlike ``ReplicationRelationshipDTO``,
+    which only exists once a cutover or fail-over has created a relationship
+    record. ``state: not_replicating, role: none`` is a valid answer, never a
+    404, because the csi-addons adapter polls this on every reconcile.
+    """
+    role: ReplicationRole
+    state: ReplicationHealthState
+    #: Creation time (epoch seconds) of the newest fully replicated snapshot;
+    #: null until the first snapshot lands on the peer.
+    last_replicated_at: int | None = None
+    lag_seconds: int | None = None
+    lag_budget_seconds: int | None = None
+    outstanding_count: int = 0
+    outstanding_bytes: int = 0
+    #: Shipping tasks currently suspended on errors.
+    failing_count: int = 0
+    #: Whether any shipping task exhausted its retries and gave up.
+    max_retry_reached: bool = False
+    #: Size and duration of the last completed shipping cycle.
+    last_cycle_bytes: int | None = None
+    last_cycle_seconds: int | None = None
+    #: A divergence catch-up (fail-back reversal or final cutover) in flight.
+    resyncing: bool = False
+
+    @staticmethod
+    def from_info(info: dict) -> 'ReplicationStatusDTO':
+        return ReplicationStatusDTO(
+            role=info.get('role', 'none'),
+            state=info.get('state', 'not_replicating'),
+            last_replicated_at=info.get('last_replicated_at'),
+            lag_seconds=info.get('lag_seconds'),
+            lag_budget_seconds=info.get('lag_budget_seconds'),
+            outstanding_count=info.get('outstanding_count', 0),
+            outstanding_bytes=info.get('outstanding_bytes', 0),
+            failing_count=info.get('failing_count', 0),
+            max_retry_reached=bool(info.get('max_retry_reached', 0)),
+            last_cycle_bytes=info.get('last_cycle_bytes'),
+            last_cycle_seconds=info.get('last_cycle_seconds'),
+            resyncing=bool(info.get('resyncing', False)),
+        )
 
 
 class FailoverResultDTO(BaseModel):

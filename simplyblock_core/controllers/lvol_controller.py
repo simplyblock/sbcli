@@ -2784,6 +2784,29 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
     return data
 
 
+def _replication_role(db_controller, lvol):
+    """Which end of its replication relationship *lvol* is (csi-addons P0-1).
+
+    The newest relationship record involving the volume decides: failed_over
+    trumps the side, because that is the state a DR orchestrator acts on.
+    Without a record — which is a volume's whole healthy replicated life,
+    since relationships only materialize at cutover or fail-over — the volume
+    is a source as soon as replication is configured, and none otherwise.
+    """
+    lvol_id = lvol.get_id()
+    for rep in reversed(db_controller.get_lvol_replication_objects()):
+        source_id = rep.source_lvol.get_id() if rep.source_lvol else ""
+        target_id = rep.target_lvol.get_id() if rep.target_lvol else ""
+        if lvol_id not in (source_id, target_id):
+            continue
+        if rep.state == LVolReplication.STATE_FAILED_OVER:
+            return "failed_over"
+        return "source" if lvol_id == source_id else "secondary"
+    if lvol.replication_policy_id or lvol.do_replicate:
+        return "source"
+    return "none"
+
+
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
     lvol = None
@@ -2806,6 +2829,17 @@ def get_replication_info(lvol_id_or_name):
         "last_replication_time": "",
         "last_replication_duration": "",
         "replicated_count": 0,
+        # The typed steady-state status fields (csi-addons P0-1).
+        # last_replicated_at is the newest fully replicated snapshot's
+        # creation time — the truthful lastSyncTime source — and the
+        # last_cycle figures describe THAT snapshot's shipping, numerically,
+        # where the display strings above describe the newest task of any
+        # state.
+        "last_replicated_at": None,
+        "last_cycle_seconds": None,
+        "last_cycle_bytes": None,
+        "role": "none",                 # source|secondary|failed_over|none
+        "resyncing": False,             # a divergence catch-up is in flight
         # Replication progress monitoring.
         "lag_seconds": None,            # how far the target is behind the source
         "lag": "",                      # human-readable lag
@@ -2832,9 +2866,15 @@ def get_replication_info(lvol_id_or_name):
         "tasks": [],
     }
     node = db_controller.get_storage_node_by_id(lvol.node_id)
+    out["role"] = _replication_role(db_controller, lvol)
     # Each replication task maps 1:1 to a source snapshot for this lvol.
     items = []  # list of (task, snap)
+    final_cutover_active = False
     for task in db_controller.get_job_tasks(node.cluster_id):
+        if (task.function_name == JobSchedule.FN_REPLICATION_FINAL
+                and not task.canceled and task.status != JobSchedule.STATUS_DONE
+                and task.function_params.get("lvol_id") == lvol.get_id()):
+            final_cutover_active = True
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
@@ -2847,6 +2887,10 @@ def get_replication_info(lvol_id_or_name):
             snaps.append(snap)
             tasks.append(task)
             items.append((task, snap))
+
+    # The final cutover reconciles independently of the snapshot pipeline, so
+    # it flags a resync even when no shipping task is queued.
+    out["resyncing"] = final_cutover_active
 
     if items:
         now = int(time.time())
@@ -2864,8 +2908,17 @@ def get_replication_info(lvol_id_or_name):
                     or bool(snap.target_replicated_snap_uuid)
                     or bool(snap.source_replicated_snap_uuid))
 
-        replicated = [s for (t, s) in items if _is_replicated(t, s)]
-        outstanding = [s for (t, s) in items if not _is_replicated(t, s)]
+        replicated_pairs = [(t, s) for (t, s) in items if _is_replicated(t, s)]
+        outstanding_pairs = [(t, s) for (t, s) in items if not _is_replicated(t, s)]
+        replicated = [s for (_, s) in replicated_pairs]
+        outstanding = [s for (_, s) in outstanding_pairs]
+
+        # A fail-back ships toward the recovered source under
+        # replicate_to_source tasks; while one is outstanding the volume is
+        # reconciling a divergence (csi-addons P0-1, the Resyncing condition).
+        out["resyncing"] = out["resyncing"] or any(
+            t.function_params.get("replicate_to_source")
+            for (t, _) in outstanding_pairs)
 
         # Count what actually replicated, not every snapshot that has a task —
         # the latter reported healthy replication for volumes where nothing had
@@ -2895,6 +2948,18 @@ def get_replication_info(lvol_id_or_name):
             lag_seconds = max(0, now - last_replicated_created)
             out["lag_seconds"] = lag_seconds
             out["lag"] = utils.strfdelta_seconds(lag_seconds)
+            out["last_replicated_at"] = last_replicated_created
+
+            # The last COMPLETED cycle (csi-addons P0-1): what shipped, and
+            # how long it took. The display fields below describe the newest
+            # task of any state, which may still be in flight.
+            last_done_task, last_done_snap = max(
+                replicated_pairs, key=lambda pair: pair[1].created_at)
+            out["last_cycle_bytes"] = last_done_snap.used_size
+            done_params = last_done_task.function_params
+            if "end_time" in done_params and "start_time" in done_params:
+                out["last_cycle_seconds"] = max(
+                    0, int(done_params["end_time"]) - int(done_params["start_time"]))
 
         last_task = tasks[-1]
         last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
@@ -2928,7 +2993,17 @@ def get_replication_info(lvol_id_or_name):
 
         # Lag budget: three snapshot intervals (one missed cycle is not an
         # incident), floor 5 min so a tiny interval does not flap the verdict.
+        # A declared RPO objective on the volume's policy (P0-4) replaces the
+        # heuristic: the operator alerts on the target they promised.
         lag_budget = max(3 * interval_sec, 300)
+        if lvol.replication_policy_id:
+            try:
+                policy = db_controller.get_replication_policy_by_id(
+                    lvol.replication_policy_id)
+            except KeyError:
+                policy = None
+            if policy is not None and policy.rpo_target_seconds > 0:
+                lag_budget = policy.rpo_target_seconds
         lag = out["lag_seconds"]
         oldest_outstanding = out["oldest_outstanding_seconds"]
         if gave_up:

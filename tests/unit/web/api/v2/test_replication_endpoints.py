@@ -239,7 +239,7 @@ class TestCreatePolicy:
         args, kwargs = replication_policy_controller.add_policy.call_args
         assert args == (CLUSTER_ID, 'nightly', REPLICATION_TARGET_ID)
         assert kwargs == {'interval_min': 5, 'mode': 'failover', 'keep_replicated': 3,
-                          'consistency_group': False}
+                          'consistency_group': False, 'rpo_target_seconds': None}
 
     def test_consistency_group_flag_reaches_the_controller(
             self, client, db, cluster, replication_policy,
@@ -259,6 +259,35 @@ class TestCreatePolicy:
         assert response.status_code == 201
         _args, kwargs = replication_policy_controller.add_policy.call_args
         assert kwargs['consistency_group'] is True
+
+    def test_rpo_target_reaches_the_controller(self, client, db, cluster, replication_policy,
+                                               replication_policy_controller):
+        """The declared RPO objective (csi-addons Phase 0, P0-4): RPO
+        compliance is computed against this target, not the derived lag
+        budget, so it must land on the policy record."""
+        replication_policy_controller.add_policy.return_value = \
+            f'{CLUSTER_ID}/{REPLICATION_POLICY_ID}'
+
+        response = client.post(POLICIES_URL, json={
+            'policy_name': 'nightly',
+            'target_id': REPLICATION_TARGET_ID,
+            'rpo_target_seconds': 600,
+        })
+
+        assert response.status_code == 201
+        _args, kwargs = replication_policy_controller.add_policy.call_args
+        assert kwargs['rpo_target_seconds'] == 600
+
+    def test_negative_rpo_target_rejected(self, client, db, cluster,
+                                          replication_policy_controller):
+        response = client.post(POLICIES_URL, json={
+            'policy_name': 'nightly',
+            'target_id': REPLICATION_TARGET_ID,
+            'rpo_target_seconds': -1,
+        })
+
+        assert response.status_code == 422
+        replication_policy_controller.add_policy.assert_not_called()
 
     def test_unknown_mode_rejected(self, client, db, cluster, replication_policy_controller):
         response = client.post(POLICIES_URL, json={
@@ -289,6 +318,20 @@ class TestPolicyInstance:
 
         assert response.status_code == 200
         assert response.json()['id'] == REPLICATION_POLICY_ID
+
+    def test_detail_reports_the_rpo_target(self, client, db, cluster, replication_policy):
+        replication_policy.rpo_target_seconds = 600
+
+        body = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/').json()
+
+        assert body['rpo_target_seconds'] == 600
+
+    def test_unset_rpo_target_serializes_as_null(self, client, db, cluster, replication_policy):
+        """0 on the record means "no declared objective" — the API reports
+        that as null rather than a target of zero seconds."""
+        body = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/').json()
+
+        assert body['rpo_target_seconds'] is None
 
     def test_policy_of_another_cluster_is_not_found(self, client, db, cluster, replication_policy):
         replication_policy.cluster_id = TARGET_CLUSTER_ID

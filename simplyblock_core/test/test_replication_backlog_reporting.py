@@ -72,6 +72,8 @@ class _Lvol:
     lvol_name = "replvol0"
     node_id = "N1"
     replication_interval_min = 1
+    replication_policy_id = ""
+    do_replicate = True
 
     def get_id(self):
         return LVOL_ID
@@ -97,6 +99,9 @@ class _FakeDB:
 
     def get_snapshot_by_id(self, uuid):
         return self._snaps[uuid]
+
+    def get_lvol_replication_objects(self):
+        return []
 
 
 @pytest.fixture

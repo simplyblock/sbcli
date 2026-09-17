@@ -94,7 +94,7 @@ def remove_target(target_id):
 # --------------------------------------------------------------------------- #
 
 def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_replicated=None,
-               retention_schedule=None, consistency_group=False):
+               retention_schedule=None, consistency_group=False, rpo_target_seconds=None):
     """Create a policy on *target* (id or name)."""
     db.get_cluster_by_id(cluster_id)
     try:
@@ -119,6 +119,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         # onto, so retention drops segments instead of swap-merging them.
         raise ReplicationConfigError(
             f"keep_replicated must be at least {ReplicationPolicy.MIN_KEEP_REPLICATED}")
+    if rpo_target_seconds is not None and rpo_target_seconds < 0:
+        raise ReplicationConfigError("rpo_target_seconds cannot be negative")
 
     if retention_schedule:
         # Validate at ingress: an unparseable schedule silently falling back to
@@ -142,6 +144,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         policy.keep_replicated = keep_replicated
     if retention_schedule is not None:
         policy.retention_schedule = retention_schedule
+    if rpo_target_seconds is not None:
+        policy.rpo_target_seconds = rpo_target_seconds
     policy.consistency_group = bool(consistency_group)
     policy.status = ReplicationPolicy.STATUS_ACTIVE
     policy.write_to_db(db.kv_store)
@@ -267,6 +271,14 @@ def detach_policy(lvol_id):
     failed-over volume built on it would start reading zeros.
     """
     lvol = db.get_lvol_by_id(lvol_id)
+
+    if not lvol.replication_policy_id:
+        # Idempotent no-op (csi-addons P0-2): there is no policy to detach and
+        # no policy residue to clean. Returning early also keeps a detach from
+        # reaching through and stopping a LEGACY (start/stop path) replication
+        # the volume may be running, which no policy ever owned.
+        logger.info("Volume %s follows no replication policy; detach is a no-op", lvol_id)
+        return True
 
     rep = _active_relationship(lvol_id)
     if rep is not None and rep.state == LVolReplication.STATE_CUTOVER_PENDING:

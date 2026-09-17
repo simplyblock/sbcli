@@ -140,6 +140,96 @@ class TestRelationship:
         assert client.get(REPLICATION_URL).status_code == 404
 
 
+def _status(**overrides):
+    """A steady-state status dict as ``get_replication_info`` computes it."""
+    status = {
+        'role': 'source',
+        'state': 'in_sync',
+        'last_replicated_at': 1758000000,
+        'lag_seconds': 42,
+        'lag_budget_seconds': 900,
+        'outstanding_count': 1,
+        'outstanding_bytes': 1048576,
+        'failing_count': 0,
+        'max_retry_reached': 0,
+        'last_cycle_bytes': 2097152,
+        'last_cycle_seconds': 12,
+        'resyncing': False,
+    }
+    status.update(overrides)
+    return status
+
+
+class TestStatus:
+    """The typed steady-state status read (csi-addons Phase 0, P0-1).
+
+    The endpoint exists for the volume's whole replicated life — unlike the
+    relationship read, which only has cutover records to serve — so the
+    csi-addons adapter can derive conditions and ``lastSyncTime`` from it on
+    every reconcile.
+    """
+
+    def test_returns_the_typed_steady_state_status(self, client, db, volume, lvol_controller):
+        lvol_controller.get_replication_info.return_value = _status()
+
+        response = client.get(REPLICATION_URL + 'status')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['role'] == 'source'
+        assert body['state'] == 'in_sync'
+        assert body['last_replicated_at'] == 1758000000
+        assert body['lag_seconds'] == 42
+        assert body['lag_budget_seconds'] == 900
+        assert body['outstanding_count'] == 1
+        assert body['outstanding_bytes'] == 1048576
+        assert body['failing_count'] == 0
+        assert body['max_retry_reached'] is False
+        assert body['last_cycle_bytes'] == 2097152
+        assert body['last_cycle_seconds'] == 12
+        assert body['resyncing'] is False
+        lvol_controller.get_replication_info.assert_called_once_with(VOLUME_ID)
+
+    def test_a_volume_that_never_replicated_is_a_valid_answer(self, client, db, volume,
+                                                              lvol_controller):
+        """``state: not_replicating, role: none`` — never a 404 for a volume
+        that exists, because Ramen polls the status for the volume's whole
+        life, including before the first snapshot ships."""
+        lvol_controller.get_replication_info.return_value = _status(
+            role='none', state='not_replicating', last_replicated_at=None,
+            lag_seconds=None, lag_budget_seconds=None, outstanding_count=0,
+            outstanding_bytes=0, last_cycle_bytes=None, last_cycle_seconds=None)
+
+        response = client.get(REPLICATION_URL + 'status')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['role'] == 'none'
+        assert body['state'] == 'not_replicating'
+        assert body['last_replicated_at'] is None
+        assert body['lag_seconds'] is None
+        assert body['lag_budget_seconds'] is None
+
+    def test_exhausted_retries_surface_as_a_flag(self, client, db, volume, lvol_controller):
+        """The DTO reports WHETHER a task gave up; the count is an internal."""
+        lvol_controller.get_replication_info.return_value = _status(
+            state='error', max_retry_reached=2)
+
+        body = client.get(REPLICATION_URL + 'status').json()
+
+        assert body['state'] == 'error'
+        assert body['max_retry_reached'] is True
+
+    def test_resync_in_flight_is_reported(self, client, db, volume, lvol_controller):
+        lvol_controller.get_replication_info.return_value = _status(
+            role='failed_over', state='replicating', resyncing=True)
+
+        body = client.get(REPLICATION_URL + 'status').json()
+
+        assert body['role'] == 'failed_over'
+        assert body['resyncing'] is True
+
+
 class TestStartStopTrigger:
 
     def test_start_passes_parameters(self, client, db, volume, lvol_controller):

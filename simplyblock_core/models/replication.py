@@ -82,6 +82,11 @@ class ReplicationPolicy(BaseModel):
     #: (bdev_lvol_snapshot_group), and fail-over generations are resolved
     #: group-wide. Auto-creates/deletes a ConsistencyGroup record.
     consistency_group: bool = False
+    #: The declared recovery point objective, in seconds. RPO compliance is
+    #: computed against THIS figure rather than the derived lag budget, so an
+    #: operator alerts on the objective they promised, not on a heuristic.
+    #: 0 means no declared objective: the lag budget stays the derived one.
+    rpo_target_seconds: int = 0
     status: str = STATUS_ACTIVE
 
     def get_id(self):
