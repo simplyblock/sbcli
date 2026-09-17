@@ -1,6 +1,6 @@
 from typing import ClassVar
 
-from simplyblock_core.indices import Index, Unique
+from simplyblock_core.models.indices import Index, Unique
 from simplyblock_core.models.base_model import BaseModel, default_factory
 from simplyblock_core.models.lvol_model import LVol, LVolMini
 

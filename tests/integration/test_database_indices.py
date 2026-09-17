@@ -13,10 +13,11 @@ import uuid
 import fdb
 import pytest
 
-from simplyblock_core import index_ops, indices
+from simplyblock_core import index_ops
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.indices import UniqueIndexViolation
+from simplyblock_core.models import indices
+from simplyblock_core.models.indices import UniqueIndexViolation
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
