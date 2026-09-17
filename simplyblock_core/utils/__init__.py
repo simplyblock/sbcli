@@ -32,7 +32,7 @@ import tempfile
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from simplyblock_core import constants
-from simplyblock_core import shell_utils
+from . import shell as shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
