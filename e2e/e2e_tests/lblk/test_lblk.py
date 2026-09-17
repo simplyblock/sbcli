@@ -369,6 +369,36 @@ class _LblkDockerMixin:
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
+    def _spdk_freeze(self, node_ip, rpc_port, freeze):
+        """Freeze or thaw the whole SPDK container.
+
+        NOT "pkill -STOP -f spdk_tgt" on the host. The spdk_<port> container is
+        created without pid_mode, so it has its own PID namespace
+        (simplyblock_web/api/internal/storage_node/docker.py) and a host pkill
+        matches nothing at all. The first version of this test did exactly that,
+        swallowed the miss with "|| true", and reported a clean pass having
+        frozen nothing.
+
+        docker pause uses the cgroup freezer, which is the SIGSTOP semantics
+        this test wants applied to every thread at once.
+        """
+        verb = "pause" if freeze else "unpause"
+        out, err = self.ssh_obj.exec_command(
+            node=node_ip, command=f"sudo docker {verb} spdk_{rpc_port}")
+        state, _ = self.ssh_obj.exec_command(
+            node=node_ip,
+            command=f"sudo docker inspect -f '{{{{.State.Status}}}}' spdk_{rpc_port}")
+        state = (state or "").strip()
+        want = "paused" if freeze else "running"
+        if state != want:
+            raise LblkPreconditionError(
+                f"[lblk] docker {verb} of spdk_{rpc_port} on {node_ip} left the "
+                f"container {state!r}, wanted {want!r} ({err or 'no stderr'}). "
+                f"Without a real freeze this test proves nothing.")
+        self.logger.info("[lblk] spdk_%s on %s is now %s", rpc_port, node_ip,
+                         state)
+        return state
+
     def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
         # SPDK logs to the container's stdout, not to a file inside it. The
         # product's own collector proves it: collect_logs.py pulls these by
@@ -385,6 +415,19 @@ class _LblkK8sMixin:
 
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
+
+    def _spdk_freeze(self, node_ip, rpc_port, freeze):
+        """No equivalent of docker pause for a pod.
+
+        Raised rather than approximated: a freeze that does not actually stop
+        SPDK makes this test report a clean pass while reproducing nothing,
+        which is exactly how it behaved before.
+        """
+        raise LblkPreconditionError(
+            "[lblk] freezing a leader is not implemented on k8s-native: there "
+            "is no pod equivalent of `docker pause`, and a partial freeze would "
+            "make this test pass without reproducing anything. Run "
+            "LblkUnfencedJournalDocker instead.")
 
     def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
         pod = self.k8s_utils.get_spdk_pod_for_node(node_ip)
@@ -762,27 +805,45 @@ class _LblkUnfencedJournal(_LblkBase):
         self._stamp_all()
 
         ip, prefix, sock, lvs = self._journal_lvs
+        node = next(n for n in self.sbcli_utils.get_storage_nodes()["results"]
+                    if n.get("mgmt_ip") == ip)
+        port = node["rpc_port"]
         before = get_stats(self.ssh_obj, ip, prefix, sock, lvs_name=lvs,
                            logger=self.logger)
 
-        self.logger.info("[lblk] freezing the leader on %s for %ds", ip,
-                         self.FREEZE_SEC)
-        self.ssh_obj.exec_command(
-            node=ip, command="sudo pkill -STOP -f spdk_tgt || true")
+        self.logger.info("[lblk] freezing the leader on %s for up to %ds "
+                         "(ring head %s)", ip, self.FREEZE_SEC,
+                         before.get("mem_head"))
+        self._spdk_freeze(ip, port, True)
         try:
-            sleep_n_sec(self.FREEZE_SEC)     # long enough to lose leadership
+            # Drive metadata WHILE it is frozen. Without this the ring simply
+            # does not move and the comparison below is vacuous: the first run
+            # of this test reported head 5 -> 5 and passed having reproduced
+            # nothing. These creates also force the lvstore to fail over, which
+            # is what demotes the frozen node.
+            for i in range(6):
+                try:
+                    self.sbcli_utils.add_lvol(
+                        lvol_name=f"lblkfencetmp{i}{random.randint(100, 999)}",
+                        pool_name=pool, size="1G")
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.info("[lblk] lvol create during freeze "
+                                     "failed (expected while degraded): %s",
+                                     str(exc)[:120])
+            self._wait_for_node_down(node["uuid"], timeout=self.FREEZE_SEC)
         finally:
-            self.ssh_obj.exec_command(
-                node=ip, command="sudo pkill -CONT -f spdk_tgt || true")
+            self._spdk_freeze(ip, port, False)
         sleep_n_sec(30)
 
-        after = get_stats(self.ssh_obj, ip, prefix, sock, lvs_name=lvs,
-                          logger=self.logger)
-        self.logger.info("[lblk] ring head before=%s after=%s (demoted=%s)",
-                         before.get("mem_head"), after.get("mem_head"),
-                         after.get("drain_demoted"))
-
+        after = get_stats(self.ssh_obj, ip,
+                          self._spdk_exec_prefix(ip, port), sock,
+                          lvs_name=lvs, logger=self.logger)
         appended = after.get("mem_head", 0) - before.get("mem_head", 0)
+        self.logger.info("[lblk] ring head before=%s after=%s (+%s), "
+                         "drain_demoted=%s",
+                         before.get("mem_head"), after.get("mem_head"),
+                         appended, after.get("drain_demoted"))
+
         if after.get("drain_demoted") and appended > 0:
             raise MdJournalError(
                 f"[lblk] the thawed node appended {appended} entries to the "
@@ -790,9 +851,22 @@ class _LblkUnfencedJournal(_LblkBase):
                 f"documented missing leadership fence: a stale writer mutated "
                 f"shared ring structure after losing leadership.")
 
+        # A pass only means something if the node really lost leadership. If it
+        # never did, the fence was never under test -- say so rather than
+        # reporting a clean result, which is what this test did before.
+        if not after.get("drain_demoted"):
+            raise LblkPreconditionError(
+                f"[lblk] INCONCLUSIVE: the frozen node was never demoted "
+                f"(drain_demoted=False) after {self.FREEZE_SEC}s frozen, so "
+                f"the missing leadership fence was never exercised. Ring head "
+                f"moved {before.get('mem_head')} -> {after.get('mem_head')}. "
+                f"Freeze for longer, or drive more metadata, before reading "
+                f"anything into a pass.")
+
         self._scan_spdk_logs("unfenced journal")
         self._verify_all("after leader freeze and thaw")
-        self.logger.info("[lblk] no unfenced append observed this cycle")
+        self.logger.info("[lblk] node was demoted and appended nothing while "
+                         "demoted -- fence held this cycle")
 
 
 # ── registered leaf classes ───────────────────────────────────────────────
