@@ -58,8 +58,25 @@ jobs:
   cleanup:
     runs-on: self-hosted
     steps:
-      - name: Fix workspace permissions
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+      - name: Fix workspace permissions and reset a dirty tree
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          # A previous job on this runner can leave tracked files modified --
+          # tests write into the workspace as root, and the chown above is
+          # best-effort. actions/checkout then cannot remove those paths when
+          # switching refs: it prints
+          #   "error: Path 'x' not uptodate; will not remove from working tree"
+          # and STILL EXITS 0, leaving HEAD on the new ref with a working tree
+          # that was only partly updated. A file that exists on the new ref can
+          # be missing entirely, which is how a run reached the cleanup step
+          # with e2e/scripts/cleanup_upgrade_test.sh absent and died at
+          # exit code 127 four hundred lines later.
+          #
+          # Reset before checkout so it has a clean tree to work from.
+          if [ -d "$GITHUB_WORKSPACE/.git" ]; then
+            git -C "$GITHUB_WORKSPACE" reset --hard 2>/dev/null || true
+            git -C "$GITHUB_WORKSPACE" clean -ffdx 2>/dev/null || true
+          fi
 
       - name: Checkout deployment tooling
         uses: actions/checkout@v4
@@ -96,8 +113,25 @@ jobs:
     runs-on: self-hosted
     needs: deploy
     steps:
-      - name: Fix workspace permissions
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+      - name: Fix workspace permissions and reset a dirty tree
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+          # A previous job on this runner can leave tracked files modified --
+          # tests write into the workspace as root, and the chown above is
+          # best-effort. actions/checkout then cannot remove those paths when
+          # switching refs: it prints
+          #   "error: Path 'x' not uptodate; will not remove from working tree"
+          # and STILL EXITS 0, leaving HEAD on the new ref with a working tree
+          # that was only partly updated. A file that exists on the new ref can
+          # be missing entirely, which is how a run reached the cleanup step
+          # with e2e/scripts/cleanup_upgrade_test.sh absent and died at
+          # exit code 127 four hundred lines later.
+          #
+          # Reset before checkout so it has a clean tree to work from.
+          if [ -d "$GITHUB_WORKSPACE/.git" ]; then
+            git -C "$GITHUB_WORKSPACE" reset --hard 2>/dev/null || true
+            git -C "$GITHUB_WORKSPACE" clean -ffdx 2>/dev/null || true
+          fi
 
       - name: Checkout code
         uses: actions/checkout@v4
