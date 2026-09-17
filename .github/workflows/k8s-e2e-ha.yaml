@@ -47,26 +47,53 @@ jobs:
     steps:
       - name: Fix workspace permissions and reset a dirty tree
         run: |
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
-          # A previous job on this runner can leave tracked files modified --
-          # tests write into the workspace as root, and the chown above is
-          # best-effort. actions/checkout then cannot remove those paths when
-          # switching refs: it prints
-          #   "error: Path 'x' not uptodate; will not remove from working tree"
-          # and STILL EXITS 0, leaving HEAD on the new ref with a working tree
-          # that was only partly updated. A file that exists on the new ref can
-          # be missing entirely, which is how a run reached the cleanup step
-          # with e2e/scripts/cleanup_upgrade_test.sh absent and died at
-          # exit code 127 four hundred lines later.
-          #
-          # Reset before checkout so it has a clean tree to work from.
+          # Errors are NOT swallowed here. The previous version ended every
+          # command with "2>/dev/null || true", so a chown that failed on
+          # root-owned files looked identical to one that worked -- and the
+          # reset that followed could not rewrite those files either, printed
+          # its complaint to the discarded stderr, and still logged
+          # "HEAD is now at ...". The run then failed in an unrelated step.
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"             || echo "::warning::chown of the workspace failed"
+
           if [ -d "$GITHUB_WORKSPACE/.git" ]; then
-            git -C "$GITHUB_WORKSPACE" reset --hard 2>/dev/null || true
-            git -C "$GITHUB_WORKSPACE" clean -ffdx 2>/dev/null || true
+            git -C "$GITHUB_WORKSPACE" reset --hard               || echo "::warning::git reset --hard failed"
+            git -C "$GITHUB_WORKSPACE" clean -ffdx               || echo "::warning::git clean -ffdx failed"
+
+            # If anything survives that, git cannot reconcile this tree and
+            # actions/checkout will not either: it reports
+            #   "error: Path 'x' not uptodate; will not remove from working tree"
+            # and STILL EXITS 0, leaving HEAD on the new ref with files from it
+            # never written. Wipe instead and let checkout clone fresh -- the
+            # fetch is --depth=1, so this costs seconds.
+            dirty="$(git -C "$GITHUB_WORKSPACE" status --porcelain 2>/dev/null)"
+            if [ -n "${dirty}" ]; then
+              echo "::warning::workspace still dirty after reset; wiping it"
+              echo "${dirty}" | head -20
+              sudo rm -rf "$GITHUB_WORKSPACE"/* "$GITHUB_WORKSPACE"/.[!.]* || true
+            fi
           fi
 
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # A checkout that could not fully update the tree still exits 0, so the
+      # only way to know is to look. Cheap, and it turns a confusing exit 127
+      # hundreds of lines later into a failure that names the cause.
+      - name: Verify the checkout is complete
+        run: |
+          missing=""
+          for f in e2e/scripts/cleanup_upgrade_test.sh e2e/e2e.py e2e/requirements.txt; do
+            [ -f "$GITHUB_WORKSPACE/$f" ] || missing="${missing} ${f}"
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::Checkout left an incomplete tree. Missing:${missing}"
+            echo "HEAD is $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD 2>/dev/null)"
+            echo "This means actions/checkout hit 'not uptodate' on some paths"
+            echo "and could not finish. The workspace reset before it should"
+            echo "have prevented that; check its warnings above."
+            exit 1
+          fi
+          echo "checkout complete"
 
       - name: Set send_slack_notification for scheduled and push events
         if: github.event_name == 'schedule' || github.event_name == 'push'
