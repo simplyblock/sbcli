@@ -1,10 +1,12 @@
 import time
 from datetime import datetime, timedelta, UTC
+from typing import ClassVar
 from uuid import uuid4
 
 from pydantic import SecretStr
 
 from simplyblock_core import utils, constants
+from simplyblock_core.indices import Index
 from simplyblock_core.models.base_model import BaseNodeObject, BaseModel, default_factory
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -21,6 +23,22 @@ logger = utils.get_logger(__name__)
 class StorageNode(BaseNodeObject):
 
     _WATCHED = True
+
+    # NVMeDevice and JMDevice are not rows of their own — they live inside this
+    # record — so `device_id` is what makes a device lookup two point reads
+    # instead of a scan of every node and every device on it.
+    _INDEXES: ClassVar[tuple] = (
+        Index('cluster_id'),
+        Index('system_uuid'),
+        Index('hostname'),
+        Index('device_id', extract=lambda node: (
+            [(device.get_id(),) for device in node.nvme_devices]
+            + ([(node.jm_device.get_id(),)] if node.jm_device else [])
+        )),
+        Index('failover_for', extract=lambda node: [
+            (peer,) for peer in (node.secondary_node_id, node.tertiary_node_id) if peer
+        ]),
+    )
 
     # Restart phase constants (per-LVS)
     RESTART_PHASE_PRE_BLOCK = "pre_block"

@@ -13,6 +13,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.pool import Pool
 from simplyblock_core.utils.nvme import NvmeConnectEntry
 
 
@@ -90,6 +91,14 @@ class _FakeDB:
 
     def get_cluster_by_id(self, cid):
         return self._clusters[cid]
+
+    def get_pool_by_id(self, pool_id):
+        pool = Pool()
+        pool.uuid = pool_id
+        pool.pool_name = pool_id
+        pool.cluster_id = "CL_tgt"
+        return pool
+
 
     def get_lvols(self, cluster_id=None):
         return self._existing_lvols

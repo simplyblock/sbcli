@@ -160,14 +160,12 @@ def process_snap_delete_finish(snap, completed_node):
         # between loses nothing: worst case the hand-off is repeated. No delete
         # event here -- the snapshot is not gone until its last copy is, which
         # is the branch below.
-        db.unindex_snapshot(snap)
         snap.remove(db.kv_store)
         snode = db.get_storage_node_by_id(new_main_instance.lvol.node_id)
         logger.info(f"Process Snapshot delete on node {snode.get_id()}")
         process_snap_delete(new_main_instance, snode)
     else:
         snapshot_events.snapshot_delete(snap)
-        db.unindex_snapshot(snap)
         snap.remove(db.kv_store)
 
 

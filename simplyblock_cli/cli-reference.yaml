@@ -1574,6 +1574,37 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: build-indices
+        help: "Backfills the database's secondary indices."
+        usage: >
+          Walks every indexed table and fills in the index entries of records that predate their index
+          declaration, then marks each index usable by reads. Idempotent, and safe to run against a live
+          cluster: normal writes already maintain every index, and the backfill only adds entries.
+          An upgrade runs this automatically; use the command after an interrupted run or to recover an
+          index that was switched off.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: check-indices
+        help: "Verifies the database's secondary indices."
+        usage: >
+          Walks every index in both directions - each record's derived keys must exist, and each index key
+          must resolve to a live record that still carries the indexed value - and reports what does not
+          match. Read-only unless `--repair` is given, and takes nothing offline.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--repair"
+            help: "Write missing entries and clear orphaned ones instead of only reporting them."
+            dest: repair
+            type: bool
+            action: store_true
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
         arguments:

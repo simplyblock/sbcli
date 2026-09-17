@@ -782,8 +782,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.size = int(size)
     lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_IN_CREATION
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
+    lvol.place_in_pool(pool)
     lvol.create_dt = str(datetime.now())
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
@@ -791,8 +790,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.guid = utils.generate_hex_string(16)
     lvol.vuid = vuid
     lvol.lvol_bdev = f"LVOL_{vuid}"
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
     lvol.crypto_bdev = ''
     lvol.comp_bdev = ''
 
@@ -927,10 +924,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             return host_entries  # (False, error_message)
         standalone_allowed_hosts = host_entries
 
-    # Set pool_uuid before write_to_db and add_lvol_on_node so that
-    # add_lvol_on_node can look up the pool for DHCHAP key registration.
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
     logger.info("[DHCHAP-DEBUG] create_lvol: pool_uuid=%s, pool.dhchap=%s, "
                 "allowed_hosts=%s, pool.dhchap_key=%s",
                 lvol.pool_uuid, pool.dhchap,
@@ -4344,7 +4337,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # the other cluster, where it names nothing and would block fail-back.
     new_lvol.replication_policy_id = ""
     new_lvol.cloned_from_snap = snapshot.get_id()
-    new_lvol.pool_uuid = pool_uuid
+    new_lvol.place_in_pool(db_controller.get_pool_by_id(pool_uuid))
     new_lvol.lvs_name = target_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.snapshot_name = snapshot.snap_bdev
@@ -5363,9 +5356,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     new_lvol.lvs_name = source_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     if pool_uuid:
-        new_pool = db_controller.get_pool_by_id(pool_uuid)
-        new_lvol.pool_uuid = new_pool.get_id()
-        new_lvol.pool_name = new_pool.pool_name
+        new_lvol.place_in_pool(db_controller.get_pool_by_id(pool_uuid))
     if new_source_cluster:
         new_lvol.nqn = new_source_cluster.nqn + ":lvol:" + new_lvol.uuid
     new_lvol.bdev_stack = [

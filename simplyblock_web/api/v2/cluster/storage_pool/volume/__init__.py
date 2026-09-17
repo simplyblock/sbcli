@@ -93,7 +93,10 @@ def add(
 ) -> Response:
     data = parameters.root
     try:
-        db.get_lvol_by_name(data.name)
+        # Scoped to this pool, which is where the name has to be unique: the
+        # unscoped lookup rejected a name any OTHER pool happened to use, and
+        # raised on a name two pools shared.
+        db.get_lvol_by_name(data.name, pool.get_id())
         raise HTTPException(409, f'Volume {data.name} exists')
     except KeyError:
         pass

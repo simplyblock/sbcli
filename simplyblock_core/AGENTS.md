@@ -22,6 +22,79 @@ All models extend `BaseModel` (`models/base_model.py`). Key conventions:
 - `BaseNodeObject` extends `BaseModel` with standard node status constants (`STATUS_ONLINE`, `STATUS_OFFLINE`, etc.) and a status code map.
 - **Secret fields** use `SecretStr` (from `pydantic`) as the type annotation with `SecretStr("")` default. `from_dict()` auto-wraps plain strings from FDB into `SecretStr`. `to_dict()` keeps wrappers (safe for logging); only `write_to_db()` calls `to_dict(unwrap_secrets=True)` to persist plaintext. When adding a new secret field, follow existing examples in `cluster.py`, `storage_node.py`, or `pool.py`.
 
+## Secondary Indices
+
+`db_controller.py` used to answer every non-primary-key lookup by scanning a table
+and filtering it in memory. It now answers them from declared secondary indices
+(`indices.py`, a stdlib-only leaf module importable from `models/` like `watches.py`).
+
+**Declaring one.** `_INDEXES` is a plain class attribute on the model, next to the
+fields it indexes — like `_WATCHED`, it stays out of `get_attrs_map()` and is never
+serialized:
+
+```python
+class LVol(BaseModel):
+    _INDEXES: ClassVar[tuple] = (
+        Index('pool_uuid'),                                 # a field
+        Index(('target_type', 'target_id')),                # a tuple of fields
+        Index('device_id', extract=lambda node: [...]),     # many entries per record
+        Unique(('pool_uuid', 'lvol_name')),                 # also a constraint
+    )
+```
+
+Keys live in their own namespace, disjoint from the `object/` scans:
+
+```
+index/<Class>/<index-name>/<value...>/<entity-id>   -> entity id
+index/<Class>/<index-name>/<value...>               -> entity id   (Unique)
+index_meta/<Class>/<index-name>                     -> state record
+```
+
+**Reading.** `DBController.query(model_cls, index, *values, limit=, reverse=)` is the
+only read primitive; `query_one` is its `single_or_none` form and `query_ids` skips the
+entity reads. Every `get_*_by_*` helper is a one-liner over it. `limit`/`reverse` order
+by the index key, so they only mean something on an `ordered=True` index.
+
+**Maintenance is transactional.** `write_to_db` / `remove` / `atomic_update` update the
+index entries in the SAME FDB transaction as the entity, so an index can never describe a
+record that was never written. Any new code path that writes a record key directly
+(`tr[key] = ...`) has to call `BaseModel._apply_index_diff` too — `_try_set_node_restarting_tx`
+is the one such site, and shows the shape.
+
+**A write becomes a read-write transaction**, so two concurrent writers of one key conflict
+and retry instead of last-writer-wins. That is the fix the `[NODE-WRITE]` tripwire exists for,
+not a cost.
+
+**`Unique` is a backstop, never a user-facing error path.** The clean "name already exists"
+answer still comes from the pre-check (`lvol_name_taken`, `snap_name_taken`) — now a point
+read on a transactionally-maintained key rather than a best-effort one. A
+`UniqueIndexViolation` means the pre-check did not run or the data is already inconsistent:
+it propagates to a 500, and `sbctl cluster check-indices` is the diagnostic. Do not catch it
+at a create site.
+
+**Rollout.** Each index carries a state at `index_meta/<Class>/<name>`, read through a
+short-TTL cache:
+
+- `building` (the default) — writes maintain it, reads fall back to a filtered scan;
+- `ready` — reads use it;
+- `disabled` — writes skip it, reads fall back. The kill switch.
+
+The fallback's predicate and ordering come from the same declaration
+(`Index.match_paths`), so index and scan cannot drift into different answers. Shipping a new
+index is therefore: declare it → `sbctl cluster build-indices` (or an upgrade, which runs
+`release_upgrades/database_indices.py`) → it flips to `ready` on its own.
+`sbctl cluster check-indices [--repair]` walks both directions and is safe against a live
+cluster. `index_ops.py` holds the backfill, the verifier and the Prometheus counters
+(`sb_index_queries_total{path="index"|"scan"}` — a `scan` that survives a `ready` flip is a bug).
+
+**When an index is worth it.** It turns a full scan into a range read plus one pipelined
+point read per hit: a win when the result is a small fraction of the table, a mild loss when
+it is most of it. Add one when the predicate is selective *and* the call site is hot or in a
+loop. A lookup that returns exactly one row is always worth it.
+
+**`LVolMini` / `SnapShotMini` are deliberately not indexed.** They are a workaround for the
+missing query layer and are scheduled for deletion; indexing them would entrench them.
+
 ## Pydantic Models
 
 Genuine Pydantic models in this package — `settings.py` (`pydantic-settings`) and any new validated payload or config object — follow the annotated pattern: constraints and metadata inside `Annotated[...]`, the default on the right-hand side of the assignment. `settings.py` is the reference example. Reusable constrained types live next to their domain (`utils/pci.py` defines `PCIAddress`). See root `AGENTS.md` § Pydantic Fields. This does not apply to `BaseModel` subclasses in `models/`, which are not Pydantic.

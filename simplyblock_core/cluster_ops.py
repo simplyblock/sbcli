@@ -23,7 +23,8 @@ import yaml
 from docker.errors import DockerException
 from pydantic import SecretStr
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, release_upgrades, storage_node_ops
+from simplyblock_core import (utils, scripts, constants, index_ops, mgmt_node_ops, release_upgrades,
+                              storage_node_ops)
 from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
@@ -539,6 +540,14 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(cluster)
+
+    # Every declared index is complete from the first write on a cluster that
+    # starts empty, so flip them to `ready` now rather than leaving every read
+    # on the scan fallback until someone runs the backfill by hand. The walk is
+    # over empty tables here; on a deployment that already holds clusters it
+    # indexes what is there, which is equally correct.
+    for line in index_ops.build_indices(log=logger.info):
+        logger.info(line)
 
     mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
 
@@ -3263,6 +3272,39 @@ def upgrade_complete(cluster_id) -> bool:
     return True
 
 
+def build_indices(cluster_id) -> bool:
+    """Backfill every declared secondary index that is not ``ready`` yet.
+
+    Idempotent and safe on a live cluster: live writes have maintained each
+    index since its declaration shipped, and the backfill only ever ADDS the
+    entries of records that predate it, so it needs no coordination with normal
+    traffic. Re-running it after completion is a no-op.
+    """
+    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+    index_ops.backfill_lvol_cluster_id(log=logger.info)
+    for line in index_ops.build_indices(log=logger.info):
+        logger.info(line)
+    return True
+
+
+def check_indices(cluster_id, repair=False) -> bool:
+    """Verify every secondary index in both directions and report the drift."""
+    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+    findings = index_ops.check_indices(repair=repair, log=logger.info)
+    for entry in findings['missing']:
+        logger.error("Missing index entry %s -> %s", *entry)
+    for entry in findings['stale']:
+        logger.error("Index entry %s points at %s, expected %s", *entry)
+    for key in findings['orphaned']:
+        logger.error("Orphaned index entry %s", key)
+    for entry in findings['duplicate']:
+        logger.error("Unique index key %s is derived by both %s and %s", *entry)
+    total = sum(len(findings[kind])
+                for kind in ('missing', 'stale', 'orphaned', 'duplicate'))
+    logger.info("Index check: %d problem(s), %d repaired", total, findings['repaired'])
+    return total == 0 or bool(findings['repaired'])
+
+
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
     get_cluster = db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
@@ -3466,9 +3508,10 @@ def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> 
     logger.info("Updating Cluster replication target")
     new_pool = None
     if target_pool:
-        # --target-pool is documented as "ID or name".
+        # --target-pool is documented as "ID or name", and a name is only
+        # unique within its cluster -- which is the target cluster here.
         try:
-            pool = db_controller.get_pool_by_id_or_name(target_pool)
+            pool = db_controller.get_pool_by_id_or_name(target_pool, target_cl_id)
         except KeyError:
             raise ValueError(f"Pool not found: {target_pool}")
         if pool.status != Pool.STATUS_ACTIVE:

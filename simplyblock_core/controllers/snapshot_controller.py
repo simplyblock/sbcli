@@ -926,16 +926,14 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     # Link into this lvol's snapshot chain using the by-lvol index (a single
     # reverse read for the current tail) instead of scanning every cluster
-    # snapshot. Find the predecessor BEFORE registering the new snap below.
+    # snapshot. The new snap is already in that index (its write maintained
+    # it), hence the exclusion.
     prev = db_controller.get_lvol_latest_snapshot(lvol_id, exclude_uuid=snap.get_id())
     if prev is not None and not prev.next_snap_uuid:
         prev.next_snap_uuid = snap.get_id()
         snap.prev_snap_uuid = prev.get_id()
         prev.write_to_db()
         snap.write_to_db()
-
-    # Register the new snapshot in the name + by-lvol indexes (O(1)).
-    db_controller.index_snapshot(snap)
 
     snapshot_events.snapshot_create(snap)
     if lvol.do_replicate:
@@ -1162,7 +1160,6 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
     except KeyError:
         logger.exception(f"Storage node not found {snap.lvol.node_id}")
         if force_delete:
-            db_controller.unindex_snapshot(snap)
             snap.remove(db_controller.kv_store)
             return True
         return False
@@ -1511,8 +1508,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.node_id = snode.get_id()
     lvol.nodes = snap.lvol.nodes
     lvol.cloned_from_snap = snapshot_id
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
+    lvol.place_in_pool(pool)
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.guid = utils.generate_hex_string(16)
