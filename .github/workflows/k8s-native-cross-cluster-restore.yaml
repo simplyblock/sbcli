@@ -754,8 +754,8 @@ jobs:
             VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
             [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
           else
-            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
-            VCPU_COUNT=4
+            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 6"
+            VCPU_COUNT=6
           fi
           echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
 
@@ -877,8 +877,8 @@ jobs:
             VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
             [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
           else
-            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
-            VCPU_COUNT=4
+            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 6"
+            VCPU_COUNT=6
           fi
           echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
 
