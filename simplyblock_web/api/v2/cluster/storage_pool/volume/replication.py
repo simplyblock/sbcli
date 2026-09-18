@@ -122,7 +122,7 @@ def trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 @api.post('/failover', name='clusters:storage-pools:volumes:replication:failover',
           status_code=204, responses={204: {"content": None}})
 def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
-             generation: int = 0) -> Response:
+             generation: int = 0, planned: bool = False) -> Response:
     """Bring the volume up on the target cluster.
 
     The counterpart's id is read back from this volume's replication
@@ -133,9 +133,25 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
     history a retention schedule keeps. Failing over to an older generation
     is the recovery path for a logical corruption, which the newest copy has
     faithfully replicated.
+
+    ``planned=True`` gates on a completed demote (P0-3) so a planned swap
+    loses nothing: 412 when no demote was ever requested for this volume (the
+    caller's premise that the source is reachable to demote was wrong, and a
+    412 is what lets the csi-addons controller's own force-escalation take
+    over), 409 while demote is still converging (retryable -- 409 must never
+    become a code the controller reads as permission to force, since that
+    controller escalates on ANY FAILED_PRECONDITION from a force=false
+    promote with no wait-and-retry grace period of its own). Unplanned
+    failover (the default) ignores demote state entirely, unchanged from
+    today: its whole premise is that the source may never have been
+    reachable to demote.
     """
     if generation < 0:
         raise HTTPException(400, 'generation cannot be negative')
+    if planned and volume.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
+        if volume.replication_demote_state == LVol.REPLICATION_DEMOTE_PENDING:
+            raise HTTPException(409, 'Demote is still converging; retry the planned fail-over')
+        raise HTTPException(412, 'No demote was ever requested for this volume')
     result = lvol_controller.replicate_lvol_on_target_cluster(
         volume.get_id(), generation=generation)
     if isinstance(result, tuple):  # (False, error)
@@ -178,6 +194,25 @@ def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume
         'clusters:tasks:detail',
         cluster_id=cluster.get_id(), task_id=result['task_id'],
     ))})
+
+
+@api.post('/demote', name='clusters:storage-pools:volumes:replication:demote',
+          status_code=204, responses={204: {"content": None}, 202: {"content": None}})
+def demote(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    """Fence the source and confirm the last write replicated (P0-3).
+
+    Synchronous and re-drivable, not queued: each call does only the work its
+    current state calls for (fence + trigger the final snapshot once, then
+    just check whether it has landed), so the caller re-invokes this route
+    until it reports 204. A 202 means still waiting -- call again, the same
+    way `GET .../status` is re-read rather than pushed.
+    """
+    result = lvol_controller.demote_lvol(volume.get_id())
+    if isinstance(result, tuple):  # (False, error)
+        raise HTTPException(500, str(result[1]))
+    if result["demoted"]:
+        return Response(status_code=204)
+    return JSONResponse(status_code=202, content=result)
 
 
 class FailbackParams(BaseModel):

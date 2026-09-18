@@ -4,6 +4,7 @@ folded into the volume PUT."""
 from datetime import UTC, datetime
 
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
+from simplyblock_core.models.lvol_model import LVol
 
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
@@ -331,6 +332,56 @@ class TestCutover:
         assert response.status_code == 500
         assert response.json()['detail'] == 'node is not online'
 
+    def test_unplanned_failover_ignores_demote_state(self, client, db, volume, lvol_controller):
+        """The default (unplanned) path is unconditional -- matches today's
+        behavior, since an unplanned failover's whole premise is that the
+        source may never have been reachable to demote."""
+        lvol_controller.replicate_lvol_on_target_cluster.return_value = {
+            'lvol_id': TARGET_VOLUME_ID, 'nqn': 'nqn.x', 'ns_id': 1, 'connection_strings': [],
+        }
+
+        response = client.post(REPLICATION_URL + 'failover')
+
+        assert response.status_code == 204
+        lvol_controller.replicate_lvol_on_target_cluster.assert_called_once_with(
+            VOLUME_ID, generation=0)
+
+    def test_planned_failover_proceeds_once_demoted(self, client, db, volume, lvol_controller):
+        volume.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+        lvol_controller.replicate_lvol_on_target_cluster.return_value = {
+            'lvol_id': TARGET_VOLUME_ID, 'nqn': 'nqn.x', 'ns_id': 1, 'connection_strings': [],
+        }
+
+        response = client.post(REPLICATION_URL + 'failover?planned=true')
+
+        assert response.status_code == 204
+        lvol_controller.replicate_lvol_on_target_cluster.assert_called_once_with(
+            VOLUME_ID, generation=0)
+
+    def test_planned_failover_while_demote_is_converging_is_409(self, client, db, volume,
+                                                                lvol_controller):
+        """Retryable, never FAILED_PRECONDITION: the vendored csi-addons
+        controller auto-escalates ANY FAILED_PRECONDITION from a force=false
+        promote to force=true on the very same reconcile (no wait-and-retry
+        grace period upstream). Returning anything that maps to
+        codes.FailedPrecondition here would silently force through a promote
+        while demote is still converging and lose data."""
+        volume.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+
+        response = client.post(REPLICATION_URL + 'failover?planned=true')
+
+        assert response.status_code == 409
+        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
+
+    def test_planned_failover_without_any_demote_is_412(self, client, db, volume, lvol_controller):
+        """No demote was ever requested for this volume: this is the case that
+        SHOULD let the vendored controller's force-escalation take over, for a
+        genuinely unplanned failover the caller only attempted as 'planned'."""
+        response = client.post(REPLICATION_URL + 'failover?planned=true')
+
+        assert response.status_code == 412
+        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
+
     def test_commit_points_at_the_cutover_task(self, client, db, volume, lvol_controller):
         lvol_controller.replication_commit.return_value = {
             'cutover_task_queued': True, 'task_id': TASK_ID,
@@ -347,6 +398,32 @@ class TestCutover:
         lvol_controller.replication_commit.return_value = False
 
         assert client.post(REPLICATION_URL + 'commit').status_code == 500
+
+    def test_demote_not_yet_done_is_202(self, client, db, volume, lvol_controller):
+        """Still waiting on the final snapshot to land -- the driver re-drives."""
+        lvol_controller.demote_lvol.return_value = {'demoted': False}
+
+        response = client.post(REPLICATION_URL + 'demote')
+
+        assert response.status_code == 202
+        assert response.json() == {'demoted': False}
+        lvol_controller.demote_lvol.assert_called_once_with(VOLUME_ID)
+
+    def test_demote_done_is_204(self, client, db, volume, lvol_controller):
+        lvol_controller.demote_lvol.return_value = {'demoted': True}
+
+        response = client.post(REPLICATION_URL + 'demote')
+
+        assert response.status_code == 204
+        assert response.content == b''
+
+    def test_failed_demote_is_an_error(self, client, db, volume, lvol_controller):
+        lvol_controller.demote_lvol.return_value = (False, 'no space')
+
+        response = client.post(REPLICATION_URL + 'demote')
+
+        assert response.status_code == 500
+        assert response.json()['detail'] == 'no space'
 
     def test_failback(self, client, db, volume, lvol_controller):
         lvol_controller.replication_failback.return_value = True

@@ -25,6 +25,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.services import replication_final_step
 
 logger = utils.get_logger(__name__)
 
@@ -3678,6 +3679,69 @@ def replication_trigger(lvol_id):
         out["last_replication_duration"] = duration
 
     return out
+
+
+def demote_lvol(lvol_id):
+    """Fence the source and confirm the last write replicated (P0-3).
+
+    The lossless half of a planned swap (design-csi-addons-replication.md
+    §5.2): after this returns {"demoted": True}, the peer's planned promote
+    is guaranteed to lose nothing. Demote never touches a target volume --
+    that is a separate, later call, possibly on a different cluster, once
+    Ramen has rescheduled the workload there.
+
+    Unlike replication_commit's live cutover, there is no in-flight write to
+    race: DemoteVolume is only called once Kubernetes has already unmounted
+    the workload, so there is no freeze window to bound, just fence-then-ship
+    to make durable. Synchronous and idempotent, re-driven by the caller
+    (the driver's DemoteVolume RPC calls this repeatedly) until it reports
+    done; each call does only the work its current state calls for.
+
+    Returns {"demoted": bool} or (False, error).
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    if lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE:
+        return {"demoted": True}
+
+    if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_PENDING:
+        # First call: fence BEFORE triggering the final snapshot, never after --
+        # a write accepted on a still-optimized path after the snapshot is the
+        # delta of record is silently lost (fence_source_paths' own invariant).
+        source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+        replication_final_step.fence_source_paths(
+            source_node, source_node.lvstore, lvol.nqn, lvol.ns_id)
+
+        snap_id, err = snapshot_controller.add(
+            lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
+        if err:
+            return False, err
+
+        lvol.replication_demote_snapshot_id = snap_id
+        lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+        lvol.write_to_db(db_controller.kv_store)
+        return {"demoted": False}
+
+    # Already pending: only check whether the snapshot being waited on has
+    # landed. Never re-fence (harmless but pointless) or re-trigger (would
+    # orphan the first snapshot's wait and never converge).
+    try:
+        snap = db_controller.get_snapshot_by_id(lvol.replication_demote_snapshot_id)
+    except KeyError as e:
+        return False, str(e)
+
+    if not getattr(snap, "target_replicated_snap_uuid", ""):
+        return {"demoted": False}
+
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lvol.write_to_db(db_controller.kv_store)
+    return {"demoted": True}
+
 
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
                       from_policy=False):
