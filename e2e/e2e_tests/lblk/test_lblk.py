@@ -633,47 +633,54 @@ class _LblkBase(TestClusterBase):
             return
 
         k8s = self._ensure_k8s_utils()
-        flush_delay = duration + 5
-        # Hand the restore to the host's systemd, not to a sleeping shell.
+        # Apply the DROP and remove it again from ONE unit owned by the host's
+        # pid 1, never from the container.
         #
-        # This used to be `nsenter --target 1 --mount --net -- nohup sleep N &&
-        # iptables -F`. Without --pid that process stays in the CONTAINER's pid
-        # namespace, so when SPDK's abort timer kills the container mid-sleep
-        # the flush dies with it and the DROP rules become permanent -- the
-        # node never comes back. That is exactly what stranded 10.0.0.10 on
-        # 2026-09-18: kubectl could not reach its kubelet for the rest of the
-        # run. A transient systemd timer is owned by pid 1 and cannot be taken
-        # down by anything that happens to the container.
+        # This used to schedule the restore separately, as
+        # `nsenter --target 1 --mount --net -- nohup sleep N && iptables -F`.
+        # Two things were wrong with that. Without --pid the sleeping process
+        # stays in the CONTAINER's pid namespace, and this test exists because
+        # the outage makes SPDK abort and the container be replaced -- so the
+        # restore died mid-sleep and the DROP became permanent. And because
+        # apply and restore were separate commands, a restore that failed to
+        # schedule still left the apply to run. That stranded worker-0
+        # (10.0.0.10) at 15:42:38Z on 2026-09-18: the node stayed NotReady with
+        # "Kubelet stopped posting node status" until it was rebooted
+        # out-of-band, because a blanket INPUT/OUTPUT DROP also blocks every
+        # route in.
         #
-        # Delete our two rules rather than `iptables -F`: flushing the whole
-        # filter table would also take out kube-proxy's jumps in INPUT/OUTPUT.
-        # Repeated because -A twice would need -D twice.
+        # Pairing them in a single transient unit means the thing that cuts the
+        # node off is the same thing that restores it, and if the unit cannot
+        # be created we never cut the node off at all.
+        #
+        # -D our own two rules rather than `iptables -F`, which would also
+        # flush kube-proxy's jumps out of INPUT/OUTPUT. Repeated because -A
+        # twice needs -D twice.
         undo = ("for i in 1 2 3; do "
                 "iptables -D INPUT -j DROP 2>/dev/null; "
                 "iptables -D OUTPUT -j DROP 2>/dev/null; done; true")
+        script = (f"sleep 5; iptables -A INPUT -j DROP; "
+                  f"iptables -A OUTPUT -j DROP; sleep {duration}; {undo}")
         host = "sudo nsenter --target 1 --mount --uts --ipc --net --pid --"
-        unit = f"lblk-nw-flush-{int(time.time())}"
+        unit = f"lblk-nw-outage-{int(time.time())}"
         try:
             k8s.exec_in_spdk_container(node_ip, (
-                f"{host} systemd-run --collect --on-active={flush_delay} "
-                f"--unit={unit} /bin/sh -c \"{undo}\""))
+                f'{host} systemd-run --collect --unit={unit} '
+                f'/bin/sh -c "{script}"'))
         except Exception as exc:                      # noqa: BLE001
-            # No systemd on the host, or systemd-run unavailable. Fall back to
-            # a detached shell, but with --pid this time so it is genuinely a
-            # host process and survives the container being replaced.
             self.logger.warning(
                 "[lblk] systemd-run unavailable on %s (%s); falling back to a "
-                "detached host shell for the iptables restore",
-                node_ip, str(exc)[:120])
-            k8s.exec_in_spdk_container(node_ip, (
-                f"{host} bash -c 'setsid nohup bash -c \"sleep {flush_delay}; "
-                f"{undo}\" > /dev/null 2>&1 < /dev/null &'"))
-        k8s.exec_in_spdk_container(node_ip, (
-            "sudo nohup bash -c '"
-            "sleep 5 && iptables -A INPUT -j DROP && iptables -A OUTPUT -j DROP"
-            "' > /tmp/lblk_nw_outage.log 2>&1 &"))
-        self.logger.info("[lblk] iptables DROP on %s, host-level flush in %ds",
-                         node_ip, flush_delay)
+                "detached host shell", node_ip, str(exc)[:120])
+            # setsid + --pid so it is a real host process with no controlling
+            # terminal. If this raises too, the exception propagates and the
+            # node is simply never isolated -- the safe direction to fail.
+            detached = (f'setsid nohup sh -c "{script}" '
+                        f'> /dev/null 2>&1 < /dev/null &')
+            k8s.exec_in_spdk_container(
+                node_ip, f"{host} bash -c {shlex.quote(detached)}")
+        self.logger.info(
+            "[lblk] %s isolated via %s: DROP in 5s, released %ds later",
+            node_ip, unit, duration)
 
     def _any_storage_node(self):
         nodes = self.sbcli_utils.get_storage_nodes()["results"]
