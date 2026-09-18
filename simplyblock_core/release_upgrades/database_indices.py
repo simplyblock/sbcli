@@ -7,9 +7,20 @@ covered once the backfill has walked them. Until then every read of that index
 falls back to the table scan the index exists to remove, which is correct but
 slow — and invisible without the fallback counter.
 
-This runs the backfill so no operator step stands between an upgrade and the
-indices being usable, and drops the three hand-rolled key families the declared
-indices replaced.
+This runs the backfill so the indices are usable once the upgrade is over
+without a separate operator step, and drops the hand-rolled key families the
+declared indices replaced.
+
+Both happen in ``upgrade_complete``, not in ``pre_update``. ``pre_update`` runs
+before a single container image has been replaced, so every API instance,
+service and task runner is still executing the previous release: it maintains
+no index, and it still reads the key families below. Flipping an index to
+``ready`` there would publish it cluster-wide while writers that do not
+maintain it are live — every record they create in the window is missing from
+it for good — and clearing the old key families there makes the running code
+answer "name free" for every name it holds. ``upgrade_complete`` is the first
+point at which the new code is the only code, so the backfill walk covers the
+window and the old families have no reader left.
 
 Unlike the other plugins in this package, this one is NOT deleted in the
 following release and does not gate on ``to_release``: the backfill is
@@ -26,8 +37,9 @@ logger = utils.get_logger(__name__)
 STATE_KEY = "database_indices"
 
 #: Key families the declared indices subsumed. Each was maintained from its own
-#: call sites, outside the entity's write transaction; they have no readers
-#: left, so the upgrade clears them rather than leaving dead keyspace behind.
+#: call sites, outside the entity's write transaction; once the rollout is
+#: complete they have no readers left, so the upgrade clears them rather than
+#: leaving dead keyspace behind.
 OBSOLETE_PREFIXES = (
     b'name_index/',
     b'lvol_snaps/',
@@ -44,23 +56,33 @@ class DatabaseIndices(UpgradePlugin):
         return True
 
     def pre_update(self, cluster) -> None:
+        """Claim the upgrade. All the work is in ``upgrade_complete``."""
         from simplyblock_core.db_controller import DBController
 
         db = DBController()
-        index_ops.backfill_lvol_cluster_id(log=logger.info)
+        cluster = db.get_cluster_by_id(cluster.get_id())
+        cluster.release_upgrade_state[STATE_KEY] = {"to_release": self.to_release}
+        cluster.write_to_db(db.kv_store)
+        logger.info("Secondary indices will be built by `cluster upgrade-complete`; "
+                    "until then every indexed read falls back to a table scan")
+
+    def upgrade_complete(self, cluster) -> list:
+        from simplyblock_core.db_controller import DBController
+
+        db = DBController()
+        messages = [index_ops.backfill_lvol_cluster_id(log=logger.info)]
         for line in index_ops.build_indices(log=logger.info):
             logger.info(line)
+            messages.append(line)
 
         for prefix in OBSOLETE_PREFIXES:
             db.kv_store.clear_range_startswith(prefix)
-            logger.info("Cleared obsolete key family %s", prefix.decode())
+            messages.append(f"Cleared obsolete key family {prefix.decode()}")
 
-    def upgrade_complete(self, cluster) -> list:
-        """Nothing to complete: ``pre_update`` leaves no state behind.
-
-        Selected by the presence of ``STATE_KEY`` in the cluster's upgrade
-        state, which this plugin never sets, so this is only reachable if a
-        future version starts using it.
-        """
+        # Persisted here rather than on the object the caller holds: the caller
+        # re-reads the cluster before stamping the installed release, so an
+        # in-memory pop would not survive.
+        cluster = db.get_cluster_by_id(cluster.get_id())
         cluster.release_upgrade_state.pop(STATE_KEY, None)
-        return []
+        cluster.write_to_db(db.kv_store)
+        return messages
