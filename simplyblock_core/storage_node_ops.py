@@ -1340,6 +1340,30 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
     })
 
 
+def _publish_device_endpoint(device, snode: StorageNode, subsystem_nqn: str):
+    """Record where ``device`` now answers, from the node's CURRENT ``data_nics``.
+
+    Peers do not discover a device's address; they read ``nvmf_ip`` out of the
+    owner's FDB record and attach to it (``connect_device`` ->
+    ``_expected_ips``). So whenever a restart re-creates a subsystem and its
+    listeners, the record has to be re-published in the same breath -- the
+    listeners come from the live ``data_nics``, and a record left behind still
+    names the address the node had *last* time.
+
+    That drift is invisible until the node's data IPs actually change, which is
+    what ``--data-nics`` and a ``--node-addr`` move both do.
+
+    ``nvmf_ip`` is a comma-separated list when the node advertises on more than
+    one NIC, matching what ``_expected_ips`` splits back apart.
+    """
+    ips = [iface.ip4_address for iface in snode.data_nics if iface.ip4_address]
+    device.nvmf_nqn = subsystem_nqn
+    device.nvmf_ip = ",".join(ips)
+    device.nvmf_port = snode.nvmf_port
+    device.nvmf_multipath = len(ips) > 1
+    return device
+
+
 def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_restart):
     db_controller = DBController()
     nvme_bdev = nvme.nvme_bdev
@@ -1392,21 +1416,11 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
         return None
 
-    if len(ip_list) > 1:
-        IP = ",".join(ip_list)
-        multipath = True
-    else:
-        IP = ip_list[0]
-        multipath = False
-
     nvme.alceml_bdev = alceml_bdev
     nvme.pt_bdev = pt_name
     nvme.alceml_name = alceml_name
-    nvme.nvmf_nqn = subsystem_nqn
-    nvme.nvmf_ip = IP
-    nvme.nvmf_port = snode.nvmf_port
+    _publish_device_endpoint(nvme, snode, subsystem_nqn)
     nvme.io_error = False
-    nvme.nvmf_multipath = multipath
     nvme.pt_spdk_uuid = pt_spdk_uuid
     # if nvme.status != NVMeDevice.STATUS_NEW:
     #     nvme.status = NVMeDevice.STATUS_ONLINE
@@ -1712,6 +1726,19 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 if iface.ip4_address:
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                     ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+
+            # The listeners above just moved to the current data_nics; the
+            # record has to move with them. Without this the JM kept the
+            # nvmf_ip it was written with, and every peer attached to an
+            # address nothing listens on any more:
+            #   Failed to attach controller remote_jm_<node> via <old ip>:
+            #   connection error
+            # Both sibling paths already do this -- _create_storage_device_stack
+            # for NVMe devices and _create_jm_stack_on_raid for a RAID JM (it
+            # returns a freshly built record). This branch, the JM-on-device
+            # layout, was the only one that mutated the existing record in
+            # place and left the endpoint behind.
+            _publish_device_endpoint(jm_device, snode, subsystem_nqn)
         jm_device.status = JMDevice.STATUS_ONLINE
         snode.jm_device = jm_device
         snode.write_to_db()
