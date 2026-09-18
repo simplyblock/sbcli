@@ -18,6 +18,8 @@ class _LVol:
         self.lvol_name = "vol0"
         self.node_id = "N1"
         self.replication_interval_min = interval
+        self.replication_policy_id = ""
+        self.do_replicate = True
 
     def get_id(self):
         return self.uuid
@@ -71,6 +73,9 @@ def _patch(monkeypatch, lvol, snaps, tasks):
                 if s.uuid == uuid:
                     return s
             raise KeyError(uuid)
+
+        def get_lvol_replication_objects(self):
+            return []
 
     monkeypatch.setattr(lvol_controller, "DBController", lambda: _DB())
 

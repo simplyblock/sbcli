@@ -188,6 +188,7 @@ def lvol_controller(monkeypatch):
     mock.get_replication_info.return_value = None
     monkeypatch.setattr(volume_module, 'lvol_controller', mock)
     monkeypatch.setattr(volume_replication_module, 'lvol_controller', mock)
+    monkeypatch.setattr(replication_module, 'lvol_controller', mock)
     return mock
 
 

@@ -83,6 +83,14 @@ ReplicationState = Literal["replicating", "cutover_pending", "cutover_done", "fa
 
 ReplicationDirection = Literal["to_target", "to_source"]
 
+#: Which end of the relationship this volume is, seen from its own cluster.
+ReplicationRole = Literal["source", "secondary", "failed_over", "none"]
+
+#: The steady-state health verdict ``get_replication_info`` derives.
+ReplicationHealthState = Literal[
+    "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
+]
+
 TaskFunctionName = Literal[
     "device_restart",
     "node_restart",
@@ -689,6 +697,9 @@ class ReplicationPolicyDTO(BaseModel):
     mode: ReplicationMode
     keep_replicated: int
     status: ReplicationPolicyStatus
+    #: The declared RPO objective, in seconds; null when the operator
+    #: declared none, in which case the derived lag budget applies.
+    rpo_target_seconds: util.OptionalUnsigned = None
     consistency_group: bool = False
     #: Pinned placement of the policy's consistency group, set by its first
     #: member: every further member volume must be created on this node/LVS.
@@ -709,6 +720,7 @@ class ReplicationPolicyDTO(BaseModel):
             mode=cast(ReplicationMode, model.mode),
             keep_replicated=model.keep_replicated,
             status=cast(ReplicationPolicyStatus, model.status),
+            rpo_target_seconds=getattr(model, 'rpo_target_seconds', 0) or None,
             consistency_group=bool(getattr(model, 'consistency_group', False)),
             group_node_id=UUID(group.node_id) if group is not None and group.node_id else None,
             group_lvs_name=group.lvs_name if group is not None else "",
@@ -787,6 +799,93 @@ class ReplicationRelationshipDTO(BaseModel):
     is_source: bool
     active: str | None = None
     active_lvol_id: util.OptionalUUID = None
+
+
+class ReplicationStatusDTO(BaseModel):
+    """The typed steady-state replication status of one volume.
+
+    Serves what ``lvol_controller.get_replication_info`` computes, for the
+    volume's WHOLE replicated life — unlike ``ReplicationRelationshipDTO``,
+    which only exists once a cutover or fail-over has created a relationship
+    record. ``state: not_replicating, role: none`` is a valid answer, never a
+    404, because the csi-addons adapter polls this on every reconcile.
+    """
+    role: ReplicationRole
+    state: ReplicationHealthState
+    #: Creation time of the newest fully replicated snapshot; null until the
+    #: first snapshot lands on the peer.
+    last_replicated_at: datetime | None = None
+    lag_seconds: util.OptionalUnsigned = None
+    lag_budget_seconds: util.OptionalUnsigned = None
+    outstanding_count: util.Unsigned = 0
+    outstanding_bytes: util.Unsigned = 0
+    #: Shipping tasks currently suspended on errors.
+    failing_count: util.Unsigned = 0
+    #: Whether any shipping task exhausted its retries and gave up.
+    max_retry_reached: bool = False
+    #: Size and duration of the last completed shipping cycle.
+    last_cycle_bytes: util.OptionalUnsigned = None
+    last_cycle_seconds: util.OptionalUnsigned = None
+    #: A divergence catch-up (fail-back reversal or final cutover) in flight.
+    resyncing: bool = False
+
+    @staticmethod
+    def from_info(info: dict) -> 'ReplicationStatusDTO':
+        last_replicated_at = info.get('last_replicated_at')
+        return ReplicationStatusDTO(
+            role=info.get('role', 'none'),
+            state=info.get('state', 'not_replicating'),
+            last_replicated_at=(datetime.fromtimestamp(last_replicated_at, tz=UTC)
+                                if last_replicated_at is not None else None),
+            lag_seconds=info.get('lag_seconds'),
+            lag_budget_seconds=info.get('lag_budget_seconds'),
+            outstanding_count=info.get('outstanding_count', 0),
+            outstanding_bytes=info.get('outstanding_bytes', 0),
+            failing_count=info.get('failing_count', 0),
+            max_retry_reached=bool(info.get('max_retry_reached', 0)),
+            last_cycle_bytes=info.get('last_cycle_bytes'),
+            last_cycle_seconds=info.get('last_cycle_seconds'),
+            resyncing=bool(info.get('resyncing', False)),
+        )
+
+
+class ReplicatedSnapshotDTO(BaseModel):
+    """A fully replicated snapshot on the secondary, addressed as a cloneable
+    object. ``lvol_id`` is the volume the snapshot belongs to on the
+    SECONDARY cluster, not the source volume the caller asked about, because
+    that is the identity the ordinary CSI clone path resolves a
+    ``dataSource`` against.
+    """
+    snapshot_id: UUID
+    cluster_id: UUID
+    pool_id: util.OptionalUUID = None
+    lvol_id: util.OptionalUUID = None
+    size: util.Unsigned
+    used_size: util.Unsigned
+    created_at: datetime
+    group_id: str = ""
+    group_seq: util.Unsigned = 0
+
+    @staticmethod
+    def from_model(model: SnapShot) -> 'ReplicatedSnapshotDTO':
+        return ReplicatedSnapshotDTO(
+            snapshot_id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            pool_id=UUID(model.pool_uuid) if model.pool_uuid else None,
+            lvol_id=UUID(model.lvol.get_id()) if model.lvol else None,
+            size=model.size,
+            used_size=model.used_size,
+            created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            group_id=model.group_id,
+            group_seq=model.group_seq,
+        )
+
+
+class ReplicatedGenerationDTO(BaseModel):
+    """One complete, fully replicated consistency-group generation, every
+    member addressed as a cloneable object on the secondary."""
+    group_seq: util.Unsigned
+    members: list[ReplicatedSnapshotDTO]
 
 
 class FailoverResultDTO(BaseModel):

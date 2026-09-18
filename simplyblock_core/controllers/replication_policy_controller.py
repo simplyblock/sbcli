@@ -94,7 +94,7 @@ def remove_target(target_id):
 # --------------------------------------------------------------------------- #
 
 def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_replicated=None,
-               retention_schedule=None, consistency_group=False):
+               retention_schedule=None, consistency_group=False, rpo_target_seconds=None):
     """Create a policy on *target* (id or name)."""
     db.get_cluster_by_id(cluster_id)
     try:
@@ -119,6 +119,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         # onto, so retention drops segments instead of swap-merging them.
         raise ReplicationConfigError(
             f"keep_replicated must be at least {ReplicationPolicy.MIN_KEEP_REPLICATED}")
+    if rpo_target_seconds is not None and rpo_target_seconds < 0:
+        raise ReplicationConfigError("rpo_target_seconds cannot be negative")
 
     if retention_schedule:
         # Validate at ingress: an unparseable schedule silently falling back to
@@ -142,6 +144,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         policy.keep_replicated = keep_replicated
     if retention_schedule is not None:
         policy.retention_schedule = retention_schedule
+    if rpo_target_seconds is not None:
+        policy.rpo_target_seconds = rpo_target_seconds
     policy.consistency_group = bool(consistency_group)
     policy.status = ReplicationPolicy.STATUS_ACTIVE
     policy.write_to_db(db.kv_store)
@@ -267,6 +271,14 @@ def detach_policy(lvol_id):
     failed-over volume built on it would start reading zeros.
     """
     lvol = db.get_lvol_by_id(lvol_id)
+
+    if not lvol.replication_policy_id:
+        # Idempotent no-op: there is no policy to detach and no policy
+        # residue to clean. Returning early also keeps a detach from
+        # reaching through and stopping a LEGACY (start/stop path) replication
+        # the volume may be running, which no policy ever owned.
+        logger.info("Volume %s follows no replication policy; detach is a no-op", lvol_id)
+        return True
 
     rep = _active_relationship(lvol_id)
     if rep is not None and rep.state == LVolReplication.STATE_CUTOVER_PENDING:
@@ -403,7 +415,7 @@ def _resolve_group_failover_generation(policy, volumes):
 
     A generation qualifies when every member still to be failed over has a
     snapshot of it that is FULLY replicated, by the same rules
-    lvol_controller._last_replicated_target_snapshot applies per volume: the
+    lvol_controller.last_replicated_target_snapshot applies per volume: the
     replication task is DONE (a target record alone proves allocation, not
     data), and the target copy still exists and is not being deleted by
     retention.
@@ -494,6 +506,47 @@ def _resolve_group_failover_generation(policy, volumes):
         f"No group generation of policy {policy.policy_name} is fully "
         f"replicated for all {len(pending_ids)} pending member(s); refusing a "
         f"mixed-generation fail-over{missing}")
+
+
+def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapShot]]:
+    """The newest consistency-group generation every current member has fully
+    replicated, as cloneable objects on the secondary.
+
+    Reuses :func:`_resolve_group_failover_generation`'s refusal rule instead
+    of its side effect: a generation qualifies only when every member has a
+    snapshot of it that reached the target and is not being pruned, so a
+    caller (the test-failover drill, design §14) never addresses a
+    mixed-generation cut. Every current member is treated as pending -- this
+    describes present-day, un-failed-over steady state, never a resumed
+    fail-over that already has clones on the peer.
+
+    Returns ``(group_seq, {lvol_id: target_snapshot})``. Raises
+    ``ReplicationConfigError`` when the policy has no consistency group or no
+    generation is fully replicated for every member yet.
+    """
+    policy = db.get_replication_policy_by_id(policy_id)
+    if not getattr(policy, "consistency_group", False):
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} has no consistency group")
+
+    volumes = db.get_lvols_by_replication_policy(policy.get_id())
+    seq, covered = _resolve_group_failover_generation(policy, volumes)
+    if not covered:
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} has no member left to resolve a "
+            f"generation for; every member has already failed over")
+
+    members = {}
+    for lvol_id, source_snap_id in covered.items():
+        source_snap = db.get_snapshot_by_id(source_snap_id)
+        # Re-fetched rather than carried from the scan above: the scan proved
+        # the target copy existed and was not being pruned at THAT instant,
+        # and this is a read with no lock, so a concurrent retention pass
+        # remains possible in the window between. Rare enough, and cheap
+        # enough to just re-raise on, that a lock is not worth taking for a
+        # status read.
+        members[lvol_id] = db.get_snapshot_by_id(source_snap.target_replicated_snap_uuid)
+    return seq, members
 
 
 def _failover_volumes(volumes, what, pinned=None):

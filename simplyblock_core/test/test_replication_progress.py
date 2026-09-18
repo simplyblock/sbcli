@@ -66,6 +66,9 @@ class _FakeDB:
     def get_snapshot_by_id(self, uuid):
         return self._snaps[uuid]
 
+    def get_lvol_replication_objects(self):
+        return []
+
 
 def _install(monkeypatch, db):
     monkeypatch.setattr(lvol_controller, "DBController", lambda: db)

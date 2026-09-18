@@ -12,6 +12,7 @@ from simplyblock_core import utils as core_utils
 
 
 Unsigned = Annotated[int, Field(ge=0)]
+OptionalUnsigned = Annotated[int | None, Field(ge=0)]
 Size = Annotated[Unsigned, BeforeValidator(core_utils.parse_size)]
 Percent = Annotated[int, Field(ge=0, le=100)]
 Port = Annotated[int, Field(ge=0, lt=65536)]

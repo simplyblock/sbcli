@@ -25,6 +25,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.services import replication_final_step
 
 logger = utils.get_logger(__name__)
 
@@ -2784,6 +2785,45 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
     return data
 
 
+def replication_source_online(lvol: LVol) -> bool:
+    """Whether *lvol*'s own storage node is genuinely up right now.
+
+    Distinguishes day-one protection of a volume that has always lived here
+    (its source node is healthy, so a promote is a no-op) from a genuine
+    unplanned fail-over (the source was never demoted BECAUSE it is
+    unreachable -- the premise force=true already accepts). Both leave
+    replication_demote_state empty, so that field alone cannot tell them
+    apart; this mirrors the target-node check replicate_lvol_on_target_cluster
+    already makes for the destination side, applied to the source instead.
+    """
+    db_controller = DBController()
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    return bool(node) and node.status == StorageNode.STATUS_ONLINE
+
+
+def _replication_role(db_controller: DBController, lvol: LVol) -> str:
+    """Which end of its replication relationship *lvol* is.
+
+    The newest relationship record involving the volume decides: failed_over
+    trumps the side, because that is the state a DR orchestrator acts on.
+    Without a record — which is a volume's whole healthy replicated life,
+    since relationships only materialize at cutover or fail-over — the volume
+    is a source as soon as replication is configured, and none otherwise.
+    """
+    lvol_id = lvol.get_id()
+    for rep in reversed(db_controller.get_lvol_replication_objects()):
+        source_id = rep.source_lvol.get_id() if rep.source_lvol else ""
+        target_id = rep.target_lvol.get_id() if rep.target_lvol else ""
+        if lvol_id not in (source_id, target_id):
+            continue
+        if rep.state == LVolReplication.STATE_FAILED_OVER:
+            return "failed_over"
+        return "source" if lvol_id == source_id else "secondary"
+    if lvol.replication_policy_id or lvol.do_replicate:
+        return "source"
+    return "none"
+
+
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
     lvol = None
@@ -2806,6 +2846,16 @@ def get_replication_info(lvol_id_or_name):
         "last_replication_time": "",
         "last_replication_duration": "",
         "replicated_count": 0,
+        # The typed steady-state status fields. last_replicated_at is the
+        # newest fully replicated snapshot's creation time (the truthful
+        # lastSyncTime source for a DR orchestrator), and the last_cycle
+        # figures describe THAT snapshot's shipping, numerically, where the
+        # display strings above describe the newest task of any state.
+        "last_replicated_at": None,
+        "last_cycle_seconds": None,
+        "last_cycle_bytes": None,
+        "role": "none",                 # source|secondary|failed_over|none
+        "resyncing": False,             # a divergence catch-up is in flight
         # Replication progress monitoring.
         "lag_seconds": None,            # how far the target is behind the source
         "lag": "",                      # human-readable lag
@@ -2832,9 +2882,15 @@ def get_replication_info(lvol_id_or_name):
         "tasks": [],
     }
     node = db_controller.get_storage_node_by_id(lvol.node_id)
+    out["role"] = _replication_role(db_controller, lvol)
     # Each replication task maps 1:1 to a source snapshot for this lvol.
     items = []  # list of (task, snap)
+    final_cutover_active = False
     for task in db_controller.get_job_tasks(node.cluster_id):
+        if (task.function_name == JobSchedule.FN_REPLICATION_FINAL
+                and not task.canceled and task.status != JobSchedule.STATUS_DONE
+                and task.function_params.get("lvol_id") == lvol.get_id()):
+            final_cutover_active = True
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
@@ -2847,6 +2903,10 @@ def get_replication_info(lvol_id_or_name):
             snaps.append(snap)
             tasks.append(task)
             items.append((task, snap))
+
+    # The final cutover reconciles independently of the snapshot pipeline, so
+    # it flags a resync even when no shipping task is queued.
+    out["resyncing"] = final_cutover_active
 
     if items:
         now = int(time.time())
@@ -2864,8 +2924,17 @@ def get_replication_info(lvol_id_or_name):
                     or bool(snap.target_replicated_snap_uuid)
                     or bool(snap.source_replicated_snap_uuid))
 
-        replicated = [s for (t, s) in items if _is_replicated(t, s)]
-        outstanding = [s for (t, s) in items if not _is_replicated(t, s)]
+        replicated_pairs = [(t, s) for (t, s) in items if _is_replicated(t, s)]
+        outstanding_pairs = [(t, s) for (t, s) in items if not _is_replicated(t, s)]
+        replicated = [s for (_, s) in replicated_pairs]
+        outstanding = [s for (_, s) in outstanding_pairs]
+
+        # A fail-back ships toward the recovered source under
+        # replicate_to_source tasks; while one is outstanding the volume is
+        # reconciling a divergence.
+        out["resyncing"] = out["resyncing"] or any(
+            t.function_params.get("replicate_to_source")
+            for (t, _) in outstanding_pairs)
 
         # Count what actually replicated, not every snapshot that has a task —
         # the latter reported healthy replication for volumes where nothing had
@@ -2895,6 +2964,18 @@ def get_replication_info(lvol_id_or_name):
             lag_seconds = max(0, now - last_replicated_created)
             out["lag_seconds"] = lag_seconds
             out["lag"] = utils.strfdelta_seconds(lag_seconds)
+            out["last_replicated_at"] = last_replicated_created
+
+            # The last COMPLETED cycle: what shipped, and how long it took.
+            # The display fields below describe the newest task of any
+            # state, which may still be in flight.
+            last_done_task, last_done_snap = max(
+                replicated_pairs, key=lambda pair: pair[1].created_at)
+            out["last_cycle_bytes"] = last_done_snap.used_size
+            done_params = last_done_task.function_params
+            if "end_time" in done_params and "start_time" in done_params:
+                out["last_cycle_seconds"] = max(
+                    0, int(done_params["end_time"]) - int(done_params["start_time"]))
 
         last_task = tasks[-1]
         last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
@@ -2928,7 +3009,17 @@ def get_replication_info(lvol_id_or_name):
 
         # Lag budget: three snapshot intervals (one missed cycle is not an
         # incident), floor 5 min so a tiny interval does not flap the verdict.
+        # A declared RPO objective on the volume's policy replaces the
+        # heuristic: the operator alerts on the target they promised.
         lag_budget = max(3 * interval_sec, 300)
+        if lvol.replication_policy_id:
+            try:
+                policy = db_controller.get_replication_policy_by_id(
+                    lvol.replication_policy_id)
+            except KeyError:
+                policy = None
+            if policy is not None and policy.rpo_target_seconds > 0:
+                lag_budget = policy.rpo_target_seconds
         lag = out["lag_seconds"]
         oldest_outstanding = out["oldest_outstanding_seconds"]
         if gave_up:
@@ -3604,6 +3695,69 @@ def replication_trigger(lvol_id):
         out["last_replication_duration"] = duration
 
     return out
+
+
+def demote_lvol(lvol_id):
+    """Fence the source and confirm the last write replicated (P0-3).
+
+    The lossless half of a planned swap (design-csi-addons-replication.md
+    §5.2): after this returns {"demoted": True}, the peer's planned promote
+    is guaranteed to lose nothing. Demote never touches a target volume --
+    that is a separate, later call, possibly on a different cluster, once
+    Ramen has rescheduled the workload there.
+
+    Unlike replication_commit's live cutover, there is no in-flight write to
+    race: DemoteVolume is only called once Kubernetes has already unmounted
+    the workload, so there is no freeze window to bound, just fence-then-ship
+    to make durable. Synchronous and idempotent, re-driven by the caller
+    (the driver's DemoteVolume RPC calls this repeatedly) until it reports
+    done; each call does only the work its current state calls for.
+
+    Returns {"demoted": bool} or (False, error).
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    if lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE:
+        return {"demoted": True}
+
+    if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_PENDING:
+        # First call: fence BEFORE triggering the final snapshot, never after --
+        # a write accepted on a still-optimized path after the snapshot is the
+        # delta of record is silently lost (fence_source_paths' own invariant).
+        source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+        replication_final_step.fence_source_paths(
+            source_node, source_node.lvstore, lvol.nqn, lvol.ns_id)
+
+        snap_id, err = snapshot_controller.add(
+            lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
+        if err:
+            return False, err
+
+        lvol.replication_demote_snapshot_id = snap_id
+        lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+        lvol.write_to_db(db_controller.kv_store)
+        return {"demoted": False}
+
+    # Already pending: only check whether the snapshot being waited on has
+    # landed. Never re-fence (harmless but pointless) or re-trigger (would
+    # orphan the first snapshot's wait and never converge).
+    try:
+        snap = db_controller.get_snapshot_by_id(lvol.replication_demote_snapshot_id)
+    except KeyError as e:
+        return False, str(e)
+
+    if not getattr(snap, "target_replicated_snap_uuid", ""):
+        return {"demoted": False}
+
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lvol.write_to_db(db_controller.kv_store)
+    return {"demoted": True}
+
 
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
                       from_policy=False):
@@ -4378,7 +4532,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
-def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
+def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
                                      pin_snapshot_id=None):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
@@ -4445,6 +4599,25 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generat
             continue
         return target_snap
     return None
+
+
+def latest_replicated_snapshot(lvol_id: str) -> SnapShot | None:
+    """The newest fully replicated snapshot of *lvol_id*, on the secondary,
+    as a cloneable object.
+
+    Exposes the same selection ``replicate_lvol_on_target_cluster`` applies
+    internally, without cloning: a test-failover drill (design §14) has to
+    know the safe point BEFORE deciding whether to touch anything, and must
+    never trigger a real fail-over just to find out what it is.
+
+    Returns the target-cluster ``SnapShot``, or ``None`` when nothing has
+    replicated yet. Raises ``KeyError`` when the volume itself does not
+    exist.
+    """
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id)
 
 
 def _evict_stale_namespace(new_lvol, target_node, superseded=None):
@@ -4594,7 +4767,7 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
     Returns (new_lvol, snapshot_used, error).
     """
     for _ in range(attempts):
-        snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
+        snapshot = last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
                                                     generation=generation,
                                                     pin_snapshot_id=pin_snapshot_id)
         if not snapshot:

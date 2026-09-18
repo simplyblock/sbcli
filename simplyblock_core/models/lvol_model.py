@@ -131,6 +131,21 @@ class LVol(BaseModel):
     #: members map remains the authoritative generation-membership record.
     group_id: str = ""
 
+    # Planned-swap demote state (P0-3, design-csi-addons-replication.md §5.2).
+    # Lives on the SOURCE volume directly, not on an LVolReplication record:
+    # demote runs before any target volume exists to pair one with. "" means
+    # never requested; PENDING means fenced and a final snapshot is in
+    # flight; DONE means that snapshot is confirmed replicated and the
+    # planned promote's precondition gate is satisfied.
+    REPLICATION_DEMOTE_PENDING = "pending"
+    REPLICATION_DEMOTE_DONE = "done"
+
+    replication_demote_state: str = ""
+    # The final snapshot demote is waiting on, so a re-invocation (the driver
+    # re-drives DemoteVolume until it reports done) checks THIS snapshot's
+    # replicated marker rather than triggering a new one every call.
+    replication_demote_snapshot_id: str = ""
+
     def watch_scope(self):
         return (self.pool_uuid,)
 

@@ -1,7 +1,10 @@
 """Unit tests for the volume replication endpoints and the policy assignment
 folded into the volume PUT."""
 
+from datetime import UTC, datetime
+
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
+from simplyblock_core.models.lvol_model import LVol
 
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
@@ -140,6 +143,97 @@ class TestRelationship:
         assert client.get(REPLICATION_URL).status_code == 404
 
 
+def _status(**overrides):
+    """A steady-state status dict as ``get_replication_info`` computes it."""
+    status = {
+        'role': 'source',
+        'state': 'in_sync',
+        'last_replicated_at': 1758000000,
+        'lag_seconds': 42,
+        'lag_budget_seconds': 900,
+        'outstanding_count': 1,
+        'outstanding_bytes': 1048576,
+        'failing_count': 0,
+        'max_retry_reached': 0,
+        'last_cycle_bytes': 2097152,
+        'last_cycle_seconds': 12,
+        'resyncing': False,
+    }
+    status.update(overrides)
+    return status
+
+
+class TestStatus:
+    """The typed steady-state status read.
+
+    The endpoint exists for the volume's whole replicated life, unlike the
+    relationship read, which only has cutover records to serve, so the
+    csi-addons adapter can derive conditions and ``lastSyncTime`` from it on
+    every reconcile.
+    """
+
+    def test_returns_the_typed_steady_state_status(self, client, db, volume, lvol_controller):
+        lvol_controller.get_replication_info.return_value = _status()
+
+        response = client.get(REPLICATION_URL + 'status')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['role'] == 'source'
+        assert body['state'] == 'in_sync'
+        assert (datetime.fromisoformat(body['last_replicated_at'])
+                == datetime.fromtimestamp(1758000000, tz=UTC))
+        assert body['lag_seconds'] == 42
+        assert body['lag_budget_seconds'] == 900
+        assert body['outstanding_count'] == 1
+        assert body['outstanding_bytes'] == 1048576
+        assert body['failing_count'] == 0
+        assert body['max_retry_reached'] is False
+        assert body['last_cycle_bytes'] == 2097152
+        assert body['last_cycle_seconds'] == 12
+        assert body['resyncing'] is False
+        lvol_controller.get_replication_info.assert_called_once_with(VOLUME_ID)
+
+    def test_a_volume_that_never_replicated_is_a_valid_answer(self, client, db, volume,
+                                                              lvol_controller):
+        """``state: not_replicating, role: none`` — never a 404 for a volume
+        that exists, because Ramen polls the status for the volume's whole
+        life, including before the first snapshot ships."""
+        lvol_controller.get_replication_info.return_value = _status(
+            role='none', state='not_replicating', last_replicated_at=None,
+            lag_seconds=None, lag_budget_seconds=None, outstanding_count=0,
+            outstanding_bytes=0, last_cycle_bytes=None, last_cycle_seconds=None)
+
+        response = client.get(REPLICATION_URL + 'status')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['role'] == 'none'
+        assert body['state'] == 'not_replicating'
+        assert body['last_replicated_at'] is None
+        assert body['lag_seconds'] is None
+        assert body['lag_budget_seconds'] is None
+
+    def test_exhausted_retries_surface_as_a_flag(self, client, db, volume, lvol_controller):
+        """The DTO reports WHETHER a task gave up; the count is an internal."""
+        lvol_controller.get_replication_info.return_value = _status(
+            state='error', max_retry_reached=2)
+
+        body = client.get(REPLICATION_URL + 'status').json()
+
+        assert body['state'] == 'error'
+        assert body['max_retry_reached'] is True
+
+    def test_resync_in_flight_is_reported(self, client, db, volume, lvol_controller):
+        lvol_controller.get_replication_info.return_value = _status(
+            role='failed_over', state='replicating', resyncing=True)
+
+        body = client.get(REPLICATION_URL + 'status').json()
+
+        assert body['role'] == 'failed_over'
+        assert body['resyncing'] is True
+
+
 class TestStartStopTrigger:
 
     def test_start_passes_parameters(self, client, db, volume, lvol_controller):
@@ -238,6 +332,74 @@ class TestCutover:
         assert response.status_code == 500
         assert response.json()['detail'] == 'node is not online'
 
+    def test_unplanned_failover_ignores_demote_state(self, client, db, volume, lvol_controller):
+        """The default (unplanned) path is unconditional -- matches today's
+        behavior, since an unplanned failover's whole premise is that the
+        source may never have been reachable to demote."""
+        lvol_controller.replicate_lvol_on_target_cluster.return_value = {
+            'lvol_id': TARGET_VOLUME_ID, 'nqn': 'nqn.x', 'ns_id': 1, 'connection_strings': [],
+        }
+
+        response = client.post(REPLICATION_URL + 'failover')
+
+        assert response.status_code == 204
+        lvol_controller.replicate_lvol_on_target_cluster.assert_called_once_with(
+            VOLUME_ID, generation=0)
+
+    def test_planned_failover_proceeds_once_demoted(self, client, db, volume, lvol_controller):
+        volume.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+        lvol_controller.replicate_lvol_on_target_cluster.return_value = {
+            'lvol_id': TARGET_VOLUME_ID, 'nqn': 'nqn.x', 'ns_id': 1, 'connection_strings': [],
+        }
+
+        response = client.post(REPLICATION_URL + 'failover?planned=true')
+
+        assert response.status_code == 204
+        lvol_controller.replicate_lvol_on_target_cluster.assert_called_once_with(
+            VOLUME_ID, generation=0)
+
+    def test_planned_failover_while_demote_is_converging_is_409(self, client, db, volume,
+                                                                lvol_controller):
+        """Retryable, never FAILED_PRECONDITION: the vendored csi-addons
+        controller auto-escalates ANY FAILED_PRECONDITION from a force=false
+        promote to force=true on the very same reconcile (no wait-and-retry
+        grace period upstream). Returning anything that maps to
+        codes.FailedPrecondition here would silently force through a promote
+        while demote is still converging and lose data."""
+        volume.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+
+        response = client.post(REPLICATION_URL + 'failover?planned=true')
+
+        assert response.status_code == 409
+        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
+
+    def test_planned_failover_without_any_demote_but_source_down_is_412(
+            self, client, db, volume, lvol_controller):
+        """No demote was ever requested, AND the source is not healthy: this
+        is the case that SHOULD let the vendored controller's force-escalation
+        take over, for a genuinely unplanned failover the caller only
+        attempted as 'planned'."""
+        lvol_controller.replication_source_online.return_value = False
+
+        response = client.post(REPLICATION_URL + 'failover?planned=true')
+
+        assert response.status_code == 412
+        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
+
+    def test_planned_failover_without_any_demote_but_source_online_is_a_noop(
+            self, client, db, volume, lvol_controller):
+        """No demote was ever requested, but the source is genuinely healthy
+        and still serving here: this is the vendored csi-addons controller's
+        OWN first-ever reconcile of a VolumeReplication that has always lived
+        at this cluster, not a disaster -- so this succeeds as the no-op it
+        is, WITHOUT materializing a clone nothing will ever read."""
+        lvol_controller.replication_source_online.return_value = True
+
+        response = client.post(REPLICATION_URL + 'failover?planned=true')
+
+        assert response.status_code == 204
+        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
+
     def test_commit_points_at_the_cutover_task(self, client, db, volume, lvol_controller):
         lvol_controller.replication_commit.return_value = {
             'cutover_task_queued': True, 'task_id': TASK_ID,
@@ -254,6 +416,32 @@ class TestCutover:
         lvol_controller.replication_commit.return_value = False
 
         assert client.post(REPLICATION_URL + 'commit').status_code == 500
+
+    def test_demote_not_yet_done_is_202(self, client, db, volume, lvol_controller):
+        """Still waiting on the final snapshot to land -- the driver re-drives."""
+        lvol_controller.demote_lvol.return_value = {'demoted': False}
+
+        response = client.post(REPLICATION_URL + 'demote')
+
+        assert response.status_code == 202
+        assert response.json() == {'demoted': False}
+        lvol_controller.demote_lvol.assert_called_once_with(VOLUME_ID)
+
+    def test_demote_done_is_204(self, client, db, volume, lvol_controller):
+        lvol_controller.demote_lvol.return_value = {'demoted': True}
+
+        response = client.post(REPLICATION_URL + 'demote')
+
+        assert response.status_code == 204
+        assert response.content == b''
+
+    def test_failed_demote_is_an_error(self, client, db, volume, lvol_controller):
+        lvol_controller.demote_lvol.return_value = (False, 'no space')
+
+        response = client.post(REPLICATION_URL + 'demote')
+
+        assert response.status_code == 500
+        assert response.json()['detail'] == 'no space'
 
     def test_failback(self, client, db, volume, lvol_controller):
         lvol_controller.replication_failback.return_value = True
