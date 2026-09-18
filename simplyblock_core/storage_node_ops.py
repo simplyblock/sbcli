@@ -5193,7 +5193,7 @@ def _finalize_node_removal(removed_node: StorageNode):
 
 
 def _resolve_data_nics(
-        node_info: dict | None, names, snode_api: Any,
+        node_info: Optional[dict], names, snode_api: Any,
         fabric_tcp: bool, fabric_rdma: bool) -> tuple[list[IFace], list[tuple[str, str]]]:
     """Resolve interface names against a node's live ``network_interface`` info
     (as returned by the node agent's ``info()``) and classify each one for the
