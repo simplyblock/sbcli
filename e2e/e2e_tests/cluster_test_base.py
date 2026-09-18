@@ -1467,8 +1467,19 @@ class TestClusterBase:
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             pvc_name = self._k8s_normalize_name(clone_name)
+            # Same normalisation _create_lvol_dual does, and for a sharper
+            # reason here: "20G" is 20*10^9 to Kubernetes while the snapshot it
+            # clones was taken from a PVC sized "20Gi" = 20*2^30, so the
+            # provisioner refuses with "requested volume size 20000000000 is
+            # less than the size 21474836480 for the source snapshot" and the
+            # PVC never binds. A no-op for callers already passing Gi/Mi.
+            pvc_size = size
+            if "G" in pvc_size and "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            if "M" in pvc_size and "Mi" not in pvc_size:
+                pvc_size = pvc_size.replace("M", "Mi")
             k8s.create_clone_pvc(
-                name=pvc_name, size=size,
+                name=pvc_name, size=pvc_size,
                 storage_class=self._k8s_storage_class_name,
                 snapshot_name=snapshot_id,
             )
@@ -1482,7 +1493,7 @@ class TestClusterBase:
             self._k8s_pvcs.append(pvc_name)
             self._volume_registry[clone_name] = {
                 "pvc_name": pvc_name, "lvol_id": lvol_id,
-                "device": pvc_name, "mount": pvc_name, "size": size,
+                "device": pvc_name, "mount": pvc_name, "size": pvc_size,
             }
             return pvc_name, pvc_name
         else:
