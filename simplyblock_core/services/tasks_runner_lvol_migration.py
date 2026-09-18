@@ -1470,7 +1470,12 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 tgt_sec=tgt_sec, sec_rpc=sec_rpc,
                 tgt_ter=tgt_ter, ter_rpc=ter_rpc)
             if not ok:
-                migration.transfer_context = {}
+                # The data transfer already completed (t['transfer_done'] is
+                # True) -- only post-processing (add_clone/convert/cleanup)
+                # failed. Keep transfer_context so the retry resumes at
+                # post-processing instead of re-running bdev_lvol_transfer and
+                # re-copying data that is already on the target.
+                migration.transfer_context = ctx
                 migration.write_to_db(db.kv_store)
                 return False, True, err
 
@@ -3357,7 +3362,10 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             # Transfer done — record without add_clone/convert.
             ok, err = _post_process_snap_group(snap, migration)
             if not ok:
-                migration.transfer_context = {}
+                # As above: the transfer itself already completed, so keep
+                # transfer_context (t['transfer_done'] stays True) rather than
+                # wiping it and forcing a full re-transfer on retry.
+                migration.transfer_context = ctx
                 migration.write_to_db(db.kv_store)
                 return False, True, err
             t['post_done'] = True
