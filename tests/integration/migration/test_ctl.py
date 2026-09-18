@@ -116,10 +116,8 @@ def cmd_lvol_list(args):
     if node_id:
         lvols = db.get_lvols_by_node_id(node_id)
     else:
-        lvols = db.get_lvols()
+        lvols = db.get_lvols(cluster_id)
     for lv in lvols:
-        if cluster_id and lv.cluster_id != cluster_id:
-            continue
         print(json.dumps({
             "uuid": lv.uuid,
             "name": lv.lvol_name,

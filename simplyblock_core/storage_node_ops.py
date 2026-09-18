@@ -4584,8 +4584,8 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         return False
 
     node_snaps = [
-        sn for sn in db_controller.get_snapshots()
-        if sn.lvol.node_id == node_id and sn.deleted is False
+        sn for sn in db_controller.get_snapshots_by_node_id(node_id)
+        if sn.deleted is False
     ]
     if node_snaps:
         logger.error(

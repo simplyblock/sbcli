@@ -12,17 +12,17 @@ class SnapShot(BaseModel):
     _INDEXES: ClassVar[tuple] = (
         Index('cluster_id'),
         Index('pool_uuid'),
-        Index('lvol_node_id', extract=lambda snap: (
+        Index('lvol_node_id', arity=1, extract=lambda snap: (
             [(snap.lvol.node_id,)] if snap.lvol else []
         )),
-        Index('lvol_uuid', extract=lambda snap: (
+        Index('lvol_uuid', arity=1, extract=lambda snap: (
             [(snap.lvol.get_id(),)] if snap.lvol else []
         )),
         Unique(('cluster_id', 'snap_name')),
         # Creation order within one lvol: the tail is the chain predecessor,
         # found by a reverse range read of limit 1. Ordered, so its segments
         # are the fixed-width encoding `encode_value` reserves for that.
-        Index('lvol_snaps', ordered=True, extract=lambda snap: (
+        Index('lvol_snaps', ordered=True, arity=3, extract=lambda snap: (
             [(snap.lvol.get_id(), int(snap.created_at or 0), int(snap.vuid or 0))]
             if snap.lvol else []
         )),

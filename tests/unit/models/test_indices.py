@@ -81,7 +81,7 @@ def test_tuple_extractor_names_itself():
 
 
 def test_callable_extractor_yields_many_keys_per_record():
-    index = Index('child', extract=lambda obj: [(child,) for child in (obj.children or [])])
+    index = Index('child', arity=1, extract=lambda obj: [(child,) for child in (obj.children or [])])
     obj = Sample({'uuid': 'u1', 'children': ['a', 'b']})
     assert index.keys(Sample, obj) == {
         b'index/Sample/child/a/u1',
@@ -122,6 +122,99 @@ def test_partial_prefix_of_a_composite_index():
     assert index.prefix(Sample, ('p1',)) == b'index/Sample/pool+label/p1/'
 
 
+def test_a_key_needs_the_full_value_tuple():
+    """An entry whose key carries the wrong number of value segments cannot be
+    read back: `entry_id` would return a value where the id belongs."""
+    index = Index(('pool', 'label'))
+    with pytest.raises(ValueError, match='2 value'):
+        index.key(Sample, ('p1',), 'u1')
+
+
+# --- reading an entry back --------------------------------------------------
+
+def test_a_non_unique_entry_stores_nothing():
+    """The id is the key's own tail. A second copy in the value could only ever
+    disagree with it — which is the drift this design does not have."""
+    assert Index('pool').entry_value('u1') == b''
+
+
+def test_the_id_comes_back_off_the_key():
+    index = Index('pool')
+    key, = index.keys(Sample, Sample({'uuid': 'u1', 'pool': 'p1'}))
+
+    assert index.entry_id(Sample, key, b'') == 'u1'
+
+
+def test_the_id_comes_back_whole_for_a_composite_primary_key():
+    """`JobSchedule.get_id()` is `<cluster>/<date>/<uuid>`, appended raw while
+    every value segment is escaped — so the id is the only part of a key that
+    may contain the separator, and skipping `arity` of them lands on all of it."""
+    task = JobSchedule({'uuid': 't1', 'cluster_id': 'c1', 'date': 42})
+    index = indices.get_index(JobSchedule, 'uuid')
+    key, = index.keys(JobSchedule, task)
+
+    assert index.entry_id(JobSchedule, key, b'') == 'c1/42/t1'
+    assert task.get_id() == 'c1/42/t1'
+
+
+def test_the_id_comes_back_through_a_value_carrying_the_separator():
+    index = Index('pool')
+    key, = index.keys(Sample, Sample({'uuid': 'u/1', 'pool': 'p/1'}))
+
+    assert index.entry_id(Sample, key, b'') == 'u/1'
+
+
+@pytest.mark.parametrize('arity', [1, 2, 3])
+def test_every_declared_index_round_trips_its_own_keys(arity):
+    """The property the read path rests on, over every shape of declaration:
+    what `keys()` writes, `entry_id()` reads back."""
+    index = Index('child', arity=arity, extract=lambda obj: [
+        tuple(f'v{n}' for n in range(arity))])
+    obj = Sample({'uuid': 'c1/c2'})
+    key, = index.keys(Sample, obj)
+
+    assert index.entry_id(Sample, key, b'') == 'c1/c2'
+
+
+def test_a_unique_entry_records_its_holder_in_the_value():
+    """Its key omits the id by design, so the value is the only record of it."""
+    index = Unique(('pool', 'label'))
+    obj = Sample({'uuid': 'u1', 'pool': 'p1', 'label': 'vol'})
+    key, = index.keys(Sample, obj)
+
+    assert index.entry_value('u1') == b'u1'
+    assert index.entry_id(Sample, key, b'u1') == 'u1'
+
+
+def test_entry_id_refuses_a_key_of_another_index():
+    index = Index('pool')
+    with pytest.raises(ValueError, match='not an entry'):
+        index.entry_id(Sample, b'index/Sample/label/x/u1', b'')
+
+
+def test_entry_id_refuses_a_key_with_no_room_for_an_id():
+    index = Index(('pool', 'label'))
+    with pytest.raises(ValueError, match='no entity id'):
+        index.entry_id(Sample, b'index/Sample/pool+label/p1/vol', b'')
+
+
+# --- arity ------------------------------------------------------------------
+
+def test_arity_is_derived_from_the_fields():
+    assert Index('pool').arity == 1
+    assert Index(('pool', 'label')).arity == 2
+
+
+def test_a_callable_extractor_must_declare_its_arity():
+    with pytest.raises(ValueError, match='arity'):
+        Index('child', extract=lambda obj: [(obj.pool,)])
+
+
+def test_a_field_extractor_may_not_restate_its_arity():
+    with pytest.raises(ValueError, match='derived from the fields'):
+        Index('pool', arity=1)
+
+
 # --- the write diff ---------------------------------------------------------
 
 def test_changing_an_indexed_field_moves_exactly_one_key():
@@ -144,7 +237,7 @@ def test_changing_an_unindexed_field_moves_nothing():
 
 
 def test_multi_valued_diff_keeps_the_unchanged_entries():
-    index = Index('child', extract=lambda obj: [(child,) for child in (obj.children or [])])
+    index = Index('child', arity=1, extract=lambda obj: [(child,) for child in (obj.children or [])])
     before = Sample({'uuid': 'u1', 'children': ['a', 'b']})
     after = Sample({'uuid': 'u1', 'children': ['b', 'c']})
 
@@ -174,6 +267,42 @@ def test_match_paths_agrees_with_the_key_the_index_would_store():
     [path] = index.match_paths(obj, ('p/1',))
 
     assert index.keys(Sample, obj) == {f'index/Sample/pool+label/{path}/u1'.encode()}
+
+
+@pytest.mark.parametrize('values', [('',), (None,)])
+def test_a_blank_lookup_value_is_refused_on_both_read_paths(values):
+    """A blank names no stored key, and an empty value path is also the empty
+    prefix — so encoding one reads back as "nothing" through the index and as
+    "everything" through the scan."""
+    index = Index('pool')
+    obj = Sample({'uuid': 'u1', 'pool': 'p1'})
+
+    with pytest.raises(ValueError, match='blank component'):
+        index.prefix(Sample, values)
+    with pytest.raises(ValueError, match='blank component'):
+        index.match_paths(obj, values)
+
+
+def test_no_values_still_means_the_whole_index():
+    index = Index('pool')
+    obj = Sample({'uuid': 'u1', 'pool': 'p1'})
+
+    assert index.prefix(Sample, ()) == b'index/Sample/pool/'
+    assert index.match_paths(obj, ()) == ['p1']
+
+
+def test_a_lookup_wider_than_the_index_is_refused():
+    """An id is appended to an entry key raw, so an over-long prefix can land
+    inside the id of a class whose `get_id()` embeds separators and select
+    entries `match_paths` would never return."""
+    index = Index('uuid')
+    job = JobSchedule({'uuid': 'u1', 'cluster_id': 'c1', 'date': '2026'})
+    assert index.keys(JobSchedule, job) == {b'index/JobSchedule/uuid/u1/c1/2026/u1'}
+
+    with pytest.raises(ValueError, match='1 value'):
+        index.prefix(JobSchedule, ('u1', 'c1'))
+    with pytest.raises(ValueError, match='1 value'):
+        index.match_paths(job, ('u1', 'c1'))
 
 
 # --- the shipped declarations -----------------------------------------------
@@ -212,6 +341,14 @@ def test_every_callable_extractor_works_on_a_default_instance():
             continue
         for values in index.tuples(cls()):
             assert isinstance(values, tuple), f'{cls.__name__}.{index.name}'
+
+
+def test_every_declared_arity_matches_the_tuples_its_extractor_returns():
+    """A declared arity that disagrees with the extractor would have the read
+    path take a value segment for the entity id."""
+    for cls, index in _declared():
+        for values in index.tuples(cls()):
+            assert len(values) == index.arity, f'{cls.__name__}.{index.name}'
 
 
 def test_index_names_are_unique_per_class():
@@ -267,10 +404,27 @@ def test_node_device_index_covers_nvme_and_journal_devices():
     index = indices.get_index(StorageNode, 'device_id')
 
     assert index.keys(StorageNode, node) == {
-        b'index/StorageNode/device_id/d1/n1',
-        b'index/StorageNode/device_id/d2/n1',
-        b'index/StorageNode/device_id/jm1/n1',
+        b'index/StorageNode/device_id/d1/nvme/n1',
+        b'index/StorageNode/device_id/d2/nvme/n1',
+        b'index/StorageNode/device_id/jm1/jm/n1',
     }
+
+
+def test_node_device_index_discriminates_by_kind():
+    """A JM built on a whole device carries that device's uuid, so the id alone
+    does not say which device is meant."""
+    node = StorageNode({
+        'uuid': 'n1', 'cluster_id': 'c1',
+        'nvme_devices': [{'uuid': 'd1'}],
+        'jm_device': {'uuid': 'jm1'},
+    })
+
+    index = indices.get_index(StorageNode, 'device_id')
+
+    assert index.match_paths(node, ('jm1',)) == ['jm1/jm']
+    assert index.match_paths(node, ('jm1', StorageNode.DEVICE_KIND_JM)) == ['jm1/jm']
+    assert index.match_paths(node, ('jm1', StorageNode.DEVICE_KIND_NVME)) == []
+    assert index.match_paths(node, ('d1', StorageNode.DEVICE_KIND_JM)) == []
 
 
 def test_node_failover_index_covers_both_peer_slots():
@@ -285,8 +439,8 @@ def test_node_failover_index_covers_both_peer_slots():
 
 
 def test_composite_key_classes_index_the_bare_uuid():
-    """The point of the `uuid` index on a composite-keyed class: the value is
-    the composite id, so a caller holding only the uuid can point-read."""
+    """The point of the `uuid` index on a composite-keyed class: the key's tail
+    is the composite id, so a caller holding only the uuid can point-read."""
     task = JobSchedule({'uuid': 't1', 'cluster_id': 'c1', 'date': 42})
 
     assert indices.get_index(JobSchedule, 'uuid').keys(JobSchedule, task) == {

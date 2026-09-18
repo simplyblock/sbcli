@@ -189,7 +189,6 @@ def add_lvol(ctx: TestContext, name: str, node_id: str,
 
     lvol = LVol()
     lvol.uuid = lvol_uuid
-    lvol.cluster_id = ctx.cluster_id
     lvol.node_id = node_id
     lvol.status = LVol.STATUS_ONLINE
     lvol.lvol_name = name

@@ -41,18 +41,28 @@ class LVol(BaseModel):
     _INDEXES: ClassVar[tuple] = (
         Index('pool_uuid'),                                 # a field
         Index(('target_type', 'target_id')),                # a tuple of fields
-        Index('device_id', extract=lambda node: [...]),     # many entries per record
+        Index('device_id', arity=2, extract=lambda node: [...]),  # many entries per record
         Unique(('pool_uuid', 'lvol_name')),                 # also a constraint
     )
 ```
 
+A callable extractor declares `arity`, the width of every tuple it returns; the field
+forms derive it from the fields. It is what lets a reader skip the value segments of a
+stored key and land on the entity id.
+
 Keys live in their own namespace, disjoint from the `object/` scans:
 
 ```
-index/<Class>/<index-name>/<value...>/<entity-id>   -> entity id
+index/<Class>/<index-name>/<value...>/<entity-id>   -> b''
 index/<Class>/<index-name>/<value...>               -> entity id   (Unique)
 index_meta/<Class>/<index-name>                     -> state record
 ```
+
+A non-unique entry stores **nothing**: its key already ends in the id, and a second copy
+in the value could only ever disagree with it — which is a drift class the design simply
+does not have. `Index.entry_id(cls, key, value)` is the one way to read an entry's owner
+(off the key for `Index`, out of the value for `Unique`, whose key omits it), and
+`Index.entry_value(id)` the one way to write one. Never decode an entry by hand.
 
 **Reading.** `DBController.query(model_cls, index, *values, limit=, reverse=)` is the
 only read primitive; `query_one` is its `single_or_none` form and `query_ids` skips the
@@ -65,9 +75,12 @@ record that was never written. Any new code path that writes a record key direct
 (`tr[key] = ...`) has to call `BaseModel._apply_index_diff` too — `_try_set_node_restarting_tx`
 is the one such site, and shows the shape.
 
-**A write becomes a read-write transaction**, so two concurrent writers of one key conflict
-and retry instead of last-writer-wins. That is the fix the `[NODE-WRITE]` tripwire exists for,
-not a cost.
+**A write becomes a read-write transaction**, which is what makes the diff correct — the
+"before" keys come from the record actually stored, re-read on each conflict retry — and what
+makes `Unique` a constraint: the index key is in the read conflict set, so two concurrent
+creates of one value cannot both commit. It does not make a full-object write safe against a
+stale copy: `value` is serialized before the transaction, so a retry rewrites the same bytes.
+`atomic_update` is still the only compare-and-set, and still the answer to `[NODE-WRITE]`.
 
 **`Unique` is a backstop, never a user-facing error path.** The clean "name already exists"
 answer still comes from the pre-check (`lvol_name_taken`, `snap_name_taken`) — now a point
@@ -81,15 +94,38 @@ short-TTL cache:
 
 - `building` (the default) — writes maintain it, reads fall back to a filtered scan;
 - `ready` — reads use it;
-- `disabled` — writes skip it, reads fall back. The kill switch.
+- `disabled` — writes skip it, reads fall back. The kill switch, thrown with
+  `sbctl cluster index-state <Class>.<index> --set disabled` and released with
+  `--set building`, which discards the index's entries on the way back in so the backfill
+  that follows leaves nothing stale behind. Both switches block for
+  `ttl_cache.INDEX_STATE_CONVERGENCE_SEC` while the new state reaches the other processes:
+  the state is TTL-cached per process, so until it has converged a reader can still be
+  trusting an index nothing maintains — or, on the way back in, reading a keyspace that was
+  emptied out from under it. `sbctl cluster index-state` with no index lists
+  where every index stands.
 
 The fallback's predicate and ordering come from the same declaration
 (`Index.match_paths`), so index and scan cannot drift into different answers. Shipping a new
 index is therefore: declare it → `sbctl cluster build-indices` (or an upgrade, which runs
-`release_upgrades/database_indices.py`) → it flips to `ready` on its own.
+`release_upgrades/database_indices.py`) → it flips to `ready` on its own. A `Unique` index
+over data that already holds duplicates is the one that does not: the backfill leaves it
+`building`, names the colliding records and exits non-zero, because the key holds one id and
+flipping it would hide every other record carrying that value.
 `sbctl cluster check-indices [--repair]` walks both directions and is safe against a live
-cluster. `index_ops.py` holds the backfill and the verifier. A read that falls back to a
+cluster. `--repair` writes back every entry it can *derive* — and refuses the one thing it
+cannot, a unique value two live records both carry, which is a defect in the data. It
+fails (non-zero) while anything is left unresolved, so a repair run that exits 0 means the
+indices are clean, not merely that something was repaired. `index_ops.py` holds the backfill and the verifier. A read that falls back to a
 scan logs a warning (rate-limited per index) — one that survives a `ready` flip is a bug.
+
+**The backfill walks keys, not records.** It reads each record inside the transaction that
+writes what that record derives (`_index_record`, over the same `_apply_index_diff` live
+writes use), so one record is one transaction and no derived value ever outlives the version
+it came from. A walk that handed out materialized records instead would let a record be
+indexed under a value it no longer carries, permanently — nothing clears an entry the record
+does not derive. Anything new that derives keys from a record must read that record in the
+transaction it writes to; a conflict there means re-derive, never retry the derivation you
+already have.
 
 **When an index is worth it.** It turns a full scan into a range read plus one pipelined
 point read per hit: a win when the result is a small fraction of the table, a mild loss when

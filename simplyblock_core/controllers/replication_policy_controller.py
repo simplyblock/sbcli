@@ -300,8 +300,8 @@ def _purge_internal_replication_snapshots(lvol_id):
     """Delete the volume's internal replication snapshots, target copy first."""
     removed = 0
     handled = set()                               # never issue a delete twice
-    for snap in db.get_snapshots():
-        if snap.deleted or not snap.lvol or snap.lvol.get_id() != lvol_id:
+    for snap in db.get_snapshots_by_lvol_id(lvol_id):
+        if snap.deleted:
             continue
         if snap.snap_type != SnapShot.TYPE_INTERNAL:
             continue                                  # user snapshots stay
@@ -456,7 +456,9 @@ def _resolve_group_failover_generation(policy, volumes):
     }
 
     by_seq: dict = {}
-    for snap in db.get_snapshots():
+    # `group_id` carries no index of its own; the cluster scope is what keeps
+    # this off a cluster-wide snapshot scan.
+    for snap in db.get_snapshots(group.cluster_id):
         if getattr(snap, "group_id", "") != group.get_id():
             continue
         seq = getattr(snap, "group_seq", 0)

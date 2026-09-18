@@ -148,6 +148,12 @@ CAPACITY_SCAN_TTL_SEC = 10
 # process per interval". Short enough that a `disabled` kill switch reaches
 # every worker within a few seconds.
 INDEX_STATE_TTL_SEC = 5
+# How long a state switch waits for every other process to see it. A process
+# still serving `ready` fetched that value before the switch committed, so it
+# drops the entry within one TTL of the commit however long ago it started
+# caching; the doubling covers a reader that passed the state check just before
+# expiry and has not issued its index read yet.
+INDEX_STATE_CONVERGENCE_SEC = 2 * INDEX_STATE_TTL_SEC
 LEADER_TTL_SEC = 8
 # Negative verdict: a full find_leader_with_failover pass (scan + recovery)
 # found NO confirmable leader. Object create/clone/snapshot requests against

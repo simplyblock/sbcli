@@ -76,7 +76,6 @@ def _lvol(uuid, status=LVol.STATUS_ONLINE, lvol_bdev=None,
     lv.status = status
     lv.node_id = "node-1"
     lv.pool_uuid = "pool-1"
-    lv.cluster_id = "cluster-1"
     lv.lvol_name = f"VOL_{uuid}"
     lv.lvol_bdev = lvol_bdev or f"LVOL_{uuid}"
     lv.top_bdev = f"LVS_100/{lv.lvol_bdev}"

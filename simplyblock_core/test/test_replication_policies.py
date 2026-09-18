@@ -104,8 +104,12 @@ class _FakeDB:
     def get_mini_lvols(self):
         return self._lvols
 
-    def get_snapshots(self):
+    def get_snapshots(self, cluster_id=None):
         return self._snapshots
+
+    def get_snapshots_by_lvol_id(self, lvol_id):
+        return [s for s in self._snapshots
+                if s.lvol and s.lvol.get_id() == lvol_id]
 
     def get_snapshot_by_id(self, uuid):
         if not uuid:

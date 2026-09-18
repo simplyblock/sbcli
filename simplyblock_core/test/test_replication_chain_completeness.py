@@ -449,7 +449,7 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             return {"P": primary, "S": peer}[nid]
         def release_lvol_ns_slot(self, lvol):
             pass
-        def get_lvols(self):
+        def get_lvols(self, cluster_id=None):
             # No copy of this subsystem exists on the target yet, so the
             # one-subsystem-one-primary guard has nothing to redirect to.
             return []
@@ -537,7 +537,7 @@ def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
         def release_lvol_ns_slot(self, lvol):
             pass
 
-        def get_lvols(self):
+        def get_lvols(self, cluster_id=None):
             return []
 
         def get_pool_by_id(self, pool_id):
