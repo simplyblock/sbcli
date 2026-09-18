@@ -475,6 +475,13 @@ class _LblkBase(TestClusterBase):
         Demoting is not ignoring: the mismatch is still logged, and the
         .hdr_fail dumps are still collected for triage.
         """
+        # The tag becomes a tmux session name, an fio job name and a log path,
+        # every one of which the shell splits on whitespace. A context like
+        # "after snapshot+clone" therefore started the session 'fio_lblkafter',
+        # wrote no log, and the absent log then read back as "clean" -- a check
+        # that silently verified nothing. Normalise at the one chokepoint every
+        # caller goes through, so no future context string can reintroduce it.
+        tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag).strip("_")[:40] or "fio"
         log = None
         if not self.k8s_test:
             log = f"{self.log_path}/fio_lblk_{tag}.log"
@@ -872,6 +879,16 @@ class _LblkIntegrity(_LblkBase):
             self._outage_and_recover(self._any_storage_node(), outage)
             self._verify_all(f"after {outage}")
             self._scan_spdk_logs(f"after {outage}")
+            # Symbolise any core the outage produced, here, while the node is
+            # still running the image that made it. e2e.py's own sweep only
+            # detects a core and stops the run, so without this the evidence
+            # that explains the failure is a bare .zst nobody can read.
+            #
+            # Swept cluster-wide on purpose, not narrowed to the node we
+            # outaged: on 2026-09-18 we shut down .201 and .203 was the node
+            # that aborted, because the journal client that lost its JM quorum
+            # is a peer of the node that went away, not the node itself.
+            self.check_core_dump()
 
         self.logger.info("[lblk] integrity held across %d outage types, with "
                          "snapshot+clone before each", len(self.OUTAGE_TYPES))

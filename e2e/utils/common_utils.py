@@ -158,6 +158,18 @@ class CommonUtils:
         file_data = self.ssh_utils.read_file(node, log_file)
         lines = file_data.splitlines()
 
+        # An FIO log always carries at least the job header, so nothing to read
+        # means the job never started -- a mistyped path, a session name the
+        # shell split on a space, a client that lost the mount. Every marker
+        # scan below would then match nothing and the caller would be told the
+        # volume is clean. Refusing to judge an empty log is the difference
+        # between "verified" and "never ran".
+        if not file_data.strip():
+            raise RuntimeError(
+                f"FIO log {log_file} on {node} is missing or empty, so nothing "
+                f"was verified. Treating as a failure rather than a pass: the "
+                f"job most likely never started.")
+
         def _hits(markers, skip=()):
             out = []
             for ln in lines:
