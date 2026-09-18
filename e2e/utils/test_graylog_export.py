@@ -592,11 +592,11 @@ def gl_fetch_container_logs(container_name, source, out_path,
         return written
 
     # Probe, taking the first form the server accepts that actually matches.
-    query, msgs, total = None, None, 0
+    query, total = None, 0
     for cand in candidates:
         m, t = _fetch_page(cand, chunk_from_iso, chunk_to_iso, 1, 0)
         if m is not None and t:
-            query, msgs, total = cand, m, t
+            query, total = cand, t
             break
     if query is None:
         print(f"    WARN: no Graylog messages for {container_name}"
