@@ -2393,7 +2393,7 @@ def list_all_info(cluster_id) -> str:
     lvols = db_controller.get_lvols(cluster_id)
     lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
 
-    snaps = [sn for sn in db_controller.get_snapshots() if sn.cluster_id == cluster_id]
+    snaps = db_controller.get_snapshots(cluster_id)
 
     devs = []
     devs_online = []

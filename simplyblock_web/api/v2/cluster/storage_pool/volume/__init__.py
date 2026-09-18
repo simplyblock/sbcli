@@ -299,8 +299,7 @@ def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volu
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
-        in db.get_snapshots()
-        if snapshot.lvol is not None and snapshot.lvol.get_id() == volume.get_id()
+        in db.get_snapshots_by_lvol_id(volume.get_id())
     ]
 
 

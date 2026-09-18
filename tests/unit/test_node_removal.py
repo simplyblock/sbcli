@@ -130,6 +130,9 @@ class FakeDB:
     def get_snapshots(self):
         return self.snaps
 
+    def get_snapshots_by_node_id(self, node_id):
+        return [s for s in self.snaps if s.lvol and s.lvol.node_id == node_id]
+
     def get_storage_device_by_id(self, did):
         return self.devices[did]
 

@@ -51,11 +51,9 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
         logger.error("Pool name is empty!")
         return False
 
-    pool_list = db_controller.get_pools()
-    for p in pool_list:
-        if p.pool_name == name and p.cluster_id == cluster_id:
-            logger.error(f"Pool found with the same name: {name}")
-            return False
+    if db_controller.pool_name_taken(cluster_id, name):
+        logger.error(f"Pool found with the same name: {name}")
+        return False
 
     try:
         cluster = db_controller.get_cluster_by_id(cluster_id)
@@ -85,7 +83,9 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool = Pool()
     pool.uuid = str(uuid.uuid4())
     pool.cluster_id = cluster.get_id()
-    pool.numeric_id = _generate_numeric_id(pool_list)
+    # Deployment-wide, not per cluster: numeric ids are allocated as max+1 over
+    # every pool, so this one read cannot be narrowed by an index.
+    pool.numeric_id = _generate_numeric_id(db_controller.get_pools())
     pool.pool_name = name
     pool.pool_max_size = pool_max
     pool.lvol_max_size = lvol_max
@@ -255,11 +255,10 @@ def set_pool(uuid, pool_max=None, lvol_max=None, max_rw_iops=0,
         return False, msg
 
     if name and name != pool.pool_name:
-        for p in db_controller.get_pools():
-            if p.pool_name == name and p.cluster_id == pool.cluster_id:
-                msg = f"Pool found with the same name: {name}"
-                logger.error(msg)
-                return False, msg
+        if db_controller.pool_name_taken(pool.cluster_id, name):
+            msg = f"Pool found with the same name: {name}"
+            logger.error(msg)
+            return False, msg
         pool.pool_name = name
 
     if lvols_cr_name and lvols_cr_name != pool.lvols_cr_name:
@@ -561,8 +560,7 @@ def get_cluster_snapshot_utilization(cluster_id, all_snaps=None):
     cluster can run out of physical space without any overprovisioning.
     """
     db_controller = DBController()
-    pool_ids = {p.get_id() for p in db_controller.get_pools()
-                if p.cluster_id == cluster_id}
+    pool_ids = {p.get_id() for p in db_controller.get_pools(cluster_id)}
     if all_snaps is None:
         all_snaps = db_controller.get_mini_snapshots()
     return sum(s.used_size for s in all_snaps if s.lvol.pool_uuid in pool_ids)

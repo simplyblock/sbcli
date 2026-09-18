@@ -89,6 +89,12 @@ class _FakeDB:
     def get_lvols(self, cluster_id=None):
         return [_Lvol()]
 
+    def get_lvol_by_id(self, lvol_id):
+        lvol = _Lvol()
+        if lvol_id != lvol.get_id():
+            raise KeyError(f'LVol {lvol_id} not found')
+        return lvol
+
     def get_storage_node_by_id(self, nid):
         return _Node()
 

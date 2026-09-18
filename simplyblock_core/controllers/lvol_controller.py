@@ -139,12 +139,9 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #     return False, "Storage node has no nvme devices"
 
     #  pool validation
-    pool = None
-    for p in db_controller.get_pools():
-        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
-            pool = p
-            break
-    if not pool:
+    try:
+        pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
+    except KeyError:
         return False, f"Pool not found: {pool_id_or_name}"
 
     if pool.status != pool.STATUS_ACTIVE:
@@ -529,12 +526,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # group; later ones are forced onto the pin. A conflicting explicit
         # --host is an error, not a preference fight.
         from simplyblock_core.controllers import consistency_group_controller as _cgc
-        _cg_pool = None
-        for _p in db_controller.get_pools():
-            if pool_id_or_name in (_p.get_id(), _p.pool_name):
-                _cg_pool = _p
-                break
-        if not _cg_pool:
+        try:
+            _cg_pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
+        except KeyError:
             return False, f"Pool not found: {pool_id_or_name}"
         try:
             cg_group = _cgc.ensure_group(_cg_pool.cluster_id, consistency_group)
@@ -569,12 +563,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         if host_node.lvol_sync_del():
             logger.info(f"LVol sync delete task on node: {host_node.get_id()}, proceeding anyway")
 
-    pool = None
-    for p in db_controller.get_pools():
-        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
-            pool = p
-            break
-    if not pool:
+    try:
+        pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
+    except KeyError:
         return False, f"Pool not found: {pool_id_or_name}"
 
     ops_gate.assert_object_ops_allowed("volume create", cluster_id=pool.cluster_id)
@@ -2779,15 +2770,16 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
 
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
-    lvol = None
-    for lv in db_controller.get_lvols():  # pass
-        if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
-            lvol = lv
-            break
-
-    if not lvol:
-        logger.error(f"LVol id or name not found: {lvol_id_or_name}")
-        return None
+    # Id first, then name — the order the scan this replaces used. Not
+    # dispatched on UUID shape: callers pass ids that are not UUID-shaped.
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id_or_name)
+    except KeyError:
+        try:
+            lvol = db_controller.get_lvol_by_name(lvol_id_or_name)
+        except KeyError:
+            logger.error(f"LVol id or name not found: {lvol_id_or_name}")
+            return None
 
     tasks = []
     snaps = []
@@ -3792,13 +3784,11 @@ def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
 
 def list_by_node(node_id=None):
     db_controller = DBController()
-    lvols = db_controller.get_lvols()
+    lvols = (db_controller.get_lvols_by_node_id(node_id) if node_id
+             else db_controller.get_lvols())
     lvols = sorted(lvols, key=lambda x: x.create_dt)
     data = []
     for lvol in lvols:
-        if node_id:
-            if lvol.node_id != node_id:
-                continue
         logger.debug(lvol)
         cloned_from_snap = ""
         if lvol.cloned_from_snap:
@@ -4073,7 +4063,9 @@ def _subsystem_home_node(db_controller, nqn, cluster_id):
     all of its volumes have to live on one primary and its HA peers. Whichever
     node got there first owns the subsystem for that cluster.
     """
-    for lv in db_controller.get_lvols():
+    # `nqn` carries no index of its own; the cluster scope is what keeps this
+    # off a deployment-wide volume scan.
+    for lv in db_controller.get_lvols(cluster_id):
         if lv.nqn != nqn or lv.status == LVol.STATUS_IN_DELETION:
             continue
         if getattr(lv, "deleted", False) or not lv.node_id:

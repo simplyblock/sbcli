@@ -346,6 +346,18 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Device {id} not found')
         return device
 
+    def get_storage_node_by_device_id(self, id: str) -> StorageNode:
+        """The node whose record holds this NVMe or JM device.
+
+        Devices are not rows of their own — they live inside the StorageNode
+        record — so the index is what says which record contains one. Callers
+        that need the owning node rather than the device itself used to scan
+        every node for it.
+        """
+        node = single_or_none(self.query(StorageNode, 'device_id', id))
+        if node is None:
+            raise KeyError(f'No storage node holds device {id}')
+        return node
 
     def get_pools(self, cluster_id: str | None = None, *, source=None) -> list[Pool]:
         if source is not None:  # in-memory watch batch; see get_storage_nodes_by_cluster_id
@@ -376,6 +388,15 @@ class DBController(metaclass=Singleton):
         if pool is None:
             raise KeyError(f'Pool {name} not found')
         return pool
+
+    def pool_name_taken(self, cluster_id: str, name: str) -> bool:
+        """Whether this cluster already holds a pool by this name.
+
+        The user-facing pre-check for the ``Unique(cluster_id, pool_name)``
+        constraint, mirroring :meth:`lvol_name_taken` — the constraint itself
+        only ever fires on an invariant breach.
+        """
+        return bool(self.query_ids(Pool, 'cluster_id+pool_name', cluster_id, name))
 
     def get_pool_by_id_or_name(self, id_or_name: str, cluster_id: str | None = None) -> Pool:
         """Look a pool up by UUID, falling back to its name.

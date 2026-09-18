@@ -218,7 +218,10 @@ def process_device_event(event, logger):
 
         device_obj = None
         device_node_obj = None
-        for node in db.get_storage_nodes():
+        # `cluster_device_order` is ordered within one cluster, so the search
+        # belongs in the reporting node's cluster; it carries no index of its
+        # own, which is what keeps this a loop rather than a lookup.
+        for node in db.get_storage_nodes_by_cluster_id(event_node_obj.cluster_id):
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
                     device_obj = dev

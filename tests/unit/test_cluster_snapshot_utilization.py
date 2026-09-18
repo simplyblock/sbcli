@@ -38,7 +38,10 @@ class TestClusterSnapshotUtilization(unittest.TestCase):
     def _run(self, pools, snaps, all_snaps_passed=True):
         with patch.object(pool_controller, "DBController") as db_cls:
             db = db_cls.return_value
-            db.get_pools.return_value = pools
+            # Honour the cluster scope: the filter lives in get_pools() now, so
+            # a double that ignores the argument would assert nothing.
+            db.get_pools.side_effect = lambda cluster_id=None: [
+                p for p in pools if not cluster_id or p.cluster_id == cluster_id]
             db.get_mini_snapshots.return_value = snaps
             return pool_controller.get_cluster_snapshot_utilization(
                 CLUSTER, all_snaps=snaps if all_snaps_passed else None)

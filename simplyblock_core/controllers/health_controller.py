@@ -743,7 +743,7 @@ def _check_node_lvstore(
 
     nodes = {}
     devices = {}
-    for n in db_controller.get_storage_nodes():
+    for n in db_controller.get_storage_nodes_by_cluster_id(node.cluster_id):
         nodes[n.get_id()] = n
         for dev in n.nvme_devices:
             devices[dev.get_id()] = dev
@@ -1040,16 +1040,18 @@ def check_node(node_id, with_devices=True):
             for jm_id in snode.jm_ids:
                 logger.info(f"Checking connection to JM device {jm_id}")
                 if jm_id and jm_id not in connected_jms:
-                    for nd in db_controller.get_storage_nodes():
-                        if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                            if _peer_connections_relevant(nd):
-                                node_remote_devices_check = False
-                                logger.error(f"JM device {jm_id} is not connected")
-                            else:
-                                logger.info(
-                                    "JM device %s not connected, but owning node %s is %s "
-                                    "— expected, not failing health", jm_id, nd.get_id(), nd.status)
-                            break
+                    try:
+                        nd = db_controller.get_storage_node_by_device_id(jm_id)
+                    except KeyError:
+                        nd = None
+                    if nd is not None:
+                        if _peer_connections_relevant(nd):
+                            node_remote_devices_check = False
+                            logger.error(f"JM device {jm_id} is not connected")
+                        else:
+                            logger.info(
+                                "JM device %s not connected, but owning node %s is %s "
+                                "— expected, not failing health", jm_id, nd.get_id(), nd.status)
 
         print("*" * 100)
         if snode.lvstore_stack:
@@ -1101,9 +1103,12 @@ def check_device(device_id):
         device = db_controller.get_storage_device_by_id(device_id)
     except KeyError:
         # is jm device ?
-        for node in db_controller.get_storage_nodes():
-            if node.jm_device and node.jm_device.get_id() == device_id:
-                return check_jm_device(node.jm_device.get_id())
+        try:
+            node = db_controller.get_storage_node_by_device_id(device_id)
+        except KeyError:
+            node = None
+        if node is not None and node.jm_device:
+            return check_jm_device(node.jm_device.get_id())
 
         logger.error("device not found")
         return False
