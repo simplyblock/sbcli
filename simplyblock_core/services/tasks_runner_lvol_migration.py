@@ -1432,6 +1432,9 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             try:
                 snap = db.get_snapshot_by_id(snap_uuid)
             except KeyError:
+                logger.warning(
+                    f"_handle_snap_copy: retrigger reason=snapshot_missing "
+                    f"snap={snap_uuid} — restarting bdev_lvol_transfer from offset 0")
                 migration.transfer_context = {}
                 migration.write_to_db(db.kv_store)
                 return False, True, f"Snapshot {snap_uuid} disappeared during transfer"
@@ -1442,6 +1445,11 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if not t['transfer_done']:
                 result = src_rpc.bdev_lvol_transfer_stat(src_composite)
                 if result is None:
+                    logger.warning(
+                        f"_handle_snap_copy: retrigger reason=stat_rpc_returned_none "
+                        f"snap={snap_uuid} composite={src_composite} — cannot confirm "
+                        f"whether the prior transfer finished; restarting bdev_lvol_transfer "
+                        f"from offset 0")
                     migration.transfer_context = {}
                     migration.write_to_db(db.kv_store)
                     return False, True, (
@@ -1454,6 +1462,10 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     prev_post_done = False
                     continue
                 if state in ('Failed', 'No process'):
+                    logger.warning(
+                        f"_handle_snap_copy: retrigger reason=stat_state_{state.replace(' ', '_').lower()} "
+                        f"snap={snap_uuid} composite={src_composite} — restarting "
+                        f"bdev_lvol_transfer from offset 0")
                     migration.transfer_context = {}
                     migration.write_to_db(db.kv_store)
                     return False, True, f"Snapshot transfer {state} for {snap_uuid}"
@@ -1470,6 +1482,10 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 tgt_sec=tgt_sec, sec_rpc=sec_rpc,
                 tgt_ter=tgt_ter, ter_rpc=ter_rpc)
             if not ok:
+                logger.warning(
+                    f"_handle_snap_copy: retrigger reason=post_process_failed "
+                    f"snap={snap_uuid} error={err!r} — transfer_done stays True; "
+                    f"retry resumes at post-processing, not bdev_lvol_transfer")
                 # The data transfer already completed (t['transfer_done'] is
                 # True) -- only post-processing (add_clone/convert/cleanup)
                 # failed. Keep transfer_context so the retry resumes at
@@ -3337,6 +3353,9 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             try:
                 snap = db.get_snapshot_by_id(snap_uuid)
             except KeyError:
+                logger.warning(
+                    f"_handle_group_snap_copy: retrigger reason=snapshot_missing "
+                    f"snap={snap_uuid} — restarting bdev_lvol_transfer from offset 0")
                 migration.transfer_context = {}
                 migration.write_to_db(db.kv_store)
                 return False, True, f"Snapshot {snap_uuid} disappeared during transfer"
@@ -3345,6 +3364,11 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if not t['transfer_done']:
                 result = src_rpc.bdev_lvol_transfer_stat(src_composite)
                 if result is None:
+                    logger.warning(
+                        f"_handle_group_snap_copy: retrigger reason=stat_rpc_returned_none "
+                        f"snap={snap_uuid} composite={src_composite} — cannot confirm "
+                        f"whether the prior transfer finished; restarting bdev_lvol_transfer "
+                        f"from offset 0")
                     migration.transfer_context = {}
                     migration.write_to_db(db.kv_store)
                     return False, True, f"bdev_lvol_transfer_stat returned None for {snap_uuid}"
@@ -3354,6 +3378,10 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     migration.write_to_db(db.kv_store)
                     return False, False, None
                 if state in ('Failed', 'No process'):
+                    logger.warning(
+                        f"_handle_group_snap_copy: retrigger reason=stat_state_{state.replace(' ', '_').lower()} "
+                        f"snap={snap_uuid} composite={src_composite} — restarting "
+                        f"bdev_lvol_transfer from offset 0")
                     migration.transfer_context = {}
                     migration.write_to_db(db.kv_store)
                     return False, True, f"Snapshot transfer {state} for {snap_uuid}"
@@ -3362,6 +3390,10 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             # Transfer done — record without add_clone/convert.
             ok, err = _post_process_snap_group(snap, migration)
             if not ok:
+                logger.warning(
+                    f"_handle_group_snap_copy: retrigger reason=post_process_failed "
+                    f"snap={snap_uuid} error={err!r} — transfer_done stays True; "
+                    f"retry resumes at post-processing, not bdev_lvol_transfer")
                 # As above: the transfer itself already completed, so keep
                 # transfer_context (t['transfer_done'] stays True) rather than
                 # wiping it and forcing a full re-transfer on retry.
