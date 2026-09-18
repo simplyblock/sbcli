@@ -65,10 +65,10 @@ def indexed_model_classes() -> list[type]:
     import importlib
     import pkgutil
 
-    import simplyblock_core.models
+    from simplyblock_core import models
 
     found: dict[str, type] = {}
-    for module_info in pkgutil.iter_modules(simplyblock_core.models.__path__):
+    for module_info in pkgutil.iter_modules(models.__path__):
         module = importlib.import_module(f'simplyblock_core.models.{module_info.name}')
         for name in dir(module):
             candidate = getattr(module, name)
