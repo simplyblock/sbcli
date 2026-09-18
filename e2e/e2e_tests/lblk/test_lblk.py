@@ -1241,7 +1241,18 @@ class _LblkUnfencedJournal(_LblkBase):
         # there is no container to inspect.
         state = ("running" if self.k8s_test
                  else self._spdk_container_state(ip, port))
-        head_reset = (after.get("mem_head", 0) or 0) < (before.get("mem_head", 0) or 0)
+        # Sample the ring here, before deciding, so the head comparison is
+        # available to the decision rather than only to the report.
+        post = {}
+        try:
+            post = get_stats(self._spdk_runner, ip,
+                             self._spdk_exec_prefix(ip, port), sock,
+                             lvs_name=lvs, logger=self.logger) or {}
+        except MdJournalError as exc:
+            self.logger.info("[lblk] ring not readable right after the "
+                             "outage (%s); relying on container state", exc)
+        head_reset = (post.get("mem_head") is not None
+                      and post.get("mem_head", 0) < before.get("mem_head", 0))
         self._cp_restarted = state != "running" or head_reset
         if self._cp_restarted:
             # The control plane restarted the node, which is what it is for.
