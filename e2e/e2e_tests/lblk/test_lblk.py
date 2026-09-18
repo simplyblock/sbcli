@@ -24,6 +24,7 @@ import random
 import re
 import shlex
 import threading
+import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
@@ -502,7 +503,11 @@ class _LblkBase(TestClusterBase):
             lvol_name, mount_path=mount, log_path=log, runtime=runtime,
             name=f"lblk{tag}", rw="randrw", bs="4K", numjobs=2, nrfiles=4,
             size="512M", verify="md5", verify_fatal=fatal)
-        if hasattr(handle, "join"):
+        # _run_fio_dual returns a Thread on docker and a job-name *string* on
+        # k8s. hasattr(handle, "join") is true for both -- str.join exists --
+        # so the old check called "jobname".join() and raised TypeError on
+        # every k8s run. Test for the type we actually mean.
+        if isinstance(handle, threading.Thread):
             handle.join()
 
         if self.k8s_test:
@@ -512,6 +517,38 @@ class _LblkBase(TestClusterBase):
                 node=self.client_machines[0], log_file=log,
                 md5_severity=self._md5_severity)
         self.logger.info("[lblk] filesystem FIO clean on clone %s", lvol_name)
+
+    def _stats_after_recovery(self, ip, prefix, sock, lvs, timeout=240):
+        """get_stats, but tolerant of a node that is up before it is reachable.
+
+        sbcli reporting a node online and healthy does not mean kubectl can
+        reach it yet: the transport is `kubectl exec`, which dials the kubelet
+        on port 10250, and after a partition or a restart that listener can
+        still be refusing connections -- "error dialing backend: dial tcp
+        10.0.0.10:10250: i/o timeout". On docker the equivalent is the SPDK
+        socket not being back yet.
+
+        Retrying is right here and tolerating is not: the caller needs the
+        counters to make its assertion, so a read that never succeeds must
+        still fail the test. This only stops us from failing on the first
+        attempt during a window we already know is unsettled.
+        """
+        deadline = time.time() + timeout
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return get_stats(self._spdk_runner, ip, prefix, sock,
+                                 lvs_name=lvs, logger=self.logger)
+            except MdJournalError as exc:
+                if time.time() >= deadline:
+                    raise MdJournalError(
+                        f"[lblk] journal stats on {ip} were still unreadable "
+                        f"{timeout}s after the node came back, over "
+                        f"{attempt} attempts: {exc}") from exc
+                self.logger.info("[lblk] journal stats on %s not readable yet "
+                                 "(attempt %d): %s", ip, attempt, exc)
+                sleep_n_sec(10)
 
     def _metadata_churn(self, lvol_name, tag):
         """Snapshot + clone, and report what it did to the journal.
@@ -1077,9 +1114,8 @@ class _LblkJournalRecovery(_LblkBase):
 
         # Corroboration from the journal's own counters: the ring should have
         # drained on the way back up.
-        after = get_stats(self._spdk_runner, ip,
-                          self._spdk_exec_prefix(ip, node["rpc_port"]),
-                          sock, lvs_name=lvs, logger=self.logger)
+        after = self._stats_after_recovery(
+            ip, self._spdk_exec_prefix(ip, node["rpc_port"]), sock, lvs)
         self.logger.info("[lblk] ring after recovery: %s/%s slots used, "
                          "disk_head=%s disk_tail=%s",
                          after.get("used_slots"), after.get("num_slots"),
@@ -1293,9 +1329,8 @@ class _LblkUnfencedJournal(_LblkBase):
                                                     timeout=300)
         sleep_n_sec(30)
 
-        after = get_stats(self._spdk_runner, ip,
-                          self._spdk_exec_prefix(ip, port), sock,
-                          lvs_name=lvs, logger=self.logger)
+        after = self._stats_after_recovery(
+            ip, self._spdk_exec_prefix(ip, port), sock, lvs)
         appended = after.get("mem_head", 0) - before.get("mem_head", 0)
         self.logger.info("[lblk] ring head before=%s after=%s (+%s), "
                          "drain_demoted=%s",
