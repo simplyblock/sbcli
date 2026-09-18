@@ -43,9 +43,36 @@ JOURNAL_FATAL_MARKERS = (
     "md journal recovery failed",
     "md journal recovery read",
     "store has an md journal but the device cannot carry it",
-    "md journal append failed",
     "unsupported base blocklen",
     "device too small for md journal",
+)
+
+#: Write failures that the journal HANDLES. Reported, never fatal.
+#:
+#: "md journal append failed" was in the fatal list and should not have been.
+#: Checked against append_write_cpl (blob_md_journal.c:355): on failure it rolls
+#: mem_head back, decrements used_slots, completes the op with the error and
+#: pumps the queue. The slot is un-allocated, so nothing is left half-written --
+#: that is the journal correctly REFUSING to acknowledge an entry it could not
+#: persist, which is the opposite of corruption.
+#:
+#: It fires during normal failover. From a real run, all inside 700us:
+#:
+#:   alg_io_split_parity2.cpp:922  DISTRIBD stopped write IO
+#:   alg_journal.cpp:3420          received a change_leadership event
+#:   blob_md_journal.c:511         md journal home write failed: -5 (retry)
+#:   blob_md_journal.c:355         md journal append failed: -5
+#:   lvol.c:2942                   Cannot update lvolstore on failover
+#:   blobstore.c:10903             Updating failed and unfreeze IOs on failover
+#:
+#: The distrib layer blocks IO while leadership moves (b_block_new_io=1), so
+#: the append gets EIO by design. Treating that as corruption failed a test on
+#: the cluster behaving exactly as intended. The home-write marker says
+#: "(retry)" in the message itself.
+JOURNAL_TRANSIENT_MARKERS = (
+    "md journal append failed",
+    "md journal home write failed",
+    "md journal entry zeroing failed",
 )
 
 #: Blobstore metadata corruption that ABORTS the operation reporting it. These
@@ -258,6 +285,8 @@ def scan_log_for_corruption(text, context=""):
     # BLOBSTORE_BENIGN_MARKERS for why the near-identical wording matters.
     info += [f"benign md scan: {m}" for m in BLOBSTORE_BENIGN_MARKERS
              if m in low]
+    info += [f"journal retry (expected during failover): {m}"
+             for m in JOURNAL_TRANSIENT_MARKERS if m in low]
     for marker, label in ((LOG_ENABLED, "journal enabled"),
                           (LOG_RECOVERY_EMPTY, "recovery: ring empty"),
                           (LOG_RESCAN, "rescan on takeover")):

@@ -125,6 +125,25 @@ class _LblkBase(TestClusterBase):
         """
         return self.ssh_obj
 
+    def _make_pool(self):
+        """Create the pool AND the StorageClass k8s provisions through.
+
+        _add_pool_dual does not create a StorageClass. Every other k8s test in
+        the suite -- 54 of them -- calls _k8s_ensure_storage_class() right
+        after the pool, and the lblk tests did not, so on k8s every PVC sat
+        Pending until the 300s wait gave up:
+
+          TimeoutError: [K8sUtils] PVC 'lblkfnraw2545' not Bound within 300s
+
+        Wrapped here rather than repeated in five run() methods, because the
+        failure mode is a five-minute timeout with no mention of a
+        StorageClass anywhere in it.
+        """
+        pool = self._add_pool_dual()
+        if self.k8s_test:
+            self._k8s_ensure_storage_class()
+        return pool
+
     def _init_lblk(self):
         # Docker's verifier reaches a client machine over ssh. K8s has no
         # ssh-reachable target at all, so it gets no verifier here --
@@ -761,7 +780,7 @@ class _LblkFunctional(_LblkBase):
         self.assert_devices_are_aio()
         self.assert_journals_live()
 
-        pool = self._add_pool_dual()
+        pool = self._make_pool()
 
         # _provision_raw, not _create_and_connect: on k8s the latter makes a
         # FILESYSTEM PVC and hands back its name, which is not something the
@@ -800,7 +819,7 @@ class _LblkIntegrity(_LblkBase):
         self.assert_devices_are_aio()
         self.assert_journals_live()
 
-        pool = self._add_pool_dual()
+        pool = self._make_pool()
 
         # A mix on purpose, because the two lanes fail differently.
         #
@@ -876,7 +895,7 @@ class _LblkDeviceFault(_LblkBase):
         self.assert_cluster_is_lblk()
         self.assert_devices_are_aio()
 
-        pool = self._add_pool_dual()
+        pool = self._make_pool()
         self._create_and_connect(f"lblkdev{random.randint(100, 999)}", pool)
         self._stamp_all()
 
@@ -933,7 +952,7 @@ class _LblkJournalRecovery(_LblkBase):
         self.assert_cluster_is_lblk()
         self.assert_journals_live()
 
-        pool = self._add_pool_dual()
+        pool = self._make_pool()
         self._create_and_connect(f"lblkjr{random.randint(100, 999)}", pool)
         self._stamp_all()
 
@@ -1162,7 +1181,7 @@ class _LblkUnfencedJournal(_LblkBase):
         self.assert_cluster_is_lblk()
         self.assert_journals_live()
 
-        pool = self._add_pool_dual()
+        pool = self._make_pool()
         self._create_and_connect(f"lblkfence{random.randint(100, 999)}", pool)
         self._stamp_all()
 
@@ -1210,10 +1229,20 @@ class _LblkUnfencedJournal(_LblkBase):
 
         # The container must still be the one we isolated. If the control plane
         # replaced it anyway there is no stale writer and nothing to conclude.
-        # Docker can see the container; on k8s the pod is managed for us.
+        # Two independent signs the process was replaced. The container check
+        # alone is not enough: by the time we look, the control plane has
+        # usually recreated it, so it reads "running" and the restart goes
+        # unnoticed -- which is how a run reported drain_demoted=False and
+        # blamed the isolation, when the ring head had gone 4351 -> 0.
+        #
+        # A head that moved BACKWARDS is proof on its own: mem_head only ever
+        # advances within a process's lifetime, so a lower value means a fresh
+        # SPDK. That is the reliable signal, and it works on k8s too where
+        # there is no container to inspect.
         state = ("running" if self.k8s_test
                  else self._spdk_container_state(ip, port))
-        self._cp_restarted = state != "running"
+        head_reset = (after.get("mem_head", 0) or 0) < (before.get("mem_head", 0) or 0)
+        self._cp_restarted = state != "running" or head_reset
         if self._cp_restarted:
             # The control plane restarted the node, which is what it is for.
             # Bring it back and carry on rather than abandoning the run. The
