@@ -30,8 +30,8 @@ def check_mgmt_disk_util_docker(cluster):
     nodes_stats = prom_client.get_node_filesystem_metrics(history="5m")
     if nodes_stats:
         for node_name in nodes_stats:
-            avail_bytes = nodes_stats[node_name].get("avail_bytes")[0]
-            size_bytes = nodes_stats[node_name].get("size_bytes")[0]
+            avail_bytes = int(nodes_stats[node_name].get("avail_bytes")[0])
+            size_bytes = int(nodes_stats[node_name].get("size_bytes")[0])
             dist_util = int( 100 - ((avail_bytes * 100) / size_bytes))
             if dist_util > 90:
                 logger.warning(f"Node {node_name} disk util: {dist_util}%")
@@ -42,10 +42,11 @@ def check_api_metrics(cluster):
     api_stats = prom_client.get_api_metrics(history="5m")
     data = []
     if api_stats:
-        for api_stat in api_stats:
+        for node in api_stats:
+            api_stat = api_stats[node]
             for i in range(len(api_stat.get("seconds_count"))):
-                http_request_duration_seconds_count = api_stat.get("seconds_count")[i]
-                http_request_duration_seconds_sum = api_stats.get("seconds_sum")[i]
+                http_request_duration_seconds_count = float(api_stat.get("seconds_count")[i])
+                http_request_duration_seconds_sum = float(api_stat.get("seconds_sum")[i])
                 data.append(http_request_duration_seconds_sum/http_request_duration_seconds_count)
 
         avg_api_req_duration = sum(data)/len(data)
