@@ -136,11 +136,18 @@ def invalidate_all() -> None:
 # Shared instances, one per concern, so unrelated keys never collide and
 # targeted invalidation stays simple.
 capacity_scan_cache = TTLCache()   # "mini_lvols" / "mini_snapshots" -> list
+index_state_cache = TTLCache()     # (class name, index name) -> building/ready/disabled
 leader_cache = TTLCache()          # (cluster_id, lvs_name) -> leader node id
 no_leader_cache = TTLCache()       # (cluster_id, lvs_name) -> True (LVS confirmed leaderless)
 quorum_verdict_cache = TTLCache()  # (node_id, lvs_peer_ids) -> bool (disconnected)
 
 CAPACITY_SCAN_TTL_SEC = 10
+# Index state changes exactly three times in an index's life (declared ->
+# backfilled -> ready, plus the kill switch), so the read is almost always
+# wasted; the TTL turns "one read per query" into "one read per index per
+# process per interval". Short enough that a `disabled` kill switch reaches
+# every worker within a few seconds.
+INDEX_STATE_TTL_SEC = 5
 LEADER_TTL_SEC = 8
 # Negative verdict: a full find_leader_with_failover pass (scan + recovery)
 # found NO confirmable leader. Object create/clone/snapshot requests against

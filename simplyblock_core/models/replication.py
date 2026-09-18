@@ -9,6 +9,7 @@ the ``cluster_id/uuid`` composite id.
 from typing import ClassVar
 import datetime
 
+from simplyblock_core.models.indices import Index, Unique
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
@@ -19,6 +20,11 @@ class ReplicationTarget(BaseModel):
     could only hold one destination and was overwritten by every
     ``cluster add-replication``.
     """
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'target_name')),
+    )
 
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
@@ -47,6 +53,11 @@ class ReplicationTarget(BaseModel):
 
 class ReplicationPolicy(BaseModel):
     """Cadence, mode and retention shared by a group of volumes."""
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'policy_name')),
+    )
 
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
@@ -115,6 +126,16 @@ class ConsistencyGroup(BaseModel):
     replication policy owns the group, and empty for a standalone group. The
     membership and generation model is identical either way.
     """
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Unique(('cluster_id', 'group_name')),
+        # Indexed by the bare uuid: the field holds a ReplicationPolicy
+        # get_id(), and callers resolve a policy from either half of it.
+        Index('policy_id', extract=lambda group: (
+            [(group.policy_id.split('/')[-1],)] if group.policy_id else []
+        )),
+    )
 
     cluster_id: str = ""
     #: group name, unique per cluster; the identity a labeled volume joins by.

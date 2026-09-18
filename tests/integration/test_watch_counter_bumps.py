@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from simplyblock_core import watches
+from simplyblock_core.models import watches
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.stats import LVolStatObject

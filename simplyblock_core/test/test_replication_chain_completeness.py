@@ -23,6 +23,27 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_replication as sr
 
 
+class _Pool:
+    """The target pool a cross-cluster clone lands in."""
+
+    def __init__(self, pool_id, cluster_id="C_TGT"):
+        self.uuid = pool_id
+        self.pool_name = pool_id
+        self.cluster_id = cluster_id
+
+    def get_id(self):
+        return self.uuid
+
+
+class _PlaceableLvol:
+    """Mixin for the volume fakes the clone path places into a pool."""
+
+    def place_in_pool(self, pool):
+        self.pool_uuid = pool.get_id()
+        self.pool_name = pool.pool_name
+        self.cluster_id = pool.cluster_id
+
+
 LVS = "LVS_1"
 
 
@@ -428,16 +449,18 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             return {"P": primary, "S": peer}[nid]
         def release_lvol_ns_slot(self, lvol):
             pass
-        def get_lvols(self):
+        def get_lvols(self, cluster_id=None):
             # No copy of this subsystem exists on the target yet, so the
             # one-subsystem-one-primary guard has nothing to redirect to.
             return []
+        def get_pool_by_id(self, pool_id):
+            return _Pool(pool_id)
         def get_lvol_replication_objects(self):
             # This volume is not a fail-over copy, so no original is
             # superseded and nothing gets retired.
             return []
 
-    class _Lvol:
+    class _Lvol(_PlaceableLvol):
         uuid = "ORIG"; nqn = "nqn.test:lvol:ORIG"; ns_id = 7
         # Real LVol carries these; the clone reads namespace to decide whether
         # it attaches to a sibling's subsystem or creates its own.
@@ -514,10 +537,13 @@ def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
         def release_lvol_ns_slot(self, lvol):
             pass
 
-        def get_lvols(self):
+        def get_lvols(self, cluster_id=None):
             return []
 
-    class _Lvol:
+        def get_pool_by_id(self, pool_id):
+            return _Pool(pool_id)
+
+    class _Lvol(_PlaceableLvol):
         uuid = "DR_ID"; nqn = "nqn.test:lvol:SHARED"; ns_id = 3
         guid = "DR_NGUID"
         ns_uuid = ""

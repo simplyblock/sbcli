@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from simplyblock_core import watches
+from simplyblock_core.models import watches
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation
 from simplyblock_core.models.events import EventObj

@@ -56,14 +56,7 @@ async def watch_device(cluster_id, node_id, device_id):
 
 
 def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNode:
-    try:
-        return next(
-            node
-            for node in db_controller.get_storage_nodes()
-            if node.jm_device.get_id() == id
-        )
-    except StopIteration:
-        raise KeyError(f'No storage node with JM device {id}')
+    return db_controller.get_storage_node_by_device_id(id)
 
 
 # Allowed values for the `cause` argument of device_set_state.
@@ -1571,21 +1564,16 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
 
 def new_device_from_failed(device_id):
     db_controller = DBController()
-    device = None
-    device_node = None
-    for node in db_controller.get_storage_nodes():
-        for dev in node.nvme_devices:
-            if dev.get_id() == device_id:
-                device = dev
-                device_node = node
-                break
-
-    if not device:
-        logger.info(f"Device not found: {device_id}")
+    try:
+        device_node = db_controller.get_storage_node_by_device_id(device_id)
+    except KeyError:
+        logger.info("node not found")
         return False
 
-    if not device_node:
-        logger.info("node not found")
+    device = next(
+        (dev for dev in device_node.nvme_devices if dev.get_id() == device_id), None)
+    if not device:
+        logger.info(f"Device not found: {device_id}")
         return False
 
     if device.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED:

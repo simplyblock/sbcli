@@ -7,7 +7,7 @@ from typing import ClassVar, TypeVar, Union, cast, get_args, get_origin
 
 from pydantic import SecretBytes, SecretStr
 
-from simplyblock_core import watches
+from simplyblock_core.models import indices, watches
 
 
 _T = TypeVar('_T')
@@ -43,6 +43,28 @@ def default_factory(factory: Callable[[], _T]) -> _T:
     return cast(_T, _DefaultFactory(factory))
 
 
+def _is_fdb_store(kv_store) -> bool:
+    """True when ``kv_store`` is a live FoundationDB handle.
+
+    Index maintenance has to READ the record it is replacing, to move the
+    entries that record owns; unlike a plain single-key write it cannot run
+    against a store that only records what it is told. So a caller that hands a
+    model a mock store — several controller tests patch ``DBController`` inside
+    the module under test — gets the plain write, exactly as before.
+
+    The names are looked up at call time: the ``fdb`` binding injects its API at
+    ``fdb.api_version()`` time, and the unit tier's stub defines neither, which
+    is the same "no indices here" answer.
+    """
+    import fdb
+    handles = tuple(
+        handle for handle
+        in (getattr(fdb, 'Database', None), getattr(fdb, 'Transaction', None))
+        if isinstance(handle, type)
+    )
+    return bool(handles) and isinstance(kv_store, handles)
+
+
 def _detached(value: _T) -> _T:
     """A copy of ``value`` that shares no mutable structure with it.
 
@@ -75,6 +97,14 @@ class BaseModel:
     # same FDB transaction so watchers (SSE API) wake up. Plain class attribute,
     # not an annotation: must stay out of get_attrs_map()/to_dict().
     _WATCHED = False
+
+    # Declared secondary indices (see models/indices.py).
+    # write_to_db()/remove()/DBController.atomic_update() maintain every entry
+    # in the SAME FDB transaction as the entity mutation, so an index can never
+    # be left describing a record that was never written. Plain class
+    # attribute like _WATCHED, not an annotation, so it stays out of
+    # get_attrs_map()/to_dict() and is never serialized.
+    _INDEXES: ClassVar[tuple] = ()
 
     id: str = ""
     uuid: str = ""
@@ -307,6 +337,18 @@ class BaseModel:
     # snapshot semantics (and its 5s budget) unchanged.
     _READ_CHUNK_SIZE = 2000
 
+    @classmethod
+    def keyspace_prefix(cls) -> bytes:
+        """``<object_type>/<ClassName>/`` — the key range one class occupies.
+
+        NOT ``get_db_id()`` of a fresh instance: a class whose ``get_id()``
+        composes a parent id renders an empty record as ``object/Class//``,
+        which matches nothing. The equivalent spelling at existing call sites
+        is ``read_from_db(id=" ")``.
+        """
+        prototype = cls()
+        return f'{prototype.object_type}/{prototype.name}/'.encode()
+
     @staticmethod
     def _next_prefix(prefix: bytes) -> bytes:
         """Smallest key strictly greater than every key starting with
@@ -382,17 +424,97 @@ class BaseModel:
         """
         return ()
 
-    @staticmethod
-    def _write_tx(tr, key, value, rollup_key, version_key):
-        tr.set(key, value)
-        tr.add(rollup_key, watches.ONE_LE64)
-        tr.add(version_key, watches.ONE_LE64)
+    @classmethod
+    def active_indexes(cls, kv_store):
+        """The indices this process maintains on a write to ``kv_store``.
+
+        Resolving an index's state is a DB read (``index_meta/<Class>/<name>``,
+        TTL-cached per class), so a class with no declarations never pays for
+        one, and neither does a write to a store that cannot maintain an index
+        at all (see :func:`_is_fdb_store`).
+        """
+        declared = indices.indexes_of(cls)
+        if not declared or not _is_fdb_store(kv_store):
+            return ()
+        from simplyblock_core.db_controller import DBController
+        db = DBController()
+        return tuple(
+            index for index in declared
+            if db.index_state(cls, index) != indices.STATE_DISABLED
+        )
 
     @staticmethod
-    def _remove_tx(tr, key, rollup_key, version_key):
+    def _read_record(tr, key, model_cls):
+        """The record currently stored at ``key``, or ``None``."""
+        raw = tr.get(key).wait()
+        if raw is None or not raw.present():
+            return None
+        return model_cls().from_dict(json.loads(bytes(raw)))
+
+    @staticmethod
+    def index_keys(model_cls, index_list, obj) -> dict:
+        """``{index name: keys}`` for one record — the "before" of a write diff."""
+        return {index.name: index.keys(model_cls, obj) for index in index_list}
+
+    @staticmethod
+    def _apply_index_diff(tr, model_cls, index_list, old_keys, obj):
+        """Move every index entry named by ``old_keys`` onto ``obj``.
+
+        ``old_keys`` comes from the record read inside this same transaction (or
+        from the object before the caller mutated it), so the diff is computed
+        against what is actually stored rather than against whatever the caller
+        last saw.
+        """
+        entity_id = str(obj.get_id())
+        encoded_id = entity_id.encode()
+        for index in index_list:
+            old = old_keys.get(index.name, set())
+            new = index.keys(model_cls, obj)
+            if index.unique:
+                for values in index.tuples(obj):
+                    key = index.key(model_cls, values, entity_id)
+                    if key in old:
+                        continue
+                    held = tr.get(key).wait()
+                    if held is not None and held.present():
+                        holder = bytes(held).decode()
+                        if holder != entity_id:
+                            raise indices.UniqueIndexViolation(
+                                model_cls.__name__, index.name, values,
+                                holder, entity_id)
+            for key in old - new:
+                tr.clear(key)
+            for key in new:
+                tr[key] = encoded_id
+
+    @staticmethod
+    def _write_tx(tr, key, value, model_cls, obj, index_list, rollup_key, version_key):
+        if index_list:
+            BaseModel._apply_index_diff(
+                tr, model_cls, index_list,
+                BaseModel.index_keys(
+                    model_cls, index_list,
+                    BaseModel._read_record(tr, key, model_cls)),
+                obj)
+        tr.set(key, value)
+        if rollup_key is not None:
+            tr.add(rollup_key, watches.ONE_LE64)
+            tr.add(version_key, watches.ONE_LE64)
+
+    @staticmethod
+    def _remove_tx(tr, key, model_cls, obj, index_list, rollup_key, version_key):
+        if index_list:
+            # Clear the keys of the record that is actually stored: the caller's
+            # copy may be stale, and for a unique index a stale value could name
+            # a key another entity has since taken over.
+            stored = BaseModel._read_record(tr, key, model_cls) or obj
+            for index in index_list:
+                for index_key in index.keys(model_cls, stored):
+                    tr.clear(index_key)
         tr.clear(key)
-        tr.add(rollup_key, watches.ONE_LE64)
-        tr.clear(version_key)
+        if rollup_key is not None:
+            tr.add(rollup_key, watches.ONE_LE64)
+            tr.clear(version_key)
 
     def write_to_db(self, kv_store=None):
         if not kv_store:
@@ -422,31 +544,48 @@ class BaseModel:
                     " <- ".join(reversed(frames)))
             key = self.get_db_id().encode()
             value = json.dumps(self.to_dict(unwrap_secrets=True)).encode()
-            if self._WATCHED:
+            index_list = self.active_indexes(kv_store)
+            if self._WATCHED or index_list:
                 import fdb
-                scope = self.watch_scope()
                 fdb.transactional(BaseModel._write_tx)(
-                    kv_store, key, value,
-                    watches.watch_index_rollup_key(type(self), scope),
-                    watches.watch_index_version_key(type(self), scope, self.get_id()))
+                    kv_store, key, value, type(self), self, index_list,
+                    *self._watch_keys())
             else:
                 kv_store.set(key, value)
             return True
+        except indices.UniqueIndexViolation:
+            # An invariant breach, not a write failure: the pre-check that
+            # produces the clean "name already exists" error either did not run
+            # or the data is already inconsistent. It propagates (to a 500 and
+            # the cluster's error log) rather than being swallowed like a
+            # transport error — and rather than taking the process down.
+            from simplyblock_core import utils
+            utils.get_logger(__name__).exception(
+                "Unique index violation writing %s", self.get_db_id())
+            raise
         except Exception:
             from simplyblock_core import utils
             utils.get_logger(__name__).exception("Error writing to FDB")
             exit(1)
 
+    def _watch_keys(self):
+        """``(rollup_key, version_key)`` for a watched class, else ``(None, None)``."""
+        if not self._WATCHED:
+            return (None, None)
+        scope = self.watch_scope()
+        return (
+            watches.watch_index_rollup_key(type(self), scope),
+            watches.watch_index_version_key(type(self), scope, self.get_id()),
+        )
+
     def remove(self, kv_store):
         key = self.get_db_id().encode()
-        if not self._WATCHED:
+        index_list = self.active_indexes(kv_store)
+        if not (self._WATCHED or index_list):
             return kv_store.clear(key)
         import fdb
-        scope = self.watch_scope()
         return fdb.transactional(BaseModel._remove_tx)(
-            kv_store, key,
-            watches.watch_index_rollup_key(type(self), scope),
-            watches.watch_index_version_key(type(self), scope, self.get_id()))
+            kv_store, key, type(self), self, index_list, *self._watch_keys())
 
     def keys(self):
         return self.get_attrs_map().keys()

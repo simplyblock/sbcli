@@ -117,18 +117,14 @@ def add_lvol():
     pool_id_or_name = cl_data['pool']
     size = core_utils.parse_size(cl_data['size'])
 
-    pool = None
-    for p in db.get_pools():
-        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
-            pool = p
-            break
-    if not pool:
+    try:
+        pool = db.get_pool_by_id_or_name(pool_id_or_name)
+    except KeyError:
         return utils.get_response(None, f"Pool not found: {pool_id_or_name}", 400)
 
-    for lvol in db.get_mini_lvols():  # pass
-        if lvol.pool_uuid == pool.get_id():
-            if lvol.lvol_name == name:
-                return utils.get_response(lvol.get_id())
+    existing = db.lvol_name_lookup(pool.get_id(), name)
+    if existing is not None:
+        return utils.get_response(existing.get_id())
 
     rw_iops = utils.get_int_value_or_default(cl_data, "max_rw_iops", 0)
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
