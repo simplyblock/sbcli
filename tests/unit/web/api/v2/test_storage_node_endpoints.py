@@ -211,6 +211,7 @@ class TestStorageNodeLifecycle:
             node_address='10.0.0.11:5000',
             reattach_volume=False,
             new_ssd_pcie=[],
+            new_data_nics=[],
         )
 
     def test_restart_passes_new_ssd_pcie(self, client, storage_node, storage_node_ops):
@@ -226,6 +227,7 @@ class TestStorageNodeLifecycle:
             node_address=None,
             reattach_volume=False,
             new_ssd_pcie=['0000:00:1e.0', '0000:00:1f.0'],
+            new_data_nics=[],
         )
 
 

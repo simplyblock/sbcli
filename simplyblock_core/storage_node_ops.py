@@ -5192,28 +5192,84 @@ def _finalize_node_removal(removed_node: StorageNode):
     logger.info("done")
 
 
-def _build_data_nics_from_names(node_info, names):
-    """Build IFace entries for the given interface names from a node's live
-    ``network_interface`` info (as returned by the node agent's ``info()``).
+def _rebuild_data_nics_on_new_host(node_info, data_nics):
+    """Re-resolve a node's EXISTING data-nic names against a new host's live
+    ``network_interface`` info (the ``--node-addr`` path: same interface names,
+    new IPs).
 
-    Returns ``(ifaces, missing)``: ``missing`` is the first requested name that
-    the node does not expose (``ifaces`` is then the partial list built so far),
-    or ``None`` when every name resolved. Pure and RPC-free so the data-nic
-    replacement on restart is unit-testable.
+    Raises ``ValueError`` naming the first interface the new host does not
+    expose. The unguarded ``node_info['network_interface'][if_name]`` this
+    replaces raised a bare ``KeyError`` out of the restart on exactly the case
+    an operator hits most: a node moved to a host where the storage NIC has a
+    different name. That is what ``--data-nics`` is for, and the message says
+    so.
     """
     available = (node_info or {}).get('network_interface', {})
-    ifaces: list = []
+    rebuilt: list[IFace] = []
+    for nic in data_nics:
+        if_name = nic["if_name"]
+        if if_name not in available:
+            raise ValueError(
+                f"data nic '{if_name}' is not present on the target host; "
+                f"available: {sorted(available)}")
+        device = available[if_name]
+        rebuilt.append(
+            IFace({
+                'uuid': str(uuid.uuid4()),
+                'if_name': if_name,
+                'ip4_address': device['ip'],
+                'status': device['status'],
+                'net_type': device['net_type']}))
+    return rebuilt
+
+
+def _build_data_nics_from_names(
+        node_info: dict | None, names, snode_api: Any,
+        fabric_tcp: bool, fabric_rdma: bool) -> list[IFace]:
+    """Resolve interface names to *classified* ``IFace`` entries from a node's
+    live ``network_interface`` info (as returned by the node agent's ``info()``).
+
+    Every returned interface is a usable storage interface for this cluster's
+    fabric. A name the host does not expose, or one that classifies as neither
+    RDMA nor TCP, raises ``ValueError`` naming it -- an unusable NIC must never
+    reach ``data_nics``, because ``IFace.trtype`` defaults to ``"TCP"``
+    (models/iface.py), so an unclassified interface is indistinguishable from a
+    working TCP one and every listener loop -- ``_create_storage_device_stack``,
+    ``_create_jm_stack_on_raid`` (which does not even guard on ``ip4_address``),
+    ``add_lvol_listeners`` -- would go on to advertise a subsystem on it. On an
+    RDMA-only cluster that means a ``listeners_create(..., "TCP", ...)`` against
+    a process with no TCP transport at all. ``add_node`` has always applied the
+    same rule by only appending an interface that passed the fabric check; this
+    is that rule for the restart path.
+
+    ``snode_api`` is used only for the two ``ifc_is_*`` probes, so the resolver
+    stays cheap to fake in unit tests.
+    """
+    available = (node_info or {}).get('network_interface', {})
+    ifaces: list[IFace] = []
     for if_name in names:
         if if_name not in available:
-            return ifaces, if_name
+            raise ValueError(
+                f"requested data nic '{if_name}' not found on the node; "
+                f"available: {sorted(available)}")
         device = available[if_name]
-        ifaces.append(IFace({
+        cfg = {
             'uuid': str(uuid.uuid4()),
             'if_name': if_name,
             'ip4_address': device['ip'],
             'status': device['status'],
-            'net_type': device['net_type']}))
-    return ifaces, None
+            'net_type': device['net_type']}
+        if fabric_rdma and snode_api.ifc_is_roce(if_name):
+            cfg['trtype'] = "RDMA"
+        elif fabric_tcp and snode_api.ifc_is_tcp(if_name):
+            cfg['trtype'] = "TCP"
+        else:
+            raise ValueError(
+                f"requested data nic '{if_name}' is not a usable storage "
+                f"interface for this cluster's fabric "
+                f"(tcp={fabric_tcp}, rdma={fabric_rdma})")
+        ifaces.append(IFace(cfg))
+    return ifaces
 
 
 def restart_storage_node(
@@ -5629,18 +5685,19 @@ def _restart_storage_node_impl(
             return False
         snode.api_endpoint = node_address
         snode.mgmt_ip = utils.resolve_address(node_address)
-        data_nics = []
-        for nic in snode.data_nics:
-            if_name = nic["if_name"]
-            device = node_info['network_interface'][if_name]
-            data_nics.append(
-                IFace({
-                    'uuid': str(uuid.uuid4()),
-                    'if_name': if_name,
-                    'ip4_address': device['ip'],
-                    'status': device['status'],
-                    'net_type': device['net_type']}))
-        snode.data_nics = data_nics
+        # A requested new NIC set supersedes the record's names and is
+        # resolved against this same host further down, so don't rebuild from
+        # the OLD names here: that lookup fails on exactly the case the
+        # --node-addr/--data-nics combination exists for -- a node moved to a
+        # host where the storage NIC has a different name.
+        if not new_data_nics:
+            try:
+                snode.data_nics = _rebuild_data_nics_on_new_host(node_info, snode.data_nics)
+            except ValueError as e:
+                logger.error(
+                    f"Cannot restart {snode.get_id()} on {node_address}: {e}. "
+                    f"Pass --data-nics to move the node onto different interface(s).")
+                return False
         snode.hostname = node_info['hostname']
 
         if snode.num_partitions_per_dev == 0 and reattach_volume:
@@ -5684,21 +5741,20 @@ def _restart_storage_node_impl(
     fabric_tcp = cluster.fabric_tcp
     fabric_rdma = cluster.fabric_rdma
     snode_api = snode.client(timeout=5 * 60, retry=3)
+    node_info, _ = snode_api.info()
+    logger.debug(f"Node info: {node_info}")
     # Replace the node's data NIC set on restart. This lets an operator swap a
     # failed/renamed storage NIC for a different one without re-adding the node:
     # the requested interfaces are looked up on the live host and become the new
     # data_nics, so the SPDK restart re-advertises the NVMe-oF listeners on the
     # new IPs. Mirrors the node_address path, but changes the interface NAMES.
     if new_data_nics:
-        nic_info, _ = snode_api.info()
-        rebuilt, missing = _build_data_nics_from_names(nic_info, new_data_nics)
-        if missing:
-            available = list((nic_info or {}).get('network_interface', {}).keys())
-            logger.error(
-                f"Requested data nic '{missing}' not found on node "
-                f"{snode.get_id()}; available: {available}")
+        try:
+            snode.data_nics = _build_data_nics_from_names(
+                node_info, new_data_nics, snode_api, fabric_tcp, fabric_rdma)
+        except ValueError as e:
+            logger.error(f"Cannot replace data nics on {snode.get_id()}: {e}")
             return False
-        snode.data_nics = rebuilt
         logger.info(f"Replacing data nics on {snode.get_id()} with: {new_data_nics}")
     for nic in snode.data_nics:
         if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
@@ -5712,14 +5768,16 @@ def _restart_storage_node_impl(
     snode.active_tcp = active_tcp
     snode.active_rdma = active_rdma
     if new_data_nics and not active_tcp and not active_rdma:
+        # _build_data_nics_from_names already rejected any interface that
+        # classified as neither RDMA nor TCP, so reaching this means the second
+        # round of ifc_is_* probes disagreed with the first -- a NIC that
+        # flapped mid-restart. Abort rather than come up advertising nothing.
         logger.error(
             f"None of the requested data nics {new_data_nics} on {snode.get_id()} "
             f"is a usable storage interface (TCP/RDMA); aborting restart")
         return False
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
-    node_info, _ = snode_api.info()
-    logger.debug(f"Node info: {node_info}")
 
     logger.info("Restarting SPDK")
 

@@ -388,7 +388,10 @@ commands:
               listeners on. Use this to swap a failed or renamed storage NIC for a different one
               without re-adding the node: the given interfaces are looked up on the (possibly new)
               host during the restart and become the node's new data NICs. If omitted, the existing
-              data NICs are kept.
+              data NICs are kept. Every named interface must exist on the host and be usable for
+              the cluster's fabric (TCP and/or RoCE), otherwise the restart is refused. Note that
+              the node's data IPs change: peer nodes re-establish their device connections on their
+              own, but clients already connected over the old IP must reconnect.
             dest: data_nics
             required: false
             type: str
