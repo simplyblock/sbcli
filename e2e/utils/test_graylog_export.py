@@ -517,12 +517,23 @@ def gl_fetch_container_logs(container_name, source, out_path,
                             chunk_from_iso, chunk_to_iso):
     """Fetch all logs for a container+source via Graylog. Returns line count."""
     search_url = f"{GRAYLOG_BASE}/search/universal/absolute"
-    # Use wildcard so partial names work (e.g. "spdk_8080" matches
-    # "/spdk_8080", "SNodeAPI" matches "simplyblock_SNodeAPI.1.xyz")
+    # This used to ask for `container_name:*name*`. Graylog on the mgmt node
+    # ships `allow_leading_wildcard_searches = false` in graylog.conf, so a
+    # query starting with '*' is refused by the server and comes back as
+    # HTTP 500 "Missing search type result!". The probe below then treated the
+    # failure as "no messages", wrote an empty file and returned 0 -- so every
+    # container produced an empty log with nothing but a WARN on stderr.
+    #
+    # Ask in increasing looseness instead, and never lead with '*'. Discovery
+    # hands us the full container name, so the exact match answers almost
+    # every call; the prefix form covers a name passed in by hand.
     esc_name = _gl_escape(container_name)
-    query = f'{CNAME_FIELD}:*{esc_name}*'
+    candidates = [
+        f'{CNAME_FIELD}:"{container_name}"',
+        f'{CNAME_FIELD}:{esc_name}*',
+    ]
     if source:
-        query += f' AND source:"{source}"'
+        candidates = [f'{c} AND source:"{source}"' for c in candidates]
 
     def _fetch_page(q, f_iso, t_iso, limit, offset):
         params = {
@@ -580,9 +591,17 @@ def gl_fetch_container_logs(container_name, source, out_path,
                 break
         return written
 
-    # Probe total
-    msgs, total = _fetch_page(query, chunk_from_iso, chunk_to_iso, 1, 0)
-    if msgs is None:
+    # Probe, taking the first form the server accepts that actually matches.
+    query, msgs, total = None, None, 0
+    for cand in candidates:
+        m, t = _fetch_page(cand, chunk_from_iso, chunk_to_iso, 1, 0)
+        if m is not None and t:
+            query, msgs, total = cand, m, t
+            break
+    if query is None:
+        print(f"    WARN: no Graylog messages for {container_name}"
+              f"{' on ' + source if source else ''} in this window; tried "
+              f"{len(candidates)} query forms", file=sys.stderr)
         open(out_path, "w").close()
         return 0
 
