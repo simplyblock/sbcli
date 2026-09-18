@@ -373,13 +373,31 @@ class TestCutover:
         assert response.status_code == 409
         lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
 
-    def test_planned_failover_without_any_demote_is_412(self, client, db, volume, lvol_controller):
-        """No demote was ever requested for this volume: this is the case that
-        SHOULD let the vendored controller's force-escalation take over, for a
-        genuinely unplanned failover the caller only attempted as 'planned'."""
+    def test_planned_failover_without_any_demote_but_source_down_is_412(
+            self, client, db, volume, lvol_controller):
+        """No demote was ever requested, AND the source is not healthy: this
+        is the case that SHOULD let the vendored controller's force-escalation
+        take over, for a genuinely unplanned failover the caller only
+        attempted as 'planned'."""
+        lvol_controller.replication_source_online.return_value = False
+
         response = client.post(REPLICATION_URL + 'failover?planned=true')
 
         assert response.status_code == 412
+        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
+
+    def test_planned_failover_without_any_demote_but_source_online_is_a_noop(
+            self, client, db, volume, lvol_controller):
+        """No demote was ever requested, but the source is genuinely healthy
+        and still serving here: this is the vendored csi-addons controller's
+        OWN first-ever reconcile of a VolumeReplication that has always lived
+        at this cluster, not a disaster -- so this succeeds as the no-op it
+        is, WITHOUT materializing a clone nothing will ever read."""
+        lvol_controller.replication_source_online.return_value = True
+
+        response = client.post(REPLICATION_URL + 'failover?planned=true')
+
+        assert response.status_code == 204
         lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
 
     def test_commit_points_at_the_cutover_task(self, client, db, volume, lvol_controller):

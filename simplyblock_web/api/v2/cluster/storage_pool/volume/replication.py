@@ -135,22 +135,28 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
     faithfully replicated.
 
     ``planned=True`` gates on a completed demote (P0-3) so a planned swap
-    loses nothing: 412 when no demote was ever requested for this volume (the
-    caller's premise that the source is reachable to demote was wrong, and a
-    412 is what lets the csi-addons controller's own force-escalation take
-    over), 409 while demote is still converging (retryable -- 409 must never
-    become a code the controller reads as permission to force, since that
-    controller escalates on ANY FAILED_PRECONDITION from a force=false
-    promote with no wait-and-retry grace period of its own). Unplanned
-    failover (the default) ignores demote state entirely, unchanged from
-    today: its whole premise is that the source may never have been
-    reachable to demote.
+    loses nothing: 409 while demote is still converging (retryable -- 409
+    must never become a code the controller reads as permission to force,
+    since that controller escalates on ANY FAILED_PRECONDITION from a
+    force=false promote with no wait-and-retry grace period of its own).
+    When no demote was ever requested, the source's own health decides: a
+    genuinely healthy, still-serving source means there is nothing to fail
+    over -- this is the vendored csi-addons controller's OWN first-ever
+    reconcile of a `VolumeReplication` that already lives here, not a
+    disaster, and this call succeeds as the no-op it is. A source that is
+    NOT healthy gets 412, the caller's premise that it was reachable to
+    demote was wrong, and 412 is what lets the controller's own
+    force-escalation take over. Unplanned failover (the default) ignores
+    demote state entirely, unchanged from today: its whole premise is that
+    the source may never have been reachable to demote.
     """
     if generation < 0:
         raise HTTPException(400, 'generation cannot be negative')
     if planned and volume.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
         if volume.replication_demote_state == LVol.REPLICATION_DEMOTE_PENDING:
             raise HTTPException(409, 'Demote is still converging; retry the planned fail-over')
+        if lvol_controller.replication_source_online(volume):
+            return Response(status_code=204)
         raise HTTPException(412, 'No demote was ever requested for this volume')
     result = lvol_controller.replicate_lvol_on_target_cluster(
         volume.get_id(), generation=generation)

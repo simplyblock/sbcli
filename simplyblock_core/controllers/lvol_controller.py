@@ -2785,6 +2785,22 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
     return data
 
 
+def replication_source_online(lvol: LVol) -> bool:
+    """Whether *lvol*'s own storage node is genuinely up right now.
+
+    Distinguishes day-one protection of a volume that has always lived here
+    (its source node is healthy, so a promote is a no-op) from a genuine
+    unplanned fail-over (the source was never demoted BECAUSE it is
+    unreachable -- the premise force=true already accepts). Both leave
+    replication_demote_state empty, so that field alone cannot tell them
+    apart; this mirrors the target-node check replicate_lvol_on_target_cluster
+    already makes for the destination side, applied to the source instead.
+    """
+    db_controller = DBController()
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    return bool(node) and node.status == StorageNode.STATUS_ONLINE
+
+
 def _replication_role(db_controller: DBController, lvol: LVol) -> str:
     """Which end of its replication relationship *lvol* is.
 
