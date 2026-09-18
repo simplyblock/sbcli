@@ -1,5 +1,4 @@
-"""
-test_dhchap_pool_level.py – unit tests for pool-level DH-HMAC-CHAP configuration.
+"""Pool-level DH-HMAC-CHAP configuration, against real FoundationDB.
 
 Covers:
   - Pool model dhchap/dhchap_key/dhchap_ctrlr_key/allowed_hosts fields
@@ -13,15 +12,166 @@ Covers:
   - add_host_to_lvol uses pool keys for DHCHAP pools
   - bdev_nvme_set_options no longer accepts/sends dhchap params
   - connect_lvol builds nvme connect strings with/without DHCHAP secrets and TLS
+
+Every case that reaches a DBController accessor seeds real records with
+``write_to_db(db.kv_store)`` and reads them back through a live
+``DBController``, per the tier's rule. These cases previously ran against a
+``MagicMock`` standing in for the database, and the stand-in is what let
+``add_pool``'s duplicate-name pre-check break unnoticed: it moved from
+``get_pools()`` (which the mock stubbed) to ``pool_name_taken()`` (which it did
+not), so the mock answered with a truthy ``MagicMock``, every ``add_pool`` call
+bailed out at "name already taken", and the failure surfaced two layers away as
+an assertion about ``pool.dhchap``. A real DBController cannot answer a
+question the code never asked it.
+
+Mocked here — everything *above* the database, per the tier's rule:
+
+- ``create_kms_connection``, the pool key-encryption-key call into the KMS.
+- ``StorageNode.rpc_client``, the JSON-RPC chain to a storage node. The
+  integration tier never starts SPDK.
+- ``add_lvol_on_node`` and ``_register_pool_dhchap_keys_on_node``, both of
+  which are node-side work behind that same RPC boundary.
 """
 
 import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
 from pydantic import SecretStr
 
-from tests._mocks import make_mock_cluster
+from simplyblock_core.controllers import lvol_controller, pool_controller
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.storage_node import StorageNode
+
+CLUSTER_ID = "cluster-dhchap-1"
+NODE_ID = "node-dhchap-1"
+POOL_ID = "pool-dhchap-1"
+HOST_A = "nqn.2014-08.org.nvmexpress:uuid:host-a"
+HOST_B = "nqn.2014-08.org.nvmexpress:uuid:host-b"
+POOL_KEY = "DHHC-1:01:aGVsbG8=:"
+POOL_CTRLR_KEY = "DHHC-1:01:d29ybGQ=:"
+
+
+@pytest.fixture
+def db():
+    db = DBController()
+    if db.kv_store is None:
+        pytest.skip("FoundationDB is not available")
+    return db
+
+
+@pytest.fixture
+def cluster(db):
+    return _write_cluster(db)
+
+
+def _write_cluster(db, uuid=CLUSTER_ID, tls=False):
+    cluster = Cluster()
+    cluster.uuid = uuid
+    cluster.status = Cluster.STATUS_ACTIVE
+    cluster.ha_type = "single"
+    cluster.nqn = f"nqn.2023-02.io.simplyblock:{uuid}"
+    cluster.tls = tls
+    cluster.tls_config = {}
+    cluster.blk_size = 4096
+    cluster.qpair_count = 32
+    cluster.client_qpair_count = 3
+    cluster.write_to_db(db.kv_store)
+    return cluster
+
+
+def _write_pool(db, uuid=POOL_ID, name="pool-dhchap", dhchap=True, hosts=(),
+                cluster_id=CLUSTER_ID):
+    pool = Pool()
+    pool.uuid = uuid
+    pool.cluster_id = cluster_id
+    pool.pool_name = name
+    pool.status = Pool.STATUS_ACTIVE
+    pool.dhchap = dhchap
+    if dhchap:
+        pool.dhchap_key = SecretStr(POOL_KEY)
+        pool.dhchap_ctrlr_key = SecretStr(POOL_CTRLR_KEY)
+    pool.allowed_hosts = list(hosts)
+    pool.write_to_db(db.kv_store)
+    return pool
+
+
+def _write_node(db, uuid=NODE_ID, cluster_id=CLUSTER_ID, devices=1):
+    nic = IFace()
+    nic.ip4_address = "10.0.0.1"
+    nic.trtype = "TCP"
+
+    node = StorageNode()
+    node.uuid = uuid
+    node.cluster_id = cluster_id
+    node.hostname = uuid
+    node.status = StorageNode.STATUS_ONLINE
+    node.mgmt_ip = "127.0.0.1"
+    node.rpc_port = 9901
+    node.lvol_subsys_port = 4420
+    node.rpc_username = "spdkuser"
+    node.rpc_password = SecretStr("spdkpass")
+    node.max_lvol = 100
+    node.lvstore = "lvs1"
+    node.lvstore_status = "ready"
+    node.active_tcp = True
+    node.active_rdma = False
+    node.data_nics = [nic]
+    node.nvme_devices = [_device(uuid, cluster_id, i) for i in range(devices)]
+    node.write_to_db(db.kv_store)
+    return node
+
+
+def _device(node_id, cluster_id, index):
+    device = NVMeDevice()
+    device.uuid = f"{node_id}-dev-{index}"
+    device.cluster_id = cluster_id
+    device.node_id = node_id
+    device.status = NVMeDevice.STATUS_ONLINE
+    device.nvme_bdev = f"nvme_{index}"
+    device.alceml_bdev = f"alceml_{index}"
+    device.nvmf_nqn = f"nqn:dev:{node_id}:{index}"
+    device.size = 100 * 1024 ** 3
+    device.health_check = True
+    return device
+
+
+def _write_lvol(db, uuid="lvol-dhchap-1", node_id=NODE_ID, pool_uuid=POOL_ID,
+                allowed_hosts=(), cluster_id=CLUSTER_ID):
+    lvol = LVol()
+    lvol.uuid = uuid
+    lvol.cluster_id = cluster_id
+    lvol.pool_uuid = pool_uuid
+    lvol.node_id = node_id
+    lvol.nodes = [node_id]
+    lvol.lvol_name = f"VOL_{uuid}"
+    lvol.lvol_bdev = f"LVOL_{uuid}"
+    lvol.lvs_name = "lvs1"
+    lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    lvol.nqn = f"nqn:test:{uuid}"
+    lvol.ha_type = "single"
+    lvol.fabric = "tcp"
+    lvol.ns_id = 1
+    lvol.size = 1024 ** 3
+    lvol.status = LVol.STATUS_ONLINE
+    lvol.allowed_hosts = [dict(entry) for entry in allowed_hosts]
+    lvol.write_to_db(db.kv_store)
+    return lvol
+
+
+def _add_pool(name="testpool", dhchap=False, cluster_id=CLUSTER_ID, **kwargs):
+    """``add_pool`` against the real DB, with only the KMS boundary mocked."""
+    with patch.object(pool_controller, "create_kms_connection"):
+        return pool_controller.add_pool(
+            name=name, pool_max=0, lvol_max=0, max_rw_iops=0, max_rw_mbytes=0,
+            max_r_mbytes=0, max_w_mbytes=0, cluster_id=cluster_id,
+            dhchap=dhchap, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -90,72 +240,38 @@ class TestDhchapConstants(unittest.TestCase):
 # pool_controller.add_pool
 # ---------------------------------------------------------------------------
 
-class TestAddPoolDhchap(unittest.TestCase):
+class TestAddPoolDhchap:
     """Tests for the dhchap parameter of add_pool()."""
-
-    def _run_add_pool(self, dhchap=False, extra_kwargs=None):
-        """Call add_pool with a fully-mocked DB and return the pool written to DB."""
-        from simplyblock_core.controllers import pool_controller
-
-        cluster = make_mock_cluster()
-
-        written_pool = {}
-
-        def fake_write(kv_store):
-            written_pool['obj'] = pool_controller  # just a sentinel
-
-        mock_pool_instance = MagicMock()
-        mock_pool_instance.has_qos.return_value = False
-
-        with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB, \
-             patch("simplyblock_core.controllers.pool_controller.Pool") as MockPool, \
-             patch("simplyblock_core.controllers.pool_controller.create_kms_connection"), \
-             patch("simplyblock_core.controllers.pool_controller.pool_events"):
-
-            mock_db = MockDB.return_value
-            mock_db.get_pools.return_value = []
-            mock_db.get_cluster_by_id.return_value = cluster
-            mock_db.kv_store = MagicMock()
-
-            pool_obj = MagicMock()
-            pool_obj.has_qos.return_value = False
-            pool_obj.get_id.return_value = "pool-new"
-            MockPool.return_value = pool_obj
-
-            kwargs = dict(
-                name="testpool",
-                pool_max=0,
-                lvol_max=0,
-                max_rw_iops=0,
-                max_rw_mbytes=0,
-                max_r_mbytes=0,
-                max_w_mbytes=0,
-                cluster_id="cluster-1",
-                dhchap=dhchap,
-            )
-            if extra_kwargs:
-                kwargs.update(extra_kwargs)
-
-            result = pool_controller.add_pool(**kwargs)
-
-        return result, pool_obj
 
     def test_dhchap_false_by_default(self):
         """add_pool with no dhchap arg must set pool.dhchap = False."""
-        from simplyblock_core.controllers import pool_controller
-        import inspect
         sig = inspect.signature(pool_controller.add_pool)
-        self.assertIn("dhchap", sig.parameters)
-        self.assertFalse(sig.parameters["dhchap"].default)
+        assert "dhchap" in sig.parameters
+        assert sig.parameters["dhchap"].default is False
 
-    def test_dhchap_true_stored_on_pool(self):
-        result, pool_obj = self._run_add_pool(dhchap=True)
-        self.assertEqual(result, "pool-new")
-        self.assertTrue(pool_obj.dhchap)
+    def test_dhchap_true_stored_on_pool(self, db, cluster):
+        pool_id = _add_pool(dhchap=True)
+        assert db.get_pool_by_id(pool_id).dhchap is True
 
-    def test_dhchap_false_stored_on_pool(self):
-        result, pool_obj = self._run_add_pool(dhchap=False)
-        self.assertFalse(pool_obj.dhchap)
+    def test_dhchap_false_stored_on_pool(self, db, cluster):
+        pool_id = _add_pool(dhchap=False)
+        assert db.get_pool_by_id(pool_id).dhchap is False
+
+    def test_duplicate_name_in_the_same_cluster_rejected(self, db, cluster):
+        """The pre-check behind Unique(cluster_id, pool_name).
+
+        Regression: it moved from a get_pools() scan to pool_name_taken(), and
+        against a mocked DBController the unstubbed accessor answered with a
+        truthy MagicMock — so every add_pool in this file bailed out here.
+        """
+        assert _add_pool(name="dupe")
+        assert _add_pool(name="dupe") is False
+
+    def test_same_name_in_another_cluster_allowed(self, db, cluster):
+        """The constraint is per cluster, not deployment-wide."""
+        other = _write_cluster(db, uuid="cluster-dhchap-2")
+        assert _add_pool(name="shared")
+        assert _add_pool(name="shared", cluster_id=other.get_id())
 
 
 # ---------------------------------------------------------------------------
@@ -272,60 +388,111 @@ class TestPoolModelDhchapFields(unittest.TestCase):
 # add_pool key generation
 # ---------------------------------------------------------------------------
 
-class TestAddPoolKeyGeneration(unittest.TestCase):
+class TestAddPoolKeyGeneration:
+    """The keys add_pool generates, as they come back out of the database.
 
-    def _run_add(self, dhchap):
-        from simplyblock_core.controllers import pool_controller
-        cluster = make_mock_cluster()
+    Read back rather than captured at the write: the pair is persisted through
+    ``SecretStr`` and has to survive the round trip to be usable at all.
+    """
 
-        with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB, \
-             patch("simplyblock_core.controllers.pool_controller.Pool") as MockPool, \
-             patch("simplyblock_core.controllers.pool_controller.pool_events"):
-            mock_db = MockDB.return_value
-            mock_db.get_pools.return_value = []
-            mock_db.get_cluster_by_id.return_value = cluster
-            mock_db.kv_store = MagicMock()
+    def _pool(self, db, dhchap):
+        return db.get_pool_by_id(_add_pool(name="p1", dhchap=dhchap))
 
-            pool_obj = MagicMock()
-            pool_obj.has_qos.return_value = False
-            pool_obj.get_id.return_value = "pool-new"
-            MockPool.return_value = pool_obj
+    def test_keys_generated_when_dhchap_true(self, db, cluster):
+        pool = self._pool(db, dhchap=True)
+        assert pool.dhchap_key.get_secret_value()
+        assert pool.dhchap_ctrlr_key.get_secret_value()
 
-            pool_controller.add_pool(
-                name="p1", pool_max=0, lvol_max=0,
-                max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
-                cluster_id="cluster-1", dhchap=dhchap,
-            )
-        return pool_obj
+    def test_key_is_dhhc1_format(self, db, cluster):
+        key_value = self._pool(db, dhchap=True).dhchap_key.get_secret_value()
+        assert key_value.startswith("DHHC-1:"), f"Expected DHHC-1 prefix, got: {key_value}"
 
-    def test_keys_generated_when_dhchap_true(self):
-        pool_obj = self._run_add(dhchap=True)
-        # dhchap_key must be set to a non-empty string (DHHC-1 format)
-        self.assertTrue(pool_obj.dhchap_key)
-        self.assertTrue(pool_obj.dhchap_ctrlr_key)
+    def test_two_distinct_keys_generated(self, db, cluster):
+        pool = self._pool(db, dhchap=True)
+        assert (pool.dhchap_key.get_secret_value()
+                != pool.dhchap_ctrlr_key.get_secret_value())
 
-    def test_key_is_dhhc1_format(self):
-        pool_obj = self._run_add(dhchap=True)
-        key_value = pool_obj.dhchap_key.get_secret_value()
-        self.assertTrue(key_value.startswith("DHHC-1:"),
-                        f"Expected DHHC-1 prefix, got: {key_value}")
+    def test_no_keys_when_dhchap_false(self, db, cluster):
+        pool = self._pool(db, dhchap=False)
+        assert pool.dhchap_key.get_secret_value() == ""
+        assert pool.dhchap_ctrlr_key.get_secret_value() == ""
 
-    def test_two_distinct_keys_generated(self):
-        pool_obj = self._run_add(dhchap=True)
-        self.assertNotEqual(pool_obj.dhchap_key, pool_obj.dhchap_ctrlr_key)
-
-    def test_no_keys_when_dhchap_false(self):
-        pool_obj = self._run_add(dhchap=False)
-        # dhchap_key should not have been set
-        _ = pool_obj.dhchap_key  # just access – the mock will track it
-        # The important thing: dhchap=False path must NOT call generate_dhchap_key
-        # We verify indirectly: the assignment was never triggered
-        assign_calls = [c for c in pool_obj.mock_calls if 'dhchap_key' in str(c) and '__setattr__' in str(c)]
-        self.assertEqual(len(assign_calls), 0)
+    def test_keys_are_masked_in_the_record_repr(self, db, cluster):
+        """The pair is secret-wrapped end to end, so a log line cannot leak it."""
+        pool = self._pool(db, dhchap=True)
+        assert pool.dhchap_key.get_secret_value() not in str(pool.to_dict())
 
 
 # ---------------------------------------------------------------------------
 # add_host_to_pool / remove_host_from_pool
+# ---------------------------------------------------------------------------
+
+class TestAddHostToPool:
+    """The allowed-host list is read back from FDB, not from the caller's copy.
+
+    ``add_host_to_pool`` persists the mutation and then fans out over the
+    pool's volumes; asserting on the in-memory object would pass even if the
+    write never landed.
+    """
+
+    def test_success(self, db, cluster):
+        pool = _write_pool(db)
+        ok, err = pool_controller.add_host_to_pool(pool.get_id(), HOST_A)
+        assert ok
+        assert err is None
+        assert HOST_A in db.get_pool_by_id(pool.get_id()).allowed_hosts
+
+    def test_duplicate_rejected(self, db, cluster):
+        pool = _write_pool(db, hosts=[HOST_A])
+        ok, err = pool_controller.add_host_to_pool(pool.get_id(), HOST_A)
+        assert not ok
+        assert err and "already in" in err
+        assert db.get_pool_by_id(pool.get_id()).allowed_hosts == [HOST_A]
+
+    def test_invalid_nqn_rejected(self, db, cluster):
+        pool = _write_pool(db)
+        ok, err = pool_controller.add_host_to_pool(pool.get_id(), "not-an-nqn")
+        assert not ok
+        assert err and "Invalid host NQN" in err
+        assert db.get_pool_by_id(pool.get_id()).allowed_hosts == []
+
+    def test_non_dhchap_pool_rejected(self, db, cluster):
+        pool = _write_pool(db, uuid="pool-plain", name="plain", dhchap=False)
+        ok, err = pool_controller.add_host_to_pool(pool.get_id(), HOST_A)
+        assert not ok
+        assert err and "DHCHAP" in err
+
+    def test_pool_not_found(self, db, cluster):
+        ok, err = pool_controller.add_host_to_pool("bad-id", HOST_A)
+        assert not ok
+        assert err and "not found" in err
+
+
+class TestRemoveHostFromPool:
+
+    def test_success(self, db, cluster):
+        pool = _write_pool(db, hosts=[HOST_A, HOST_B])
+        ok, err = pool_controller.remove_host_from_pool(pool.get_id(), HOST_A)
+        assert ok
+        assert err is None
+        assert db.get_pool_by_id(pool.get_id()).allowed_hosts == [HOST_B]
+
+    def test_nonexistent_host_rejected(self, db, cluster):
+        pool = _write_pool(db, hosts=[HOST_A])
+        ok, err = pool_controller.remove_host_from_pool(pool.get_id(), "nqn:not-there")
+        assert not ok
+        assert err and "not in" in err
+        assert db.get_pool_by_id(pool.get_id()).allowed_hosts == [HOST_A]
+
+    def test_non_dhchap_pool_rejected(self, db, cluster):
+        pool = _write_pool(db, uuid="pool-plain", name="plain", dhchap=False)
+        ok, err = pool_controller.remove_host_from_pool(pool.get_id(), HOST_A)
+        assert not ok
+        assert err and "DHCHAP" in err
+
+
+# ---------------------------------------------------------------------------
+# _get_dhchap_group with pool
 # ---------------------------------------------------------------------------
 
 def _make_dhchap_pool(pool_id="pool-1", hosts=None):
@@ -338,95 +505,6 @@ def _make_dhchap_pool(pool_id="pool-1", hosts=None):
     p.allowed_hosts = list(hosts or [])
     return p
 
-
-class TestAddHostToPool(unittest.TestCase):
-
-    def _run(self, pool, host_nqn):
-        from simplyblock_core.controllers import pool_controller
-        with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB:
-            mock_db = MockDB.return_value
-            mock_db.get_pool_by_id.return_value = pool
-            mock_db.kv_store = MagicMock()
-            with patch.object(pool, "write_to_db"):
-                return pool_controller.add_host_to_pool(pool.get_id(), host_nqn)
-
-    def test_success(self):
-        host_nqn = "nqn.2014-08.org.nvmexpress:uuid:host-a"
-        pool = _make_dhchap_pool()
-        ok, err = self._run(pool, host_nqn)
-        self.assertTrue(ok)
-        self.assertIsNone(err)
-        self.assertIn(host_nqn, pool.allowed_hosts)
-
-    def test_duplicate_rejected(self):
-        host_nqn = "nqn.2014-08.org.nvmexpress:uuid:host-a"
-        pool = _make_dhchap_pool(hosts=[host_nqn])
-        ok, err = self._run(pool, host_nqn)
-        self.assertFalse(ok)
-        self.assertIn("already in", err)
-
-    def test_non_dhchap_pool_rejected(self):
-        from simplyblock_core.models.pool import Pool
-        p = Pool()
-        p.uuid = "pool-plain"
-        p.dhchap = False
-        from simplyblock_core.controllers import pool_controller
-        with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB:
-            MockDB.return_value.get_pool_by_id.return_value = p
-            ok, err = pool_controller.add_host_to_pool("pool-plain", "nqn:host")
-        self.assertFalse(ok)
-        self.assertIn("DHCHAP", err)
-
-    def test_pool_not_found(self):
-        from simplyblock_core.controllers import pool_controller
-        with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB:
-            MockDB.return_value.get_pool_by_id.side_effect = KeyError("not found")
-            ok, err = pool_controller.add_host_to_pool("bad-id", "nqn:host")
-        self.assertFalse(ok)
-        self.assertIn("not found", err)
-
-
-class TestRemoveHostFromPool(unittest.TestCase):
-
-    def _run(self, pool, host_nqn):
-        from simplyblock_core.controllers import pool_controller
-        with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB:
-            mock_db = MockDB.return_value
-            mock_db.get_pool_by_id.return_value = pool
-            mock_db.kv_store = MagicMock()
-            with patch.object(pool, "write_to_db"):
-                return pool_controller.remove_host_from_pool(pool.get_id(), host_nqn)
-
-    def test_success(self):
-        pool = _make_dhchap_pool(hosts=["nqn:host-a", "nqn:host-b"])
-        ok, err = self._run(pool, "nqn:host-a")
-        self.assertTrue(ok)
-        self.assertIsNone(err)
-        self.assertNotIn("nqn:host-a", pool.allowed_hosts)
-        self.assertIn("nqn:host-b", pool.allowed_hosts)
-
-    def test_nonexistent_host_rejected(self):
-        pool = _make_dhchap_pool(hosts=["nqn:host-a"])
-        ok, err = self._run(pool, "nqn:not-there")
-        self.assertFalse(ok)
-        self.assertIn("not in", err)
-
-    def test_non_dhchap_pool_rejected(self):
-        from simplyblock_core.models.pool import Pool
-        p = Pool()
-        p.uuid = "pool-plain"
-        p.dhchap = False
-        from simplyblock_core.controllers import pool_controller
-        with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB:
-            MockDB.return_value.get_pool_by_id.return_value = p
-            ok, err = pool_controller.remove_host_from_pool("pool-plain", "nqn:host")
-        self.assertFalse(ok)
-        self.assertIn("DHCHAP", err)
-
-
-# ---------------------------------------------------------------------------
-# _get_dhchap_group with pool
-# ---------------------------------------------------------------------------
 
 class TestGetDhchapGroupWithPool(unittest.TestCase):
 
@@ -464,12 +542,15 @@ class TestGetDhchapGroupWithPool(unittest.TestCase):
 # LVol creation: allowed_hosts inherited from pool when pool.dhchap=True
 # ---------------------------------------------------------------------------
 
-class TestLvolInheritsDhchapFromPool(unittest.TestCase):
+class TestLvolInheritsDhchapFromPool:
 
-    def test_lvol_allowed_hosts_set_from_pool(self):
+    def test_lvol_allowed_hosts_set_from_pool(self, db, cluster):
         """When pool.dhchap=True, add_lvol_ha populates lvol.allowed_hosts from pool."""
-
-        pool = _make_dhchap_pool(hosts=["nqn:host-a", "nqn:host-b"])
+        node = _write_node(db)
+        secondary = _write_node(db, uuid="node-dhchap-2", devices=0)
+        node.secondary_node_id = secondary.get_id()
+        node.write_to_db(db.kv_store)
+        pool = _write_pool(db, hosts=[HOST_A, HOST_B])
 
         captured_lvol = {}
 
@@ -477,366 +558,239 @@ class TestLvolInheritsDhchapFromPool(unittest.TestCase):
             captured_lvol['obj'] = lvol
             return {'uuid': 'u1', 'driver_specific': {'lvol': {'blobid': 1}}}, None
 
-        with patch("simplyblock_core.controllers.lvol_controller.DBController") as MockDB, \
-             patch("simplyblock_core.controllers.lvol_controller.add_lvol_on_node",
-                   side_effect=fake_add_on_node):
-            from simplyblock_core.models.cluster import Cluster
-            from simplyblock_core.models.storage_node import StorageNode
-
-            cluster = MagicMock(spec=Cluster)
-            cluster.get_id.return_value = "cluster-1"
-            cluster.nqn = "nqn.2023:test"
-            cluster.ha_type = "single"
-            cluster.fabric_tcp = True
-            cluster.fabric_rdma = False
-            cluster.status = Cluster.STATUS_ACTIVE
-            cluster.qpair_count = 32
-            cluster.client_qpair_count = 3
-            cluster.client_data_nic = ""
-
-            node = MagicMock(spec=StorageNode)
-            node.get_id.return_value = "node-1"
-            node.status = StorageNode.STATUS_ONLINE
-            node.secondary_node_id = "node-2"
-            node.secondary_node_id_2 = None
-            node.cluster_id = "cluster-1"
-            node.active_tcp = True
-            node.active_rdma = False
-            node.lvol_sync_del.return_value = False
-
-            sec_node = MagicMock(spec=StorageNode)
-            sec_node.get_id.return_value = "node-2"
-            sec_node.status = StorageNode.STATUS_ONLINE
-
-            mock_db = MockDB.return_value
-            mock_db.get_pools.return_value = [pool]
-            mock_db.get_cluster_by_id.return_value = cluster
-            mock_db.get_storage_node_by_id.side_effect = lambda nid: (
-                node if nid == "node-1" else sec_node
-            )
-            mock_db.get_storage_nodes_by_cluster_id.return_value = [node]
-            mock_db.get_lvols.return_value = []
-            mock_db.get_qos.return_value = []
-            mock_db.get_next_vuid.return_value = 1
-            mock_db.kv_store = MagicMock()
-
-            from simplyblock_core.controllers.lvol_controller import add_lvol_ha
-            result, err = add_lvol_ha(
-                name="vol1", size=1073741824, host_id_or_name="node-1",
-                ha_type="single", pool_id_or_name="pool-1",
+        rpc = MagicMock()
+        with patch.object(StorageNode, "rpc_client", return_value=rpc), \
+             patch.object(lvol_controller, "add_lvol_on_node",
+                          side_effect=fake_add_on_node):
+            result, err = lvol_controller.add_lvol_ha(
+                name="vol1", size=1073741824, host_id_or_name=node.get_id(),
+                ha_type="single", pool_id_or_name=pool.pool_name,
                 use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0,
                 max_r_mbytes=0, max_w_mbytes=0,
             )
 
-        if 'obj' in captured_lvol:
-            lvol = captured_lvol['obj']
-            host_nqns = [h["nqn"] for h in lvol.allowed_hosts]
-            self.assertIn("nqn:host-a", host_nqns)
-            self.assertIn("nqn:host-b", host_nqns)
-            # Entries must be plain NQN dicts, no key material stored on lvol
-            for entry in lvol.allowed_hosts:
-                self.assertNotIn("dhchap_key", entry)
-                self.assertNotIn("dhchap_ctrlr_key", entry)
+        assert err is None, err
+        assert result
+        lvol = captured_lvol['obj']
+        host_nqns = [h["nqn"] for h in lvol.allowed_hosts]
+        assert HOST_A in host_nqns
+        assert HOST_B in host_nqns
+        # Entries must be plain NQN dicts, no key material stored on lvol
+        for entry in lvol.allowed_hosts:
+            assert "dhchap_key" not in entry
+            assert "dhchap_ctrlr_key" not in entry
 
+        # The persisted record, not just the object handed to the node.
+        stored = db.get_lvol_by_id(result)
+        assert [h["nqn"] for h in stored.allowed_hosts] == [HOST_A, HOST_B]
 
 # ---------------------------------------------------------------------------
 # add_host_to_lvol uses pool keys for DHCHAP pools
 # ---------------------------------------------------------------------------
 
-class TestAddHostToLvolDhchapPool(unittest.TestCase):
+class TestAddHostToLvolDhchapPool:
+    """add_host_to_lvol on a DHCHAP pool must use the pool's key pair.
 
-    @patch("simplyblock_core.controllers.lvol_controller._register_pool_dhchap_keys_on_node")
-    @patch("simplyblock_core.models.storage_node.RPCClient")
-    @patch("simplyblock_core.controllers.lvol_controller.DBController")
-    def test_uses_pool_keys_not_per_host_keys(self, MockDB, MockRPC, mock_pool_reg):
-        """add_host_to_lvol on a DHCHAP pool must use pool key names, not generate new ones."""
-        from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
-        from simplyblock_core.models.lvol_model import LVol
-        from simplyblock_core.models.storage_node import StorageNode
+    The node-side halves are mocked (key registration and the JSON-RPC call);
+    the volume, its pool and its node are real records, because which key pair
+    the call uses is decided by reading them back.
+    """
 
-        pool = _make_dhchap_pool()
-        mock_pool_reg.return_value = {
+    @pytest.fixture
+    def rpc(self):
+        rpc = MagicMock()
+        rpc.subsystem_add_host.return_value = True
+        with patch.object(StorageNode, "rpc_client", return_value=rpc):
+            yield rpc
+
+    def test_uses_pool_keys_not_per_host_keys(self, db, cluster, rpc):
+        _write_node(db)
+        _write_pool(db)
+        lvol = _write_lvol(db)
+        key_names = {
             "dhchap_key": "pool_pool_1_dhchap_key",
             "dhchap_ctrlr_key": "pool_pool_1_dhchap_ctrlr_key",
         }
 
-        node = MagicMock(spec=StorageNode)
-        node.get_id.return_value = "node-1"
-        node.status = StorageNode.STATUS_ONLINE
-        node.mgmt_ip = "127.0.0.1"
-        node.rpc_port = 9901
-        node.rpc_username = "u"
-        node.rpc_password = "p"
+        with patch.object(lvol_controller, "_register_pool_dhchap_keys_on_node",
+                          return_value=key_names) as mock_pool_reg:
+            entry, err = lvol_controller.add_host_to_lvol(lvol.get_id(), HOST_A)
 
-        lvol = MagicMock(spec=LVol)
-        lvol.uuid = "lvol-1"
-        lvol.get_id.return_value = "lvol-1"
-        lvol.nqn = "nqn:test:lvol-1"
-        lvol.pool_uuid = "pool-1"
-        lvol.nodes = ["node-1"]
-        lvol.allowed_hosts = []
-
-        mock_db = MockDB.return_value
-        mock_db.get_lvol_by_id.return_value = lvol
-        mock_db.get_pool_by_id.return_value = pool
-        mock_db.get_storage_node_by_id.return_value = node
-        mock_db.kv_store = MagicMock()
-
-        mock_rpc = MockRPC.return_value
-        mock_rpc.subsystem_add_host.return_value = True
-        node.rpc_client.return_value = mock_rpc
-
-        result, err = add_host_to_lvol("lvol-1", "nqn:new-host")
-
-        self.assertIsNone(err)
+        assert err is None
         mock_pool_reg.assert_called_once()
 
-        # subsystem_add_host must be called with pool key names
-        call_kwargs = mock_rpc.subsystem_add_host.call_args[1]
-        self.assertEqual(call_kwargs["dhchap_key"], "pool_pool_1_dhchap_key")
-        self.assertEqual(call_kwargs["dhchap_ctrlr_key"], "pool_pool_1_dhchap_ctrlr_key")
-        self.assertEqual(call_kwargs["dhchap_group"], "ffdhe2048")
+        call_kwargs = rpc.subsystem_add_host.call_args[1]
+        assert call_kwargs["dhchap_key"] == key_names["dhchap_key"]
+        assert call_kwargs["dhchap_ctrlr_key"] == key_names["dhchap_ctrlr_key"]
+        assert call_kwargs["dhchap_group"] == "ffdhe2048"
 
-    @patch("simplyblock_core.controllers.lvol_controller._register_pool_dhchap_keys_on_node")
-    @patch("simplyblock_core.models.storage_node.RPCClient")
-    @patch("simplyblock_core.controllers.lvol_controller.DBController")
-    def test_no_per_host_key_generation_for_dhchap_pool(self, MockDB, MockRPC, mock_pool_reg):
+        # The host is persisted as a bare NQN: pool-level DHCHAP keeps key
+        # material on the pool, never copied onto the volume.
+        stored = db.get_lvol_by_id(lvol.get_id()).allowed_hosts
+        assert stored == [{"nqn": HOST_A}]
+        assert entry == {"nqn": HOST_A}
+
+    def test_no_per_host_key_generation_for_dhchap_pool(self, db, cluster, rpc):
         """For DHCHAP pools, generate_dhchap_key must never be called."""
-        from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
-        from simplyblock_core.models.lvol_model import LVol
-        from simplyblock_core.models.storage_node import StorageNode
         from simplyblock_core import utils
 
-        pool = _make_dhchap_pool()
-        mock_pool_reg.return_value = {
-            "dhchap_key": "pool_k", "dhchap_ctrlr_key": "pool_ck"}
+        _write_node(db)
+        _write_pool(db)
+        lvol = _write_lvol(db)
 
-        node = MagicMock(spec=StorageNode)
-        node.get_id.return_value = "node-1"
-        node.status = StorageNode.STATUS_ONLINE
-        node.mgmt_ip = "127.0.0.1"
-        node.rpc_port = 9901
-        node.rpc_username = "u"
-        node.rpc_password = "p"
+        with patch.object(lvol_controller, "_register_pool_dhchap_keys_on_node",
+                          return_value={"dhchap_key": "pool_k",
+                                        "dhchap_ctrlr_key": "pool_ck"}), \
+             patch.object(utils, "generate_dhchap_key") as mock_gen:
+            lvol_controller.add_host_to_lvol(lvol.get_id(), HOST_A)
 
-        lvol = MagicMock(spec=LVol)
-        lvol.get_id.return_value = "lvol-1"
-        lvol.nqn = "nqn:test:lvol-1"
-        lvol.pool_uuid = "pool-1"
-        lvol.nodes = ["node-1"]
-        lvol.allowed_hosts = []
+        mock_gen.assert_not_called()
 
-        mock_db = MockDB.return_value
-        mock_db.get_lvol_by_id.return_value = lvol
-        mock_db.get_pool_by_id.return_value = pool
-        mock_db.get_storage_node_by_id.return_value = node
-        mock_db.kv_store = MagicMock()
-        MockRPC.return_value.subsystem_add_host.return_value = True
+    def test_offline_node_is_skipped(self, db, cluster, rpc):
+        """A node that is not ONLINE gets no subsystem call."""
+        node = _write_node(db)
+        node.status = StorageNode.STATUS_OFFLINE
+        node.write_to_db(db.kv_store)
+        _write_pool(db)
+        lvol = _write_lvol(db)
 
-        with patch.object(utils, "generate_dhchap_key") as mock_gen:
-            add_host_to_lvol("lvol-1", "nqn:new-host")
-            mock_gen.assert_not_called()
+        with patch.object(lvol_controller, "_register_pool_dhchap_keys_on_node",
+                          return_value={}) as mock_pool_reg:
+            _entry, err = lvol_controller.add_host_to_lvol(lvol.get_id(), HOST_A)
+
+        assert err is None
+        mock_pool_reg.assert_not_called()
+        rpc.subsystem_add_host.assert_not_called()
+
+    def test_duplicate_host_rejected(self, db, cluster, rpc):
+        _write_node(db)
+        _write_pool(db)
+        lvol = _write_lvol(db, allowed_hosts=[{"nqn": HOST_A}])
+
+        result, err = lvol_controller.add_host_to_lvol(lvol.get_id(), HOST_A)
+
+        assert result is False
+        assert err and "already allowed" in err
 
 
 # ---------------------------------------------------------------------------
 # connect_lvol: DHCHAP secret & TLS flag handling in the nvme connect string
 # ---------------------------------------------------------------------------
 
-def _make_connect_ctx(lvol_allowed_hosts, pool_dhchap_key="", pool_dhchap_ctrlr_key=""):
-    """Build the mocked DBController context used by every connect_lvol test.
+def _connect_env(db, lvol_allowed_hosts, pool_dhchap_key="", pool_dhchap_ctrlr_key=""):
+    """Seed the records every connect_lvol case reads, and return the volume.
 
     connect_lvol pulls the pool's DHCHAP keys onto the matched host_entry (see
-    PR #1074, which reverted the "stop injecting" change), so the pool mock must
-    return concrete (possibly empty) key strings rather than the default
-    MagicMock attributes. Callers that want a secret injected pass
-    pool_dhchap_key / pool_dhchap_ctrlr_key; that also turns on the pool's
-    ``dhchap`` flag, which is what gates the pool-key branch in
-    ``HostConnectAuth.from_entry``. Callers that pass no keys get a pool with
-    DHCHAP off, so per-entry material (e.g. psk) is used instead — matching
-    add_pool, which sets the flag and the keys together.
-
-    Returns (patchers, lvol) — patchers must be started/stopped by the test.
+    PR #1074, which reverted the "stop injecting" change). Passing either key
+    also turns on the pool's ``dhchap`` flag, which is what gates the pool-key
+    branch in ``HostConnectAuth.from_entry`` — matching add_pool, which sets
+    the flag and the keys together. Passing neither gives a pool with DHCHAP
+    off, so per-entry material (e.g. psk) is used instead.
     """
-    from simplyblock_core.models.cluster import Cluster
-    from simplyblock_core.models.iface import IFace
-    from simplyblock_core.models.lvol_model import LVol
-    from simplyblock_core.models.pool import Pool
-    from simplyblock_core.models.storage_node import StorageNode
-
-    lvol = MagicMock(spec=LVol)
-    lvol.get_id.return_value = "lvol-1"
-    lvol.nqn = "nqn:test:lvol-1"
-    lvol.ha_type = "single"
-    lvol.node_id = "node-1"
-    lvol.nodes = ["node-1"]
-    lvol.lvs_name = "lvs1"
-    lvol.ns_id = 1
-    lvol.fabric = "tcp"
-    lvol.pool_uuid = "pool-1"
-    lvol.allowed_hosts = lvol_allowed_hosts
-
-    nic = IFace()
-    nic.ip4_address = "10.0.0.1"
-    nic.trtype = "TCP"
-
-    node = MagicMock(spec=StorageNode)
-    node.get_id.return_value = "node-1"
-    node.cluster_id = "cluster-1"
-    node.data_nics = [nic]
-    node.get_lvol_subsys_port.return_value = 4420
-
-    cluster = MagicMock(spec=Cluster)
-    cluster.status = Cluster.STATUS_ACTIVE
-    cluster.snapshot_replication_target_cluster = None
-    cluster.client_qpair_count = 3
-    cluster.client_data_nic = ""
+    _write_cluster(db)
+    _write_node(db)
 
     pool = Pool()
-    pool.uuid = "pool-1"
+    pool.uuid = POOL_ID
+    pool.cluster_id = CLUSTER_ID
+    pool.pool_name = "pool-dhchap"
+    pool.status = Pool.STATUS_ACTIVE
     pool.dhchap = bool(pool_dhchap_key or pool_dhchap_ctrlr_key)
     pool.dhchap_key = SecretStr(pool_dhchap_key)
     pool.dhchap_ctrlr_key = SecretStr(pool_dhchap_ctrlr_key)
+    pool.write_to_db(db.kv_store)
 
-    db_patch = patch(
-        "simplyblock_core.controllers.lvol_controller.DBController")
-    MockDB = db_patch.start()
-    mock_db = MockDB.return_value
-    mock_db.get_lvol_by_id.return_value = lvol
-    mock_db.get_storage_node_by_id.return_value = node
-    mock_db.get_cluster_by_id.return_value = cluster
-    mock_db.get_pool_by_id.return_value = pool
-
-    return db_patch, lvol
+    return _write_lvol(db, allowed_hosts=lvol_allowed_hosts)
 
 
-class TestConnectLvolDhchap(unittest.TestCase):
+class TestConnectLvolDhchap:
 
-    def test_host_with_dhchap_keys_injected_into_connect_cmd(self):
+    def test_host_with_dhchap_keys_injected_into_connect_cmd(self, db):
         """connect_lvol must add --dhchap-secret and --dhchap-ctrl-secret,
         sourced from the pool's DHCHAP keys, for an allowed host entry.
 
         Per PR #1074 the secrets come from the POOL, not from any key material
         stored on the lvol's allowed_hosts entry — for a pool with DHCHAP
         enabled (the pool keys are gated on pool.dhchap)."""
-        from simplyblock_core.controllers.lvol_controller import connect_lvol
+        _connect_env(db, [{"nqn": HOST_A}],
+                     pool_dhchap_key=POOL_KEY,
+                     pool_dhchap_ctrlr_key=POOL_CTRLR_KEY)
 
-        pool_key = "DHHC-1:01:aGVsbG8=:"
-        pool_ctrlr_key = "DHHC-1:01:d29ybGQ=:"
-        patcher, _ = _make_connect_ctx(
-            [{"nqn": "nqn:host-a"}],
-            pool_dhchap_key=pool_key,
-            pool_dhchap_ctrlr_key=pool_ctrlr_key,
-        )
-        try:
-            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
-        finally:
-            patcher.stop()
+        result, _err = lvol_controller.connect_lvol("lvol-dhchap-1", host_nqn=HOST_A)
 
-        self.assertIsInstance(result, list)
-        self.assertEqual(len(result), 1)
+        assert isinstance(result, list)
+        assert len(result) == 1
         cmd = result[0].connect
-        self.assertIn("--hostnqn=nqn:host-a", cmd)
-        self.assertIn(f"--dhchap-secret={pool_key}", cmd)
-        self.assertIn(f"--dhchap-ctrl-secret={pool_ctrlr_key}", cmd)
+        assert f"--hostnqn={HOST_A}" in cmd
+        assert f"--dhchap-secret={POOL_KEY}" in cmd
+        assert f"--dhchap-ctrl-secret={POOL_CTRLR_KEY}" in cmd
         # No PSK/TLS was configured
-        self.assertNotIn(" --tls", cmd)
-        self.assertFalse(result[0].tls)
+        assert " --tls" not in cmd
+        assert result[0].tls is False
 
-    def test_host_with_psk_sets_tls_flag(self):
+    def test_host_with_psk_sets_tls_flag(self, db):
         """A host_entry with a psk must add --tls to the connect command and
         mark tls=True on the returned entry."""
-        from simplyblock_core.controllers.lvol_controller import connect_lvol
+        _connect_env(db, [{"nqn": HOST_A, "psk": "NVMeTLSkey-1:01:aGVsbG8=:"}])
 
-        host_entry = {
-            "nqn": "nqn:host-a",
-            "psk": "NVMeTLSkey-1:01:aGVsbG8=:",
-        }
-        patcher, _ = _make_connect_ctx([host_entry])
-        try:
-            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
-        finally:
-            patcher.stop()
+        result, _err = lvol_controller.connect_lvol("lvol-dhchap-1", host_nqn=HOST_A)
 
-        self.assertIsInstance(result, list)
+        assert isinstance(result, list)
         cmd = result[0].connect
-        self.assertIn(" --tls", cmd)
-        self.assertIn("--hostnqn=nqn:host-a", cmd)
-        self.assertTrue(result[0].tls)
+        assert " --tls" in cmd
+        assert f"--hostnqn={HOST_A}" in cmd
+        assert result[0].tls is True
         # No DHCHAP keys on the entry
-        self.assertNotIn("--dhchap-secret", cmd)
-        self.assertNotIn("--dhchap-ctrl-secret", cmd)
+        assert "--dhchap-secret" not in cmd
+        assert "--dhchap-ctrl-secret" not in cmd
 
-    def test_missing_host_nqn_when_allowed_hosts_present_returns_false(self):
+    def test_missing_host_nqn_when_allowed_hosts_present_returns_false(self, db):
         """If allowed_hosts is populated, host_nqn is mandatory."""
-        from simplyblock_core.controllers.lvol_controller import connect_lvol
+        _connect_env(db, [{"nqn": HOST_A}])
+        result, _err = lvol_controller.connect_lvol("lvol-dhchap-1", host_nqn=None)
+        assert not result
 
-        patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
-        try:
-            result, _err = connect_lvol("lvol-1", host_nqn=None)
-        finally:
-            patcher.stop()
-        self.assertFalse(result)
-
-    def test_unknown_host_nqn_returns_false(self):
+    def test_unknown_host_nqn_returns_false(self, db):
         """host_nqn that is not in the allowed_hosts list is rejected."""
-        from simplyblock_core.controllers.lvol_controller import connect_lvol
+        _connect_env(db, [{"nqn": HOST_A}])
+        result, _err = lvol_controller.connect_lvol("lvol-dhchap-1", host_nqn="nqn:intruder")
+        assert not result
 
-        patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
-        try:
-            result, _err = connect_lvol("lvol-1", host_nqn="nqn:intruder")
-        finally:
-            patcher.stop()
-        self.assertFalse(result)
-
-    def test_no_allowed_hosts_pass_through_with_host_nqn(self):
+    def test_no_allowed_hosts_pass_through_with_host_nqn(self, db):
         """When lvol.allowed_hosts is empty, host_nqn is passed through
         without any DHCHAP/TLS material and the volume accepts any host."""
-        from simplyblock_core.controllers.lvol_controller import connect_lvol
+        _connect_env(db, [])
 
-        patcher, _ = _make_connect_ctx([])
-        try:
-            result, _err = connect_lvol("lvol-1", host_nqn="nqn:whoever")
-        finally:
-            patcher.stop()
+        result, _err = lvol_controller.connect_lvol("lvol-dhchap-1", host_nqn="nqn:whoever")
 
-        self.assertIsInstance(result, list)
+        assert isinstance(result, list)
         cmd = result[0].connect
-        self.assertIn("--hostnqn=nqn:whoever", cmd)
-        self.assertNotIn("--dhchap-secret", cmd)
-        self.assertNotIn("--dhchap-ctrl-secret", cmd)
-        self.assertNotIn(" --tls", cmd)
+        assert "--hostnqn=nqn:whoever" in cmd
+        assert "--dhchap-secret" not in cmd
+        assert "--dhchap-ctrl-secret" not in cmd
+        assert " --tls" not in cmd
         # No allowed_hosts → empty list on returned entry
-        self.assertEqual(result[0].allowed_hosts, [])
+        assert result[0].allowed_hosts == []
 
-    def test_pool_level_dhchap_lvol_injects_pool_secret_in_connect_cmd(self):
+    def test_pool_level_dhchap_lvol_injects_pool_secret_in_connect_cmd(self, db):
         """Lvols inheriting from a pool-level DHCHAP pool have nqn-only entries
         in allowed_hosts (no key material stored on the lvol). connect_lvol
         injects the pool's DHCHAP keys onto the connect command for the matched
         host — documents current behavior after PR #1074 reverted the change
         that stopped unconditionally injecting pool keys."""
-        from simplyblock_core.controllers.lvol_controller import connect_lvol
+        _connect_env(db, [{"nqn": HOST_A}],
+                     pool_dhchap_key=POOL_KEY,
+                     pool_dhchap_ctrlr_key=POOL_CTRLR_KEY)
 
-        pool_key = "DHHC-1:01:aGVsbG8=:"
-        pool_ctrlr_key = "DHHC-1:01:d29ybGQ=:"
-        # Pool-level DHCHAP: lvol.allowed_hosts contains only nqn, no keys;
-        # keys live on the pool and are injected by connect_lvol.
-        patcher, _ = _make_connect_ctx(
-            [{"nqn": "nqn:host-a"}],
-            pool_dhchap_key=pool_key,
-            pool_dhchap_ctrlr_key=pool_ctrlr_key,
-        )
-        try:
-            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
-        finally:
-            patcher.stop()
+        result, _err = lvol_controller.connect_lvol("lvol-dhchap-1", host_nqn=HOST_A)
 
-        self.assertIsInstance(result, list)
+        assert isinstance(result, list)
         cmd = result[0].connect
-        self.assertIn("--hostnqn=nqn:host-a", cmd)
-        self.assertIn(f"--dhchap-secret={pool_key}", cmd)
-        self.assertIn(f"--dhchap-ctrl-secret={pool_ctrlr_key}", cmd)
-        self.assertEqual(result[0].allowed_hosts, ["nqn:host-a"])
+        assert f"--hostnqn={HOST_A}" in cmd
+        assert f"--dhchap-secret={POOL_KEY}" in cmd
+        assert f"--dhchap-ctrl-secret={POOL_CTRLR_KEY}" in cmd
+        assert result[0].allowed_hosts == [HOST_A]
 
 
 if __name__ == "__main__":
