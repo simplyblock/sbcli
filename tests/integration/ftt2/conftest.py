@@ -397,13 +397,11 @@ def create_test_lvol(env, primary_node_idx: int, name: str = "test-vol",
     """Create an LVol in FDB on the given primary node's LVS."""
     db = env['db']
     node = env['nodes'][primary_node_idx]
-    cluster = env['cluster']
 
     lvol = LVol()
     lvol.uuid = str(_uuid_mod.uuid4())
     lvol.lvol_name = name
     lvol.lvol_uuid = str(_uuid_mod.uuid4())
-    lvol.cluster_id = cluster.uuid
     lvol.node_id = node.uuid
     lvol.status = LVol.STATUS_ONLINE
     lvol.size = 1_073_741_824

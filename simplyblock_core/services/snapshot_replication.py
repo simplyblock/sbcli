@@ -445,7 +445,7 @@ def process_snap_replicate_start(task, snapshot):
         rep_name = f"REP_{snapshot.snap_name}"
         existing = None
         try:
-            existing = db.get_lvol_by_name(rep_name)
+            existing = db.get_lvol_by_name(rep_name, include_deleted=True)
         except KeyError:
             pass
         if existing is not None:

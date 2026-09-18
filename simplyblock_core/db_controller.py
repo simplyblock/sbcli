@@ -1,4 +1,5 @@
 import datetime
+import itertools
 import json
 import logging
 import os.path
@@ -247,8 +248,8 @@ class DBController(metaclass=Singleton):
             raw = self.kv_store.get(idx.point_key(model_cls, values))
             return [] if raw is None else [bytes(raw).decode()]
         return [
-            bytes(value).decode() for _key, value
-            in self.kv_store.get_range_startswith(
+            idx.entry_id(model_cls, bytes(key), bytes(value))
+            for key, value in self.kv_store.get_range_startswith(
                 idx.prefix(model_cls, values), limit=limit, reverse=reverse)
         ]
 
@@ -338,7 +339,8 @@ class DBController(metaclass=Singleton):
     def get_storage_device_by_id(self, id: str) -> NVMeDevice:
         device = single_or_none(
             device
-            for node in self.query(StorageNode, 'device_id', id)
+            for node in self.query(
+                StorageNode, 'device_id', id, StorageNode.DEVICE_KIND_NVME)
             for device in node.nvme_devices
             if device.get_id() == id
         )
@@ -346,6 +348,27 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Device {id} not found')
         return device
 
+    def get_storage_node_by_device_id(self, id: str) -> StorageNode:
+        """The node whose record holds this NVMe or JM device.
+
+        Devices are not rows of their own — they live inside the StorageNode
+        record — so the index is what says which record contains one. Callers
+        that need the owning node rather than the device itself used to scan
+        every node for it.
+
+        Answers for either kind of device. A caller that means "the node whose
+        *journal* this is" must say so — see
+        :func:`device_controller.get_storage_node_by_jm_device` — because the
+        two id spaces overlap.
+
+        Raises ``ValueError`` if two nodes claim the device: that is a broken
+        invariant, not a lookup miss, and is not something a caller can
+        meaningfully recover from.
+        """
+        node = single_or_none(self.query(StorageNode, 'device_id', id))
+        if node is None:
+            raise KeyError(f'No storage node holds device {id}')
+        return node
 
     def get_pools(self, cluster_id: str | None = None, *, source=None) -> list[Pool]:
         if source is not None:  # in-memory watch batch; see get_storage_nodes_by_cluster_id
@@ -377,6 +400,15 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Pool {name} not found')
         return pool
 
+    def pool_name_taken(self, cluster_id: str, name: str) -> bool:
+        """Whether this cluster already holds a pool by this name.
+
+        The user-facing pre-check for the ``Unique(cluster_id, pool_name)``
+        constraint, mirroring :meth:`lvol_name_taken` — the constraint itself
+        only ever fires on an invariant breach.
+        """
+        return bool(self.query_ids(Pool, 'cluster_id+pool_name', cluster_id, name))
+
     def get_pool_by_id_or_name(self, id_or_name: str, cluster_id: str | None = None) -> Pool:
         """Look a pool up by UUID, falling back to its name.
 
@@ -390,18 +422,45 @@ class DBController(metaclass=Singleton):
             else self.get_pool_by_name(id_or_name, cluster_id)
         )
 
+    def get_cluster_id_by_lvol(self, lvol) -> str:
+        """The cluster ``lvol`` belongs to — the one owner of that relation.
+
+        A volume's cluster is its POOL's cluster. ``pool_uuid`` has a single
+        writer (:meth:`LVol.place_in_pool`) and a pool never moves between
+        clusters, so the relation is stable for the life of the record;
+        ``node_id`` is assigned from a dozen sites and is deliberately in flux
+        for the length of every migration and fail-over, which made a volume's
+        cluster change under readers that had asked for nothing to move.
+        :meth:`get_lvols` reads the same relation in the other direction.
+        """
+        return self.get_pool_by_id(lvol.pool_uuid).cluster_id
+
     def get_lvols(self, cluster_id: str | None = None) -> list[LVol]:
+        """Live volumes, optionally only those of ``cluster_id``.
+
+        The bulk direction of :meth:`get_cluster_id_by_lvol`: the cluster's
+        pools, then each pool's volumes. Both sides derive membership from
+        ``pool_uuid``, so a volume can never be listed under a cluster whose
+        id the per-volume accessor would not return for it.
+
+        The index state is consulted once rather than per pool. Fanning
+        ``query(LVol, 'pool_uuid', ...)`` out over the pools would, while the
+        index is not ready, take that call's scan fallback once *per pool* —
+        turning the single table scan this had before the index existed into
+        one per pool of the cluster.
+        """
         if not cluster_id:
             return self._live_lvols(self.get_all_lvols())
-        if self.index_state(LVol, 'cluster_id') == indices.STATE_READY:
-            return self._live_lvols(self.query(LVol, 'cluster_id', cluster_id))
-        # `LVol.cluster_id` is denormalized and newer than the records: a volume
-        # created before the field existed carries none until the backfill runs.
-        # Matching on it would silently omit exactly those volumes, so until the
-        # index is ready this resolves through the node, as it always did.
-        node_ids = {node.get_id() for node in self.get_storage_nodes_by_cluster_id(cluster_id)}
+
+        pool_ids = {pool.get_id() for pool in self.get_pools(cluster_id)}
+        state = self.index_state(LVol, 'pool_uuid')
+        if state == indices.STATE_READY:
+            return self._live_lvols(itertools.chain.from_iterable(
+                self.query(LVol, 'pool_uuid', pool_id) for pool_id in pool_ids))
+
+        index_ops.warn_fallback(LVol, indices.get_index(LVol, 'pool_uuid'), state)
         return self._live_lvols(
-            lvol for lvol in self.get_all_lvols() if lvol.node_id in node_ids)
+            lvol for lvol in self.get_all_lvols() if lvol.pool_uuid in pool_ids)
 
     def get_all_lvols(self) -> list[LVol]:
         start_time = time.time()
@@ -430,7 +489,7 @@ class DBController(metaclass=Singleton):
         lvols = self.get_lvols_by_pool_id(pool_id)
         hostnames = []
         for lv in lvols:
-            if (lv.hostname not in hostnames):
+            if lv.hostname and lv.hostname not in hostnames:
                 hostnames.append(lv.hostname)
         return hostnames
 
@@ -485,16 +544,28 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'LVolReplication {uuid} not found')
         return ret[0]
 
-    def get_lvol_by_name(self, lvol_name: str, pool_uuid: str | None = None) -> LVol:
+    def get_lvol_by_name(self, lvol_name: str, pool_uuid: str | None = None,
+                         *, include_deleted: bool = False) -> LVol:
         """Look a volume up by name, within one pool when one is known.
 
         Volume names are unique per pool, not globally: the unscoped form
         raises ``ValueError('Multiple values present')`` when two pools use the
         same name, and pass ``pool_uuid`` wherever it is in scope to make that
         a point read on the uniqueness constraint instead.
+
+        ``include_deleted`` also returns tombstones — ``status == deleted``
+        records written by the pre-2026-05 force-delete path and never removed
+        (a delete now removes the record outright). A tombstone still holds the
+        pool+name uniqueness slot, so a caller about to create under that name
+        has to see it; a caller resolving a name for a user does not.
         """
-        lvol = (self.query_one(LVol, 'pool_uuid+lvol_name', pool_uuid, lvol_name)
-                if pool_uuid else self.query_one(LVol, 'lvol_name', lvol_name))
+        candidates = [
+            lvol for lvol
+            in (self.query(LVol, 'pool_uuid+lvol_name', pool_uuid, lvol_name) if pool_uuid
+                else self.query(LVol, 'lvol_name', lvol_name))
+            if include_deleted or lvol.status != LVol.STATUS_DELETED
+        ]
+        lvol = single_or_none(candidates)
         if lvol is None:
             raise KeyError(f'LVol {lvol_name} not found')
         return lvol
@@ -635,8 +706,9 @@ class DBController(metaclass=Singleton):
     def get_jm_device_by_id(self, jm_id: str) -> JMDevice:
         device = single_or_none(
             node.jm_device
-            for node in self.query(StorageNode, 'device_id', jm_id)
-            if node.jm_device and node.jm_device.get_id() == jm_id
+            for node in self.query(
+                StorageNode, 'device_id', jm_id, StorageNode.DEVICE_KIND_JM)
+            if node.jm_device
         )
         if device is None:
             raise KeyError(f'JMDevice {jm_id} not found')

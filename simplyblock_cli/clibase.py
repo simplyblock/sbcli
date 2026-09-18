@@ -610,10 +610,20 @@ class CLIWrapperBase:
         return True
 
     def cluster__build_indices(self, sub_command, args):
-        return cluster_ops.build_indices(args.cluster_id)
+        return cluster_ops.build_indices()
+
+    def cluster__index_state(self, sub_command, args):
+        if args.state:
+            return cluster_ops.switch_index(args.index, args.state)
+
+        data = cluster_ops.list_index_states(args.index)
+        if args.json:
+            return utils.dump_json(data, indent=2)
+        else:
+            return utils.print_table(data)
 
     def cluster__check_indices(self, sub_command, args):
-        return cluster_ops.check_indices(args.cluster_id, repair=args.repair)
+        return cluster_ops.check_indices(repair=args.repair)
 
     def cluster__graceful_shutdown(self, sub_command, args):
         cluster_ops.cluster_grace_shutdown(args.cluster_id)

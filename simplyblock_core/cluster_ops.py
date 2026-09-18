@@ -29,6 +29,7 @@ from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import jm_raid
+from simplyblock_core.models import indices
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -2393,7 +2394,7 @@ def list_all_info(cluster_id) -> str:
     lvols = db_controller.get_lvols(cluster_id)
     lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
 
-    snaps = [sn for sn in db_controller.get_snapshots() if sn.cluster_id == cluster_id]
+    snaps = db_controller.get_snapshots(cluster_id)
 
     devs = []
     devs_online = []
@@ -3272,24 +3273,89 @@ def upgrade_complete(cluster_id) -> bool:
     return True
 
 
-def build_indices(cluster_id) -> bool:
+def build_indices() -> bool:
     """Backfill every declared secondary index that is not ``ready`` yet.
 
     Idempotent and safe on a live cluster: live writes have maintained each
-    index since its declaration shipped, and the backfill only ever ADDS the
-    entries of records that predate it, so it needs no coordination with normal
-    traffic. Re-running it after completion is a no-op.
+    index since its declaration shipped, so the backfill only has to cover the
+    records that predate it, and it derives each one's entries inside the
+    transaction that writes them — a record rewritten underneath is re-derived,
+    never indexed under the value it used to carry. Re-running it after
+    completion is a no-op.
+
+    False when an index could not be completed — a ``Unique`` declaration whose
+    values are already duplicated in the data, or a record that stayed under
+    rewrite for the whole retry budget. Reads keep their scan fallback, so this
+    is a job for the operator, not an outage.
+
+    Deployment-wide: the index keyspace is shared by every cluster on the
+    management node, so this takes no cluster id.
     """
-    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
-    index_ops.backfill_lvol_cluster_id(log=logger.info)
     for line in index_ops.build_indices(log=logger.info):
         logger.info(line)
+    unready = index_ops.unready_indices()
+    for name in unready:
+        logger.error("Index %s was not completed; reads still fall back to a "
+                     "full scan. Run `sbctl cluster check-indices` for the "
+                     "records behind it.", name)
+    return not unready
+
+
+def list_index_states(index=None) -> builtins.list[dict]:
+    """The state record of every declared index, or of the one named.
+
+    The only way to see where an index stands without reading ``index_meta/``
+    out of FoundationDB by hand: ``build-indices`` reports an outcome and
+    ``check-indices`` reports drift, neither reports state.
+    """
+    if index is None:
+        return index_ops.index_states()
+    model_cls, idx = index_ops.resolve_index(index)
+    return index_ops.index_states(model_cls, idx)
+
+
+def switch_index(index, state) -> bool:
+    """Take one index out of service, or put it back.
+
+    ``building`` empties the index on the way back in — see
+    :func:`index_ops.enable_index` — and hands it to the next
+    ``build-indices``.
+
+    Blocks for ``ttl_cache.INDEX_STATE_CONVERGENCE_SEC`` while the new state
+    reaches the other processes, so the command returns only once the switch is
+    actually in effect across the deployment.
+    """
+    if not index:
+        raise ValueError('--set needs an index to act on, e.g. LVol.node_id')
+    if state == indices.STATE_READY:
+        raise ValueError('an index reaches `ready` only by completing '
+                         '`sbctl cluster build-indices`')
+    if state not in indices.STATES:
+        raise ValueError(f'unknown index state {state!r}')
+
+    model_cls, idx = index_ops.resolve_index(index)
+    if state == indices.STATE_DISABLED:
+        index_ops.disable_index(model_cls, idx)
+        logger.warning("Index %s is out of service everywhere; reads of it fall "
+                       "back to a full scan of %s", index, model_cls.__name__)
+    else:
+        index_ops.enable_index(model_cls, idx)
+        logger.info("Index %s is back in service at `building`. Run "
+                    "`sbctl cluster build-indices` to fill and flip it.", index)
     return True
 
 
-def check_indices(cluster_id, repair=False) -> bool:
-    """Verify every secondary index in both directions and report the drift."""
-    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+def check_indices(repair=False) -> bool:
+    """Verify every secondary index in both directions and report the drift.
+
+    False while anything is left for the operator to do — which is every finding
+    of a read-only run, and the duplicated values a ``--repair`` run cannot
+    settle by picking a winner. A repair that found its finding already gone is
+    not one of them: the walks are not isolated from live traffic, so on a busy
+    cluster that is the expected outcome rather than a problem.
+
+    Deployment-wide, like :func:`build_indices`.
+    """
     findings = index_ops.check_indices(repair=repair, log=logger.info)
     for entry in findings['missing']:
         logger.error("Missing index entry %s -> %s", *entry)
@@ -3301,8 +3367,17 @@ def check_indices(cluster_id, repair=False) -> bool:
         logger.error("Unique index key %s is derived by both %s and %s", *entry)
     total = sum(len(findings[kind])
                 for kind in ('missing', 'stale', 'orphaned', 'duplicate'))
-    logger.info("Index check: %d problem(s), %d repaired", total, findings['repaired'])
-    return total == 0 or bool(findings['repaired'])
+    logger.info("Index check: %d problem(s), %d repaired, %d no longer present, "
+                "%d unresolved", total, findings['repaired'], findings['vanished'],
+                findings['unresolved'])
+    if findings['unresolved'] and not repair:
+        logger.error("Re-run with --repair to write back the entries that can be "
+                     "derived from the records.")
+    elif findings['unresolved']:
+        logger.error("%d problem(s) need an operator: a value two live records "
+                     "both carry cannot be repaired by picking one of them.",
+                     findings['unresolved'])
+    return findings['unresolved'] == 0
 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:

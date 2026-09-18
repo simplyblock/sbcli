@@ -54,7 +54,6 @@ def db():
 def _write_lvol(db, uuid, node_id, cloned_from_snap="", status=LVol.STATUS_ONLINE):
     lvol = LVol()
     lvol.uuid = uuid
-    lvol.cluster_id = CLUSTER_ID
     lvol.pool_uuid = POOL_ID
     lvol.node_id = node_id
     lvol.lvol_name = f"VOL_{uuid}"

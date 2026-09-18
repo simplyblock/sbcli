@@ -1580,28 +1580,49 @@ commands:
           Walks every indexed table and fills in the index entries of records that predate their index
           declaration, then marks each index usable by reads. Idempotent, and safe to run against a live
           cluster: normal writes already maintain every index, and the backfill only adds entries.
-          An upgrade runs this automatically; use the command after an interrupted run or to recover an
-          index that was switched off.
+          An upgrade runs this automatically; use the command after an interrupted run, or to fill an index
+          that `sbctl cluster index-state --set building` has just put back into service.
+      - name: index-state
+        help: "Shows or switches the state of the database's secondary indices."
+        usage: >
+          Without arguments, lists every declared index with its state (`building`, `ready` or `disabled`),
+          its backfill cursor and when the state last changed. `--set disabled` takes one index out of
+          service: writes stop maintaining it and reads fall back to a full scan, which is how a
+          misbehaving index is switched off without touching the rest of its class. Its entries are
+          left in place, so readers that have not seen the change yet still get right answers, and
+          the command waits a few seconds before returning, until every process has seen it.
+          `--set building` puts it back, waiting the same way before discarding those entries, after
+          which `sbctl cluster build-indices` refills and re-enables it. An index reaches `ready`
+          only by completing a backfill, so it cannot be set here.
         arguments:
-          - name: "cluster_id"
-            help: "The cluster id."
-            dest: cluster_id
+          - name: "index"
+            help: "The index to act on, as <Class>.<index> (e.g. LVol.node_id). Omit to list them all."
+            dest: index
             type: str
-            completer: _completer_get_cluster_list
+            nargs: '?'
+          - name: "--set"
+            help: "Switch the named index to this state."
+            dest: state
+            type: str
+            choices:
+              - building
+              - disabled
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
       - name: check-indices
         help: "Verifies the database's secondary indices."
         usage: >
           Walks every index in both directions - each record's derived keys must exist, and each index key
           must resolve to a live record that still carries the indexed value - and reports what does not
-          match. Read-only unless `--repair` is given, and takes nothing offline.
+          match. Read-only unless `--repair` is given, and takes nothing offline. Fails while anything is
+          left unresolved: every finding of a read-only run, and the one thing a repair cannot settle -
+          a unique value that two live records both carry, which has to be resolved in the data itself.
         arguments:
-          - name: "cluster_id"
-            help: "The cluster id."
-            dest: cluster_id
-            type: str
-            completer: _completer_get_cluster_list
           - name: "--repair"
-            help: "Write missing entries and clear orphaned ones instead of only reporting them."
+            help: "Write back the entries that can be derived from the records, and clear orphaned ones, instead of only reporting them."
             dest: repair
             type: bool
             action: store_true

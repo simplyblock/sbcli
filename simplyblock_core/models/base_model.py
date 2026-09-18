@@ -457,16 +457,24 @@ class BaseModel:
         return {index.name: index.keys(model_cls, obj) for index in index_list}
 
     @staticmethod
-    def _apply_index_diff(tr, model_cls, index_list, old_keys, obj):
+    def _apply_index_diff(tr, model_cls, index_list, old_keys, obj, *,
+                          on_violation=None):
         """Move every index entry named by ``old_keys`` onto ``obj``.
 
         ``old_keys`` comes from the record read inside this same transaction (or
         from the object before the caller mutated it), so the diff is computed
         against what is actually stored rather than against whatever the caller
         last saw.
+
+        A unique value another live record holds aborts the write, which is what
+        every caller on the write path wants: the record does not exist yet, and
+        a create that half-happened is worse than one that did not. The backfill
+        is the exception — its records already exist, and pre-constraint data can
+        carry duplicates it must not let cost a record its entries in the OTHER
+        indices — so it passes ``on_violation`` and gets the offending key
+        skipped and reported instead of the whole transaction lost.
         """
         entity_id = str(obj.get_id())
-        encoded_id = entity_id.encode()
         for index in index_list:
             old = old_keys.get(index.name, set())
             new = index.keys(model_cls, obj)
@@ -477,15 +485,19 @@ class BaseModel:
                         continue
                     held = tr.get(key).wait()
                     if held is not None and held.present():
-                        holder = bytes(held).decode()
+                        holder = index.entry_id(model_cls, key, bytes(held))
                         if holder != entity_id:
-                            raise indices.UniqueIndexViolation(
+                            violation = indices.UniqueIndexViolation(
                                 model_cls.__name__, index.name, values,
                                 holder, entity_id)
+                            if on_violation is None:
+                                raise violation
+                            on_violation(violation)
+                            new.discard(key)
             for key in old - new:
                 tr.clear(key)
             for key in new:
-                tr[key] = encoded_id
+                tr[key] = index.entry_value(entity_id)
 
     @staticmethod
     def _write_tx(tr, key, value, model_cls, obj, index_list, rollup_key, version_key):

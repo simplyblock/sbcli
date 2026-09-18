@@ -132,7 +132,7 @@ class ConsistencyGroup(BaseModel):
         Unique(('cluster_id', 'group_name')),
         # Indexed by the bare uuid: the field holds a ReplicationPolicy
         # get_id(), and callers resolve a policy from either half of it.
-        Index('policy_id', extract=lambda group: (
+        Index('policy_id', arity=1, extract=lambda group: (
             [(group.policy_id.split('/')[-1],)] if group.policy_id else []
         )),
     )

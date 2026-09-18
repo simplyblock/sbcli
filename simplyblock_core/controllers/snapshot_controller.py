@@ -972,12 +972,11 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
 def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False,
                    consistency_group=None):
-    all_snaps = db_controller.get_snapshots()
     if lvol_id:
         try:
             lvol = (db_controller.get_lvol_by_id(lvol_id) if utils.UUID_PATTERN.match(lvol_id) is not None
                     else db_controller.get_lvol_by_name(lvol_id))
-            snaps = [sn for sn in all_snaps if sn.lvol.get_id() == lvol.get_id()]
+            snaps = db_controller.get_snapshots_by_lvol_id(lvol.get_id())
         except KeyError:
             logger.error("Can not find lvol with provided lvol_id_or_name: %s", lvol_id)
             return False
@@ -993,15 +992,13 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             node = (db_controller.get_storage_node_by_id(node_id)
                     if utils.UUID_PATTERN.match(node_id) is not None
                     else db_controller.get_storage_nodes_by_hostname(node_id)[0])
-            snaps = [sn for sn in all_snaps if sn.lvol.node_id == node.get_id()]
+            snaps = db_controller.get_snapshots_by_node_id(node.get_id())
         except KeyError:
             logger.error("Can not find node with provided value: %s", node_id)
             return False
 
-    elif cluster_id:
-        snaps = [sn for sn in all_snaps if sn.cluster_id == cluster_id]
     else:
-        snaps = all_snaps
+        snaps = db_controller.get_snapshots(cluster_id)
 
     if consistency_group:
         # Filter to one group's snapshots without client-side name matching

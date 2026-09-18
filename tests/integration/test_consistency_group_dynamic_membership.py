@@ -46,7 +46,6 @@ def db():
 def _write_lvol(db, uuid, pool=POOL_A, node=NODE, lvs=LVS):
     lvol = LVol()
     lvol.uuid = uuid
-    lvol.cluster_id = CLUSTER_ID
     lvol.pool_uuid = pool
     lvol.node_id = node
     lvol.lvs_name = lvs

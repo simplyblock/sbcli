@@ -12,7 +12,6 @@ class LVol(BaseModel):
     _INDEXES: ClassVar[tuple] = (
         Index('pool_uuid'),
         Index('node_id'),
-        Index('cluster_id'),
         # Names are unique per POOL, so the constraint below cannot answer a
         # lookup that has only the name — which `sbctl volume get <name>` and
         # the v1 "id or name" surfaces legitimately do.
@@ -20,7 +19,7 @@ class LVol(BaseModel):
         # Indexed by the bare uuid: the field holds a ReplicationPolicy
         # get_id() ("<cluster>/<uuid>") but every caller resolves a policy from
         # whichever half it happens to hold.
-        Index('replication_policy_id', extract=lambda lvol: (
+        Index('replication_policy_id', arity=1, extract=lambda lvol: (
             [(lvol.replication_policy_id.split('/')[-1],)]
             if lvol.replication_policy_id else []
         )),
@@ -49,11 +48,6 @@ class LVol(BaseModel):
     bdev_stack: list = default_factory(list)
     blobid: int = 0
     cloned_from_snap: str = ""
-    #: Denormalized from the volume's node at create time. LVol is reached by
-    #: pool and by node, never by cluster, so without this a per-cluster
-    #: listing had to resolve the cluster's nodes first and filter every lvol
-    #: against that id list — two scans for one query.
-    cluster_id: str = ""
     comp_bdev: str = ""
     crypto_bdev: str = ""
     crypto_key_name: str = ""
@@ -156,17 +150,15 @@ class LVol(BaseModel):
     group_id: str = ""
 
     def place_in_pool(self, pool) -> None:
-        """Put this volume in ``pool`` — which is also what fixes its cluster.
+        """Put this volume in ``pool``.
 
-        The three fields move as one: ``pool_uuid`` and ``pool_name`` are what
-        the display paths read, and ``cluster_id`` is denormalized from the
-        pool so a per-cluster listing is a single range read. Assigning them
-        separately is how a volume ends up in a pool but in no cluster, which
-        the by-cluster index would then silently omit.
+        The two fields move as one: ``pool_uuid`` is what the index and every
+        lookup key on, ``pool_name`` is what the display paths read, and a
+        record carrying one without the other shows a volume in the wrong pool
+        on exactly one of those surfaces.
         """
         self.pool_uuid = pool.get_id()
         self.pool_name = pool.pool_name
-        self.cluster_id = pool.cluster_id
 
     def watch_scope(self):
         return (self.pool_uuid,)

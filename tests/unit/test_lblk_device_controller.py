@@ -125,7 +125,7 @@ class TestNewDeviceFromFailedAio(unittest.TestCase):
         node.client.return_value = client
 
         db = MagicMock()
-        db.get_storage_nodes.return_value = [node]
+        db.get_storage_node_by_device_id.return_value = node
         with patch.object(device_controller, "DBController", return_value=db):
             result = device_controller.new_device_from_failed("dev-1")
         return result, rpc, db
@@ -246,7 +246,7 @@ class TestLateEventGateAio(unittest.TestCase):
 
         db = MagicMock()
         db.get_storage_node_by_id.return_value = event_node
-        db.get_storage_nodes.return_value = [home_node]
+        db.get_storage_nodes_by_cluster_id.return_value = [home_node]
 
         with patch.object(collector, "db", db), \
              patch.object(collector, "_is_target_remote_controller_healthy",
