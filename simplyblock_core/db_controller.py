@@ -262,7 +262,6 @@ class DBController(metaclass=Singleton):
         """
         idx = indices.get_index(model_cls, index)
         if self.index_state(model_cls, idx) == indices.STATE_READY:
-            index_ops.QUERIES.labels(model_cls.__name__, idx.name, 'index').inc()
             return self._indexed_ids(model_cls, idx, values, limit, reverse)
         return [
             str(obj.get_id()) for obj
@@ -283,15 +282,9 @@ class DBController(metaclass=Singleton):
         """
         idx = indices.get_index(model_cls, index)
         if self.index_state(model_cls, idx) == indices.STATE_READY:
-            index_ops.QUERIES.labels(model_cls.__name__, idx.name, 'index').inc()
             ids = self._indexed_ids(model_cls, idx, values, limit, reverse)
-            found = self.multi_get(model_cls, ids)
-            if len(found) != len(ids):
-                index_ops.DANGLING.labels(model_cls.__name__, idx.name).inc(
-                    len(ids) - len(found))
-            return found
+            return self.multi_get(model_cls, ids)
 
-        index_ops.QUERIES.labels(model_cls.__name__, idx.name, 'scan').inc()
         index_ops.warn_fallback(model_cls, idx, self.index_state(model_cls, idx))
         rows = []
         # id=" " is this codebase's spelling for "the whole class keyspace";

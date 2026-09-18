@@ -1,4 +1,4 @@
-"""Backfill, verification and observability for the declared secondary indices.
+"""Backfill and verification for the declared secondary indices.
 
 :mod:`simplyblock_core.models.indices` defines what an index *is* and
 :class:`~simplyblock_core.db_controller.DBController` reads and maintains one.
@@ -12,16 +12,12 @@ This module owns the operations that run over a whole keyspace:
   exist, and every index key resolves to a live entity that really carries that
   value. It is the field diagnostic behind a ``UniqueIndexViolation`` and the
   thing that makes the whole scheme auditable.
-* the counters that make a read's choice of path visible. A scan fallback that
-  survives a ``ready`` flip is a bug, and without a counter it is invisible —
-  it just looks slow.
 """
 
 import json
 import time
 
 import fdb
-from prometheus_client import Counter
 
 from simplyblock_core import utils
 from simplyblock_core.models import indices
@@ -29,22 +25,6 @@ from simplyblock_core.models.base_model import BaseModel
 
 logger = utils.get_logger(__name__)
 
-
-QUERIES = Counter(
-    'sb_index_queries_total',
-    'Index-backed lookups, by whether they used the index or fell back to a scan',
-    ['model', 'index', 'path'],
-)
-DANGLING = Counter(
-    'sb_index_dangling_entries_total',
-    'Index entries whose entity was gone by the time it was point-read',
-    ['model', 'index'],
-)
-BACKFILLED = Counter(
-    'sb_index_backfilled_records_total',
-    'Records walked by the index backfill',
-    ['model'],
-)
 
 #: Records whose index entries are written in one backfill transaction. The
 #: read side is chunked at ``_READ_CHUNK_SIZE``; the write side commits in much
@@ -209,7 +189,6 @@ def build_indices(model_classes=None, *, force=False, log=None) -> list[str]:
                 fdb.transactional(_index_chunk_tx)(
                     db.kv_store, model_cls, pending, batch)
                 walked += len(batch)
-                BACKFILLED.labels(model_cls.__name__).inc(len(batch))
                 cursor = batch[-1][0].decode()
                 for index in pending:
                     db.set_index_state(model_cls, index, indices.STATE_BUILDING,

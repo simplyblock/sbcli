@@ -88,8 +88,8 @@ The fallback's predicate and ordering come from the same declaration
 index is therefore: declare it → `sbctl cluster build-indices` (or an upgrade, which runs
 `release_upgrades/database_indices.py`) → it flips to `ready` on its own.
 `sbctl cluster check-indices [--repair]` walks both directions and is safe against a live
-cluster. `index_ops.py` holds the backfill, the verifier and the Prometheus counters
-(`sb_index_queries_total{path="index"|"scan"}` — a `scan` that survives a `ready` flip is a bug).
+cluster. `index_ops.py` holds the backfill and the verifier. A read that falls back to a
+scan logs a warning (rate-limited per index) — one that survives a `ready` flip is a bug.
 
 **When an index is worth it.** It turns a full scan into a range read plus one pipelined
 point read per hit: a win when the result is a small fraction of the table, a mild loss when
