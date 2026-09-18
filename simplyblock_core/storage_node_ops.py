@@ -1340,6 +1340,30 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
     })
 
 
+def _publish_device_endpoint(device, snode: StorageNode, subsystem_nqn: str):
+    """Record where ``device`` now answers, from the node's CURRENT ``data_nics``.
+
+    Peers do not discover a device's address; they read ``nvmf_ip`` out of the
+    owner's FDB record and attach to it (``connect_device`` ->
+    ``_expected_ips``). So whenever a restart re-creates a subsystem and its
+    listeners, the record has to be re-published in the same breath -- the
+    listeners come from the live ``data_nics``, and a record left behind still
+    names the address the node had *last* time.
+
+    That drift is invisible until the node's data IPs actually change, which is
+    what ``--data-nics`` and a ``--node-addr`` move both do.
+
+    ``nvmf_ip`` is a comma-separated list when the node advertises on more than
+    one NIC, matching what ``_expected_ips`` splits back apart.
+    """
+    ips = [iface.ip4_address for iface in snode.data_nics if iface.ip4_address]
+    device.nvmf_nqn = subsystem_nqn
+    device.nvmf_ip = ",".join(ips)
+    device.nvmf_port = snode.nvmf_port
+    device.nvmf_multipath = len(ips) > 1
+    return device
+
+
 def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_restart):
     db_controller = DBController()
     nvme_bdev = nvme.nvme_bdev
@@ -1392,21 +1416,11 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
         return None
 
-    if len(ip_list) > 1:
-        IP = ",".join(ip_list)
-        multipath = True
-    else:
-        IP = ip_list[0]
-        multipath = False
-
     nvme.alceml_bdev = alceml_bdev
     nvme.pt_bdev = pt_name
     nvme.alceml_name = alceml_name
-    nvme.nvmf_nqn = subsystem_nqn
-    nvme.nvmf_ip = IP
-    nvme.nvmf_port = snode.nvmf_port
+    _publish_device_endpoint(nvme, snode, subsystem_nqn)
     nvme.io_error = False
-    nvme.nvmf_multipath = multipath
     nvme.pt_spdk_uuid = pt_spdk_uuid
     # if nvme.status != NVMeDevice.STATUS_NEW:
     #     nvme.status = NVMeDevice.STATUS_ONLINE
@@ -1712,6 +1726,19 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 if iface.ip4_address:
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                     ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+
+            # The listeners above just moved to the current data_nics; the
+            # record has to move with them. Without this the JM kept the
+            # nvmf_ip it was written with, and every peer attached to an
+            # address nothing listens on any more:
+            #   Failed to attach controller remote_jm_<node> via <old ip>:
+            #   connection error
+            # Both sibling paths already do this -- _create_storage_device_stack
+            # for NVMe devices and _create_jm_stack_on_raid for a RAID JM (it
+            # returns a freshly built record). This branch, the JM-on-device
+            # layout, was the only one that mutated the existing record in
+            # place and left the endpoint behind.
+            _publish_device_endpoint(jm_device, snode, subsystem_nqn)
         jm_device.status = JMDevice.STATUS_ONLINE
         snode.jm_device = jm_device
         snode.write_to_db()
@@ -5192,11 +5219,76 @@ def _finalize_node_removal(removed_node: StorageNode):
     logger.info("done")
 
 
+def _resolve_data_nics(
+        node_info: Optional[dict], names, snode_api: Any,
+        fabric_tcp: bool, fabric_rdma: bool) -> tuple[list[IFace], list[tuple[str, str]]]:
+    """Resolve interface names against a node's live ``network_interface`` info
+    (as returned by the node agent's ``info()``) and classify each one for the
+    cluster's fabric.
+
+    Returns ``(ifaces, rejected)``. ``ifaces`` holds only usable storage
+    interfaces, each with its ``trtype`` set; ``rejected`` holds
+    ``(if_name, reason)`` for every name the host does not expose or that
+    classifies as neither RDMA nor TCP.
+
+    An unusable NIC must never reach ``data_nics``: ``IFace.trtype`` defaults to
+    ``"TCP"`` (models/iface.py), so an unclassified interface is
+    indistinguishable from a working TCP one, and every listener loop --
+    ``_create_storage_device_stack``, ``_create_jm_stack_on_raid`` (which does
+    not even guard on ``ip4_address``), ``add_lvol_listeners`` -- would go on to
+    advertise a subsystem on it. On an RDMA-only cluster that is a
+    ``listeners_create(..., "TCP", ...)`` against a process with no TCP
+    transport at all. Being present by name is not enough: ``get_nics_data``
+    lists every interface, an address-less one included, with ``ip`` set to
+    ``""``.
+
+    Classification is a property of the HOST, not of the name, which is why
+    both restart paths that rebuild ``data_nics`` come through here -- the
+    ``--node-addr`` move as well as ``--data-nics``. What to DO about a
+    rejected name is left to the caller, because the two mean different things
+    by their name list: one is what the operator just asked for, the other is
+    what the record happened to carry.
+
+    ``snode_api`` is used only for the two ``ifc_is_*`` probes, so the resolver
+    stays cheap to fake in unit tests.
+    """
+    available = (node_info or {}).get('network_interface', {})
+    ifaces: list[IFace] = []
+    rejected: list[tuple[str, str]] = []
+    for if_name in names:
+        if if_name not in available:
+            rejected.append((
+                if_name,
+                f"not present on the host (available: {sorted(available)})"))
+            continue
+        device = available[if_name]
+        cfg = {
+            'uuid': str(uuid.uuid4()),
+            'if_name': if_name,
+            'ip4_address': device['ip'],
+            'status': device['status'],
+            'net_type': device['net_type']}
+        if fabric_rdma and snode_api.ifc_is_roce(if_name):
+            cfg['trtype'] = "RDMA"
+        elif fabric_tcp and snode_api.ifc_is_tcp(if_name):
+            cfg['trtype'] = "TCP"
+        else:
+            rejected.append((
+                if_name,
+                f"not a usable storage interface for this cluster's fabric "
+                f"(tcp={fabric_tcp}, rdma={fabric_rdma}, ip='{device['ip']}', "
+                f"status={device['status']})"))
+            continue
+        ifaces.append(IFace(cfg))
+    return ifaces, rejected
+
+
 def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        new_data_nics=[],
         force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None):
     """Wrapper that guarantees the node is reset to OFFLINE if the restart
     fails after THIS call set the RESTARTING status. Without this, any
@@ -5314,7 +5406,7 @@ def restart_storage_node(
             spdk_image=spdk_image, set_spdk_debug=set_spdk_debug,
             small_bufsize=small_bufsize, large_bufsize=large_bufsize,
             force=force, node_address=node_address, reattach_volume=reattach_volume,
-            clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
+            clear_data=clear_data, new_ssd_pcie=new_ssd_pcie, new_data_nics=new_data_nics,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image,
             current_restart_task_id=current_restart_task_id or _owned_task_id,
             restart_claim_token=_claim_token)
@@ -5513,6 +5605,7 @@ def _restart_storage_node_impl(
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        new_data_nics=[],
         force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None,
         restart_claim_token=""):
     db_controller = DBController()
@@ -5603,18 +5696,38 @@ def _restart_storage_node_impl(
             return False
         snode.api_endpoint = node_address
         snode.mgmt_ip = utils.resolve_address(node_address)
-        data_nics = []
-        for nic in snode.data_nics:
-            if_name = nic["if_name"]
-            device = node_info['network_interface'][if_name]
-            data_nics.append(
-                IFace({
-                    'uuid': str(uuid.uuid4()),
-                    'if_name': if_name,
-                    'ip4_address': device['ip'],
-                    'status': device['status'],
-                    'net_type': device['net_type']}))
-        snode.data_nics = data_nics
+        # A requested new NIC set supersedes the record's names and is
+        # resolved against this same host further down, so don't rebuild from
+        # the OLD names here: that lookup fails on exactly the case the
+        # --node-addr/--data-nics combination exists for -- a node moved to a
+        # host where the storage NIC has a different name.
+        if not new_data_nics:
+            # Same interface NAMES, new IPs -- and a fresh classification,
+            # because whether a name is a usable storage interface is a
+            # property of the host, not of the name. The new host can carry an
+            # eth1 that is address-less or, on an RDMA cluster, not RoCE; that
+            # NIC used to be rebuilt unclassified and inherit IFace.trtype's
+            # "TCP" default, which put a listener on a dead interface.
+            old_names = [nic["if_name"] for nic in snode.data_nics]
+            rebuilt, rejected = _resolve_data_nics(
+                node_info, old_names, snode_api,
+                cluster.fabric_tcp, cluster.fabric_rdma)
+            for if_name, reason in rejected:
+                # These names came off the record, not from the operator, so a
+                # bad one is dropped rather than failing the move outright --
+                # the rule add_node has always applied. Loud, because the node
+                # comes back advertising fewer paths than it had.
+                logger.warning(
+                    f"Dropping data nic '{if_name}' of {snode.get_id()} on "
+                    f"{node_address}: {reason}")
+            if not rebuilt:
+                logger.error(
+                    f"Cannot restart {snode.get_id()} on {node_address}: none of "
+                    f"its data nics {old_names} is a usable storage interface "
+                    f"there. Pass --data-nics to move the node onto different "
+                    f"interface(s).")
+                return False
+            snode.data_nics = rebuilt
         snode.hostname = node_info['hostname']
 
         if snode.num_partitions_per_dev == 0 and reattach_volume:
@@ -5658,6 +5771,26 @@ def _restart_storage_node_impl(
     fabric_tcp = cluster.fabric_tcp
     fabric_rdma = cluster.fabric_rdma
     snode_api = snode.client(timeout=5 * 60, retry=3)
+    node_info, _ = snode_api.info()
+    logger.debug(f"Node info: {node_info}")
+    # Replace the node's data NIC set on restart. This lets an operator swap a
+    # failed/renamed storage NIC for a different one without re-adding the node:
+    # the requested interfaces are looked up on the live host and become the new
+    # data_nics, so the SPDK restart re-advertises the NVMe-oF listeners on the
+    # new IPs. Mirrors the node_address path, but changes the interface NAMES.
+    if new_data_nics:
+        rebuilt, rejected = _resolve_data_nics(
+            node_info, new_data_nics, snode_api, fabric_tcp, fabric_rdma)
+        if rejected:
+            # The operator named these explicitly, so an unusable one is an
+            # error rather than something to quietly drop: they asked for a
+            # specific set and would otherwise get a different one.
+            logger.error(
+                f"Cannot replace data nics on {snode.get_id()}: "
+                + "; ".join(f"'{n}' {r}" for n, r in rejected))
+            return False
+        snode.data_nics = rebuilt
+        logger.info(f"Replacing data nics on {snode.get_id()} with: {new_data_nics}")
     for nic in snode.data_nics:
         if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
             nic.trtype = "RDMA"
@@ -5669,10 +5802,19 @@ def _restart_storage_node_impl(
             active_tcp = True
     snode.active_tcp = active_tcp
     snode.active_rdma = active_rdma
+    if (new_data_nics or node_address) and not active_tcp and not active_rdma:
+        # Both rebuild paths above went through _resolve_data_nics, which keeps
+        # only interfaces that classified as RDMA or TCP, so reaching this means
+        # the second round of ifc_is_* probes disagreed with the first -- a NIC
+        # that flapped mid-restart. Abort rather than come up advertising
+        # nothing. A plain restart is deliberately left alone: its data_nics
+        # come straight off the record and have never been gated here.
+        logger.error(
+            f"No data nic on {snode.get_id()} is a usable storage interface "
+            f"(TCP/RDMA); aborting restart")
+        return False
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
-    node_info, _ = snode_api.info()
-    logger.debug(f"Node info: {node_info}")
 
     logger.info("Restarting SPDK")
 

@@ -33,7 +33,7 @@ def _restart_args():
     return argparse.Namespace(
         node_id="node-1", max_snap=5000,
         spdk_image=None, spdk_debug=False, reattach_volume=False,
-        small_bufsize=0, large_bufsize=0, ssd_pcie=[], node_ip=None,
+        small_bufsize=0, large_bufsize=0, ssd_pcie=[], data_nics=[], node_ip=None,
         force=False, force_lvol_recreate=False, spdk_proxy_image=None,
     )
 

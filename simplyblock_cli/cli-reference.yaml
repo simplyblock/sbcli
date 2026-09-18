@@ -337,7 +337,11 @@ commands:
               Allows to restart an existing storage node on new host or hardware. Devices attached to storage nodes
               have to be attached to new hosts. Otherwise, they have to be marked as failed and removed from cluster.
               Triggers a pro-active migration of data from those devices onto other storage nodes.<br><br>
-              The provided value must be presented in the form of _IP:PORT_. Be default the port number is _5000_.
+              The provided value must be presented in the form of _IP:PORT_. Be default the port number is _5000_.<br><br>
+              The node keeps its data NIC names and they are re-resolved on the new host. A NIC that is
+              missing there, or that is not usable for the cluster's fabric, is dropped with a warning; the
+              restart is refused only if none of them is usable. Pass `--data-nics` to move the node onto
+              differently named interface(s).
             dest: node_ip
             type: str
           - name: "--spdk-image"
@@ -377,6 +381,22 @@ commands:
           - name: "--ssd-pcie"
             help: "New Nvme PCIe address to add to the storage node. Can be more than one."
             dest: ssd_pcie
+            required: false
+            type: str
+            nargs: +
+            default: ""
+          - name: "--data-nics"
+            help: "Replace the storage node's data network interface(s) on restart. Provide the new interface name(s); they replace the existing data NIC set. Can be more than one."
+            description: >
+              Replaces the data network interface(s) the storage node advertises its NVMe-oF
+              listeners on. Use this to swap a failed or renamed storage NIC for a different one
+              without re-adding the node: the given interfaces are looked up on the (possibly new)
+              host during the restart and become the node's new data NICs. If omitted, the existing
+              data NICs are kept. Every named interface must exist on the host and be usable for
+              the cluster's fabric (TCP and/or RoCE), otherwise the restart is refused. Note that
+              the node's data IPs change: peer nodes re-establish their device connections on their
+              own, but clients already connected over the old IP must reconnect.
+            dest: data_nics
             required: false
             type: str
             nargs: +
