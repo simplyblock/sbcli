@@ -87,6 +87,54 @@ class TestCreateCluster:
         assert response.status_code == 422
         cluster_ops.add_cluster.assert_not_called()
 
+    def test_backup_config_without_a_bucket_is_accepted(self, client, db, cluster, cluster_ops):
+        """The bucket is derived from the id of the cluster this request is
+        asking to create, so no caller can name one: the operator's
+        ``StorageCluster.spec.backup`` has no field for it at all. Requiring it
+        here rejected every backup-enabled create with a 422 before any of
+        Cluster's resolution ran."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {
+                'access_key_id': 'minioadmin',
+                'secret_access_key': 'minioadmin',
+                'local_endpoint': 'http://minio:9000',
+                'local_testing': True,
+            },
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        # Absent rather than derived: what keeps Cluster.get_backup_config's
+        # derivation live instead of frozen into the record.
+        assert 'bucket_name' not in cluster_ops.add_cluster.call_args.kwargs['backup_config']
+
+    def test_a_named_backup_bucket_is_passed_through(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {'bucket_name': 'chosen', 'region': 'eu-central-1'},
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        assert cluster_ops.add_cluster.call_args.kwargs['backup_config']['bucket_name'] == 'chosen'
+
+    def test_an_invalid_backup_config_is_still_rejected(self, client, db, cluster_ops):
+        """Dropping the bucket requirement must not drop the rest of them."""
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {'buckt_name': 'typo'},
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 422
+        cluster_ops.add_cluster.assert_not_called()
+
     def test_omitted_hugepages_mem_defaults_to_computed(self, client, db, cluster, cluster_ops):
         """Unlike max_subsys/spdk_vcpu_count, hugepages_mem is only ever a
         floor on top of a figure computed from the other two -- 0 means

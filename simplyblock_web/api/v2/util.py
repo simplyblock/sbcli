@@ -17,6 +17,11 @@ Port = Annotated[int, Field(ge=0, lt=65536)]
 # Records spell an unset reference as an empty string rather than omitting it.
 OptionalUUID = Annotated[Optional[UUID], BeforeValidator(lambda value: value or None)]
 
+#: Re-exported rather than redefined: the manifest in the core layer needs the
+#: same type, and one definition is what keeps the two from drifting. Here so
+#: that API models find their scalar types in one place.
+NQN = core_utils.NQN
+
 
 def _validate_url_path(value: Any) -> str:
     if not isinstance(value, str):

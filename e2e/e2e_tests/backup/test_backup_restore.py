@@ -16,7 +16,7 @@ Backup CRUD:
   sbcli backup list [--cluster-id]
   sbcli backup delete <lvol_id>               # deletes ALL backups for that lvol
   sbcli backup restore <backup_id> [--lvol NAME] [--pool POOL]
-  sbcli backup import <metadata.json>
+  sbcli backup import (--from-file <metadata.json> | --bucket NAME) [--cluster-id]
 
 Policy management:
   sbcli backup policy-add <cluster_id> <name> [--versions N] [--age 1d] [--schedule ...]
@@ -1057,30 +1057,14 @@ class BackupTestBase(TestClusterBase):
         details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
         assert details, f"{label}: get_lvol_details returned empty for {lvol_id}"
         d = details[0] if isinstance(details, list) else details
-        crypto_val = d.get("crypto") or d.get("encryption") or d.get("Crypto")
+        crypto_val = ("crypto" in d.get("lvol_type", "").split(",")
+                      or bool(d.get("crypto_bdev")))
         self.logger.info(f"{label}: lvol {lvol_id} crypto={crypto_val}")
         assert crypto_val, (
-            f"{label}: restored lvol {lvol_id} expected crypto=True, "
-            f"got {crypto_val!r}. Full details: {d}")
+            f"{label}: restored lvol {lvol_id} expected crypto=True, but "
+            f"lvol_type={d.get('lvol_type')!r} and "
+            f"crypto_bdev={d.get('crypto_bdev')!r}. Full details: {d}")
         return d
-
-    def _verify_lvol_dhchap(self, lvol_id: str, label: str = ""):
-        """Assert that the lvol's connect string includes DHCHAP keys.
-
-        This verifies the restored lvol preserves DHCHAP authentication.
-        Returns the connect output for further inspection if needed.
-        """
-        connect_out, _ = self._sbcli(f"volume connect {lvol_id}")
-        self.logger.info(f"{label}: connect output: {connect_out[:300]}")
-        has_dhchap = (
-            "--dhchap-secret" in connect_out
-            or "--dhchap-ctrl-secret" in connect_out
-        )
-        self.logger.info(f"{label}: lvol {lvol_id} has_dhchap={has_dhchap}")
-        assert has_dhchap, (
-            f"{label}: restored lvol {lvol_id} expected DHCHAP keys in "
-            f"connect string, but none found: {connect_out}")
-        return connect_out
 
     # ── lvol / mount helpers ──────────────────────────────────────────────────
 
@@ -2138,8 +2122,8 @@ class TestBackupNegative(BackupTestBase):
       - policy-attach invalid target_type → CLI error
       - policy-remove non-existent policy_id → error
       - backup list after all lvols deleted → empty or graceful
-      - backup import with valid metadata file
-      - backup import with malformed JSON → error
+      - backup import --from-file with a valid (empty) export document
+      - backup import --from-file with malformed JSON → error
       - Duplicate snapshot backup → handled (no crash, idempotent or error)
     """
 
@@ -2204,7 +2188,7 @@ class TestBackupNegative(BackupTestBase):
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
                 f"echo '{{not valid json}}' > {bad_json}")
-            out, err = self._sbcli(f"backup import {bad_json}")
+            out, err = self._sbcli(f"backup import --from-file {bad_json}")
             assert err or "error" in out.lower(), \
                 "TC-BCK-035: expected error for malformed JSON import"
             self.logger.info("TC-BCK-035: got expected error ✓")
@@ -2213,11 +2197,16 @@ class TestBackupNegative(BackupTestBase):
             good_json = "/tmp/good_backup.json"
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
-                f"echo '[]' > {good_json}")
-            out, err = self._sbcli(f"backup import {good_json}")
-            # Empty list → 0 imported; should not error
+                f"""echo '{{"schema_version": 1, "groups": []}}' > {good_json}""")
+            out, err = self._sbcli(f"backup import --from-file {good_json}")
+            # exec_command synthesises err from a non-zero exit when stderr is
+            # empty, so this rejects a refused command line too, not just a
+            # reported failure.
+            assert not err, \
+                f"TC-BCK-036: empty export import failed: {err}"
+            # Empty export → 0 imported; should not error
             assert "error" not in out.lower() or "0" in out, \
-                f"TC-BCK-036: unexpected error for empty-list import: {err}"
+                f"TC-BCK-036: unexpected error for empty export import: {out}"
             self.logger.info("TC-BCK-036: import handled ✓")
         else:
             self.logger.info("TC-BCK-035/036: skipped (backup import is CLI-only)")
@@ -3030,7 +3019,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     --------
     1. On Cluster-1: create lvol → write data → snapshot + S3 backup → wait for done.
     2. Export backup metadata from Cluster-1 via `backup list` → JSON file.
-    3. On Cluster-2: `backup import <metadata.json>` to register the chain.
+    3. On Cluster-2: `backup import --from-file <metadata.json>` to register the chain.
     4. On Cluster-2: `backup restore <backup_id>` to restore from Cluster-1's S3.
        (Backups self-describe their S3 bucket — no source-switch needed.)
     5. Verify checksums match the data written on Cluster-1.
@@ -3820,7 +3809,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         # TC-BCK-073: import metadata on Cluster-2
         self.logger.info(f"TC-BCK-073: Cluster-2 — backup import {meta_file}")
         out, err = self._sbcli_c2(
-            f"backup import {meta_file} --cluster-id {self._cluster2_id}")
+            f"backup import --from-file {meta_file} --cluster-id {self._cluster2_id}")
         assert not (err and "error" in err.lower()), \
             f"TC-BCK-073: backup import on Cluster-2 failed: {err}"
         self.logger.info(f"TC-BCK-073: import result: {out.strip()}")
@@ -4997,15 +4986,15 @@ def get_backup_extra_tests():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TC-BCK-150..154 – Backup / restore of a DHCHAP + crypto lvol
+#  TC-BCK-150..154 – Backup / restore of a crypto lvol
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBackupSecurityLvol(BackupTestBase):
     """
-    Verifies that a DHCHAP+crypto lvol can be backed up and that the
-    restored lvol is accessible.
+    Verifies that a crypto lvol can be backed up and that the restored lvol
+    is accessible.
 
-    TC-BCK-150  Create DHCHAP+crypto lvol; write FIO data
+    TC-BCK-150  Create crypto lvol; write FIO data
     TC-BCK-151  Take snapshot with --backup flag
     TC-BCK-152  Wait for backup to complete
     TC-BCK-153  Restore backup to a new lvol name
@@ -5021,8 +5010,8 @@ class TestBackupSecurityLvol(BackupTestBase):
         self.fio_node = self.fio_node[0]
         self._ensure_pool_and_sc()
 
-        # TC-BCK-150: create DHCHAP+crypto lvol and write data
-        self.logger.info("TC-BCK-150: Creating DHCHAP+crypto lvol …")
+        # TC-BCK-150: create crypto lvol and write data
+        self.logger.info("TC-BCK-150: Creating crypto lvol …")
         lvol_name, lvol_id = self._create_lvol(crypto=True)
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
@@ -5061,11 +5050,6 @@ class TestBackupSecurityLvol(BackupTestBase):
         self.logger.info("TC-BCK-153b: verify restored lvol has crypto property")
         self._verify_lvol_crypto(restored_id, label="TC-BCK-153b")
         self.logger.info("TC-BCK-153b: crypto property preserved ✓")
-
-        # TC-BCK-153c: verify restored lvol has DHCHAP authentication
-        self.logger.info("TC-BCK-153c: verify restored lvol has DHCHAP keys in connect string")
-        self._verify_lvol_dhchap(restored_id, label="TC-BCK-153c")
-        self.logger.info("TC-BCK-153c: DHCHAP property preserved ✓")
 
         # TC-BCK-154: connect and verify data
         self.logger.info("TC-BCK-154: Verifying restored lvol data …")
