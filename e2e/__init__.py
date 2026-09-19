@@ -113,8 +113,10 @@ from e2e_tests.lblk.test_lblk import (
     LblkDeviceFaultK8s,
     LblkJournalRecoveryDocker,
     LblkJournalRecoveryK8s,
-    LblkUnfencedJournalDocker,
-    LblkUnfencedJournalK8s,
+)
+from e2e_tests.lblk.test_lblk_outage_matrix import (
+    LblkOutageMatrixDocker,
+    LblkOutageMatrixK8s,
 )
 from stress_test.lblk_stress import (
     LblkStressDocker,
@@ -486,8 +488,8 @@ ALL_TESTS = [
     LblkDeviceFaultK8s,
     LblkJournalRecoveryDocker,
     LblkJournalRecoveryK8s,
-    LblkUnfencedJournalDocker,
-    LblkUnfencedJournalK8s,
+    LblkOutageMatrixDocker,
+    LblkOutageMatrixK8s,
     LblkStressDocker,
     LblkStressK8s,
     LblkMultiOutageStressDocker,
@@ -1012,8 +1014,8 @@ def get_lblk_tests():
         LblkDeviceFaultK8s,
         LblkJournalRecoveryDocker,
         LblkJournalRecoveryK8s,
-        LblkUnfencedJournalDocker,
-        LblkUnfencedJournalK8s,
+        LblkOutageMatrixDocker,
+        LblkOutageMatrixK8s,
     ]
 
 

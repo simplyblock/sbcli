@@ -28,7 +28,6 @@ import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
-from exceptions.custom_exception import SkippedTestsException
 from utils.common_utils import sleep_n_sec
 from utils.md_journal import (
     MdJournalError,
@@ -759,6 +758,10 @@ class _LblkBase(TestClusterBase):
                 f"need at least 2 storage nodes to take one down, have {len(nodes)}")
         return random.choice(nodes)
 
+    #: How long a network-interrupt outage holds. Short enough that the
+    #: 600s offline wait in _outage_and_recover still has room afterwards.
+    NETWORK_OUTAGE_SEC = 120
+
     def _outage_and_recover(self, node, outage_type):
         """Take one node down the requested way and bring it back."""
         uuid, ip = node["uuid"], node["mgmt_ip"]
@@ -787,6 +790,14 @@ class _LblkBase(TestClusterBase):
                 self._ensure_k8s_utils().stop_spdk_pod(ip)
             else:
                 self.ssh_obj.reboot_node(ip)
+        elif outage_type == "interface_full_network_interrupt":
+            # Self-restoring on both platforms, so unlike the others this one
+            # does not need us to reach the node to end it. Held well short of
+            # the 600s offline wait below so the links are back before we ask
+            # the control plane to restart it.
+            self._network_outage(ip, self.NETWORK_OUTAGE_SEC)
+            sleep_n_sec(self.NETWORK_OUTAGE_SEC + 15)
+            self._restore_network(ip)
         else:
             raise ValueError(f"unhandled outage type {outage_type!r}")
 
@@ -806,46 +817,6 @@ class _LblkDockerMixin:
 
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
-
-    def _spdk_freeze(self, node_ip, rpc_port, freeze):
-        """Freeze or thaw the whole SPDK container.
-
-        NOT "pkill -STOP -f spdk_tgt" on the host. The spdk_<port> container is
-        created without pid_mode, so it has its own PID namespace
-        (simplyblock_web/api/internal/storage_node/docker.py) and a host pkill
-        matches nothing at all. The first version of this test did exactly that,
-        swallowed the miss with "|| true", and reported a clean pass having
-        frozen nothing.
-
-        docker pause uses the cgroup freezer, which is the SIGSTOP semantics
-        this test wants applied to every thread at once.
-        """
-        verb = "pause" if freeze else "unpause"
-        _out, err = self.ssh_obj.exec_command(
-            node=node_ip, command=f"sudo docker {verb} spdk_{rpc_port}",
-            max_retries=1)
-        state = self._spdk_container_state(node_ip, rpc_port)
-        want = "paused" if freeze else "running"
-
-        # Strict on the way in only. Thawing is best effort because by then the
-        # control plane may have auto-restarted the node and removed the
-        # container out from under us -- raising there would mask whatever the
-        # test was about to report with an unrelated teardown error.
-        if freeze and state != want:
-            raise LblkPreconditionError(
-                f"[lblk] docker pause of spdk_{rpc_port} on {node_ip} left the "
-                f"container {state!r}, wanted {want!r} "
-                f"({(err or 'no stderr').splitlines()[-1][:120]}). Without a "
-                f"real freeze this test proves nothing.")
-        if not freeze and state != want:
-            self.logger.warning(
-                "[lblk] unpause of spdk_%s on %s left it %r, not %r -- the "
-                "control plane most likely replaced the container",
-                rpc_port, node_ip, state, want)
-            return state
-        self.logger.info("[lblk] spdk_%s on %s is now %s", rpc_port, node_ip,
-                         state)
-        return state
 
     def _spdk_container_state(self, node_ip, rpc_port):
         """docker's own view of the container, or "" when it no longer exists."""
@@ -900,19 +871,6 @@ class _LblkK8sMixin:
 
     def _spdk_sock(self, rpc_port):
         return f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
-
-    def _spdk_freeze(self, node_ip, rpc_port, freeze):
-        """No equivalent of docker pause for a pod.
-
-        Raised rather than approximated: a freeze that does not actually stop
-        SPDK makes this test report a clean pass while reproducing nothing,
-        which is exactly how it behaved before.
-        """
-        raise LblkPreconditionError(
-            "[lblk] freezing a leader is not implemented on k8s-native: there "
-            "is no pod equivalent of `docker pause`, and a partial freeze would "
-            "make this test pass without reproducing anything. Run "
-            "LblkUnfencedJournalDocker instead.")
 
     def _spdk_log_cmd(self, node_ip, rpc_port, tail=4000):
         k8s = self._ensure_k8s_utils()
@@ -1317,228 +1275,6 @@ class _LblkJournalRecovery(_LblkBase):
         return len(staged)
 
 
-# ── integration: the documented open gap ──────────────────────────────────
-class _LblkUnfencedJournal(_LblkBase):
-    """Reproduce the missing leadership fence.
-
-    blob_md_journal.h records this openly: the drain stops on demotion, but a
-    demoted node can still *append*. Their own test F3 saw a stopped-then-thawed
-    old leader accept 15 further md ops while the new leader was at head 23.
-    The journal widens the blast radius versus pre-journal behaviour, because a
-    stale writer now mutates shared ring structure rather than page-local LBAs.
-
-    A failure here is a product finding, not a test bug. If an integrity
-    mismatch ever appears during failover, look here first.
-    """
-
-    #: How long the leader is cut off. Long enough for its peers to demote it,
-    #: short enough that the control plane does not give up and restart the
-    #: node -- a restarted process is a new one and has nothing stale to write.
-    #:
-    #: Raised from 90s, though length has turned out not to be the binding
-    #: constraint. With a real partition in place the control plane marks the
-    #: node unreachable within ~40s, and it still is not demoted at 180s: no
-    #: node in the cluster logs writer_conflict, non_leader or a jm lock
-    #: conflict at any point. Leadership here moves on a deliberate leave or
-    #: rejoin, not because a peer went quiet, so more seconds will not help.
-    #: The poll below records when the cluster first notices, so any future
-    #: change to this number can be made from a measurement.
-    ISOLATION_SEC = 180
-
-    def run(self):
-        self._init_lblk()
-        self.assert_cluster_is_lblk()
-        self.assert_journals_live()
-
-        pool = self._make_pool()
-        self._create_and_connect(f"lblkfence{random.randint(100, 999)}", pool)
-        self._stamp_all()
-
-        ip, prefix, sock, lvs = self._journal_lvs
-        node = next(n for n in self.sbcli_utils.get_storage_nodes()["results"]
-                    if n.get("mgmt_ip") == ip)
-        port = node["rpc_port"]
-        before = get_stats(self._spdk_runner, ip, prefix, sock, lvs_name=lvs,
-                           logger=self.logger)
-
-        # Isolate the node's network rather than pausing its container.
-        #
-        # docker pause did freeze SPDK, but the control plane treats an
-        # unresponsive node as failed and auto-restarts it, which REMOVES the
-        # paused container: the previous run came back to "No such container"
-        # after 98s. A replaced process is not a thawed one, so there was never
-        # a stale writer to observe.
-        #
-        # Dropping the NICs leaves the SPDK process running the whole time. It
-        # simply cannot be reached, so its peers demote it; when the links come
-        # back, the ORIGINAL process resumes still believing it is the leader.
-        # That is the stale writer this gap is about, and it is the same shape
-        # as SPDK's own F3 (stop, lose leadership, resume).
-        #
-        # Clear any peer DROP left behind by a previous run that died between
-        # applying and restoring. Idempotent, and cheap insurance against a
-        # test that silently isolates nothing because the node is already
-        # half-isolated from something we did yesterday.
-        self._restore_network(ip)
-        outage = threading.Thread(
-            target=self._network_outage,
-            args=(ip, self.ISOLATION_SEC), daemon=True)
-        outage.start()
-
-        # Drive metadata while it is cut off. The lvstore fails over to a peer,
-        # which is what demotes the isolated node.
-        for i in range(6):
-            try:
-                self.sbcli_utils.add_lvol(
-                    lvol_name=f"lblkfencetmp{i}{random.randint(100, 999)}",
-                    pool_name=pool, size="1G")
-            except Exception as exc:                  # noqa: BLE001
-                self.logger.info("[lblk] lvol create during the outage failed "
-                                 "(expected while degraded): %s", str(exc)[:120])
-
-        # join() is nearly a no-op on k8s: _network_outage applies the rules
-        # and returns, so it never blocked for the isolation window and "links
-        # restored" was logged while the node was still cut off. Wait out the
-        # window for real, and watch the control plane while we do it --
-        # whether the cluster ever marks the node offline is the evidence that
-        # decides whether this test can conclude anything, and we were not
-        # recording it at all.
-        outage.join(timeout=30)
-        started = time.time()
-        deadline = started + self.ISOLATION_SEC + 20
-        noticed_at = None
-        while time.time() < deadline:
-            if noticed_at is None:
-                try:
-                    cur = next(
-                        (n for n in
-                         self.sbcli_utils.get_storage_nodes()["results"]
-                         if n["uuid"] == node["uuid"]), None)
-                    if cur and cur.get("status") != "online":
-                        noticed_at = time.time() - started
-                        self.logger.info(
-                            "[lblk] cluster marked %s %r %.0fs into the "
-                            "isolation", ip, cur.get("status"), noticed_at)
-                except Exception as exc:              # noqa: BLE001
-                    self.logger.debug("[lblk] status poll failed: %s",
-                                      str(exc)[:80])
-            sleep_n_sec(5)
-        if noticed_at is None:
-            self.logger.warning(
-                "[lblk] the cluster never marked %s offline during %ds of "
-                "isolation, so its peers had no reason to take leadership -- "
-                "expect the demotion check below to be inconclusive",
-                ip, self.ISOLATION_SEC)
-        # Drive the restore from here rather than trusting the in-node
-        # backstop. kubectl still reaches the node because only peer traffic
-        # was blocked, which is the whole reason that design was chosen.
-        self._restore_network(ip)
-
-        # The container must still be the one we isolated. If the control plane
-        # replaced it anyway there is no stale writer and nothing to conclude.
-        # Two independent signs the process was replaced. The container check
-        # alone is not enough: by the time we look, the control plane has
-        # usually recreated it, so it reads "running" and the restart goes
-        # unnoticed -- which is how a run reported drain_demoted=False and
-        # blamed the isolation, when the ring head had gone 4351 -> 0.
-        #
-        # A head that moved BACKWARDS is proof on its own: mem_head only ever
-        # advances within a process's lifetime, so a lower value means a fresh
-        # SPDK. That is the reliable signal, and it works on k8s too where
-        # there is no container to inspect.
-        state = ("running" if self.k8s_test
-                 else self._spdk_container_state(ip, port))
-        # Sample the ring here, before deciding, so the head comparison is
-        # available to the decision rather than only to the report.
-        post = {}
-        try:
-            post = get_stats(self._spdk_runner, ip,
-                             self._spdk_exec_prefix(ip, port), sock,
-                             lvs_name=lvs, logger=self.logger) or {}
-        except MdJournalError as exc:
-            self.logger.info("[lblk] ring not readable right after the "
-                             "outage (%s); relying on container state", exc)
-        head_reset = (post.get("mem_head") is not None
-                      and post.get("mem_head", 0) < before.get("mem_head", 0))
-        self._cp_restarted = state != "running" or head_reset
-        if self._cp_restarted:
-            # The control plane restarted the node, which is what it is for.
-            # Bring it back and carry on rather than abandoning the run. The
-            # stale-append window is gone -- storage_node_monitor queues a
-            # restart as soon as status reaches OFFLINE and polls every
-            # NODE_MONITOR_INTERVAL_SEC=3s, so there is no window to race and
-            # no flag to suppress it (auto_restart_disabled is set only by
-            # `sn shutdown`, which stops SPDK and takes the stale writer with
-            # it). What remains provable is that a partitioned node which gets
-            # restarted leaves no corruption behind, and that is the path a
-            # real cluster actually takes.
-            self.logger.warning(
-                "[lblk] spdk_%s is %r after the outage -- the control plane "
-                "replaced it, so no stale writer survived. Continuing as a "
-                "partition-and-recover check.", port, state)
-            self.sbcli_utils.restart_node(node_uuid=node["uuid"])
-            self.sbcli_utils.wait_for_storage_node_status(
-                node["uuid"], "online", timeout=900)
-            self.sbcli_utils.wait_for_health_status(node["uuid"], True,
-                                                    timeout=300)
-        sleep_n_sec(30)
-
-        after = self._stats_after_recovery(
-            ip, self._spdk_exec_prefix(ip, port), sock, lvs)
-        appended = after.get("mem_head", 0) - before.get("mem_head", 0)
-        self.logger.info("[lblk] ring head before=%s after=%s (+%s), "
-                         "drain_demoted=%s",
-                         before.get("mem_head"), after.get("mem_head"),
-                         appended, after.get("drain_demoted"))
-
-        if after.get("drain_demoted") and appended > 0:
-            raise MdJournalError(
-                f"[lblk] the reconnected node appended {appended} entries to the "
-                f"shared ring while demoted (drain_demoted=True). This is the "
-                f"documented missing leadership fence: a stale writer mutated "
-                f"shared ring structure after losing leadership.")
-
-        # Whatever happened to leadership, the partition itself is worth
-        # checking: a node that was cut off and came back must leave no
-        # corruption behind. Run that FIRST and unconditionally. It used to sit
-        # after the demotion check, so an inconclusive run threw away the one
-        # result it had actually earned.
-        self._scan_spdk_logs("unfenced journal")
-        self._verify_all("after partition and recover")
-
-        # A pass only means something if the node really lost leadership.
-        if not after.get("drain_demoted"):
-            # Not a defect, and not a pass either. On this cluster a peer
-            # partition does not trigger an lvstore failover at all: on the
-            # k8s run of 2026-09-19 13:35 the control plane marked the node
-            # 'unreachable' 39s in and kept it cut off for the full 180s, the
-            # node appended nothing (ring head 2174 -> 2174), and NO node in
-            # the cluster logged writer_conflict, non_leader or a jm lock
-            # conflict at any point. Leadership here moves when a node leaves
-            # or rejoins deliberately -- see the 2026-09-18 docker RCA, where a
-            # graceful shutdown produced a writer-lock conflict in 31s -- not
-            # because a peer went quiet.
-            #
-            # So the stale-writer window cannot be manufactured this way, and
-            # reporting it as a failure buries the real ones. Skip, with the
-            # evidence, and keep the integrity result above.
-            raise SkippedTestsException(
-                f"[lblk] the missing leadership fence was not exercised: the "
-                f"isolated node was never demoted (drain_demoted=False) after "
-                f"{self.ISOLATION_SEC}s cut off, ring head "
-                f"{before.get('mem_head')} -> {after.get('mem_head')}. The "
-                f"partition was real -- the control plane saw the node go "
-                f"unreachable -- but no peer took leadership, so there was "
-                f"never a demoted writer to catch. Integrity after partition "
-                f"and recover was verified and is clean. Reproducing the fence "
-                f"needs leadership to actually move: drive IO against the "
-                f"isolated node's lvstore, or take the node down in a way the "
-                f"cluster treats as a handover.")
-
-        self.logger.info("[lblk] node was demoted and appended nothing after "
-                         "reconnecting -- fence held this cycle")
-
-
 # ── registered leaf classes ───────────────────────────────────────────────
 class LblkFunctionalDocker(_LblkDockerMixin, _LblkFunctional):
     """lblk functional smoke, docker."""
@@ -1570,11 +1306,3 @@ class LblkJournalRecoveryDocker(_LblkDockerMixin, _LblkJournalRecovery):
 
 class LblkJournalRecoveryK8s(_LblkK8sMixin, _LblkJournalRecovery):
     """Metadata-journal replay after a kill, k8s-native."""
-
-
-class LblkUnfencedJournalDocker(_LblkDockerMixin, _LblkUnfencedJournal):
-    """The documented missing-leadership-fence reproducer, docker."""
-
-
-class LblkUnfencedJournalK8s(_LblkK8sMixin, _LblkUnfencedJournal):
-    """The documented missing-leadership-fence reproducer, k8s-native."""
