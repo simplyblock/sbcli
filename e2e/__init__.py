@@ -114,7 +114,7 @@ from e2e_tests.lblk.test_lblk import (
     LblkJournalRecoveryDocker,
     LblkJournalRecoveryK8s,
 )
-from e2e_tests.lblk.test_lblk_outage_matrix import (
+from stress_test.lblk_outage_matrix import (
     LblkOutageMatrixDocker,
     LblkOutageMatrixK8s,
 )
@@ -789,6 +789,8 @@ def get_stress_tests():
         LblkStressK8s,
         LblkMultiOutageStressDocker,
         LblkResilientStressK8s,
+        LblkOutageMatrixDocker,
+        LblkOutageMatrixK8s,
         ProductLimits_Docker,
         ProductLimits_K8s,
         ProductLimits_70TiB_Docker,
@@ -1014,8 +1016,6 @@ def get_lblk_tests():
         LblkDeviceFaultK8s,
         LblkJournalRecoveryDocker,
         LblkJournalRecoveryK8s,
-        LblkOutageMatrixDocker,
-        LblkOutageMatrixK8s,
     ]
 
 
