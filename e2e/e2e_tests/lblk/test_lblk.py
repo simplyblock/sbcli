@@ -658,54 +658,88 @@ class _LblkBase(TestClusterBase):
             return
 
         k8s = self._ensure_k8s_utils()
-        # Apply the DROP and remove it again from ONE unit owned by the host's
-        # pid 1, never from the container.
+        peers = self._peer_ips(node_ip)
+        # Cut this node off from its STORAGE PEERS only, not from everything.
         #
-        # This used to schedule the restore separately, as
-        # `nsenter --target 1 --mount --net -- nohup sleep N && iptables -F`.
-        # Two things were wrong with that. Without --pid the sleeping process
-        # stays in the CONTAINER's pid namespace, and this test exists because
-        # the outage makes SPDK abort and the container be replaced -- so the
-        # restore died mid-sleep and the DROP became permanent. And because
-        # apply and restore were separate commands, a restore that failed to
-        # schedule still left the apply to run. That stranded worker-0
-        # (10.0.0.10) at 15:42:38Z on 2026-09-18: the node stayed NotReady with
-        # "Kubelet stopped posting node status" until it was rebooted
-        # out-of-band, because a blanket INPUT/OUTPUT DROP also blocks every
-        # route in.
+        # Three hard constraints on this platform, learned the expensive way:
         #
-        # Pairing them in a single transient unit means the thing that cuts the
-        # node off is the same thing that restores it, and if the unit cannot
-        # be created we never cut the node off at all.
+        # 1. The SPDK pod is hostNetwork, so iptables run inside the container
+        #    act on the host's network namespace. That part works.
+        # 2. The pod is NOT hostPID, so `nsenter --target 1` resolves /proc/1
+        #    of the CONTAINER, not the host. Anything scheduled that way runs
+        #    in the container ("System has not been booted with systemd as init
+        #    system (PID 1). Can't operate.") and dies when SPDK's abort timer
+        #    replaces it. There is no way to leave a timer on the host.
+        # 3. exec_in_spdk_container never raises on a non-zero exit -- it
+        #    returns (stdout, stderr) -- so a failed command looks exactly like
+        #    a successful one unless the output is checked.
         #
-        # -D our own two rules rather than `iptables -F`, which would also
-        # flush kube-proxy's jumps out of INPUT/OUTPUT. Repeated because -A
-        # twice needs -D twice.
-        undo = ("for i in 1 2 3; do "
-                "iptables -D INPUT -j DROP 2>/dev/null; "
-                "iptables -D OUTPUT -j DROP 2>/dev/null; done; true")
-        script = (f"sleep 5; iptables -A INPUT -j DROP; "
-                  f"iptables -A OUTPUT -j DROP; sleep {duration}; {undo}")
-        host = "sudo nsenter --target 1 --mount --uts --ipc --net --pid --"
-        unit = f"lblk-nw-outage-{int(time.time())}"
-        try:
-            k8s.exec_in_spdk_container(node_ip, (
-                f'{host} systemd-run --collect --unit={unit} '
-                f'/bin/sh -c "{script}"'))
-        except Exception as exc:                      # noqa: BLE001
-            self.logger.warning(
-                "[lblk] systemd-run unavailable on %s (%s); falling back to a "
-                "detached host shell", node_ip, str(exc)[:120])
-            # setsid + --pid so it is a real host process with no controlling
-            # terminal. If this raises too, the exception propagates and the
-            # node is simply never isolated -- the safe direction to fail.
-            detached = (f'setsid nohup sh -c "{script}" '
-                        f'> /dev/null 2>&1 < /dev/null &')
-            k8s.exec_in_spdk_container(
-                node_ip, f"{host} bash -c {shlex.quote(detached)}")
+        # A blanket INPUT/OUTPUT DROP therefore cannot be undone reliably: it
+        # also blocks the kubelet, so once the in-container timer dies there is
+        # no route left to fix it. That is what left worker-0 NotReady until it
+        # was rebooted out of band.
+        #
+        # Blocking only the peer storage nodes gives the test what it actually
+        # wants -- the peers stop hearing from this node and take leadership --
+        # while leaving the kubelet, the API server and our own kubectl exec
+        # reachable, so the restore can always be driven from outside. The
+        # in-container timer stays as a backstop for the case where the test
+        # process itself dies.
+        if not peers:
+            raise LblkPreconditionError(
+                f"[lblk] no peer storage nodes to isolate {node_ip} from")
+        add = "; ".join(f"iptables -A INPUT -s {p} -j DROP; "
+                        f"iptables -A OUTPUT -d {p} -j DROP" for p in peers)
+        undo = self._undo_rules(peers)
+        k8s.exec_in_spdk_container(node_ip, f"sudo sh -c {shlex.quote(add)}")
+        # Verify, because a silent no-op here is indistinguishable from a
+        # successful isolation and produces a test that proves nothing.
+        out, _err = k8s.exec_in_spdk_container(
+            node_ip, "sudo iptables -S INPUT; sudo iptables -S OUTPUT")
+        applied = sum(1 for p in peers if f"-s {p}/32" in (out or "")
+                      or f"-d {p}/32" in (out or ""))
+        if applied < len(peers):
+            self._restore_network(node_ip)
+            raise LblkPreconditionError(
+                f"[lblk] iptables did not take on {node_ip}: wanted {len(peers)} "
+                f"peers blocked, saw {applied}. Rules undone. iptables -S said: "
+                f"{(out or '<nothing>')[:300]}")
+        # Backstop only; the test restores explicitly in a finally.
+        k8s.exec_in_spdk_container(node_ip, (
+            f"sudo sh -c {shlex.quote(f'(sleep {duration + 30}; {undo}) >/dev/null 2>&1 &')}"))
         self.logger.info(
-            "[lblk] %s isolated via %s: DROP in 5s, released %ds later",
-            node_ip, unit, duration)
+            "[lblk] %s cut off from %d peer(s) %s for %ds; kubelet left "
+            "reachable so the restore cannot strand the node",
+            node_ip, len(peers), ",".join(peers), duration)
+
+    def _peer_ips(self, node_ip):
+        """Every other storage node's mgmt_ip."""
+        return [n["mgmt_ip"] for n
+                in self.sbcli_utils.get_storage_nodes()["results"]
+                if n.get("mgmt_ip") and n["mgmt_ip"] != node_ip]
+
+    @staticmethod
+    def _undo_rules(peers):
+        return "; ".join(
+            f"for i in 1 2 3; do iptables -D INPUT -s {p} -j DROP 2>/dev/null; "
+            f"iptables -D OUTPUT -d {p} -j DROP 2>/dev/null; done" for p in peers
+        ) + "; true"
+
+    def _restore_network(self, node_ip):
+        """Remove every peer DROP we may have added. Safe to call twice."""
+        if not self.k8s_test:
+            return
+        k8s = self._ensure_k8s_utils()
+        undo = self._undo_rules(self._peer_ips(node_ip))
+        k8s.exec_in_spdk_container(node_ip, f"sudo sh -c {shlex.quote(undo)}")
+        out, _err = k8s.exec_in_spdk_container(
+            node_ip, "sudo iptables -S INPUT; sudo iptables -S OUTPUT")
+        left = [ln for ln in (out or "").splitlines() if "-j DROP" in ln]
+        if left:
+            self.logger.warning("[lblk] DROP rules still on %s after restore: "
+                                "%s", node_ip, left[:4])
+        else:
+            self.logger.info("[lblk] network restored on %s", node_ip)
 
     def _any_storage_node(self):
         nodes = self.sbcli_utils.get_storage_nodes()["results"]
@@ -1332,6 +1366,11 @@ class _LblkUnfencedJournal(_LblkBase):
         #
         # The restore is scheduled on the node itself with nohup, so losing our
         # SSH session during the outage does not strand it down.
+        # Clear any peer DROP left behind by a previous run that died between
+        # applying and restoring. Idempotent, and cheap insurance against a
+        # test that silently isolates nothing because the node is already
+        # half-isolated from something we did yesterday.
+        self._restore_network(ip)
         outage = threading.Thread(
             target=self._network_outage,
             args=(ip, self.ISOLATION_SEC), daemon=True)
@@ -1348,13 +1387,13 @@ class _LblkUnfencedJournal(_LblkBase):
                 self.logger.info("[lblk] lvol create during the outage failed "
                                  "(expected while degraded): %s", str(exc)[:120])
 
-        # join() is nearly a no-op on k8s: _network_outage only *schedules* the
-        # host unit and returns, so it never blocked for the isolation window
-        # and "links restored" was logged while the node was still cut off.
-        # Wait out the window for real, and watch the control plane while we do
-        # it -- whether the cluster ever marks the node offline is the evidence
-        # that decides if this test can conclude anything, and previously we
-        # were not recording it at all.
+        # join() is nearly a no-op on k8s: _network_outage applies the rules
+        # and returns, so it never blocked for the isolation window and "links
+        # restored" was logged while the node was still cut off. Wait out the
+        # window for real, and watch the control plane while we do it --
+        # whether the cluster ever marks the node offline is the evidence that
+        # decides whether this test can conclude anything, and we were not
+        # recording it at all.
         outage.join(timeout=30)
         started = time.time()
         deadline = started + self.ISOLATION_SEC + 20
@@ -1381,7 +1420,10 @@ class _LblkUnfencedJournal(_LblkBase):
                 "isolation, so its peers had no reason to take leadership -- "
                 "expect the demotion check below to be inconclusive",
                 ip, self.ISOLATION_SEC)
-        self.logger.info("[lblk] links restored on %s", ip)
+        # Drive the restore from here rather than trusting the in-node
+        # backstop. kubectl still reaches the node because only peer traffic
+        # was blocked, which is the whole reason that design was chosen.
+        self._restore_network(ip)
 
         # The container must still be the one we isolated. If the control plane
         # replaced it anyway there is no stale writer and nothing to conclude.
