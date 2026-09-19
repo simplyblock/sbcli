@@ -560,6 +560,31 @@ class _LblkBase(TestClusterBase):
         """
         before = self._journal_heads()
 
+        # The clone below is formatted and mounted, so on k8s it is a
+        # Filesystem PVC -- and Kubernetes refuses to clone a Block snapshot
+        # into one: "requested volume ... modifies the mode of the source
+        # volume but does not have permission to do so.
+        # snapshot.storage.kubernetes.io/allow-volume-mode-change annotation is
+        # not present on snapshotcontent". The raw lvols are Block PVCs, so
+        # snapshotting one of those and cloning it here can never bind. Take a
+        # formatted volume as the source instead, keeping the caller's
+        # alternation so both lvstores still see metadata work. Docker has no
+        # volumeMode and is untouched.
+        if self.k8s_test and lvol_name in self._lblk_devices:
+            fs_names = sorted(self._fs_volumes or {})
+            if not fs_names:
+                raise LblkPreconditionError(
+                    "[lblk] this run created no formatted volume, so there is "
+                    "nothing k8s will let us snapshot into a Filesystem clone")
+            raw_names = list(self._lblk_devices)
+            idx = raw_names.index(lvol_name) if lvol_name in raw_names else 0
+            substitute = fs_names[idx % len(fs_names)]
+            self.logger.info(
+                "[lblk] churning %s rather than raw %s: the clone is a "
+                "Filesystem PVC and its source must have the same mode",
+                substitute, lvol_name)
+            lvol_name = substitute
+
         snap = f"snap{tag}{random.randint(100, 999)}"
         snap_id = self._create_snapshot_dual(lvol_name, snap)
         clone = f"clone{tag}{random.randint(100, 999)}"
@@ -1264,7 +1289,16 @@ class _LblkUnfencedJournal(_LblkBase):
     #: How long the leader is cut off. Long enough for its peers to demote it,
     #: short enough that the control plane does not give up and restart the
     #: node -- a restarted process is a new one and has nothing stale to write.
-    ISOLATION_SEC = 90
+    #:
+    #: Was 90s, which measurably was not enough: on the k8s run of 2026-09-18
+    #: 22:14 no node logged writer_conflict, lock conflict or non_leader at any
+    #: point in the window, and the ring head moved 17 -> 23 on the original
+    #: process, so the peers never even noticed it was gone, let alone demoted
+    #: it. The test correctly refused to conclude anything. There is headroom
+    #: to wait longer: nothing restarted the node at 90s either. The poll below
+    #: now records when the cluster first marks the node offline, so the next
+    #: adjustment to this number can be made from a measurement.
+    ISOLATION_SEC = 180
 
     def run(self):
         self._init_lblk()
@@ -1314,7 +1348,39 @@ class _LblkUnfencedJournal(_LblkBase):
                 self.logger.info("[lblk] lvol create during the outage failed "
                                  "(expected while degraded): %s", str(exc)[:120])
 
-        outage.join(timeout=self.ISOLATION_SEC + 120)
+        # join() is nearly a no-op on k8s: _network_outage only *schedules* the
+        # host unit and returns, so it never blocked for the isolation window
+        # and "links restored" was logged while the node was still cut off.
+        # Wait out the window for real, and watch the control plane while we do
+        # it -- whether the cluster ever marks the node offline is the evidence
+        # that decides if this test can conclude anything, and previously we
+        # were not recording it at all.
+        outage.join(timeout=30)
+        started = time.time()
+        deadline = started + self.ISOLATION_SEC + 20
+        noticed_at = None
+        while time.time() < deadline:
+            if noticed_at is None:
+                try:
+                    cur = next(
+                        (n for n in
+                         self.sbcli_utils.get_storage_nodes()["results"]
+                         if n["uuid"] == node["uuid"]), None)
+                    if cur and cur.get("status") != "online":
+                        noticed_at = time.time() - started
+                        self.logger.info(
+                            "[lblk] cluster marked %s %r %.0fs into the "
+                            "isolation", ip, cur.get("status"), noticed_at)
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.debug("[lblk] status poll failed: %s",
+                                      str(exc)[:80])
+            sleep_n_sec(5)
+        if noticed_at is None:
+            self.logger.warning(
+                "[lblk] the cluster never marked %s offline during %ds of "
+                "isolation, so its peers had no reason to take leadership -- "
+                "expect the demotion check below to be inconclusive",
+                ip, self.ISOLATION_SEC)
         self.logger.info("[lblk] links restored on %s", ip)
 
         # The container must still be the one we isolated. If the control plane
