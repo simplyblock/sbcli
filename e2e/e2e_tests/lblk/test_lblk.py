@@ -28,6 +28,7 @@ import time
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
+from exceptions.custom_exception import SkippedTestsException
 from utils.common_utils import sleep_n_sec
 from utils.md_journal import (
     MdJournalError,
@@ -1489,20 +1490,43 @@ class _LblkUnfencedJournal(_LblkBase):
                 f"documented missing leadership fence: a stale writer mutated "
                 f"shared ring structure after losing leadership.")
 
-        # A pass only means something if the node really lost leadership. If it
-        # never did, the fence was never under test -- say so rather than
-        # reporting a clean result, which is what this test did before.
-        if not after.get("drain_demoted"):
-            raise LblkPreconditionError(
-                f"[lblk] INCONCLUSIVE: the isolated node was never demoted "
-                f"(drain_demoted=False) after {self.ISOLATION_SEC}s cut off, so "
-                f"the missing leadership fence was never exercised. Ring head "
-                f"moved {before.get('mem_head')} -> {after.get('mem_head')}. "
-                f"Isolate for longer, or drive more metadata, before reading "
-                f"anything into a pass.")
-
+        # Whatever happened to leadership, the partition itself is worth
+        # checking: a node that was cut off and came back must leave no
+        # corruption behind. Run that FIRST and unconditionally. It used to sit
+        # after the demotion check, so an inconclusive run threw away the one
+        # result it had actually earned.
         self._scan_spdk_logs("unfenced journal")
-        self._verify_all("after leader freeze and thaw")
+        self._verify_all("after partition and recover")
+
+        # A pass only means something if the node really lost leadership.
+        if not after.get("drain_demoted"):
+            # Not a defect, and not a pass either. On this cluster a peer
+            # partition does not trigger an lvstore failover at all: on the
+            # k8s run of 2026-09-19 13:35 the control plane marked the node
+            # 'unreachable' 39s in and kept it cut off for the full 180s, the
+            # node appended nothing (ring head 2174 -> 2174), and NO node in
+            # the cluster logged writer_conflict, non_leader or a jm lock
+            # conflict at any point. Leadership here moves when a node leaves
+            # or rejoins deliberately -- see the 2026-09-18 docker RCA, where a
+            # graceful shutdown produced a writer-lock conflict in 31s -- not
+            # because a peer went quiet.
+            #
+            # So the stale-writer window cannot be manufactured this way, and
+            # reporting it as a failure buries the real ones. Skip, with the
+            # evidence, and keep the integrity result above.
+            raise SkippedTestsException(
+                f"[lblk] the missing leadership fence was not exercised: the "
+                f"isolated node was never demoted (drain_demoted=False) after "
+                f"{self.ISOLATION_SEC}s cut off, ring head "
+                f"{before.get('mem_head')} -> {after.get('mem_head')}. The "
+                f"partition was real -- the control plane saw the node go "
+                f"unreachable -- but no peer took leadership, so there was "
+                f"never a demoted writer to catch. Integrity after partition "
+                f"and recover was verified and is clean. Reproducing the fence "
+                f"needs leadership to actually move: drive IO against the "
+                f"isolated node's lvstore, or take the node down in a way the "
+                f"cluster treats as a handover.")
+
         self.logger.info("[lblk] node was demoted and appended nothing after "
                          "reconnecting -- fence held this cycle")
 
