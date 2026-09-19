@@ -367,7 +367,9 @@ def main():
             # Deliberately NOT added to errors: the summary reports anything
             # that is neither passed nor failed as SKIPPED.
             logger.warning(f"{test.__name__} SKIPPED: {exp}")
-            skipped_cases += 1
+            # Deliberately NOT incremented here. The final tally counts every
+            # case that is neither passed nor failed, which already includes
+            # this one -- incrementing as well reported one skip as two.
         except Exception as exp:
             tb = traceback.format_exc()
             logger.error(tb)
@@ -516,7 +518,13 @@ def main():
                     break
 
     failed_cases = list(errors.keys())
-    skipped_cases += len(test_class_run) - (len(passed_cases) + len(failed_cases))
+    # skipped_cases so far counts only cases dropped BEFORE the run, which
+    # never entered test_class_run (missing --new-nodes and friends). Cases
+    # that ran and skipped themselves are covered by the subtraction, so the
+    # two are added, not double-counted. max() because a mid-run abort can
+    # leave more results than planned cases.
+    skipped_cases += max(
+        0, len(test_class_run) - (len(passed_cases) + len(failed_cases)))
 
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
     logger.info(f"Number of Passed Cases: {len(passed_cases)}")
