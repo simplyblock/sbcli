@@ -636,11 +636,21 @@ class _LblkBase(TestClusterBase):
     def _network_outage(self, node_ip, duration):
         """Cut a storage node off the network for *duration*, self-restoring.
 
-        Docker drops the NICs over ssh. K8s applies iptables DROP from inside
-        the privileged hostNetwork SPDK pod and schedules the flush as a HOST
-        process via nsenter, so it survives SPDK's abort timer killing the
-        container -- without that the rules would be permanent and the node
-        would never come back.
+        The two platforms cut at different depths, and the difference matters
+        when reading a result.
+
+        Docker drops EVERY NIC over ssh, restored by a timer on the node. Total
+        isolation: SPDK loses its peers and the control plane at once, so it
+        usually aborts and gets restarted.
+
+        K8s drops only traffic to and from the PEER STORAGE NODES, with
+        iptables inside the hostNetwork SPDK pod (which therefore acts on the
+        host's netns). The kubelet, the API server and our own kubectl exec
+        stay reachable, so the restore can always be driven from outside. That
+        is not a stylistic choice: the pod is not hostPID, so there is no way
+        to leave a timer running on the host, and a blanket DROP that outlives
+        the container cannot be undone -- it once left a worker NotReady until
+        it was rebooted out of band.
 
         Same shape as _network_outage_dual in the security suite, which was
         itself ported from continuous_k8s_native_failover. Third copy, and it
@@ -1325,14 +1335,14 @@ class _LblkUnfencedJournal(_LblkBase):
     #: short enough that the control plane does not give up and restart the
     #: node -- a restarted process is a new one and has nothing stale to write.
     #:
-    #: Was 90s, which measurably was not enough: on the k8s run of 2026-09-18
-    #: 22:14 no node logged writer_conflict, lock conflict or non_leader at any
-    #: point in the window, and the ring head moved 17 -> 23 on the original
-    #: process, so the peers never even noticed it was gone, let alone demoted
-    #: it. The test correctly refused to conclude anything. There is headroom
-    #: to wait longer: nothing restarted the node at 90s either. The poll below
-    #: now records when the cluster first marks the node offline, so the next
-    #: adjustment to this number can be made from a measurement.
+    #: Raised from 90s, though length has turned out not to be the binding
+    #: constraint. With a real partition in place the control plane marks the
+    #: node unreachable within ~40s, and it still is not demoted at 180s: no
+    #: node in the cluster logs writer_conflict, non_leader or a jm lock
+    #: conflict at any point. Leadership here moves on a deliberate leave or
+    #: rejoin, not because a peer went quiet, so more seconds will not help.
+    #: The poll below records when the cluster first notices, so any future
+    #: change to this number can be made from a measurement.
     ISOLATION_SEC = 180
 
     def run(self):
@@ -1365,8 +1375,6 @@ class _LblkUnfencedJournal(_LblkBase):
         # That is the stale writer this gap is about, and it is the same shape
         # as SPDK's own F3 (stop, lose leadership, resume).
         #
-        # The restore is scheduled on the node itself with nohup, so losing our
-        # SSH session during the outage does not strand it down.
         # Clear any peer DROP left behind by a previous run that died between
         # applying and restoring. Idempotent, and cheap insurance against a
         # test that silently isolates nothing because the node is already
