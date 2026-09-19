@@ -399,13 +399,38 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
-          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          # Ours first, the operator's second -- same order as
+          # k8s-native-e2e.yaml, which this lane did not have.
+          #
+          # cleanup_upgrade_test.sh is the 12-phase one: Helm R25+R26, CRs,
+          # CRDs, cert-manager, kube-system, snapshots, PVCs/PVs, node
+          # cleanup, labels, CSI hostpath data, namespace finalization. It
+          # auto-detects Talos and skips node debug operations.
+          #
+          # Running it first means the operator's script sees whatever ours
+          # could not resolve, rather than ours inheriting half-removed state
+          # from the operator's. This lane had the order the other way round
+          # AND only ran cleanup_k8s.sh, which does not touch CRDs, node
+          # labels, hugepages or CSI hostpath data -- so stale CRDs survived
+          # into the next run and the apiserver silently pruned unknown
+          # fields from the CRs.
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_upgrade_test.sh \
+            -n "$NAMESPACE" \
+            -e "$CLUSTER_ENV" \
+            -w "${{ github.event.inputs.worker_nodes }}" \
+            -c "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/"
+
+          # The operator's own cleanup, second: it picks up anything the
+          # 12-phase pass above could not resolve.
           if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
             bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
           fi
 
-          # Run the shared cleanup script (handles etcd overload with
-          # --request-timeout, bulk deletes, and parallel finalizer patching)
+          # Kept as a final sweep. By now the namespace should be empty, so
+          # this is cheap; it stays because it is the one pass tuned for a
+          # cluster with hundreds of thousands of objects, which is the state
+          # a stress run can genuinely leave behind.
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
           echo "=== Phase 7: Delete Released PVs from simplyblock ==="
