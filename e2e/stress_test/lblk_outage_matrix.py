@@ -151,15 +151,7 @@ class _LblkOutageMatrix(_LblkBase):
         ]
         for label, opts in flavours:
             name = f"mx{label}{random.randint(100, 999)}"
-            try:
-                mount = self._provision_typed(name, pool, **opts)
-            except Exception as exc:                  # noqa: BLE001
-                # Encryption and DHCHAP on lblk have never been exercised. If
-                # one cannot even be provisioned that is the finding; name the
-                # flavour rather than letting a generic CSI error stand.
-                raise LblkPreconditionError(
-                    f"[matrix] could not provision a {label} volume on an lblk "
-                    f"cluster: {exc}") from exc
+            mount = self._provision_typed(name, pool, **opts)
             self._write_static(name, mount)
             self._baselines[name] = self._static_md5(name, mount)
             self._static.append((name, mount))
@@ -196,6 +188,19 @@ class _LblkOutageMatrix(_LblkBase):
         is the only way in -- the parameters exist there (``encryption``,
         ``dhchap_node_label``) and map onto the same two product features.
         """
+        label = "dhchap" if dhchap else ("crypto" if crypto else "plain")
+        try:
+            return self._provision_typed_inner(name, pool, crypto, dhchap)
+        except Exception as exc:                      # noqa: BLE001
+            # Encryption and DHCHAP on lblk have never been exercised. When one
+            # cannot even be provisioned that IS the finding, so name the
+            # flavour rather than leaving a bare "PVC not Bound within 300s"
+            # that says nothing about which combination is unsupported.
+            raise LblkPreconditionError(
+                f"[matrix] could not provision a {label} volume on an lblk "
+                f"cluster: {type(exc).__name__}: {exc}") from exc
+
+    def _provision_typed_inner(self, name, pool, crypto, dhchap):
         if dhchap:
             pool = self._dhchap_pool()
 
