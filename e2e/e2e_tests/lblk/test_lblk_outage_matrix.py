@@ -87,7 +87,7 @@ class _LblkOutageMatrix(_LblkBase):
             # Durability, checked here rather than only at the end so a
             # mismatch names the outage that produced it.
             self._assert_static_unchanged(f"after {outage}")
-            self._verify_all(f"after {outage}")
+            self._verify_raw(f"after {outage}")
             self._scan_spdk_logs(f"after {outage}")
             self._assert_fio_alive(live, outage)
 
@@ -178,8 +178,10 @@ class _LblkOutageMatrix(_LblkBase):
                        storage_class=sc)
         k8s.wait_pvc_bound(pvc)
         self._volume_registry[name] = {"pvc_name": pvc, "mount": "/spdkvol"}
-        self._fs_volumes = self._fs_volumes or {}
-        self._fs_volumes[name] = "/spdkvol"
+        # Deliberately NOT registered in _fs_volumes. _verify_all runs a write
+        # workload over everything in there, and a static volume that gets
+        # written to is no longer a static volume -- the md5 baseline would be
+        # measuring the test's own IO.
         return "/spdkvol"
 
     def _dhchap_pool(self):
@@ -257,23 +259,47 @@ class _LblkOutageMatrix(_LblkBase):
         self.logger.info("[matrix] %d static volume(s) unchanged %s",
                          len(self._static), context)
 
+    def _verify_raw(self, context):
+        """crc32c on the raw device only.
+
+        _verify_all would also run a filesystem FIO over every registered
+        formatted volume, which on this test means writing to the static set.
+        The static md5 check above already covers those, and covers them more
+        strictly than a fresh FIO would.
+        """
+        if not self.RAW_VERIFY:
+            return
+        for name, (client, dev) in self._lblk_devices.items():
+            self._verifier.verify(client, dev,
+                                  region_size=self.VERIFY_REGION,
+                                  context=f"{context} [{name}]")
+
     # ── the availability lane ─────────────────────────────────────────────
 
     def _start_live_fio(self, pool):
-        """FIO that must run, uninterrupted, across every outage."""
+        """FIO that must run, uninterrupted, across every outage.
+
+        One volume per flavour, matching the static set. Encryption in
+        particular belongs here rather than only in the static lane: the crypto
+        layer sits in the IO path, so an encrypted volume carrying load while a
+        node disappears is the most likely place for this to come apart, and a
+        plain-only live lane would never touch it.
+        """
         handles = []
-        for i in range(2):
-            name = f"mxlive{i}{random.randint(100, 999)}"
-            self._create_lvol_dual(name, self.LVOL_SIZE, pool_name=pool)
-            _dev, mount = self._connect_and_mount_dual(
-                name, mount_path=f"/mnt/{name}", format_disk=True)
-            log = None if self.k8s_test else f"{self.log_path}/fio_mx_{i}.log"
+        for label, opts in (("plain", dict()),
+                            ("crypto", dict(crypto=True)),
+                            ("dhchap", dict(dhchap=True))):
+            name = f"mxlive{label}{random.randint(100, 999)}"
+            mount = self._provision_typed(name, pool, **opts)
+            log = (None if self.k8s_test
+                   else f"{self.log_path}/fio_mx_{label}.log")
             handles.append((name, log, self._run_fio_dual(
                 name, mount_path=mount, log_path=log,
-                runtime=self.FIO_RUNTIME, name=f"mxlive{i}",
+                runtime=self.FIO_RUNTIME, name=f"mxlive{label}",
                 rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
                 time_based=True)))
-            self.logger.info("[matrix] live FIO started on %s", name)
+            self.logger.info("[matrix] live FIO started on %s volume %s",
+                             label, name)
         return handles
 
     def _assert_fio_alive(self, handles, outage):
