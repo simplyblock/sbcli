@@ -354,6 +354,35 @@ for RES in clusterrole clusterrolebinding; do
   done
 done
 
+# CSIDriver. Cluster-scoped, so it outlives the namespace, and helm does not
+# remove it on uninstall -- a 5-day-old csi.simplyblock.io was still present
+# after every cleanup. The next install then dies before it starts:
+#
+#   Error: Unable to continue with install: CSIDriver "csi.simplyblock.io" in
+#   namespace "" exists and cannot be imported into the current release:
+#   invalid ownership metadata; label validation error: missing key
+#   "app.kubernetes.io/managed-by": must be set to "Helm"
+#
+# Helm refuses to adopt an object it does not own, and nothing in the chart
+# stamps the ownership metadata onto a pre-existing one. Deleting it is safe:
+# it is a registration record with no data, and the chart recreates it.
+for CSID in $(kubectl $KUBECTL_TIMEOUT get csidrivers --no-headers \
+      -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+  echo "  Deleting CSIDriver $CSID"
+  kubectl $KUBECTL_TIMEOUT delete csidriver "$CSID" --ignore-not-found 2>/dev/null || true
+done
+
+# VolumeSnapshotClasses, same class of leftover: cluster-scoped, survives the
+# namespace, and blocks adoption the same way.
+for VSC in $(kubectl $KUBECTL_TIMEOUT get volumesnapshotclass --no-headers \
+      -o custom-columns=:metadata.name,:driver 2>/dev/null \
+      | awk '$2 == "csi.simplyblock.io" { print $1 }' 2>/dev/null); do
+  kubectl $KUBECTL_TIMEOUT delete volumesnapshotclass "$VSC" --ignore-not-found 2>/dev/null || true
+done
+for VSC in $(kubectl $KUBECTL_TIMEOUT get volumesnapshotclass --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+  kubectl $KUBECTL_TIMEOUT delete volumesnapshotclass "$VSC" --ignore-not-found 2>/dev/null || true
+done
+
 # Webhook configurations
 for WH in $(kubectl $KUBECTL_TIMEOUT get mutatingwebhookconfiguration --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
   kubectl $KUBECTL_TIMEOUT delete mutatingwebhookconfiguration "$WH" --ignore-not-found 2>/dev/null || true
@@ -567,6 +596,24 @@ echo "  kube-system simplyblock resources:"
 for RTYPE in deployment daemonset service sa configmap; do
   kubectl -n kube-system get $RTYPE --no-headers 2>/dev/null | grep -i simplyblock || true
 done
+
+echo ""
+echo "  Cluster-scoped leftovers (these block the next helm install):"
+# Listed explicitly because this is the class of leftover that survives
+# everything else. A CSIDriver outlived five days of cleanups and the next
+# install failed with "exists and cannot be imported into the current
+# release: invalid ownership metadata" -- a message that points at helm
+# rather than at cleanup, so nobody looked here.
+LEFTOVERS=0
+for RTYPE in csidrivers volumesnapshotclass storageclass clusterrole clusterrolebinding; do
+  FOUND=$(kubectl $KUBECTL_TIMEOUT get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null \
+    | grep -i simplyblock 2>/dev/null || true)
+  if [ -n "$FOUND" ]; then
+    LEFTOVERS=1
+    echo "$FOUND" | while read -r N; do echo "    STILL PRESENT: $RTYPE/$N"; done
+  fi
+done
+[ "$LEFTOVERS" = "0" ] && echo "    (none)"
 echo "  (empty = clean)"
 
 echo ""
