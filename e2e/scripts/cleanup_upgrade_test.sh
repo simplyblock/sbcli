@@ -179,12 +179,45 @@ CR_TYPES=(
   "backupimports.storage.simplyblock.io"
 )
 
-for CR_TYPE in "${CR_TYPES[@]}"; do
+# Union the list above with every CRD actually registered in the
+# simplyblock API group. The hardcoded list is a floor, not the truth: it did
+# not contain simplyblockdrivers.storage.simplyblock.io, so that CR was never
+# cleared, the namespace was then deleted out from under it, and the CR became
+# unpatchable and unkillable -- the apiserver refuses every write to an object
+# whose namespace does not exist, so neither this script nor the operator's
+# could recover it. Discovering the types means a CRD added later is handled
+# the day it appears rather than the day someone notices a stuck cleanup.
+DISCOVERED=$(kubectl $KUBECTL_TIMEOUT get crd --no-headers \
+  -o custom-columns=:metadata.name 2>/dev/null | grep 'simplyblock\.io$' || true)
+ALL_CR_TYPES=$(printf '%s\n' "${CR_TYPES[@]}" $DISCOVERED | sort -u)
+
+for CR_TYPE in $ALL_CR_TYPES; do
   for CR_NAME in $(kubectl -n $NAMESPACE $KUBECTL_TIMEOUT get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
     kubectl -n $NAMESPACE $KUBECTL_TIMEOUT patch "$CR_TYPE" "$CR_NAME" \
       --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
     kubectl -n $NAMESPACE $KUBECTL_TIMEOUT delete "$CR_TYPE" "$CR_NAME" \
       --ignore-not-found --wait=false 2>/dev/null || true
+  done
+done
+
+# Rescue any CR left orphaned by a previous run: present, finalizer set, and
+# sitting in a namespace that no longer exists. Recreating the namespace is
+# the only way to make such an object writable again; once the finalizer is
+# gone it deletes itself and the namespace goes with it.
+for CR_TYPE in $ALL_CR_TYPES; do
+  ORPHANS=$(kubectl $KUBECTL_TIMEOUT get "$CR_TYPE" -A --no-headers \
+    -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null || true)
+  [ -z "$ORPHANS" ] && continue
+  echo "$ORPHANS" | while read -r ONS ONAME; do
+    [ -z "$ONS" ] && continue
+    kubectl $KUBECTL_TIMEOUT get namespace "$ONS" >/dev/null 2>&1 && continue
+    echo "  orphaned $CR_TYPE/$ONAME in missing namespace $ONS - recreating it to clear the finalizer"
+    kubectl $KUBECTL_TIMEOUT create namespace "$ONS" >/dev/null 2>&1 || true
+    kubectl -n "$ONS" $KUBECTL_TIMEOUT patch "$CR_TYPE" "$ONAME" \
+      --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+    kubectl -n "$ONS" $KUBECTL_TIMEOUT delete "$CR_TYPE" "$ONAME" \
+      --ignore-not-found --wait=false 2>/dev/null || true
+    kubectl $KUBECTL_TIMEOUT delete namespace "$ONS" --wait=false >/dev/null 2>&1 || true
   done
 done
 
