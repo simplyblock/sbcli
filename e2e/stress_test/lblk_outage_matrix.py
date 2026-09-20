@@ -194,9 +194,24 @@ class _LblkOutageMatrix(_LblkBase):
         # in the way, which is the strongest integrity check available here and
         # the one the rest of the lblk suite gates on.
         raw = f"mxraw{random.randint(100, 999)}"
-        self._create_and_connect(raw, pool)
+        # _provision_raw, not _create_and_connect. On k8s the latter makes an
+        # ordinary filesystem PVC and returns (None, name) without touching
+        # _lblk_devices or building a verifier -- so _stamp_all and
+        # _verify_raw would both iterate an empty dict and do nothing, while
+        # the log claimed a device had been stamped. _provision_raw asks CSI
+        # for a volumeMode: Block PVC and attaches it through volumeDevices,
+        # which is the only way to get a device with no filesystem on it here.
+        self._provision_raw(raw, pool)
+        if not self._lblk_devices:
+            raise LblkPreconditionError(
+                f"[matrix] {raw} produced no raw device, so the crc32c lane "
+                f"would verify nothing. A raw block device is the one check "
+                f"here with no filesystem in the way; silently skipping it "
+                f"would leave the strongest gate untested.")
         self._stamp_all()
-        self.logger.info("[matrix] raw device %s stamped with crc32c", raw)
+        self.logger.info("[matrix] raw device(s) %s stamped with crc32c",
+                         ", ".join(f"{n}->{d}"
+                                   for n, (_h, d) in self._lblk_devices.items()))
 
     def _provision_typed(self, name, pool, crypto=False, dhchap=False,
                          namespaced=False):
@@ -674,10 +689,20 @@ class _LblkOutageMatrix(_LblkBase):
         return handles
 
     def _assert_fio_alive(self, handles, outage):
-        """FIO must still be running. A job that died is an interruption."""
+        """FIO must still be running. A job that died is an interruption.
+
+        On k8s the handle is the Job NAME -- a non-empty string -- so the old
+        `bool(handle)` was true forever and this check reported "still
+        running" after every outage without looking at anything. The whole
+        availability lane was a no-op on the platform it mattered most on.
+        Ask the cluster instead: a Job with no pod, or whose pod has gone
+        Failed/Succeeded, is a Job that stopped doing IO.
+        """
         for name, _log, handle in handles:
-            alive = (handle.is_alive() if hasattr(handle, "is_alive")
-                     else bool(handle))
+            if isinstance(handle, str):
+                alive = self._k8s_fio_running(handle)
+            else:
+                alive = handle.is_alive()
             if not alive:
                 raise LblkPreconditionError(
                     f"[matrix] live FIO on {name} stopped during {outage}. "
@@ -685,6 +710,23 @@ class _LblkOutageMatrix(_LblkBase):
                     f"meant to be survivable, so IO ending here is a loss of "
                     f"availability, not an expected blip.")
         self.logger.info("[matrix] live FIO still running after %s", outage)
+
+    def _k8s_fio_running(self, job_name):
+        """Is this FIO Job still moving IO?"""
+        k8s = self._ensure_k8s_utils()
+        pods = k8s.get_job_pod_names(job_name) or []
+        if not pods:
+            self.logger.warning("[matrix] FIO job %s has no pod", job_name)
+            return False
+        for pod in pods:
+            detail = k8s.get_pod_status_detail(pod) or {}
+            phase = (detail.get("phase") or detail.get("reason") or "").lower()
+            if phase in ("running", "podinitializing", "containercreating"):
+                return True
+            self.logger.warning("[matrix] FIO pod %s is %r (%s)", pod,
+                                phase or "unknown",
+                                str(detail.get("message", ""))[:120])
+        return False
 
     def _finish_live_fio(self, handles):
         """Join, then hold every job to zero IO errors.
@@ -699,7 +741,11 @@ class _LblkOutageMatrix(_LblkBase):
             if hasattr(handle, "join"):
                 handle.join(timeout=self._fio_runtime)
             if self.k8s_test:
-                self._validate_fio_dual(handle)
+                # k8s.validate_fio_job raises; _validate_fio_dual only logs a
+                # warning for "error"/"fail" and then says validation passed,
+                # which would have let an io_u error through on exactly the
+                # platform this lane is meant to gate.
+                self._ensure_k8s_utils().validate_fio_job(handle)
             else:
                 self.common_utils.validate_fio_test(
                     node=self.client_machines[0], log_file=log,
