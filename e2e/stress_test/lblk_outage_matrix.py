@@ -53,6 +53,12 @@ class _LblkOutageMatrix(_LblkBase):
         "interface_full_network_interrupt",
     )
 
+    #: Where create_utility_pod and the FIO job mount a PVC inside the pod.
+    #: On k8s nothing is mounted on the runner, so every read of a volume's
+    #: contents goes through a pod and sees this path -- whatever the dual
+    #: helper happened to return as "mount".
+    K8S_MOUNT = "/spdkvol"
+
     #: Static payload per volume. Large enough to span many stripes -- and so
     #: to involve every node's parity -- small enough that re-md5ing five
     #: volumes after each of four outages is not the bulk of the runtime.
@@ -170,6 +176,15 @@ class _LblkOutageMatrix(_LblkBase):
         _dev, cmount = self._create_clone_dual(
             snap_id, clone, size=self.LVOL_SIZE,
             mount_path=f"/mnt/{clone}", format_disk=False)
+        if self.k8s_test:
+            # _create_clone_dual returns (pvc_name, pvc_name) on k8s -- its
+            # "mount" is the claim name, not a path, because nothing is
+            # mounted on the runner. The bytes live at create_utility_pod's
+            # mount_path inside the pod that reads them, which is where every
+            # other k8s volume in this test is read from too. Using the
+            # returned value produced md5sum "can't open
+            # 'mxclone363/static.dat'".
+            cmount = self.K8S_MOUNT
         self._baselines[clone] = self._static_md5(clone, cmount)
         self._static.append((clone, cmount))
         self.logger.info("[matrix] clone %s of %s seeded, md5=%s",
@@ -260,13 +275,13 @@ class _LblkOutageMatrix(_LblkBase):
                 k8s.delete_pod(binder, wait=True)
         else:
             k8s.wait_pvc_bound(pvc)
-        self._volume_registry[name] = {"pvc_name": pvc, "mount": "/spdkvol",
+        self._volume_registry[name] = {"pvc_name": pvc, "mount": self.K8S_MOUNT,
                                        "node_selector": pin}
         # Deliberately NOT registered in _fs_volumes. _verify_all runs a write
         # workload over everything in there, and a static volume that gets
         # written to is no longer a static volume -- the md5 baseline would be
         # measuring the test's own IO.
-        return "/spdkvol"
+        return self.K8S_MOUNT
 
     def _assert_kms_usable(self):
         """An encrypted volume needs KMS, so check it before asking for one.
@@ -604,6 +619,12 @@ class _LblkOutageMatrix(_LblkBase):
         compare equal to the next empty result and report the data as
         unchanged, which is the failure mode this whole lane exists to catch.
         """
+        if not str(mount).startswith("/"):
+            raise LblkPreconditionError(
+                f"[matrix] {lvol_name} was handed {mount!r} as a mount point. "
+                f"That is a claim name, not a path -- the dual helpers return "
+                f"one of each depending on the platform, and only an absolute "
+                f"path can be read.")
         path = f"{mount}/static.dat"
         cmd = f"md5sum {path}"
         if self.k8s_test:
