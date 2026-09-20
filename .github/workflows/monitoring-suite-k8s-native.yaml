@@ -382,13 +382,30 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
-          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          # Ours first, the operator's second -- same order as
+          # k8s-native-e2e.yaml and k8s-native-stress.yaml.
+          #
+          # cleanup_upgrade_test.sh is the 12-phase one: Helm R25+R26, CRs,
+          # CRDs, cert-manager, kube-system, snapshots, PVCs/PVs, node
+          # cleanup, labels, CSI hostpath data, namespace finalization.
+          # Running it first means the operator's script sees whatever ours
+          # could not resolve, rather than ours inheriting half-removed state
+          # from the operator's. This lane had the order reversed and never
+          # ran the 12-phase script, so stale CRDs survived into the next run
+          # and the apiserver silently pruned unknown fields from the CRs.
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_upgrade_test.sh \
+            -n "$NAMESPACE" \
+            -e "$CLUSTER_ENV" \
+            -w "${{ github.event.inputs.worker_nodes }}" \
+            -c "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/"
+
+          # The operator's own cleanup, second.
           if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
             bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
           fi
 
-          # Run the shared cleanup script (handles etcd overload with
-          # --request-timeout, bulk deletes, and parallel finalizer patching)
+          # Final sweep.
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
           echo "=== Phase 7: Delete Released PVs ==="
@@ -439,7 +456,33 @@ jobs:
           # Remove Helm release secrets in case uninstall left a broken/pending state
           kubectl delete secret -n vault -l name=openbao,owner=helm 2>/dev/null || true
           kubectl delete namespace vault --wait=false 2>/dev/null || true
+
+          # Orphaned aggregated APIServices are WHY this namespace hangs. The
+          # namespace controller will not finalize while it cannot enumerate
+          # every API group, and helm uninstall leaves simplyblock's own
+          # metrics APIService behind because it is cluster-scoped. One dead
+          # APIService blocks EVERY namespace deletion on the cluster, not
+          # just this one -- vault sat Terminating for 25h on exactly that.
+          for a in $(kubectl get apiservice -o json 2>/dev/null \
+            | jq -r '.items[] | select((.status.conditions // [])
+                | map(select(.type=="Available" and .status!="True"))
+                | length > 0) | .metadata.name'); do
+            echo "Removing unavailable APIService: ${a}"
+            kubectl delete apiservice "${a}" --timeout=30s 2>/dev/null || true
+          done
+
           kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
+
+          # Last resort. Everything above addresses why it hangs; this makes
+          # sure it does not STAY hung, because a Terminating vault blocks the
+          # next run's KMS install.
+          if kubectl get namespace vault >/dev/null 2>&1; then
+            echo "vault still Terminating; force-finalizing"
+            kubectl get namespace vault -o json \
+              | jq 'del(.spec.finalizers[])' \
+              | kubectl replace --raw /api/v1/namespaces/vault/finalize -f - || true
+            kubectl wait --for=delete namespace/vault --timeout=60s 2>/dev/null || true
+          fi
 
       # ============================================================
       # LABEL + NAMESPACE + DEPLOY

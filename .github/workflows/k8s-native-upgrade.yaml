@@ -354,13 +354,29 @@ jobs:
           done
 
           echo "=== Phase 3: Run shared cleanup scripts ==="
-          # Run the operator's own cleanup script (thorough helm + CR cleanup)
+          # Ours first, the operator's second -- same order as
+          # k8s-native-e2e, -stress and monitoring-suite. Running the
+          # operator's first meant ours inherited half-removed state from it.
+          #
+          # The 12-phase script supersedes the inline phases above rather than
+          # conflicting with them: every phase here is idempotent, so the
+          # earlier Helm and kube-system passes simply find nothing left.
+          # What it adds over cleanup_k8s.sh alone is CRDs, cert-manager, node
+          # labels, hugepages and CSI hostpath data -- without which stale
+          # CRDs survive into the next run and the apiserver silently prunes
+          # unknown fields from the CRs.
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_upgrade_test.sh \
+            -n "$NAMESPACE" \
+            -e "$CLUSTER_ENV" \
+            -w "${{ github.event.inputs.worker_nodes }}" \
+            -c "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/"
+
+          # The operator's own cleanup, second.
           if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
             bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
           fi
-          # Run the shared cleanup script (handles etcd overload with
-          # --request-timeout, bulk deletes, parallel finalizer patching,
-          # kube-system resources, StorageClasses, webhooks, etc.)
+
+          # Final sweep.
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
           echo "=== Delete Released PVs from simplyblock ==="
