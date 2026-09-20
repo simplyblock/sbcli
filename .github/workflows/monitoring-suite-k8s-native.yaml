@@ -327,6 +327,54 @@ jobs:
             secrets.KUBECONFIG_LOCAL || secrets.KUBECONFIG_CONTENT
             }}
 
+      - name: Resolve the openshift-local API server
+        if: ${{ github.event.inputs.cluster_environment == 'openshift-local' }}
+        run: |
+          set +e
+          # openshift-local publishes its API under a name only the lab
+          # resolver knows. A runner that cannot resolve it fails every
+          # kubectl call with "no such host", which reads like a dead cluster
+          # rather than a DNS gap, and the run then fails several steps later
+          # with something unrelated-looking.
+          #
+          # Deliberately scoped to NAME RESOLUTION, not general reachability:
+          # a check like `kubectl cluster-info` also fails on an expired
+          # token, and rewriting /etc/resolv.conf would not fix that while
+          # making the real cause harder to see.
+          API_HOST="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null \
+            | sed -E 's#^https?://##; s#[:/].*##')"
+          if [ -z "$API_HOST" ]; then
+            echo "::warning::could not read the API server host from the kubeconfig; skipping the DNS check"
+            exit 0
+          fi
+          echo "API server host: $API_HOST"
+
+          if getent hosts "$API_HOST" >/dev/null 2>&1; then
+            echo "$API_HOST already resolves; leaving /etc/resolv.conf alone"
+            exit 0
+          fi
+
+          echo "$API_HOST does not resolve — adding the lab resolver"
+          grep -qs "nameserver ${OCP_LOCAL_DNS}" /etc/resolv.conf \
+            || echo "nameserver ${OCP_LOCAL_DNS}" | sudo tee -a /etc/resolv.conf >/dev/null
+          grep -qs "search ${OCP_LOCAL_SEARCH}" /etc/resolv.conf \
+            || echo "search ${OCP_LOCAL_SEARCH}" | sudo tee -a /etc/resolv.conf >/dev/null
+          echo "--- /etc/resolv.conf ---"; cat /etc/resolv.conf
+
+          for i in 1 2 3 4 5 6; do
+            getent hosts "$API_HOST" >/dev/null 2>&1 && { echo "$API_HOST resolves now"; exit 0; }
+            sleep 5
+          done
+          echo "::error::$API_HOST still does not resolve after adding ${OCP_LOCAL_DNS} to /etc/resolv.conf."
+          echo "Every kubectl call in this run would fail with 'no such host'. Failing here rather than"
+          echo "letting a later step report it as a cluster problem."
+          exit 1
+        env:
+          # Hardcoded rather than added as workflow inputs: several of these
+          # lanes are already at GitHub's 25-input ceiling.
+          OCP_LOCAL_DNS: 192.168.10.34
+          OCP_LOCAL_SEARCH: simplyblock1.localdomain
+
       - name: Install Helm v3.15.4
         run: |
           if ! helm version 2>/dev/null | grep -q 'v3.15'; then
