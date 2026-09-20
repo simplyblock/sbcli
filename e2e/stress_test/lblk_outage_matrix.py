@@ -348,7 +348,14 @@ class _LblkOutageMatrix(_LblkBase):
         allowed = workers[:-1]
 
         pool = f"mxdhchap{random.randint(100, 999)}"
-        actual = k8s.add_storage_pool(
+        # sbcli_utils, not k8s_utils: add_storage_pool lives on K8sSbcliUtils
+        # (k8s_utils.py:3837) and only that one takes allowed_nodes and
+        # storage_class_parameters. K8sUtils has no add_storage_pool at all,
+        # and calling it there raised AttributeError after the pool had
+        # already been named. In k8s mode self.sbcli_utils IS a K8sSbcliUtils
+        # (cluster_test_base.py:210), which is how the security suite reaches
+        # the same method.
+        actual = self.sbcli_utils.add_storage_pool(
             pool_name=pool, cluster_id=self.cluster_id, dhchap=True,
             allowed_nodes=allowed,
             storage_class_parameters={"filesystem": "ext4"})
@@ -392,7 +399,7 @@ class _LblkOutageMatrix(_LblkBase):
         """
         try:
             details = self.sbcli_utils.get_pool_by_id(
-                self.sbcli_utils.get_pool_id(pool_name))
+                self.sbcli_utils.get_storage_pool_id(pool_name))
             if isinstance(details, list):
                 details = details[0] if details else {}
             cr_name = (details or {}).get("cr_name")
