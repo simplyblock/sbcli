@@ -229,6 +229,8 @@ class _LblkOutageMatrix(_LblkBase):
             return mount
 
         k8s = self._ensure_k8s_utils()
+        if crypto:
+            self._assert_kms_usable()
         if dhchap:
             sc, pin = self._dhchap_k8s()
         else:
@@ -257,6 +259,48 @@ class _LblkOutageMatrix(_LblkBase):
         # written to is no longer a static volume -- the md5 baseline would be
         # measuring the test's own IO.
         return "/spdkvol"
+
+    def _assert_kms_usable(self):
+        """An encrypted volume needs KMS, so check it before asking for one.
+
+        Without this the failure is a 300s PVC timeout whose only detail is
+        "not Bound", and the cause sits three layers down: the CSI driver's
+        CreateVolume gets POST 500 from the control plane, whose log shows
+        KMSException("Authentication failed") from _hcp.py -- because openbao
+        is sealed.
+
+        It re-seals on its own. The seal type is shamir with no auto-unseal,
+        so any fresh openbao process comes up sealed, and the workflow unseals
+        only once at setup. On 2026-09-20 the pod was recreated after setup
+        (restartCount 0 but newer than its namespace), came back sealed, and
+        every encrypted volume failed from then on.
+
+        Checking pod readiness rather than the seal status directly: openbao's
+        readiness probe already tracks sealed state, and `bao status` needs
+        BAO_SKIP_VERIFY here because the server certificate carries no IP SAN.
+        """
+        k8s = self._ensure_k8s_utils()
+        out, _err = k8s._exec_kubectl(
+            "kubectl get pods -n vault -l app.kubernetes.io/name=openbao "
+            "--no-headers -o custom-columns=NAME:.metadata.name,"
+            "READY:.status.containerStatuses[0].ready 2>/dev/null || true")
+        rows = [ln.split() for ln in (out or "").splitlines() if ln.strip()]
+        if not rows:
+            raise LblkPreconditionError(
+                "[matrix] no openbao pod in namespace vault, so KMS cannot "
+                "serve an encryption key and every crypto volume will fail to "
+                "provision. Run the workflow's 'Setup KMS (vault)' step, or "
+                "drop the crypto flavour for this run.")
+        unready = [r[0] for r in rows if len(r) < 2 or r[1] != "true"]
+        if unready:
+            raise LblkPreconditionError(
+                f"[matrix] openbao {unready} is not ready, which on a shamir "
+                f"seal means sealed. The control plane will answer CreateVolume "
+                f"with POST 500 (KMSException: Authentication failed) for every "
+                f"encrypted volume. Unseal it -- the keys from setup are in "
+                f"openbao-init.txt on the runner -- then re-run.")
+        self.logger.info("[matrix] KMS ready: %s",
+                         " ".join(r[0] for r in rows))
 
     def _pin_for(self, lvol_name):
         """nodeSelector a pod touching this volume must carry, or None."""
