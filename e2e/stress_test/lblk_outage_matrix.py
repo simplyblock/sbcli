@@ -25,8 +25,10 @@ DHCHAP on lblk are an untested combination; a failure confined to those lanes
 is a real finding about lblk rather than a bug in this test.
 """
 
+import json
 import os
 import random
+import time
 
 from e2e_tests.lblk.test_lblk import (
     _LblkBase,
@@ -368,7 +370,7 @@ class _LblkOutageMatrix(_LblkBase):
                 f"[matrix] the operator did not generate StorageClass {sc!r} "
                 f"for DHCHAP pool {crd!r}; nothing to provision from")
 
-        label = f"simplyblock.io/pool.{k8s.namespace}.{self.cluster_id}.{crd}"
+        label = self._discover_pool_label(allowed, workers[-1:])
         if not k8s.restart_csi_node_driver(expect_topology_key=label,
                                            expect_on_nodes=allowed):
             self.logger.warning(
@@ -382,6 +384,67 @@ class _LblkOutageMatrix(_LblkBase):
         self._dhchap_k8s_cache = (sc, pin)
         self._dhchap_allowed = allowed
         return self._dhchap_k8s_cache
+
+    def _discover_pool_label(self, allowed, disallowed, timeout=180):
+        """Read the operator's pool label off the nodes it labelled.
+
+        Rebuilding the key is what broke this. The real one is
+
+            storage.simplyblock.io/storage-pool.<pool uuid> = allowed
+
+        and the version constructed from namespace, cluster id and CRD name --
+        simplyblock.io/pool.<ns>.<cluster>.<crd> -- matches nothing. The binder
+        pod's nodeSelector then selected no node at all and sat Pending until
+        the 300s timeout, with the CSI re-register warning as the only hint.
+
+        Identified by behaviour rather than by name: the key carries the value
+        "allowed" on every allowed node and is absent from the excluded one.
+        That pins down this pool's label even when other pools have labelled
+        the same nodes, and it keeps working if the operator changes the
+        naming scheme.
+        """
+        k8s = self._ensure_k8s_utils()
+        deadline = time.time() + timeout
+        seen = set()
+        while True:
+            out, _err = k8s._exec_kubectl(
+                "kubectl get nodes -o json 2>/dev/null || true")
+            try:
+                nodes = {n["metadata"]["name"]: (n["metadata"].get("labels") or {})
+                         for n in json.loads(out).get("items", [])}
+            except (ValueError, AttributeError, KeyError):
+                nodes = {}
+
+            if nodes:
+                on_allowed = [
+                    {k for k, v in nodes.get(n, {}).items() if v == "allowed"}
+                    for n in allowed]
+                common = set.intersection(*on_allowed) if on_allowed else set()
+                for n in disallowed:
+                    common -= set(nodes.get(n, {}))
+                seen = common
+                if len(common) == 1:
+                    label = common.pop()
+                    self.logger.info("[matrix] pool node label: %s", label)
+                    return label
+                if len(common) > 1:
+                    # More than one pool has labelled exactly this set. Prefer
+                    # the storage-pool key; anything else is not ours to pin on.
+                    pref = sorted(k for k in common if "storage-pool" in k)
+                    if pref:
+                        self.logger.info(
+                            "[matrix] %d candidate labels %s; using %s",
+                            len(common), sorted(common), pref[-1])
+                        return pref[-1]
+
+            if time.time() >= deadline:
+                raise LblkPreconditionError(
+                    f"[matrix] the operator never labelled {allowed} for this "
+                    f"DHCHAP pool within {timeout}s (candidates seen: "
+                    f"{sorted(seen) or 'none'}). Without that label there is no "
+                    f"nodeSelector that selects an allowed node, so the PVC "
+                    f"cannot bind and DHCHAP is not enforced either.")
+            sleep_n_sec(5)
 
     def _k8s_worker_names(self):
         k8s = self._ensure_k8s_utils()
