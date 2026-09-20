@@ -148,6 +148,7 @@ class _LblkOutageMatrix(_LblkBase):
             ("plain", dict()),
             ("crypto", dict(crypto=True)),
             ("dhchap", dict(dhchap=True)),
+            ("nsvol", dict(namespaced=True)),
         ]
         for label, opts in flavours:
             name = f"mx{label}{random.randint(100, 999)}"
@@ -180,17 +181,26 @@ class _LblkOutageMatrix(_LblkBase):
         self._stamp_all()
         self.logger.info("[matrix] raw device %s stamped with crc32c", raw)
 
-    def _provision_typed(self, name, pool, crypto=False, dhchap=False):
+    def _provision_typed(self, name, pool, crypto=False, dhchap=False,
+                         namespaced=False):
         """A formatted volume of the requested flavour, on either platform.
 
-        Docker varies the lvol: crypto is a per-lvol flag, DHCHAP a property of
-        the pool it lives in. K8s varies the StorageClass instead, because CSI
-        is the only way in -- the parameters exist there (``encryption``,
-        ``dhchap_node_label``) and map onto the same two product features.
+        Docker varies the lvol: crypto and namespace packing are per-lvol
+        flags, DHCHAP a property of the pool it lives in.
+
+        K8s goes through CSI, so the flavour lives in the StorageClass -- but
+        not uniformly. Crypto and namespaced use a class we build ourselves,
+        which is fine because nothing about them depends on node identity.
+        DHCHAP must use the class the OPERATOR generates for its pool: that
+        one carries dhchap_node_label, and the nodeAffinity CSI writes from it
+        is the thing that actually enforces allowedNodes at mount time. See
+        _dhchap_k8s for why building our own there does not work.
         """
-        label = "dhchap" if dhchap else ("crypto" if crypto else "plain")
+        label = ("dhchap" if dhchap else "crypto" if crypto
+                 else "nsvol" if namespaced else "plain")
         try:
-            return self._provision_typed_inner(name, pool, crypto, dhchap)
+            return self._provision_typed_inner(name, pool, crypto, dhchap,
+                                               namespaced)
         except Exception as exc:                      # noqa: BLE001
             # Encryption and DHCHAP on lblk have never been exercised. When one
             # cannot even be provisioned that IS the finding, so name the
@@ -200,63 +210,178 @@ class _LblkOutageMatrix(_LblkBase):
                 f"[matrix] could not provision a {label} volume on an lblk "
                 f"cluster: {type(exc).__name__}: {exc}") from exc
 
-    def _provision_typed_inner(self, name, pool, crypto, dhchap):
-        if dhchap:
-            pool = self._dhchap_pool()
-
+    def _provision_typed_inner(self, name, pool, crypto, dhchap,
+                               namespaced=False):
         if not self.k8s_test:
-            self._create_lvol_dual(name, self.LVOL_SIZE, pool_name=pool,
-                                   crypto=crypto)
+            # Docker: every flavour is an lvol flag or a property of its pool.
+            kwargs = dict(lvol_name=name, size=self.LVOL_SIZE,
+                          pool_name=(self._dhchap_pool() if dhchap else pool))
+            if crypto:
+                kwargs["crypto"] = True
+            if namespaced:
+                # Several namespaces packed into one subsystem, rather than a
+                # subsystem per lvol.
+                kwargs["namespace"] = True
+                kwargs["max_namespace_per_subsys"] = 4
+            self.sbcli_utils.add_lvol(**kwargs)
             _dev, mount = self._connect_and_mount_dual(
                 name, mount_path=f"/mnt/{name}", format_disk=True)
             return mount
 
         k8s = self._ensure_k8s_utils()
-        sc = self._typed_storage_class(crypto=crypto, dhchap=dhchap, pool=pool)
+        if dhchap:
+            sc, pin = self._dhchap_k8s()
+        else:
+            sc, pin = self._typed_storage_class(crypto, namespaced), None
+
         pvc = self._k8s_normalize_name(name)
         k8s.create_pvc(name=pvc, size=self.LVOL_SIZE.replace("G", "Gi"),
                        storage_class=sc)
+        if pin:
+            # The operator's DHCHAP class is WaitForFirstConsumer, so the PVC
+            # stays Pending until something is scheduled against it -- and it
+            # must be scheduled on an allowed node, because CSI writes a
+            # matching nodeAffinity onto the PV. Bind it with a throwaway pod
+            # pinned there.
+            binder = f"bind-{pvc}"[:63]
+            k8s.create_utility_pod(binder, pvc, node_selector=pin)
+            try:
+                k8s.wait_pod_running(binder)
+            finally:
+                k8s.delete_pod(binder, wait=True)
         k8s.wait_pvc_bound(pvc)
-        self._volume_registry[name] = {"pvc_name": pvc, "mount": "/spdkvol"}
+        self._volume_registry[name] = {"pvc_name": pvc, "mount": "/spdkvol",
+                                       "node_selector": pin}
         # Deliberately NOT registered in _fs_volumes. _verify_all runs a write
         # workload over everything in there, and a static volume that gets
         # written to is no longer a static volume -- the md5 baseline would be
         # measuring the test's own IO.
         return "/spdkvol"
 
+    def _pin_for(self, lvol_name):
+        """nodeSelector a pod touching this volume must carry, or None."""
+        return (self._volume_registry.get(lvol_name) or {}).get("node_selector")
+
     def _dhchap_pool(self):
-        """A DHCHAP-enabled pool, created once per run."""
+        """A DHCHAP-enabled pool, created once per run (docker)."""
         if getattr(self, "_dhchap_pool_name", None):
             return self._dhchap_pool_name
         self._dhchap_pool_name = f"mxdhchap{random.randint(100, 999)}"
         self._add_pool_dual(pool_name=self._dhchap_pool_name, dhchap=True)
         return self._dhchap_pool_name
 
-    def _typed_storage_class(self, crypto, dhchap, pool):
-        """StorageClass for a flavour, created on demand and reused."""
-        key = f"crypto={crypto},dhchap={dhchap}"
+    def _dhchap_k8s(self):
+        """DHCHAP on k8s, the operator's own path. Returns (sc, nodeSelector).
+
+        The first attempt created a second pool with dhchap=True and no
+        allowedNodes, then built its own StorageClass. The operator never
+        reconciled it -- "Pool not visible in sbcli after 300s" -- because a
+        DHCHAP pool with no allowedNodes has no hosts to authorise. Four
+        things are required, and the security suite established all of them:
+
+        1. allowedNodes must be a real subset, so the operator can derive each
+           allowed node's NQN and label those nodes.
+        2. The StorageClass has to be the operator's, not ours: it carries
+           dhchap_node_label, which is what makes CSI write a nodeAffinity
+           onto every PV, and that is what enforces the restriction at mount.
+        3. The CSI node plugin snapshots node labels as topology keys only at
+           REGISTRATION, so a pool created while it is already running is
+           invisible to it and every PVC fails on topology. The daemonset has
+           to be restarted once per pool.
+        4. That class is WaitForFirstConsumer, so a PVC does not bind until a
+           pod is scheduled against it on an allowed node.
+        """
+        cached = getattr(self, "_dhchap_k8s_cache", None)
+        if cached:
+            return cached
+        k8s = self._ensure_k8s_utils()
+
+        workers = self._k8s_worker_names()
+        if len(workers) < 2:
+            raise LblkPreconditionError(
+                f"[matrix] DHCHAP needs at least two workers so allowedNodes "
+                f"can be a strict subset; saw {workers}")
+        allowed = workers[:-1]
+
+        pool = f"mxdhchap{random.randint(100, 999)}"
+        actual = k8s.add_storage_pool(
+            pool_name=pool, cluster_id=self.cluster_id, dhchap=True,
+            allowed_nodes=allowed,
+            storage_class_parameters={"filesystem": "ext4"})
+        pool = actual or pool
+
+        crd = self._k8s_pool_crd_name(pool)
+        sc = k8s.operator_storage_class_name(crd)
+        if not k8s.wait_storage_class_exists(sc):
+            raise LblkPreconditionError(
+                f"[matrix] the operator did not generate StorageClass {sc!r} "
+                f"for DHCHAP pool {crd!r}; nothing to provision from")
+
+        label = f"simplyblock.io/pool.{k8s.namespace}.{self.cluster_id}.{crd}"
+        if not k8s.restart_csi_node_driver(expect_topology_key=label,
+                                           expect_on_nodes=allowed):
+            self.logger.warning(
+                "[matrix] CSI re-register did not surface %r as a topology "
+                "key; DHCHAP provisioning may fail on allowedTopologies",
+                label)
+
+        pin = f"{label}=allowed"
+        self.logger.info("[matrix] DHCHAP pool %s: allowed=%s, sc=%s",
+                         crd, allowed, sc)
+        self._dhchap_k8s_cache = (sc, pin)
+        self._dhchap_allowed = allowed
+        return self._dhchap_k8s_cache
+
+    def _k8s_worker_names(self):
+        k8s = self._ensure_k8s_utils()
+        out, _ = k8s._exec_kubectl(
+            "kubectl get nodes -l node-role.kubernetes.io/control-plane!= "
+            "--no-headers -o custom-columns=NAME:.metadata.name")
+        return [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+
+    def _k8s_pool_crd_name(self, pool_name):
+        """The StoragePool CRD name the operator built its label from.
+
+        Not necessarily the backend pool name: the CRD name can pick up a
+        suffix or be truncated to fit the 63-char label budget, and the label
+        is derived from the CRD name, not from the backend name.
+        """
+        try:
+            details = self.sbcli_utils.get_pool_by_id(
+                self.sbcli_utils.get_pool_id(pool_name))
+            if isinstance(details, list):
+                details = details[0] if details else {}
+            cr_name = (details or {}).get("cr_name")
+            if cr_name:
+                return cr_name
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.info("[matrix] cr_name unavailable (%s); assuming the "
+                             "CRD is named after the pool", str(exc)[:100])
+        return pool_name
+
+    def _typed_storage_class(self, crypto, namespaced):
+        """Our own StorageClass for the non-DHCHAP flavours.
+
+        Safe to build here, unlike DHCHAP: no node label is involved, so
+        nothing depends on the operator's generated class, and ours is
+        volumeBindingMode: Immediate, which keeps provisioning simple.
+        """
+        key = f"crypto={crypto},ns={namespaced}"
         cache = getattr(self, "_sc_cache", None)
         if cache is None:
             cache = self._sc_cache = {}
         if key in cache:
             return cache[key]
-        if not crypto and not dhchap:
+        if not crypto and not namespaced:
             cache[key] = self._k8s_storage_class_name
             return cache[key]
 
         k8s = self._ensure_k8s_utils()
-        name = f"{self._k8s_storage_class_name}-{'enc' if crypto else 'auth'}"
-        label = None
-        if dhchap:
-            # Without the pool's node label the CSI driver provisions with no
-            # nodeAffinity and DHCHAP is not actually enforced, so the lane
-            # would pass while testing nothing.
-            label = (f"simplyblock.io/pool.{k8s.namespace}."
-                     f"{self.cluster_id}.{pool}")
+        name = f"{self._k8s_storage_class_name}-{'enc' if crypto else 'ns'}"
         k8s.create_storage_class(
-            name=name, cluster_id=self.cluster_id, pool_name=pool,
+            name=name, cluster_id=self.cluster_id, pool_name=self.pool_name,
             ndcs=self.ndcs, npcs=self.npcs, encryption=crypto,
-            dhchap_node_label=label)
+            max_namespace_per_subsys=(4 if namespaced else 1))
         cache[key] = name
         self.logger.info("[matrix] StorageClass %s (%s)", name, key)
         return name
@@ -269,7 +394,12 @@ class _LblkOutageMatrix(_LblkBase):
             k8s = self._ensure_k8s_utils()
             pvc = self._volume_registry[lvol_name]["pvc_name"]
             pod = f"seed-{pvc}"[:63]
-            k8s.create_utility_pod(pod, pvc)
+            # A DHCHAP volume's PV carries a nodeAffinity for the pool's
+            # allowed nodes. An unpinned pod can land elsewhere and fail to
+            # mount, which would look like a storage fault rather than a
+            # scheduling one.
+            k8s.create_utility_pod(pod, pvc,
+                                   node_selector=self._pin_for(lvol_name))
             try:
                 k8s.wait_pod_running(pod)
                 k8s.exec_in_pod(pod, cmd)
@@ -328,7 +458,8 @@ class _LblkOutageMatrix(_LblkBase):
             k8s = self._ensure_k8s_utils()
             pvc = self._volume_registry[lvol_name]["pvc_name"]
             pod = f"md5-{pvc}"[:63]
-            k8s.create_utility_pod(pod, pvc)
+            k8s.create_utility_pod(pod, pvc,
+                                   node_selector=self._pin_for(lvol_name))
             k8s.wait_pod_running(pod)
             self._k8s_utility_pods.append(pod)
             pods[lvol_name] = pod
@@ -375,7 +506,8 @@ class _LblkOutageMatrix(_LblkBase):
         handles = []
         for label, opts in (("plain", dict()),
                             ("crypto", dict(crypto=True)),
-                            ("dhchap", dict(dhchap=True))):
+                            ("dhchap", dict(dhchap=True)),
+                            ("nsvol", dict(namespaced=True))):
             name = f"mxlive{label}{random.randint(100, 999)}"
             mount = self._provision_typed(name, pool, **opts)
             log = (None if self.k8s_test
@@ -384,7 +516,7 @@ class _LblkOutageMatrix(_LblkBase):
                 name, mount_path=mount, log_path=log,
                 runtime=runtime, name=f"mxlive{label}",
                 rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
-                time_based=True)))
+                time_based=True, node_selector=self._pin_for(name))))
             self.logger.info("[matrix] live FIO started on %s volume %s",
                              label, name)
         return handles

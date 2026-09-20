@@ -1276,7 +1276,7 @@ class TestClusterBase:
                       runtime=300, name=None, rw="randrw", size="1G",
                       bs="4K", iodepth=1, numjobs=2, nrfiles=8,
                       time_based=True, verify=None, verify_fatal=False,
-                      **kwargs):
+                      node_selector=None, **kwargs):
         """Start FIO. Returns thread (Docker) or job_name str (K8s).
 
         verify: e.g. "md5" or "crc32c". Opt-in and off by default, so existing
@@ -1320,7 +1320,11 @@ class TestClusterBase:
                 f"directory=/spdkvol\n"
                 f"nrfiles={nrfiles}\n"
             )
-            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config)
+            # node_selector matters for a DHCHAP pool: its PVs carry a
+            # nodeAffinity for the pool's allowed nodes, so an unpinned
+            # job can be scheduled somewhere that cannot mount it.
+            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config,
+                               node_selector=node_selector)
             self._k8s_fio_jobs.append(job_name)
             self._k8s_configmaps.append(cm_name)
             return job_name
