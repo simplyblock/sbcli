@@ -756,6 +756,23 @@ def add_new_device_mig_task(device_id):
 
 
 def add_node_add_task(cluster_id, function_params):
+    """Queue an add for a host, or answer with the one already queued for it.
+
+    The dedup in `_validate_new_task_node_add` is load-bearing and stays: a
+    retried post that created a second FN_NODE_ADD for one host put two threads
+    on the same host's config-slot logic (2026-07-23, six nodes for a four-slot
+    host). What it reported was the problem. `_add_task` answers a duplicate
+    with False, and the v2 endpoint raises ValueError on falsy, so the guard
+    working as designed reached the caller as a 500 -- on a host whose add was
+    already queued and running.
+
+    A task that already exists is the answer to "add this host", so it is
+    returned, which is what `ensure_node_restart_task` does with its own repeat.
+    """
+    existing = _validate_new_task_node_add(
+        cluster_id, (function_params or {}).get("node_addr"))
+    if existing:
+        return existing
     return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
                      function_params=function_params, max_retry=11)
 
