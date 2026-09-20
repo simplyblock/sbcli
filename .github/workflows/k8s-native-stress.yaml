@@ -1008,8 +1008,94 @@ jobs:
           UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/setup-kms.sh
 
           echo "Waiting for vault pods to be ready..."
-          kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s || true
-          echo "KMS setup complete."
+          kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s
+          echo "openbao is unsealed and ready."
+
+          # ── Keep it that way ────────────────────────────────────────────
+          # setup-kms.sh unseals exactly once. The seal type is shamir with no
+          # auto-unseal, so ANY fresh openbao process comes up sealed again --
+          # a reschedule, an eviction, a node drain. It then answers every
+          # request with an auth failure, the control plane turns that into
+          # POST 500, and each encrypted volume fails to provision with
+          # nothing in the CSI error naming vault. On 2026-09-20 the pod was
+          # recreated after setup, came back sealed, and every crypto volume
+          # failed from that point on.
+          #
+          # There is no cloud KMS to auto-unseal against on bare metal, and
+          # transit auto-unseal would need a second openbao to hold the key.
+          # So: keep the unseal keys in a Secret and run a tiny watcher that
+          # re-unseals whenever it finds the seal closed. The keys stay on the
+          # cluster rather than only in a file on the runner, which is also
+          # what makes the vault survivable across a multi-hour run.
+          #
+          # NOT dev mode: that auto-unseals but keeps everything in memory, so
+          # a restart would lose the transit keys and silently break every
+          # volume already encrypted with them.
+          K1=$(grep -E '^Unseal Key 1:' ./openbao-init.txt | awk '{print $NF}')
+          K2=$(grep -E '^Unseal Key 2:' ./openbao-init.txt | awk '{print $NF}')
+          K3=$(grep -E '^Unseal Key 3:' ./openbao-init.txt | awk '{print $NF}')
+          if [ -z "$K1" ] || [ -z "$K2" ] || [ -z "$K3" ]; then
+            echo "::error::could not read 3 unseal keys from openbao-init.txt;"
+            echo "the auto-unsealer cannot be deployed and KMS will stay sealed"
+            echo "the first time this pod is rescheduled."
+            exit 1
+          fi
+          kubectl create secret generic openbao-unseal-keys -n vault \
+            --from-literal=KEY1="$K1" --from-literal=KEY2="$K2" --from-literal=KEY3="$K3" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          BAO_IMAGE=$(kubectl get pod openbao-0 -n vault -o jsonpath='{.spec.containers[0].image}')
+          echo "Deploying openbao-unsealer using $BAO_IMAGE"
+          # Quoted heredoc: nothing is expanded by the runner's shell, so
+          # $KEY1..$KEY3 reach the container intact for IT to expand. With an
+          # unquoted heredoc they had to be written \$KEY1, which lands in the
+          # manifest as a literal and makes the unsealer try the string '$KEY1'
+          # as a key. The image is the one thing that must come from the runner,
+          # so it goes in by sed rather than by expansion.
+          cat <<'UNSEALER' | sed "s|BAO_IMAGE_PLACEHOLDER|${BAO_IMAGE}|" | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: openbao-unsealer
+            namespace: vault
+          spec:
+            replicas: 1
+            selector:
+              matchLabels: { app: openbao-unsealer }
+            template:
+              metadata:
+                labels: { app: openbao-unsealer }
+              spec:
+                containers:
+                - name: unsealer
+                  image: BAO_IMAGE_PLACEHOLDER
+                  env:
+                  # The server certificate carries no IP SAN, so a verified
+                  # connection fails with "cannot validate certificate for
+                  # 127.0.0.1 because it doesn't contain any IP SANs".
+                  - { name: BAO_SKIP_VERIFY, value: "true" }
+                  - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.vault.svc:8200" }
+                  envFrom:
+                  - secretRef: { name: openbao-unseal-keys }
+                  command: ["/bin/sh","-c"]
+                  args:
+                  - |
+                    while true; do
+                      if bao status 2>/dev/null | grep -qE '^Sealed +true'; then
+                        echo "$(date -Is) openbao is sealed, unsealing"
+                        for k in "$KEY1" "$KEY2" "$KEY3"; do
+                          bao operator unseal "$k" >/dev/null 2>&1 || true
+                        done
+                        bao status 2>/dev/null | grep -E '^Sealed' || true
+                      fi
+                      sleep 10
+                    done
+                  resources:
+                    requests: { cpu: 10m, memory: 32Mi }
+                    limits: { cpu: 100m, memory: 128Mi }
+          UNSEALER
+          kubectl rollout status deploy/openbao-unsealer -n vault --timeout=120s || true
+          echo "KMS setup complete (auto-unseal watcher running)."
 
       - name: Cleanup stale CSI hostpath data on worker nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
