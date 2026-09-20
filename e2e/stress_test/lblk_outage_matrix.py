@@ -250,10 +250,16 @@ class _LblkOutageMatrix(_LblkBase):
             binder = f"bind-{pvc}"[:63]
             k8s.create_utility_pod(binder, pvc, node_selector=pin)
             try:
-                k8s.wait_pod_running(binder)
+                # Wait on the CLAIM, not on the pod. Binding happens as soon
+                # as the scheduler places the pod, which is the whole point of
+                # WaitForFirstConsumer; the pod itself never has to reach
+                # Running. Waiting for Running instead is what turned a bound
+                # PVC into a 300s timeout.
+                k8s.wait_pvc_bound(pvc)
             finally:
                 k8s.delete_pod(binder, wait=True)
-        k8s.wait_pvc_bound(pvc)
+        else:
+            k8s.wait_pvc_bound(pvc)
         self._volume_registry[name] = {"pvc_name": pvc, "mount": "/spdkvol",
                                        "node_selector": pin}
         # Deliberately NOT registered in _fs_volumes. _verify_all runs a write
@@ -378,9 +384,20 @@ class _LblkOutageMatrix(_LblkBase):
                 "key; DHCHAP provisioning may fail on allowedTopologies",
                 label)
 
-        pin = f"{label}=allowed"
-        self.logger.info("[matrix] DHCHAP pool %s: allowed=%s, sc=%s",
-                         crd, allowed, sc)
+        # A NODE NAME, not a label expression. create_utility_pod and
+        # create_fio_job both render node_selector as
+        #   nodeSelector: { kubernetes.io/hostname: <value> }
+        # so passing "<label>=allowed" asked the scheduler for a node whose
+        # hostname was literally that string. Nothing matched, the binder pod
+        # stayed Pending, and it timed out after 300s. The label still matters
+        # -- it is what CSI turns into the PV's nodeAffinity, and what the
+        # topology key check above looks for -- but it is not how a pod is
+        # pinned. Same as _k8s_bind_pvc in the security suite, which passes
+        # self._dhchap_allowed_nodes[0].
+        pin = allowed[0]
+        self.logger.info(
+            "[matrix] DHCHAP pool %s: allowed=%s, sc=%s, label=%s, pinning to %s",
+            crd, allowed, sc, label, pin)
         self._dhchap_k8s_cache = (sc, pin)
         self._dhchap_allowed = allowed
         return self._dhchap_k8s_cache
