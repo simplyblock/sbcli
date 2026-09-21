@@ -355,16 +355,38 @@ class _LblkOutageMatrix(_LblkBase):
                           pool_name=(self._dhchap_pool() if dhchap else pool))
             if crypto:
                 kwargs["crypto"] = True
+
             if namespaced:
-                # Several namespaces packed into one subsystem, rather than a
-                # subsystem per lvol.
+                # A namespaced volume is a CHILD: it joins a subsystem that
+                # already exists rather than opening one. Two things make that
+                # happen, and the previous attempt had neither right.
+                #
+                # `namespace=True` alone on a standalone volume still opens a
+                # fresh subsystem -- it came back as ns_id 1 of its own NQN,
+                # which then could not be resolved because nothing had
+                # connected it. And the slots have to exist on the PARENT:
+                # max_namespace_per_subsys belongs on the volume being joined,
+                # not on the one joining.
+                #
+                # So pin it to the parent's node, because a subsystem is
+                # per-node and an unpinned child lands elsewhere and opens its
+                # own. Same shape as _create_namespaced_children in
+                # continuous_failover_ha_multi_outage.py.
+                parent = self._ns_parent()
                 kwargs["namespace"] = True
-                kwargs["max_namespace_per_subsys"] = 4
+                if parent.get("node_id"):
+                    kwargs["host_id"] = parent["node_id"]
+                self.sbcli_utils.add_lvol(**kwargs)
+                return self._mount_namespaced(name, parent=parent)
+
+            # Every other volume is created with room for children, so any of
+            # them can host the namespaced one. 30 is what the failover suites
+            # use, well under the product's 50-per-subsystem limit.
+            kwargs["max_namespace_per_subsys"] = 30
             self.sbcli_utils.add_lvol(**kwargs)
-            if namespaced:
-                return self._mount_namespaced(name)
             _dev, mount = self._connect_and_mount_dual(
                 name, mount_path=f"/mnt/{name}", format_disk=True)
+            self._remember_ns_parent(name)
             return mount
 
         k8s = self._ensure_k8s_utils()
@@ -447,7 +469,33 @@ class _LblkOutageMatrix(_LblkBase):
         self.logger.info("[matrix] KMS ready: %s",
                          " ".join(r[0] for r in rows))
 
-    def _mount_namespaced(self, name, retries=5, delay=4):
+    def _remember_ns_parent(self, name):
+        """Record the first connected volume as the namespaced one's parent."""
+        if getattr(self, "_ns_parent_info", None):
+            return
+        try:
+            lvol_id = self.sbcli_utils.get_lvol_id(name)
+            det = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)[0]
+            self._ns_parent_info = {"name": name, "nqn": det.get("nqn"),
+                                    "node_id": det.get("node_id")}
+            self.logger.info("[matrix] %s will host the namespaced child "
+                             "(node=%s)", name, det.get("node_id"))
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[matrix] could not record %s as a namespace "
+                                "parent: %s", name, str(exc)[:120])
+            self._ns_parent_info = {}
+
+    def _ns_parent(self):
+        parent = getattr(self, "_ns_parent_info", None)
+        if not parent:
+            raise LblkPreconditionError(
+                "[matrix] no connected volume to host a namespaced child. A "
+                "namespaced volume joins an existing subsystem; without a "
+                "parent it opens its own and is not testing namespace "
+                "sharing at all.")
+        return parent
+
+    def _mount_namespaced(self, name, parent=None, retries=5, delay=4):
         """Find a namespaced volume's device without connecting to it.
 
         A namespaced volume joins an existing subsystem rather than opening
@@ -466,6 +514,13 @@ class _LblkOutageMatrix(_LblkBase):
         lvol_id = self.sbcli_utils.get_lvol_id(name)
         details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)[0]
         nqn, ns_id = details.get("nqn"), details.get("ns_id")
+        if parent and parent.get("nqn") and nqn != parent["nqn"]:
+            # Not fatal: the backend puts a child in any subsystem on that
+            # node with room, which may be a different volume's. Worth saying
+            # so, because the resolve below then looks somewhere unexpected.
+            self.logger.warning(
+                "[matrix] %s joined %s rather than %s's subsystem",
+                name, (nqn or "?")[-24:], parent.get("name"))
         if not isinstance(ns_id, int) or ns_id < 1:
             raise LblkPreconditionError(
                 f"[matrix] {name} reports ns_id={ns_id!r}. Without a usable "
