@@ -1092,9 +1092,8 @@ jobs:
         run: |
           set -o pipefail
           cd $GITHUB_WORKSPACE/e2e
-          python3 -m venv myenv
-          source myenv/bin/activate
-          python3 -m pip install -r requirements.txt
+          python3 -m pip install --upgrade pip uv
+          export PATH="$(python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))'):$PATH"
 
           export CLUSTER_ID="${{ env.C1_CLUSTER_ID }}"
           export CLUSTER_SECRET="${{ env.C1_CLUSTER_SECRET }}"
@@ -1104,7 +1103,7 @@ jobs:
           export K8S_LOCAL_KUBECTL=1
           export SBCLI_CMD=sbctl
 
-          python3 -u e2e.py \
+          PYTHONUNBUFFERED=1 ./e2e.py \
             --testname TestBackupCrossClusterRestore \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True --run_ha true 2>&1 | tee output.log

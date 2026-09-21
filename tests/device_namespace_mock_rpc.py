@@ -57,7 +57,7 @@ class NamespaceNodeState:
         self.failures = {method: list(codes) for method, codes in mapping.items()}
 
     def maybe_fail(self, method):
-        if method in self.failures and self.failures[method]:
+        if self.failures.get(method):
             code = self.failures[method].pop(0)
             raise _RpcError(code, f"Scripted failure for {method}")
         if method in self.random_failures and self.random.random() < self.random_failure_probability:

@@ -152,7 +152,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             }
 
     def _record_timing(self, op: str, name: str, elapsed: float,
-                       inventory: dict, api_elapsed: float = None):
+                       inventory: dict, api_elapsed: float | None = None):
         with self._lock:
             sample = {
                 "iteration": self._current_iteration,
@@ -250,7 +250,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         return ("must be unique" in text or "must be unique" in msg
                 or "already exists" in text or "already exists" in msg)
 
-    def _api_retry(self, op: str, fn, ctx: dict = None):
+    def _api_retry(self, op: str, fn, ctx: dict | None = None):
         """Call fn() with retry.  Returns fn() result on success."""
         ctx = ctx or {}
         for attempt in range(1, self.RETRY_MAX + 1):
@@ -2776,7 +2776,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
 
     # ── Fire-all-then-wait-all helpers ────────────────────────────────────
 
-    def _submit_pvc(self, name: str, sc_name: str = None):
+    def _submit_pvc(self, name: str, sc_name: str | None = None):
         """Apply PVC YAML without waiting for Bound.  Fire-and-forget."""
         sc = sc_name or self.STORAGE_CLASS_NAME
         ns = self.k8s_utils.namespace
@@ -2904,7 +2904,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             )
         return ready, not_ready, ready_ts
 
-    def _submit_clone(self, name: str, snap_name: str, sc_name: str = None):
+    def _submit_clone(self, name: str, snap_name: str, sc_name: str | None = None):
         """Apply clone PVC YAML (dataSource=VolumeSnapshot) without waiting."""
         sc = sc_name or self.STORAGE_CLASS_NAME
         ns = self.k8s_utils.namespace
@@ -3796,7 +3796,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 f"{total_clone_fail}/{len(all_items)}"
             )
 
-    def _create_pvc(self, name: str, sc_name: str = None):
+    def _create_pvc(self, name: str, sc_name: str | None = None):
         """Create a single PVC with label and wait for Bound."""
         sc = sc_name or self.STORAGE_CLASS_NAME
         ns = self.k8s_utils.namespace

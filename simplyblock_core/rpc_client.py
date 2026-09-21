@@ -18,7 +18,7 @@ from urllib3 import Retry
 from simplyblock_core import utils, constants
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils.helpers import single_or_none
-from simplyblock_core.utils.secrets import unwrap_secrets_for_send
+from simplyblock_core.utils.secrets import redact_rpc_params, unwrap_secrets_for_send
 
 logger = utils.get_logger()
 
@@ -342,7 +342,8 @@ class RPCClient:
         # window, where a single attach has to land within hundreds of ms).
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
+            logger.debug("From: %s, Requesting method: %s, params: %s",
+                         self.host, method, redact_rpc_params(params))
             # Tell the SPDK proxy how long we are willing to wait, so it bounds
             # its own SPDK round-trip (and the semaphore slot it holds) to this
             # instead of the proxy-global timeout. Prevents an abandoned/stuck
@@ -385,7 +386,7 @@ class RPCClient:
         return None, None
 
     def _request3(self, method: str, **kwargs):
-        logger.debug("Requesting method: %s, params: %s", method, kwargs)
+        logger.debug("Requesting method: %s, params: %s", method, redact_rpc_params(kwargs))
         wire_payload = unwrap_secrets_for_send({
             'id': 1,
             'method': method,
@@ -875,8 +876,7 @@ class RPCClient:
         }
         return self._request("bdev_crypto_create", params)
 
-    def lvol_crypto_key_create(self, name, key, key2):
-        # todo: mask the keys so that they don't show up in logs
+    def lvol_crypto_key_create(self, name, key: SecretStr, key2: SecretStr):
         params = {
             "cipher": "AES_XTS",
             "key": key,
@@ -2332,7 +2332,7 @@ class RPCClient:
 
     def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
                        snapshot_backups=True, local_testing=False, local_endpoint="",
-                       access_key_id="", secret_access_key="",
+                       access_key_id="", secret_access_key: SecretStr | None = None,
                        bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
         """Create the S3 bdev device.
         Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
@@ -2423,14 +2423,23 @@ class RPCClient:
         }
         return self._request("bdev_lvol_s3_backup", params)
 
-    # Backup/recovery/merge polling: use bdev_lvol_transfer_stat(lvol_name)
-    # which reads lvol->transfer_status on the data plane. Works for backup
-    # (pass snapshot bdev name) and recovery (pass target lvol name).
-    # Merge has lvol=NULL on data plane so transfer_stat cannot poll it.
+    # Backup/recovery polling: use bdev_lvol_transfer_stat(lvol_name) which
+    # reads lvol->transfer_status on the data plane. Works for backup (pass
+    # snapshot bdev name) and recovery (pass target lvol name). Merge has
+    # lvol=NULL on data plane, so it's polled separately via
+    # bdev_lvol_s3_merge_stat(s3_id, old_s3_id) below.
 
-    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None):
+    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None, allow_exist: bool = True):
         """Merge two backups: keep s3_id and merge old_s3_id into it.
-        This shortens the backup chain."""
+        This shortens the backup chain.
+
+        allow_exist: if True (default), an EEXIST response -- a matching
+        merge already queued/running on the data plane, e.g. from a prior
+        call whose RPC connection dropped before the response arrived -- is
+        treated the same as a fresh success (returns True) rather than
+        raised. A caller that needs to distinguish "started this call" from
+        "already running" can pass allow_exist=False.
+        """
         params = {
             "s3_id": s3_id,
             "old_s3_id": old_s3_id,
@@ -2438,7 +2447,21 @@ class RPCClient:
         }
         if lvs_name:
             params["lvs_name"] = lvs_name
-        return self._request("bdev_lvol_s3_merge", params)
+        try:
+            return self._request3("bdev_lvol_s3_merge", **params)
+        except RPCRemoteError as e:
+            if allow_exist and e.code == -17:
+                logger.debug("Merge %s -> %s already in progress", old_s3_id, s3_id)
+                return True
+            raise
+
+    def bdev_lvol_s3_merge_stat(self, s3_id, old_s3_id):
+        """Return merge status for the (s3_id, old_s3_id) pair.
+
+        Result dict keys:
+          ``transfer_state``: "No process" | "In progress" | "Failed" | "Done"
+        """
+        return self._request("bdev_lvol_s3_merge_stat", {"s3_id": s3_id, "old_s3_id": old_s3_id})
 
     def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch):
         """Restore a chain of S3 backups into a new lvol.

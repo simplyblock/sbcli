@@ -32,7 +32,7 @@ import tempfile
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from simplyblock_core import constants
-from simplyblock_core import shell_utils
+from . import shell as shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
@@ -790,7 +790,7 @@ def get_logger(name=""):
     try:
         logg.setLevel(log_level.upper() if log_level else constants.LOG_LEVEL)
     except ValueError as e:
-        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {e!s}')
         logg.setLevel(constants.LOG_LEVEL)
 
     if not logg.hasHandlers():
@@ -1760,7 +1760,7 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
         # Check for unmatched addresses
         unmatched = user_pci_set - ssd_pci_set
         if unmatched:
-            logger.warn(f"Invalid PCI addresses: {', '.join(unmatched)}")
+            logger.warning(f"Invalid PCI addresses: {', '.join(unmatched)}")
             pci_addresses = user_pci_set & ssd_pci_set
         else:
             pci_addresses = list(user_pci_set)

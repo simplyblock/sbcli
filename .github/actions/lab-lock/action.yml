@@ -1,0 +1,37 @@
+name: Lab host lock
+description: Reserve the lab hosts a run touches, so two workflows cannot clean the same machines.
+
+inputs:
+  mode:
+    description: acquire | verify | release
+    required: true
+  hosts:
+    description: Space- or comma-separated hosts. Duplicates are fine; they are deduped.
+    required: true
+  job:
+    description: Job name recorded in the lock, for operators reading it over SSH.
+    required: false
+    default: ""
+  label:
+    description: RUN_LABEL recorded in the lock.
+    required: false
+    default: ""
+  grace-seconds:
+    description: How long acquire waits out a cancelled run that is still releasing.
+    required: false
+    default: "120"
+  disabled:
+    description: Emergency bypass. Skips the lock operation and warns.
+    required: false
+    default: "false"
+
+runs:
+  # A JavaScript action, not a composite one: only these get `post`, which is
+  # how the lock is released. The post step runs at the end of the job that
+  # acquired it, including when that job is cancelled -- the common case here,
+  # since cancel-in-progress is this lab's kill switch. The payload stays in
+  # e2e/lab_lock.sh; these files only marshal inputs into it.
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: always()

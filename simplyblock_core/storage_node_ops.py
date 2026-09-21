@@ -3557,7 +3557,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         # check for memory
-        if "memory_details" in node_info and node_info['memory_details']:
+        if node_info.get('memory_details'):
             memory_details = node_info['memory_details']
             logger.info("Node Memory info")
             logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -6733,7 +6733,7 @@ def restart_storage_node(
         # only logs this one line, leaving the actual raise point (e.g. a
         # remote-JM/device connect timing out when a same-failure-domain peer
         # is also down) undiagnosable from the logs.
-        logger.error("restart_storage_node raised unexpectedly", exc_info=True)
+        logger.exception("restart_storage_node raised unexpectedly")
     finally:
         _hb_stop.set()
         # Trust the DB. If the impl raised after the ONLINE write was
@@ -7172,7 +7172,7 @@ def _restart_storage_node_impl(
     minimum_hp_memory = max(minimum_hp_memory, max_prov)
 
     # check for memory
-    if "memory_details" in node_info and node_info['memory_details']:
+    if node_info.get('memory_details'):
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -13803,7 +13803,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
-        logger.debug(f"online_jms: {str(jm_ids)}")
+        logger.debug(f"online_jms: {jm_ids!s}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
@@ -14618,7 +14618,7 @@ def dump_lvstore(node_id):
 
     rpc_client = snode.rpc_client(timeout=120)
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
-    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
+    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{datetime.datetime.now().isoformat()!s}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
     ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
     if not ret:
@@ -14662,7 +14662,29 @@ def safe_delete_bdev(name, node_id):
 
     db_controller = DBController()
     primary_node = db_controller.get_storage_node_by_id(node_id)
-    secondary_node = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    # Every replica peer, in the role order lvol_controller uses. A blank id
+    # means the role is not wired up (ha_type single has no secondary), and a
+    # blank id is a KeyError by contract -- see tests/unit/test_blank_id_
+    # lookups.py -- so each needs guarding; every other caller does this and
+    # this one did not, so the first orphan on such a node aborted the whole
+    # repair with a traceback.
+    #
+    # The tertiary leg matters for the same reason the secondary one does: the
+    # normal delete path fans out to EVERY replica (lvol_controller.py:2235
+    # tears subsystems down tertiary -> secondary -> primary, and :2310 issues
+    # a sync delete or a durable FN_LVOL_SYNC_DEL task per non-leader). Deleting
+    # on two of three nodes left the blob alive on the tertiary, where nothing
+    # would ever find it again -- auto_repair dumps a node's OWN lvstore, and
+    # the tertiary holds a replica of the primary's.
+    peer_nodes = []
+    for role_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+        if not role_id:
+            continue
+        try:
+            peer_nodes.append(db_controller.get_storage_node_by_id(role_id))
+        except KeyError:
+            logger.warning(f"Replica peer {role_id} of {primary_node.get_id()} "
+                           f"has no record; skipping its delete leg")
     bdev_name = f"{primary_node.lvstore}/{name}"
     logger.info(f"deleting from primary: {bdev_name}")
     ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
@@ -14690,14 +14712,27 @@ def safe_delete_bdev(name, node_id):
                 return False
 
             logger.info(f"deletion completed on primary: {bdev_name}")
-            logger.info(f"deleting from secondary: {bdev_name}")
-            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, sync=True)
-            if not ret:
-                logger.error(f"Failed to delete bdev: {bdev_name} from node: {secondary_node.get_id()}")
-                return False
-            else:
-                logger.info(f"deletion completed on secondary: {bdev_name}")
-            return True
+            if not peer_nodes:
+                logger.info(f"no replica peers for {primary_node.get_id()}; "
+                            f"deletion completed: {bdev_name}")
+                return True
+
+            # Every peer is attempted even when an earlier one fails. Same
+            # reasoning as the sync-delete loop in lvol_controller ("Never
+            # abort the loop -- the remaining non-leaders must still be
+            # processed"): the primary's blob is already gone by this point, so
+            # a peer skipped here is a replica stranded with nothing scheduled
+            # to clean it.
+            all_deleted = True
+            for peer in peer_nodes:
+                logger.info(f"deleting from peer {peer.get_id()}: {bdev_name}")
+                ret, _ = peer.rpc_client().delete_lvol(bdev_name, sync=True)
+                if not ret:
+                    logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}")
+                    all_deleted = False
+                else:
+                    logger.info(f"deletion completed on peer {peer.get_id()}: {bdev_name}")
+            return all_deleted
         else:
             logger.error(f"failed to delete bdev: {bdev_name}, status code: {ret}")
             return False
@@ -14786,7 +14821,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")
@@ -14832,7 +14867,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
 
     for blob in out_blobid_dict_keys:
         if blob not in (lvols_blobid_dict_keys + snaps_blobid_dict_keys):
-            if out_blobid_dict[blob]["name"] == "hublvol":
+            if out_blobid_dict[blob]["name"] in ["hublvol", "transferhub"]:
                 continue
             else:
                 # all blob ID in spdk but not in mgmt
@@ -14843,7 +14878,14 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
                     inconsistent_dict[blob] = out_blobid_dict[blob]
                     inconsistent_dict[blob]["type"] = "lvol|clone"
             if blob in snaps_blobid_dict_keys:
-                if out_blobid_dict[blob]["name"] != snaps_blobid_dict[blob]["name"] or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]:
+                # snap_bdev is stored qualified ("<lvstore>/<name>", see
+                # snapshot_controller.create_snapshot); the lvstore dump names
+                # the blob bare. lvol_bdev is bare on both sides, so only this
+                # branch qualifies -- comparing the two shapes raw flagged
+                # every snapshot on the node as inconsistent, which
+                # --force-remove-inconsistent would then have deleted.
+                if (f"{snode.lvstore}/{out_blobid_dict[blob]['name']}" != snaps_blobid_dict[blob]["name"]
+                        or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]):
                     inconsistent_dict[blob] = out_blobid_dict[blob]
                     inconsistent_dict[blob]["type"] = "snap"
 
@@ -14880,48 +14922,57 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
             else:
                 diff_clone_dict[blob] = out_blobid_dict[blob]
 
+    # Capture the status to restore. The entry guard above admits DEGRADED as
+    # well as ACTIVE, so writing ACTIVE back unconditionally promoted a
+    # degraded cluster to healthy just for having run a repair.
+    prev_cluster_status = cluster.status
     if not validate_only:
         cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_ACTIVATION)
         time.sleep(3)
 
-    print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
-    print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
-    print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
-    print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
-    print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
-    print("#########################################")
-    print("Safe lvols to be deleted:")
-    for blob, value in diff_lvol_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+    # try/finally, because every safe_delete_bdev below can raise (a node
+    # lookup, an RPC timeout, a wedged delete-status poll). Without it the
+    # first failure left the cluster parked in IN_ACTIVATION with no path back
+    # -- the repair looked destructive and was in fact completely ineffective.
+    try:
+        print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
+        print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
+        print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
+        print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
+        print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
+        print("#########################################")
+        print("Safe lvols to be deleted:")
+        for blob, value in diff_lvol_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Safe snaps to be deleted:")
+        for blob, value in diff_snap_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Safe clones to be deleted:")
+        for blob, value in diff_clone_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Manual bdeves to be deleted that have wrong ref number:")
+        for blob, value in manual_del.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only and force_remove_worng_ref:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Inconsistent bdeves to be checked:")
+        for blob, value in inconsistent_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only and force_remove_inconsistent:
+                safe_delete_bdev(value['name'], node_id)
+    finally:
         if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Safe snaps to be deleted:")
-    for blob, value in diff_snap_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Safe clones to be deleted:")
-    for blob, value in diff_clone_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Manual bdeves to be deleted that have wrong ref number:")
-    for blob, value in manual_del.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only and force_remove_worng_ref:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Inconsistent bdeves to be checked:")
-    for blob, value in inconsistent_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only and force_remove_inconsistent:
-            safe_delete_bdev(value['name'], node_id)
-
-    if not validate_only:
-        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_ACTIVE)
+            cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
 
     print("#########################################")
     print("All mgmt bdeves to be checked:")
@@ -14952,7 +15003,7 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")

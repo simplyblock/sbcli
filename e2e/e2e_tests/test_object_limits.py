@@ -1,27 +1,26 @@
 """TC-LIMITS-001 — Hard object limits: enforcement on the control plane and
 no performance degradation on SPDK at the limits.
 
-Limits under test (simplyblock_core/constants.py):
-  * MAX_LVOL_SIZE            = 70 TiB   volume create / resize / clone --resize
-  * MAX_SNAPSHOTS_PER_LVOL   = 100      active snapshots of one volume (one chain)
-  * MAX_CLONES_PER_SNAPSHOT  = 500      active clones of one snapshot
+Limits under test:
+  * MAX_LVOL_SIZE            volume create / resize / clone --resize
+  * MAX_SNAPSHOTS_PER_LVOL   active snapshots of one volume (one chain)
+  * MAX_CLONES_PER_SNAPSHOT  active clones of one snapshot
 
 Flow
   1. pool + one volume, connect, mount, fio baseline (json output -> IOPS / clat).
   2. take MAX_SNAPSHOTS_PER_LVOL snapshots of it; the next one must be
      rejected with "Snapshot limit reached".
-  3. fio on the volume again: it now sits on top of a 100-deep blob chain and
-     reads of untouched clusters walk that chain. IOPS / latency must stay
-     within tolerance of the baseline.
+  3. fio on the volume again: it now sits on top of a blob chain at the
+     snapshot limit and reads of untouched clusters walk that chain. IOPS /
+     latency must stay within tolerance of the baseline.
   4. create MAX_CLONES_PER_SNAPSHOT clones from the newest snapshot; the next
      one must be rejected with "Clone limit reached". fio on one clone (reads
      resolve through the snapshot) and once more on the source volume.
   5. size cap: a create and a resize one TiB ABOVE the limit must both be
      rejected with "exceeds the maximum". The oversize value is derived from
-     constants.MAX_LVOL_SIZE rather than written out: it was hardcoded to
-     51TiB against a 50 TiB limit, and when the limit moved to 70 TiB that
-     turned the whole step into an assertion that a perfectly legal volume
-     is refused -- a test that fails on correct behaviour.
+     MAX_LVOL_SIZE rather than written out: a written-out one silently became
+     a legal size when the limit was raised, turning the step into an
+     assertion that a valid volume is refused.
 
 Tolerance: after-vs-baseline IOPS >= (1 - perf_tolerance) * baseline and mean
 completion latency <= (1 + perf_tolerance) * baseline, default 30%. The
@@ -33,10 +32,16 @@ import time
 
 import requests
 
-from simplyblock_core import constants
-
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
+
+# Mirror of simplyblock_core/constants.py. The harness is a black-box client of
+# the cluster under test and deliberately imports nothing from the package, so
+# these must be kept in lockstep with it by hand -- a mismatch makes the test
+# assert the wrong ceiling rather than fail outright.
+MAX_LVOL_SIZE = 70 * 1024 ** 4
+MAX_SNAPSHOTS_PER_LVOL = 100
+MAX_CLONES_PER_SNAPSHOT = 500
 
 FIO_RUNTIME = 120
 FIO_JSON_DIR = "/tmp/fio_object_limits"
@@ -49,13 +54,13 @@ class TestObjectLimits(TestClusterBase):
         super().__init__(**kwargs)
         self.test_name = "object_limits"
         self.logger = setup_logger(__name__)
-        self.snapshot_count = int(kwargs.get("snapshot_count", 100))
-        self.clone_count = int(kwargs.get("clone_count", 500))
+        self.snapshot_count = int(kwargs.get("snapshot_count", MAX_SNAPSHOTS_PER_LVOL))
+        self.clone_count = int(kwargs.get("clone_count", MAX_CLONES_PER_SNAPSHOT))
         self.perf_tolerance = float(kwargs.get("perf_tolerance", 0.30))
         # One TiB past whatever the product limit currently is. Derived, not
         # written out: see the module docstring.
         self.oversize = kwargs.get(
-            "oversize", f"{constants.MAX_LVOL_SIZE // (1024 ** 4) + 1}TiB")
+            "oversize", f"{MAX_LVOL_SIZE // (1024 ** 4) + 1}TiB")
         self.created_clones = []
         self.created_snapshots = []
 

@@ -356,19 +356,21 @@ class ClusterCreateLock(BaseModel):
     burst, producing 6 separate clusters named "simplyblock-cluster" instead
     of one).
 
-    Keyed by ``name`` so only one create can be in flight for a given name at
-    a time. No heartbeat — add_cluster() is a single synchronous call, not a
-    long-lived section like node-add's mesh wiring — just a generous TTL
-    (``CLUSTER_CREATE_LOCK_TTL_SEC``) so a crashed holder's lock is eventually
-    reclaimable by a genuine retry.
+    Keyed by ``lock_name`` so only one create can be in flight for a given name
+    at a time (not ``name``: that is BaseModel key material — the class-name
+    segment of the FDB key — and shadowing it would write each lock into the
+    keyspace its name spells). No heartbeat — add_cluster() is a single
+    synchronous call, not a long-lived section like node-add's mesh wiring —
+    just a generous TTL (``CLUSTER_CREATE_LOCK_TTL_SEC``) so a crashed holder's
+    lock is eventually reclaimable by a genuine retry.
     """
 
-    name: str = ""
+    lock_name: str = ""
     owner: str = ""
     acquired_at: int = 0
 
     def get_id(self):
-        return self.name or self.uuid
+        return self.lock_name or self.uuid
 
 
 class PortReservation(BaseModel):

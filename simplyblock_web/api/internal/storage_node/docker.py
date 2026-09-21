@@ -13,7 +13,8 @@ from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
 
-from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
+from simplyblock_core import scripts, constants, utils as core_utils
+from simplyblock_core.utils import shell as shell_utils
 import simplyblock_core.utils.pci as pci_utils
 import simplyblock_core.utils as init_utils
 from simplyblock_web import utils, node_utils

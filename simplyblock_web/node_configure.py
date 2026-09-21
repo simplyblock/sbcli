@@ -221,7 +221,7 @@ def validate_arguments(args: argparse.Namespace) -> None:
         except ValueError as e:
             raise argparse.ArgumentError(
                 None,
-                f"Invalid value for max-lvol '{args.max_lvol}': {str(e)}"
+                f"Invalid value for max-lvol '{args.max_lvol}': {e!s}"
             )
 
         if args.pci_allowed and args.pci_blocked:
@@ -283,7 +283,7 @@ def main() -> None:
             except ValueError as e:
                 raise argparse.ArgumentError(
                     None,
-                    f"Invalid value for sockets-to-use '{args.sockets_to_use}': {str(e)}"
+                    f"Invalid value for sockets-to-use '{args.sockets_to_use}': {e!s}"
                 )
 
         nodes_per_socket: int = 1
@@ -295,7 +295,7 @@ def main() -> None:
             except ValueError as e:
                 raise argparse.ArgumentError(
                     None,
-                    f"Invalid value for nodes-per-socket '{args.nodes_per_socket}': {str(e)}"
+                    f"Invalid value for nodes-per-socket '{args.nodes_per_socket}': {e!s}"
                 )
 
         # Process PCI device filters
@@ -339,7 +339,7 @@ def main() -> None:
         logger.error(f"Argument error: {e}")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.exception(f"Error: {e}")
         sys.exit(1)
 
 

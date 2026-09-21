@@ -1,3 +1,15 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "matplotlib",
+#     "paramiko",
+#     "ping3",
+#     "requests>=2.34.0",
+#     "urllib3>=2.7.0",
+# ]
+# ///
 ### simplyblock Stress tests
 import argparse
 import traceback

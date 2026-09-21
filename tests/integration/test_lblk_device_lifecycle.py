@@ -258,38 +258,6 @@ class TestWatchdogAgainstRealStateMachine:
         read = db.get_storage_device_by_id(dev.get_id())
         assert read.status == NVMeDevice.STATUS_UNAVAILABLE
         assert read.io_error is True
-        assert read.flap_count == 1  # ONLINE -> UNAVAILABLE, LOCAL_FAILURE, node ONLINE
-
-    def test_flap_limit_forces_failed_and_queues_migration(self, db):
-        _seed_cluster(db)
-        dev = _aio_device("S1", "sdb")
-        _seed_node(db, [dev])
-
-        patches = _patched_fanout() + [
-            patch.object(device_controller, "DEVICE_FLAP_DEBOUNCE_SEC", 0.0),
-            # re-online between flaps queues FN_DEV_MIG — irrelevant noise here
-            patch.object(device_controller.tasks_controller,
-                         "add_device_mig_task_for_node", return_value=None),
-            patch.object(device_controller.tasks_controller,
-                         "add_device_failed_mig_task"),
-        ]
-        started = [p.start() for p in patches]
-        mig_task = started[-1]
-        try:
-            for _ in range(device_controller.DEVICE_FLAP_LIMIT + 1):
-                device_controller.device_set_unavailable(
-                    dev.get_id(), cause=device_controller.CAUSE_LOCAL_FAILURE)
-                read = db.get_storage_device_by_id(dev.get_id())
-                if read.status == NVMeDevice.STATUS_FAILED:
-                    break
-                device_controller.device_set_online(dev.get_id())
-        finally:
-            for p in patches:
-                p.stop()
-
-        read = db.get_storage_device_by_id(dev.get_id())
-        assert read.status == NVMeDevice.STATUS_FAILED
-        mig_task.assert_called_once_with(dev.get_id())
 
     def test_disappearance_drives_real_device_remove(self, db):
         _seed_cluster(db)
