@@ -702,6 +702,21 @@ class _LblkBase(TestClusterBase):
 
         k8s = self._ensure_k8s_utils()
         peers = self._peer_ips(node_ip)
+        # Cut the STORAGE path to the peers, not every packet between nodes.
+        #
+        # Dropping all node-to-node traffic took the cluster down with the
+        # node: OVN's geneve overlay runs between these same node IPs, so
+        # every pod-to-pod link across nodes died, FoundationDB lost quorum
+        # and the control plane started failing with
+        #
+        #   fdb.impl.FDBError: Operation aborted because the transaction
+        #   timed out (1031)
+        #
+        # which is a broken test environment, not a storage outage. Matching
+        # only the node's own service ports isolates it as a STORAGE node --
+        # its peers stop hearing from it and its data path is gone -- while
+        # the kubelet, the API server, the overlay and the database keep
+        # working, so the cluster can still report what happened.
         # Cut this node off from its STORAGE PEERS only, not from everything.
         #
         # Three hard constraints on this platform, learned the expensive way:
@@ -731,8 +746,12 @@ class _LblkBase(TestClusterBase):
         if not peers:
             raise LblkPreconditionError(
                 f"[lblk] no peer storage nodes to isolate {node_ip} from")
-        add = "; ".join(f"iptables -A INPUT -s {p} -j DROP; "
-                        f"iptables -A OUTPUT -d {p} -j DROP" for p in peers)
+        ports = self.STORAGE_PORTS
+        add = "; ".join(
+            f"iptables -A INPUT -s {p} -p tcp -m multiport --ports {ports} "
+            f"-j DROP; "
+            f"iptables -A OUTPUT -d {p} -p tcp -m multiport --ports {ports} "
+            f"-j DROP" for p in peers)
         undo = self._undo_rules(peers)
         k8s.exec_in_spdk_container(node_ip, f"sudo sh -c {shlex.quote(add)}")
         # Verify, because a silent no-op here is indistinguishable from a
@@ -741,6 +760,12 @@ class _LblkBase(TestClusterBase):
             node_ip, "sudo iptables -S INPUT; sudo iptables -S OUTPUT")
         applied = sum(1 for p in peers if f"-s {p}/32" in (out or "")
                       or f"-d {p}/32" in (out or ""))
+        # A rule that matched every port would sever OVN's geneve overlay and
+        # take FoundationDB down with it -- see the comment above.
+        if "-j DROP" in (out or "") and "multiport" not in (out or ""):
+            self.logger.warning(
+                "[lblk] a DROP rule on %s has no port match; that blocks the "
+                "cluster network, not just storage", node_ip)
         if applied < len(peers):
             self._restore_network(node_ip)
             raise LblkPreconditionError(
@@ -761,11 +786,23 @@ class _LblkBase(TestClusterBase):
                 in self.sbcli_utils.get_storage_nodes()["results"]
                 if n.get("mgmt_ip") and n["mgmt_ip"] != node_ip]
 
-    @staticmethod
-    def _undo_rules(peers):
+    #: The node's own service ports, source or destination.
+    #:
+    #: NVMe-oF listeners start at NVMF_BASE_PORT 4420 and are allocated
+    #: upwards per subsystem; SPDK's JSON-RPC is RPC_BASE_PORT 8080 and the
+    #: SNodeAPI is SNODE_API_PORT 50001. Ranges rather than exact ports
+    #: because each is a base that the cluster allocates from.
+    STORAGE_PORTS = "4420:4499,8080:8099,50001:50020"
+
+    @classmethod
+    def _undo_rules(cls, peers):
+        ports = cls.STORAGE_PORTS
         return "; ".join(
-            f"for i in 1 2 3; do iptables -D INPUT -s {p} -j DROP 2>/dev/null; "
-            f"iptables -D OUTPUT -d {p} -j DROP 2>/dev/null; done" for p in peers
+            f"for i in 1 2 3; do "
+            f"iptables -D INPUT -s {p} -p tcp -m multiport --ports {ports} "
+            f"-j DROP 2>/dev/null; "
+            f"iptables -D OUTPUT -d {p} -p tcp -m multiport --ports {ports} "
+            f"-j DROP 2>/dev/null; done" for p in peers
         ) + "; true"
 
     def _restore_network(self, node_ip):
