@@ -141,9 +141,42 @@ class _LblkBase(TestClusterBase):
         StorageClass anywhere in it.
         """
         pool = self._add_pool_dual()
+        self._await_pool_visible(pool)
         if self.k8s_test:
             self._k8s_ensure_storage_class()
         return pool
+
+    def _await_pool_visible(self, pool, timeout=180):
+        """Block until the control plane will accept volumes in *pool*.
+
+        Pool creation is asynchronous. On docker the base setup deletes every
+        pool first, so each run genuinely creates one, and the POST returns
+        before the pool is queryable. The matrix then asked for its first
+        volume 58 ms later and got
+
+          400 Bad Request: {"error":"Pool not found: ...
+
+        which the API answers with a dump of every storage node, so the real
+        cause is buried and the run fails at its very first volume. The other
+        lblk cases do the same thing and have been winning this race by
+        accident -- there is more work between their pool and their first
+        lvol, not a different mechanism.
+        """
+        deadline = time.time() + timeout
+        while True:
+            try:
+                if self.sbcli_utils.get_storage_pool_id(pool):
+                    self.logger.info("[lblk] pool %s is visible", pool)
+                    return
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.debug("[lblk] pool lookup failed: %s",
+                                  str(exc)[:100])
+            if time.time() >= deadline:
+                raise LblkPreconditionError(
+                    f"[lblk] pool {pool!r} was created but never became "
+                    f"visible to the control plane within {timeout}s, so no "
+                    f"volume can be placed in it.")
+            sleep_n_sec(3)
 
     def _init_lblk(self):
         # Docker's verifier reaches a client machine over ssh. K8s has no
