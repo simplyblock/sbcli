@@ -809,6 +809,55 @@ class _LblkBase(TestClusterBase):
     #: Restart attempts before giving up on a node.
     RESTART_ATTEMPTS = 3
 
+    def _issue_restart(self, uuid):
+        """Ask for a restart the way this platform expects.
+
+        On k8s the operator owns node lifecycle: it watches StorageNodeOps CRs
+        and performs the operation itself. Calling the control-plane API
+        instead bypasses it, and that is the path that failed -- the control
+        plane killed SPDK and then tried to reach the node's own
+        spdk-proxy address, which is a headless-service endpoint and stops
+        resolving exactly while the pod is being recreated:
+
+          restart_storage_node raised unexpectedly
+          NameResolutionError: Failed to resolve
+            'worker-4.simplyblock-spdk-proxy.simplyblock.svc.cluster.local'
+
+        Going through the operator avoids that entirely, and it is what every
+        other k8s-native test does -- see _operator_shutdown_node in
+        continuous_k8s_native_failover.py. Falls back to the API only if the
+        CR cannot be created, so a cluster whose operator lacks the action is
+        not simply stuck.
+        """
+        if not self.k8s_test:
+            self.sbcli_utils.restart_node(node_uuid=uuid)
+            return
+
+        k8s = self._ensure_k8s_utils()
+        try:
+            cr_name = k8s.resolve_storage_node_cr_name(uuid)
+            ops_name = f"restart-{uuid[:8]}-{random.randint(1000, 9999)}"
+            k8s.create_storage_node_ops(name=ops_name,
+                                        storage_node_ref=cr_name,
+                                        action="restart")
+            self.logger.info(
+                "[lblk] StorageNodeOps %s: restart of %s (CR=%s)",
+                ops_name, uuid, cr_name)
+            try:
+                k8s.wait_storage_node_ops_done(ops_name, timeout=600)
+            except (TimeoutError, AssertionError) as exc:
+                # The phase is not always Succeeded even when the node comes
+                # back; the caller's status wait is the real verdict.
+                self.logger.warning(
+                    "[lblk] StorageNodeOps %s did not report success (%s); "
+                    "the node status check decides", ops_name, str(exc)[:120])
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[lblk] could not drive the restart through StorageNodeOps "
+                "(%s); falling back to the control-plane API",
+                str(exc)[:150])
+            self.sbcli_utils.restart_node(node_uuid=uuid)
+
     def _restart_until_online(self, uuid, ip, per_attempt=600):
         """Restart the node, and try again if the control plane gave up.
 
@@ -833,7 +882,7 @@ class _LblkBase(TestClusterBase):
         """
         last = None
         for attempt in range(1, self.RESTART_ATTEMPTS + 1):
-            self.sbcli_utils.restart_node(node_uuid=uuid)
+            self._issue_restart(uuid)
             try:
                 self.sbcli_utils.wait_for_storage_node_status(
                     uuid, "online", timeout=per_attempt)
