@@ -167,6 +167,16 @@ def main():
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
         log_path = getattr(test_obj, "docker_logs_path", "")
+        # The workflow summary builds its per-test table by grepping
+        # output.log for "Logs Path:". e2e.py prints it (e2e.py:420); this
+        # runner never did, so every stress run reported "Test logs: not
+        # detected" while the logs sat on NFS the whole time. Printed here,
+        # before the collection and copy steps that can throw or hang.
+        try:
+            test_obj.get_logs_path()
+        except Exception:
+            logger.error("Error printing logs path")
+            logger.error(traceback.format_exc())
         try:
             if args.run_k8s:
                 test_obj.stop_k8s_log_collect()

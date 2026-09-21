@@ -802,10 +802,61 @@ class _LblkBase(TestClusterBase):
             raise ValueError(f"unhandled outage type {outage_type!r}")
 
         self.sbcli_utils.wait_for_storage_node_status(uuid, "offline", timeout=600)
-        self.sbcli_utils.restart_node(node_uuid=uuid)
-        self.sbcli_utils.wait_for_storage_node_status(uuid, "online", timeout=900)
+        self._restart_until_online(uuid, ip)
         self.sbcli_utils.wait_for_health_status(uuid, True, timeout=300)
         self.logger.info("[lblk] %s recovered", uuid)
+
+    #: Restart attempts before giving up on a node.
+    RESTART_ATTEMPTS = 3
+
+    def _restart_until_online(self, uuid, ip, per_attempt=600):
+        """Restart the node, and try again if the control plane gave up.
+
+        A single restart is not reliable here. On 2026-09-20 the control plane
+        killed SPDK on worker-4, then immediately tried to reach that node's
+        per-node proxy address and aborted the whole operation:
+
+          restart_storage_node raised unexpectedly
+          NameResolutionError: Failed to resolve
+            'worker-4.simplyblock-spdk-proxy.simplyblock.svc.cluster.local'
+
+        That name is a headless-service endpoint, so it stops resolving while
+        the pod is being recreated -- exactly the window the restart itself
+        opens. The node was then left offline with nothing retrying, and a
+        two-hour run ended on a DNS race rather than on anything it set out to
+        measure.
+
+        Waiting longer does not help, because the control plane has already
+        stopped trying; the restart has to be re-issued. Each attempt is still
+        given a generous window first, so a node that is merely slow is never
+        restarted twice.
+        """
+        last = None
+        for attempt in range(1, self.RESTART_ATTEMPTS + 1):
+            self.sbcli_utils.restart_node(node_uuid=uuid)
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    uuid, "online", timeout=per_attempt)
+                if attempt > 1:
+                    self.logger.info(
+                        "[lblk] %s came online on restart attempt %d", uuid,
+                        attempt)
+                return
+            except Exception as exc:                  # noqa: BLE001
+                last = exc
+                self.logger.warning(
+                    "[lblk] %s (%s) still offline %ds after restart attempt "
+                    "%d/%d: %s", uuid, ip, per_attempt, attempt,
+                    self.RESTART_ATTEMPTS, str(exc)[:160])
+                sleep_n_sec(30)
+        raise LblkPreconditionError(
+            f"[lblk] {uuid} ({ip}) did not come online after "
+            f"{self.RESTART_ATTEMPTS} restarts of {per_attempt}s each. Check "
+            f"the control plane log for 'restart_storage_node raised "
+            f"unexpectedly' -- a NameResolutionError on that node's "
+            f"spdk-proxy address means the restart was abandoned rather than "
+            f"failed, and is a product issue, not a slow node. Last error: "
+            f"{last}")
 
 
 # ── Docker / K8s platform bindings ────────────────────────────────────────
