@@ -54,8 +54,12 @@ fin = src("_finish_live_fio")
 if "_validate_fio_dual" in fin:
     findings.append("_finish_live_fio uses _validate_fio_dual, which only "
                     "warns on k8s")
-if "validate_fio_job" not in fin:
-    findings.append("_finish_live_fio does not call the raising validator")
+if "_k8s_finish_fio" not in fin:
+    findings.append("_finish_live_fio does not route k8s through the raising "
+                    "log check (_k8s_finish_fio)")
+if "validate_fio_job" in fin:
+    findings.append("_finish_live_fio waits on validate_fio_job, which times "
+                    "out on a job sized to outlast the matrix")
 
 # 4. The raw lane must go through _provision_raw on k8s.
 build = src("_build_static_set").replace('"', "'")
