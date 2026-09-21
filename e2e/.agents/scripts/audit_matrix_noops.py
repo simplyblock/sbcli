@@ -94,6 +94,21 @@ for _fn in [n for n in _ast.walk(_tree) if isinstance(n, _ast.FunctionDef)]:
                     findings.append(
                         f"{_fn.name}() rebinds its parameter {_t.id!r}")
 
+
+# 8. handles is a tuple built in one place and unpacked in three. An arity
+#    mismatch is a runtime ValueError deep into a multi-hour run, so check
+#    that every unpack matches the append.
+import re as _re
+_src = inspect.getsource(C)
+_app = _re.search(r"handles\.append\(\((.*?)self\._run_fio_dual", _src, _re.S)
+if _app:
+    _n = _app.group(1).count(",") + 1
+    for _m in _re.finditer(r"for ([\w_, ]+) in handles", _src):
+        _k = len([x for x in _m.group(1).split(",") if x.strip()])
+        if _k != _n:
+            findings.append(f"handles unpacked as {_k}-tuple but appended "
+                            f"as {_n}-tuple: 'for {_m.group(1)} in handles'")
+
 print(f"audited {len(inspect.getsource(C).splitlines())} lines of the matrix")
 for f in findings:
     print("  FINDING " + f)

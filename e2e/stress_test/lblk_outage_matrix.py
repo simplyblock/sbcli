@@ -912,9 +912,10 @@ class _LblkOutageMatrix(_LblkBase):
             mount = self._provision_typed(name, pool, **opts)
             log = (None if self.k8s_test
                    else f"{self.log_path}/fio_mx_{label}.log")
-            handles.append((name, log, self._run_fio_dual(
+            job = f"mxlive{label}"
+            handles.append((name, log, job, self._run_fio_dual(
                 name, mount_path=mount, log_path=log,
-                runtime=runtime, name=f"mxlive{label}",
+                runtime=runtime, name=job,
                 rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
                 time_based=True,
                 node_selector=(self._pin_for(name)
@@ -933,11 +934,18 @@ class _LblkOutageMatrix(_LblkBase):
         Ask the cluster instead: a Job with no pod, or whose pod has gone
         Failed/Succeeded, is a Job that stopped doing IO.
         """
-        for name, _log, handle in handles:
+        for name, _log, job, handle in handles:
             if isinstance(handle, str):
                 alive = self._k8s_fio_running(handle)
             else:
-                alive = handle.is_alive()
+                # NOT handle.is_alive(). run_fio_test starts FIO in a DETACHED
+                # tmux session and returns once it has confirmed the session
+                # exists, so the launching thread finishes seconds later while
+                # FIO runs for its full runtime. Checking the thread reported
+                # "live FIO stopped" one cycle into a run where every job was
+                # healthy -- a false failure on the availability gate, which
+                # is worse than having no gate. Ask the client instead.
+                alive = self._docker_fio_running(job)
             if not alive:
                 raise LblkPreconditionError(
                     f"[matrix] live FIO on {name} stopped during {outage}. "
@@ -945,6 +953,16 @@ class _LblkOutageMatrix(_LblkBase):
                     f"meant to be survivable, so IO ending here is a loss of "
                     f"availability, not an expected blip.")
         self.logger.info("[matrix] live FIO still running after %s", outage)
+
+    def _docker_fio_running(self, job):
+        """Is FIO still running on the client, as a tmux session or process?"""
+        client = (self.fio_node or self.client_machines)[0]
+        out, _err = self.ssh_obj.exec_command(
+            node=client,
+            command=(f"sudo tmux has-session -t fio_{job} 2>/dev/null "
+                     f"&& echo ALIVE || (pgrep -f 'fio.*{job}' >/dev/null "
+                     f"&& echo ALIVE || echo GONE)"))
+        return "ALIVE" in (out or "")
 
     def _k8s_fio_running(self, job_name):
         """Is this FIO Job still moving IO?"""
@@ -971,15 +989,27 @@ class _LblkOutageMatrix(_LblkBase):
         sees it, so an io_u error during any outage -- graceful or not -- is a
         defect rather than something to triage away.
         """
+        # Stop the docker jobs first. The tmux session outlives the thread
+        # that launched it and was sized to outlast the whole matrix, so
+        # joining the thread proves nothing and waiting for the session to
+        # end would add hours. An io_u error during an outage is already in
+        # the log, which is what this gate reads.
+        if not self.k8s_test:
+            client = (self.fio_node or self.client_machines)[0]
+            for _n, _l, job, _h in handles:
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command=(f"sudo tmux kill-session -t fio_{job} "
+                             f"2>/dev/null || true"))
         sleep_n_sec(10)
-        for name, log, handle in handles:
-            # threading.Thread, not hasattr: on k8s the handle is the Job
-            # NAME and str.join exists, so this called "jobname".join(
-            # timeout=...) and died with "str.join() takes no keyword
-            # arguments" -- after all 12 cycles had passed. Same trap as
-            # _fs_fio in test_lblk.py, which was fixed and this was not.
+        for name, log, job, handle in handles:
             if isinstance(handle, threading.Thread):
-                handle.join(timeout=self._fio_runtime)
+                # Reaping the launcher, which has long since returned. NOT
+                # hasattr(handle, "join"): on k8s the handle is the Job NAME
+                # and str.join exists, so that called "jobname".join(
+                # timeout=...) and died with "str.join() takes no keyword
+                # arguments" after all 12 cycles had passed.
+                handle.join(timeout=60)
             if self.k8s_test:
                 # k8s.validate_fio_job raises; _validate_fio_dual only logs a
                 # warning for "error"/"fail" and then says validation passed,
