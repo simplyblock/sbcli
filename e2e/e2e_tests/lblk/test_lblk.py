@@ -860,13 +860,42 @@ class _LblkBase(TestClusterBase):
             else:
                 self.ssh_obj.reboot_node(ip)
         elif outage_type == "interface_full_network_interrupt":
-            # Self-restoring on both platforms, so unlike the others this one
-            # does not need us to reach the node to end it. Held well short of
-            # the 600s offline wait below so the links are back before we ask
-            # the control plane to restart it.
+            # Self-restoring, so unlike the others nothing has to reach the
+            # node to end it -- which is also why the offline wait has to
+            # happen HERE, while the links are down.
+            #
+            # This used to sleep out the whole window and restore the network
+            # before falling through to the shared offline wait below. By then
+            # the node was back: the poll started 164s after the cut, ran 600
+            # times over ten minutes and saw "online" every single time, then
+            # failed the run. The outage worked; nobody was watching it.
+            started = time.time()
             self._network_outage(ip, self.NETWORK_OUTAGE_SEC)
-            sleep_n_sec(self.NETWORK_OUTAGE_SEC + 15)
+            saw_offline = False
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    uuid, "offline", timeout=self.NETWORK_OUTAGE_SEC)
+                saw_offline = True
+                self.logger.info("[lblk] %s went offline %.0fs into the cut",
+                                 ip, time.time() - started)
+            except Exception:                         # noqa: BLE001
+                self.logger.warning(
+                    "[lblk] %s never went offline during %ds cut off. The "
+                    "links were down, so either the control plane tolerates a "
+                    "gap this short or it is not watching -- the integrity "
+                    "checks after this cycle still mean something, the outage "
+                    "itself proved less than intended.",
+                    ip, self.NETWORK_OUTAGE_SEC)
+            remaining = self.NETWORK_OUTAGE_SEC + 15 - (time.time() - started)
+            if remaining > 0:
+                sleep_n_sec(int(remaining))
             self._restore_network(ip)
+            if not saw_offline:
+                # Nothing to bring back: it never left.
+                self.sbcli_utils.wait_for_health_status(uuid, True,
+                                                        timeout=300)
+                self.logger.info("[lblk] %s recovered", uuid)
+                return
         else:
             raise ValueError(f"unhandled outage type {outage_type!r}")
 

@@ -88,6 +88,14 @@ class _LblkOutageMatrix(_LblkBase):
     #: still under IO.
     FIO_SLACK_SEC = 600
 
+    #: Ceiling on the live FIO runtime. 16 cycles x 450s + slack would ask for
+    #: 7800s, and every second FIO runs past the last outage is a second spent
+    #: waiting for it to finish. At the measured mean of 227s a 16-cycle loop
+    #: is 3632s, so 6000 still covers it with room; only a run where most
+    #: cycles are near the 401s worst case would outlast it, and
+    #: _assert_fio_alive reports that as a sizing note rather than a failure.
+    FIO_MAX_RUNTIME = 6000
+
     def run(self):
         self._init_lblk()
         self.assert_cluster_is_lblk()
@@ -906,8 +914,9 @@ class _LblkOutageMatrix(_LblkBase):
         node disappears is the most likely place for this to come apart, and a
         plain-only live lane would never touch it.
         """
-        runtime = self._fio_runtime = (cycles * self.SEC_PER_CYCLE
-                                       + self.FIO_SLACK_SEC)
+        runtime = self._fio_runtime = min(
+            cycles * self.SEC_PER_CYCLE + self.FIO_SLACK_SEC,
+            self.FIO_MAX_RUNTIME)
         self._fio_started_at = time.time()
         self.logger.info("[matrix] live FIO sized for %d cycles: %ds",
                          cycles, runtime)
