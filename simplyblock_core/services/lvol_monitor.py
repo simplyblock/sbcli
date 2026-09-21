@@ -131,6 +131,14 @@ def post_lvol_delete_rebalance(cluster, lvol):
     diff = time.time() - lvol_del_start_time
     if diff > 0:
         records = db.get_cluster_capacity(cluster, int(diff/5))
+        if not records:
+            # No capacity samples over the window (a freshly bootstrapped
+            # cluster, or a monitor restart mid-delete leaves
+            # lvol_del_start_time at its 0.0 default, making diff -- and the
+            # requested window -- huge). Nothing to compare against; skip the
+            # rebalance check rather than indexing an empty list.
+            lvol_del_start_time = 0
+            return False
         total_size = records[0].size_total
         current_cap = records[0].size_used
         start_cap = records[-1].size_used
@@ -365,18 +373,21 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
     # Post-condition, not just an acknowledged RPC: confirm the bdev is really
     # gone from the leader. A failed probe is not "clean".
     try:
-        absent = lvol_controller.lvol_bdev_absent_on_node(lvol, primary_node)
+        primary_confirmed = lvol_controller.lvol_bdev_absent_on_node(lvol, primary_node)
     except Exception as e:
         logger.error(
             f"LVol {lvol.get_id()}: could not verify {lvol_bdev_name} is gone "
             f"from {primary_node.get_id()[:8]} ({e}); keeping the record in_deletion")
         return
-    if not absent:
+    if not primary_confirmed:
         logger.error(
             f"LVol {lvol.get_id()}: sync delete of {lvol_bdev_name} reported "
             f"success but the bdev is still present on "
             f"{primary_node.get_id()[:8]}; keeping the record in_deletion")
-        return
+        # Fall through rather than returning: the peers below are cleared
+        # independently of the primary, and remembering an already-cleared
+        # peer here saves a retry pass from re-walking its blob tree even
+        # though the record has to wait on the primary regardless.
 
     peers_owing: list[str] = []
     peers_cleared: list[str] = []
@@ -434,6 +445,11 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             f"LVol {lvol.get_id()}: {lvol_bdev_name} still registered on live "
             f"peers {[n[:8] for n in peers_owing]}; their sync-delete tasks are "
             f"queued. Keeping the record in_deletion until they drain")
+        return
+
+    if not primary_confirmed:
+        # Already logged above; the peers were cleared (or found owing) on
+        # the way here so a retry does not repeat that work.
         return
 
     lvol_events.lvol_delete(lvol)
