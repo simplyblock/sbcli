@@ -1,10 +1,9 @@
 """A node configuration that could not be generated must stop the pod.
 
-`generate_automated_deployment_config` reports failure by returning
-``(False, False)``: no device matched the filters, the sockets did not
-validate, the memory did not add up. `main` discarded that return, so the
-process exited 0 and the storage-node pod's init container counted as
-successful. The pod then started on whatever `/etc/simplyblock/sn_config_file`
+`generate_automated_deployment_config` reports failure by returning ``False``:
+no device matched the filters, the sockets did not validate, the memory did not
+add up. `main` discarded that return, so the process exited 0 and the
+storage-node pod's init container counted as successful. The pod then started on whatever `/etc/simplyblock/sn_config_file`
 the host already had — a previous deployment's, in the case this was written
 for, naming lblk devices for a cluster running in nvme mode. Nothing said so
 until `node_add` refused the node twenty minutes later, and the message named
@@ -34,9 +33,14 @@ def _configure_args(**overrides):
     return args
 
 
-@pytest.mark.parametrize("result", [(False, False), False, None])
+@pytest.mark.parametrize("result", [False, None])
 def test_a_generation_that_failed_exits_non_zero(result):
-    """Every falsy shape the generator reports failure with stops the process."""
+    """A generation that reported failure stops the process.
+
+    False is the contract; None covers a path that falls off the end without
+    returning, which is the same thing to the caller and is what a refactor of
+    the generator would most plausibly introduce.
+    """
     with patch.object(node_configure, "parse_arguments", return_value=_configure_args()), \
          patch.object(node_configure, "validate_arguments"), \
          patch.object(node_configure, "_is_pod_present_for_node", return_value=False), \
@@ -58,7 +62,7 @@ def test_a_generation_that_succeeded_does_not_exit_non_zero():
          patch.object(node_configure, "validate_arguments"), \
          patch.object(node_configure, "_is_pod_present_for_node", return_value=False), \
          patch.object(node_configure, "generate_automated_deployment_config",
-                      return_value=({"nodes": [{}]}, {"host": {}})):
+                      return_value=True):
         try:
             node_configure.main()
         except SystemExit as exit_info:  # pragma: no cover - only on a regression
@@ -84,7 +88,7 @@ def test_a_previous_configuration_is_discarded_before_regenerating(tmp_path):
          patch.object(node_configure, "validate_arguments"), \
          patch.object(node_configure, "_is_pod_present_for_node", return_value=False), \
          patch.object(node_configure, "generate_automated_deployment_config",
-                      return_value=(False, False)):
+                      return_value=False):
         with pytest.raises(SystemExit):
             node_configure.main()
 
@@ -101,7 +105,7 @@ def test_nothing_to_discard_is_not_an_error(tmp_path):
          patch.object(node_configure, "validate_arguments"), \
          patch.object(node_configure, "_is_pod_present_for_node", return_value=False), \
          patch.object(node_configure, "generate_automated_deployment_config",
-                      return_value=({"nodes": [{}]}, {"host": {}})):
+                      return_value=True):
         node_configure.main()
 
 

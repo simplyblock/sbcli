@@ -377,10 +377,11 @@ def main() -> None:
             lblk_selection=lblk_selection,
             jm_percent=int(args.jm_percent or 3)
         )
-        # A successful run answers with the config it wrote and the system info
-        # beside it; every failure path answers falsy, including the (False,
-        # False) pair the device filters return.
-        if not configured or not (configured[0] if isinstance(configured, tuple) else configured):
+        # The generation reports its own outcome and nothing else does: every
+        # failure path -- no device matched the filters, the sockets did not
+        # validate, the memory did not add up -- answers False and writes
+        # nothing.
+        if not configured:
             logger.error(
                 "The node configuration could not be generated, so nothing was written; "
                 "the node is not configured and any configuration already on this host is "
