@@ -337,15 +337,14 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
         ret = lvol_controller.delete_lvol_from_node(
             lvol.get_id(), primary_node.get_id(), sync=True,
             force=leader_independent)
-    if ret is not lvol_controller.NodeTeardown.DONE:
+    if not ret:
         logger.error(
-            f"Failed to delete lvol from primary_node node: {primary_node.get_id()} "
-            f"({getattr(ret, 'value', ret)}); keeping the record in_deletion")
-        if ret is lvol_controller.NodeTeardown.FAILED:
-            # Durable retry in case this monitor process dies before the next
-            # pass; the record stays either way.
-            tasks_controller.add_lvol_sync_del_task(
-                cluster.get_id(), primary_node.get_id(), lvol_bdev_name, lvol.node_id)
+            f"Failed to delete lvol from primary_node node: {primary_node.get_id()}; "
+            "keeping the record in_deletion")
+        # Durable retry in case this monitor process dies before the next
+        # pass; the record stays either way.
+        tasks_controller.add_lvol_sync_del_task(
+            cluster.get_id(), primary_node.get_id(), lvol_bdev_name, lvol.node_id)
         return
 
     # Post-condition, not just an acknowledged RPC: confirm the bdev is really

@@ -1,5 +1,4 @@
 import copy
-import enum
 import random
 import sys
 import time
@@ -28,36 +27,6 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
 logger = utils.get_logger(__name__)
-
-
-class NodeTeardown(enum.Enum):
-    """Outcome of tearing an object's data-plane state down on ONE node.
-
-    ``delete_lvol_from_node`` used to answer this question with a bool, and
-    returned ``True`` for three different things: "removed it", "the node is
-    disconnected so I did not try", and "I handed it to a durable task". A
-    caller could therefore not tell a completed teardown from one that was
-    never attempted — which is how ``process_lvol_delete_finish`` came to
-    erase FDB records whose blob and bdev were still alive in SPDK.
-
-    ``DONE`` is the ONLY outcome that means "nothing of this object is left on
-    this node". It is also the only truthy member, so the legacy ``if not
-    ret:`` call sites keep working and get the stricter meaning for free;
-    callers that must distinguish "not attempted" from "failed" compare
-    identity.
-    """
-
-    #: Teardown confirmed: subsystem/namespace and every bdev are gone.
-    DONE = "done"
-    #: Not attempted. A durable task owns it, or the node is gone/disconnected
-    #: and owes nothing. Never an error — but never a licence to drop the
-    #: record either.
-    DEFERRED = "deferred"
-    #: Attempted and failed. Something of this object may still be on the node.
-    FAILED = "failed"
-
-    def __bool__(self) -> bool:
-        return self is NodeTeardown.DONE
 
 
 def _bdev_present(rpc_client, name) -> bool | None:
@@ -2160,9 +2129,11 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
     return all_removed
 
 
-def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=False) -> NodeTeardown:
-    """Tear ``lvol_id`` down on ``node_id``. See ``NodeTeardown`` for the
-    contract — only ``DONE`` means nothing of the object is left on the node.
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=False) -> bool:
+    """Tear ``lvol_id`` down on ``node_id``. Returns True only when the
+    teardown is confirmed complete on this node (subsystem/namespace and
+    every bdev gone); False for a deferred or a failed teardown alike —
+    callers cannot tell those two apart from the return value.
     """
     db_controller = DBController()
     try:
@@ -2171,27 +2142,26 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=F
     except KeyError:
         # The record (or the node) is already gone: whatever this node held
         # went with it, so nothing is owed.
-        return NodeTeardown.DONE
+        return True
 
     # Per design: gate sync deletes on non-leader nodes.
     from simplyblock_core.storage_node_ops import check_non_leader_for_operation
     if not force:
         action = check_non_leader_for_operation(node_id, lvol.lvs_name, operation_type="delete")
         if action == "skip":
-            # DEFERRED, not DONE. This branch answered "True" — the caller then
-            # believed the node was clean, and the monitor dropped the record
-            # with the bdev still registered. Nothing was attempted here; say so.
+            # Not attempted (deferred), not confirmed done -- report False so
+            # the caller cannot believe the node is clean.
             logger.info(f"Skipping sync delete of {lvol_id} on {node_id[:8]}: node disconnected")
             lvol.deletion_status = node_id
             lvol.write_to_db(db_controller.kv_store)
-            return NodeTeardown.DEFERRED
+            return False
         elif action in ("queue", "retry"):
             # Durable deferral (DB task) — the in-memory drain queue is
             # per-process and lossy (incident 2026-07-10).
             tasks_controller.add_lvol_sync_del_task(
                 snode.cluster_id, node_id,
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.node_id)
-            return NodeTeardown.DEFERRED
+            return False
     # action == "proceed" — execute now
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
@@ -2212,7 +2182,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=F
         logger.error(
             f"Namespace/subsystem removal not confirmed for {lvol.get_id()} "
             f"on {node_id[:8]}; aborting bdev delete")
-        return NodeTeardown.FAILED
+        return False
 
     # 2- remove bdevs
     logger.info("Removing bdev stack")
@@ -2221,11 +2191,11 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=F
         logger.error(
             f"Bdev stack of {lvol.get_id()} not fully removed on "
             f"{node_id[:8]}; the teardown is NOT complete")
-        return NodeTeardown.FAILED
+        return False
 
     lvol.deletion_status = node_id
     lvol.write_to_db(db_controller.kv_store)
-    return NodeTeardown.DONE
+    return True
 
 
 # nvmf_subsystem_remove_ns is asynchronous inside SPDK: the RPC response can
@@ -2423,12 +2393,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
         with snapshot_controller.lvstore_op_lock(
                 snode.cluster_id, lvol.lvs_name, node_id=lvol.node_id, enabled=_inner, **_inner_kw):
             ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
-        # Only a genuine FAILURE aborts the API call. DEFERRED means a durable
-        # task (or the monitor) owns the teardown — the record is already
-        # in_deletion, so raising here would report an error for a delete that
-        # is in fact in progress, which is the regression the "persist the
-        # intent first" change exists to avoid.
-        if ret is NodeTeardown.FAILED and not force_delete:
+        if not ret and not force_delete:
             raise RuntimeError("Failed to delete lvol from node")
 
     elif lvol.ha_type == "ha":
@@ -2507,13 +2472,10 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
             with snapshot_controller.lvstore_op_lock(
                     snode.cluster_id, lvol.lvs_name, node_id=leader.get_id(), enabled=_inner, **_inner_kw):
                 ret = delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
-                if ret is NodeTeardown.DONE:
+                if ret:
                     async_completed["done"] = _wait_async_delete(
                         leader.rpc_client(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-            # DEFERRED is not a leader failure (a durable task owns it), so it
-            # must not trigger a failover onto another node — return it as a
-            # non-None result. Only FAILED re-resolves leadership and retries.
-            return None if ret is NodeTeardown.FAILED else ret
+            return ret if ret else None
 
         success, actual_leader, result = execute_on_leader_with_failover(
             all_nodes, lvol.lvs_name, _delete_on_leader)
@@ -2667,8 +2629,8 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
                 unconfirmed.append(peer_id)
                 continue
             try:
-                if delete_lvol_from_node(
-                        lvol.get_id(), peer_id, sync=True, force=True) is not NodeTeardown.DONE:
+                if not delete_lvol_from_node(
+                        lvol.get_id(), peer_id, sync=True, force=True):
                     unconfirmed.append(peer_id)
             except Exception:
                 logger.exception(
@@ -5465,7 +5427,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
             except Exception:
                 logger.exception("rollback: removing %s from %s raised",
                                  new_lvol.get_id(), source_node.get_id()[:8])
-                ret = NodeTeardown.FAILED
+                ret = False
             if not ret:
                 logger.error("rollback: could not remove %s from %s",
                              new_lvol.get_id(), source_node.get_id()[:8])

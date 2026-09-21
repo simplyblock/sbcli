@@ -14,8 +14,10 @@ Three of the defects behind that live in this module and are pure logic:
      the delete entirely and recorded it as done, leaving nothing in the log
      but an INFO line.
 
-  3. ``NodeTeardown`` did not exist: "removed it", "the node is disconnected so
-     I did not try" and "a task owns it" were all ``True``.
+  3. ``delete_lvol_from_node`` conflated "removed it", "the node is
+     disconnected so I did not try" and "a task owns it": all three were
+     ``True``. It now returns ``True`` only when the teardown is confirmed
+     complete on the node.
 """
 
 from simplyblock_core.controllers import lvol_controller as lc
@@ -45,16 +47,6 @@ def _stack(**over):
             "params": {"lvs_name": "LVS_1", "name": "LVOL_1"}}
     bdev.update(over)
     return [bdev]
-
-
-class TestNodeTeardownTruthiness:
-    """Only DONE may pass a ``if not ret:`` gate. The legacy call sites were
-    written against a bool and must keep working — with the stricter meaning."""
-
-    def test_only_done_is_truthy(self):
-        assert bool(lc.NodeTeardown.DONE) is True
-        assert bool(lc.NodeTeardown.DEFERRED) is False
-        assert bool(lc.NodeTeardown.FAILED) is False
 
 
 class TestBdevPresenceProbe:
