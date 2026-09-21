@@ -11,9 +11,11 @@ tests/
 ├── unit/                # Pure-logic tests; single module under test, no model state, no flows.
 │   ├── conftest.py      # Stubs the native `fdb` module so unit tests run without libfdb_c / a live cluster.
 │   ├── models/          # Every `BaseModel` test: field defaults, secrets, chunked reads, serialization.
+│   │   └── indices/     # The index subsystem as pure logic: key derivation, the declarations, the verdict.
 │   └── web/             # Unit tests for simplyblock_web (settings, v2 auth).
 ├── integration/         # Flow/controller tests — ALL run against real FDB.
 │   ├── conftest.py      # `pytest_configure` provisions FDB (testcontainers) before collection; autouse per-test keyspace wipe.
+│   ├── models/indices/  # Index maintenance, uniqueness, state, backfill, the verifier — against real FDB.
 │   ├── ftt2/            # FTT=2 restart scenarios.
 │   ├── migration/       # Live volume migration.
 │   └── expansion_sim/   # Cluster-expansion simulator (rebinds the real fdb client, routes RPC to simulators).
@@ -49,7 +51,7 @@ So, when a unit test seems to need a fake DB: **the need is the signal that it i
 
 ### `tests/integration/`
 
-Controller-flow tests, **all of which run against a real FoundationDB**. `tests/integration/conftest.py` provisions FDB once for the whole tier from `pytest_configure` — *before* test collection — reusing `$FDB_CLUSTER_FILE` if set, otherwise starting a `testcontainers` container and binding its cluster file into `simplyblock_core.constants`. Provisioning at `pytest_configure` (rather than in a session fixture) means the real `fdb` client and a live `DBController()` are available at **collection / module-import time**, so test modules may touch the DB at import scope. A separate autouse fixture wipes the user keyspace before every test for isolation. The FDB-backed subdirs (`ftt2/`, `migration/`, `expansion_sim/`) add their own per-suite topology/bootstrap fixtures on top of that same cluster.
+Controller-flow tests, **all of which run against a real FoundationDB**. `tests/integration/conftest.py` provisions FDB once for the whole tier from `pytest_configure` — *before* test collection — reusing `$FDB_CLUSTER_FILE` if set, otherwise starting a `testcontainers` container and binding its cluster file into `simplyblock_core.constants`. Provisioning at `pytest_configure` (rather than in a session fixture) means the real `fdb` client and a live `DBController()` are available at **collection / module-import time**, so test modules may touch the DB at import scope. A separate autouse fixture wipes the user keyspace before every test for isolation. The FDB-backed subdirs (`models/indices/`, `ftt2/`, `migration/`, `expansion_sim/`) add their own per-suite fixtures on top of that same cluster.
 
 **Never spoof or mock the database layer in an integration test.** The whole point of the tier is to exercise real `DBController` → FoundationDB reads and writes. Concretely, in `tests/integration/` do **not**:
 
