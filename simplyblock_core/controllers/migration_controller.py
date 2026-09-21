@@ -1338,31 +1338,49 @@ def create_migration(lvol_id, target_node_id,
     if src_node.tertiary_node_id:
         src_node_ids.add(src_node.tertiary_node_id)
 
-    # A target replica that is being removed is not a usable entry. Its SPDK is
-    # stopped and its mgmt hostname no longer resolves, so every RPC in the
-    # tgt_entries loop below raises -- and unlike the pre-registration above,
-    # that loop is not tolerant: one unreachable replica fails the entire
-    # create_migration.
+    # A target replica that cannot answer RPCs is not a usable entry -- every
+    # RPC in the tgt_entries loop below raises against it, and unlike the
+    # pre-registration above, that loop is not tolerant: one unreachable
+    # replica fails the entire create_migration.
     #
-    # The blast radius is wider than the removal's own drain. The replica set
-    # belongs to the TARGET, so a migration between two perfectly healthy nodes
-    # is refused whenever the target happens to list the departing node as its
-    # secondary or tertiary. Live 2026-09-16 on cluster 5aaf0a5d: migrating a
-    # volume from healthy rpksz to healthy zqhjg died with
-    # "Could not reach remote" against 94dtj, the node under removal, which was
-    # involved only as the target's replica.
+    # The blast radius is wider than just node removal. The replica set
+    # belongs to the TARGET, so a migration between two perfectly healthy
+    # nodes is refused whenever the target happens to list an unreachable node
+    # as its secondary or tertiary -- whether that node is leaving the cluster
+    # (REMOVAL_SHUT_DOWN_STATUSES) or simply offline for an unrelated reason
+    # (a plain `sn shutdown`, a crash). Live 2026-09-16 on cluster 5aaf0a5d
+    # hit "Could not reach remote" against 94dtj, a node under removal,
+    # involved only as the target's replica; live again 2026-09-21 on cluster
+    # bbad9e32 with the same error against a node that was merely
+    # `sn shutdown`, not being removed at all.
     #
-    # Skipping is also the correct end state: a departing node cannot hold a
-    # replica of anything, and the removal's own relocation re-places it.
-    def _usable_replica(node):
+    # Mirrors _get_target_secondary_node/_get_target_tertiary_node in
+    # tasks_runner_lvol_migration.py -- the task runner already classifies
+    # OFFLINE as "administratively down, skip" for the exact same TARGET
+    # replica concept during a later migration phase; create_migration's own
+    # pre-create phase had fallen out of sync with it, only skipping
+    # REMOVAL_SHUT_DOWN_STATUSES. A genuinely transient status (RESTARTING
+    # and the like) still blocks with a clear error instead of being silently
+    # dropped -- losing HA coverage on the target quietly would be worse than
+    # asking the caller to retry once the peer is back.
+    def _usable_replica(node, err_label):
         if node is None:
-            return None
+            return None, None
+        if node.status == StorageNode.STATUS_ONLINE:
+            return node, None
+        if node.status == StorageNode.STATUS_OFFLINE:
+            return None, None
         if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
             logger.info(
-                f"create_migration: skipping target replica {node.get_id()[:8]} "
-                f"(status={node.status}); it is leaving the cluster")
-            return None
-        return node
+                f"create_migration: target {err_label} {node.get_id()[:8]} is "
+                f"{node.status} (leaving the cluster); skipping it rather than "
+                f"blocking the migration")
+            return None, None
+        if node.status == StorageNode.STATUS_SUSPENDED and node.get_id() == src_node_id:
+            return node, None
+        return None, (
+            f"Target {err_label} node {node.get_id()} is in state "
+            f"'{node.status}'; cannot create migration target")
 
     tgt_sec_node = None
     if lvol.ha_type != "single" and tgt_node.secondary_node_id:
@@ -1372,7 +1390,9 @@ def create_migration(lvol_id, target_node_id,
                 tgt_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
             except KeyError:
                 pass
-    tgt_sec_node = _usable_replica(tgt_sec_node)
+    tgt_sec_node, _sec_err = _usable_replica(tgt_sec_node, "secondary")
+    if _sec_err:
+        raise PreconditionError(_sec_err)
 
     tgt_ter_node = None
     if tgt_node.tertiary_node_id:
@@ -1382,7 +1402,9 @@ def create_migration(lvol_id, target_node_id,
                 tgt_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
             except KeyError:
                 pass
-    tgt_ter_node = _usable_replica(tgt_ter_node)
+    tgt_ter_node, _ter_err = _usable_replica(tgt_ter_node, "tertiary")
+    if _ter_err:
+        raise PreconditionError(_ter_err)
 
     tgt_node_ids = {target_node_id}
     if tgt_sec_node is not None:
