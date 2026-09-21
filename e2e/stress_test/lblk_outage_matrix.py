@@ -72,14 +72,21 @@ class _LblkOutageMatrix(_LblkBase):
     #: volumes after each of four outages is not the bulk of the runtime.
     STATIC_MB = 256
 
-    #: Budget per outage cycle when sizing the live FIO job. An outage plus
-    #: full recovery plus the post-checks has measured at 8-12 minutes, so 900s
-    #: leaves headroom. The job must outlast the WHOLE sequence -- every outage
-    #: type on every node -- and with a fixed runtime it silently ended part
-    #: way through and the availability lane stopped watching. Sized from the
-    #: cycle count instead, and joined at the end regardless, so an
-    #: over-estimate costs nothing.
-    SEC_PER_CYCLE = 900
+    #: Budget per outage cycle when sizing the live FIO job, from the twelve
+    #: cycles measured on the k8s run of 2026-09-21: min 164s, max 401s, mean
+    #: 227s. 450 sits above the worst one with room to spare.
+    #:
+    #: It was 900, a guess, which made a 16-cycle run ask FIO for 15000s --
+    #: four times the work. An over-estimate is not free: the job then far
+    #: outlives the outages, so it can never be allowed to finish, and both
+    #: platforms ended up killing it and grepping the wreckage instead of
+    #: reading a completed run. Sized properly, FIO finishes on its own
+    #: shortly after the last cycle and is judged on its real summary.
+    SEC_PER_CYCLE = 450
+
+    #: Extra time beyond the planned cycles, so the tail of the last outage is
+    #: still under IO.
+    FIO_SLACK_SEC = 600
 
     def run(self):
         self._init_lblk()
@@ -899,7 +906,9 @@ class _LblkOutageMatrix(_LblkBase):
         node disappears is the most likely place for this to come apart, and a
         plain-only live lane would never touch it.
         """
-        runtime = self._fio_runtime = cycles * self.SEC_PER_CYCLE + 600
+        runtime = self._fio_runtime = (cycles * self.SEC_PER_CYCLE
+                                       + self.FIO_SLACK_SEC)
+        self._fio_started_at = time.time()
         self.logger.info("[matrix] live FIO sized for %d cycles: %ds",
                          cycles, runtime)
         flavours = [("plain", dict()),
@@ -948,12 +957,55 @@ class _LblkOutageMatrix(_LblkBase):
                 # is worse than having no gate. Ask the client instead.
                 alive = self._docker_fio_running(job)
             if not alive:
+                ran = time.time() - getattr(self, "_fio_started_at", 0)
+                if ran >= self._fio_runtime:
+                    # It finished its run rather than dying. The outages
+                    # outlasted the job, which is a sizing problem on our
+                    # side, not a loss of availability -- say which.
+                    self.logger.warning(
+                        "[matrix] live FIO on %s completed its %ds runtime "
+                        "before the outages finished (%.0fs elapsed); later "
+                        "cycles ran without it. Raise SEC_PER_CYCLE.",
+                        name, self._fio_runtime, ran)
+                    continue
                 raise LblkPreconditionError(
                     f"[matrix] live FIO on {name} stopped during {outage}. "
                     f"With ndcs/npcs {self.ndcs}/{self.npcs} one node down is "
                     f"meant to be survivable, so IO ending here is a loss of "
                     f"availability, not an expected blip.")
         self.logger.info("[matrix] live FIO still running after %s", outage)
+
+    def _await_fio_done(self, handles):
+        """Wait for every live FIO job to finish, then leave it to be judged.
+
+        Bounded by the runtime it was given plus slack: if a job is still
+        going well past that, something is wrong with it rather than with the
+        cluster, and hanging here forever would hide that.
+        """
+        started = getattr(self, "_fio_started_at", time.time())
+        deadline = started + self._fio_runtime + self.FIO_SLACK_SEC + 300
+        for name, _log, job, handle in handles:
+            while time.time() < deadline:
+                running = (self._k8s_fio_running(job if isinstance(handle, str)
+                                                 else job)
+                           if self.k8s_test else self._docker_fio_running(job))
+                if not running:
+                    self.logger.info("[matrix] live FIO on %s finished after "
+                                     "%.0fs", name, time.time() - started)
+                    break
+                sleep_n_sec(20)
+            else:
+                self.logger.warning(
+                    "[matrix] live FIO on %s was still running %.0fs after it "
+                    "started, past its %ds runtime; judging it where it is",
+                    name, time.time() - started, self._fio_runtime)
+                if self.k8s_test:
+                    continue
+                client = (self.fio_node or self.client_machines)[0]
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command=(f"sudo tmux kill-session -t fio_{job} "
+                             f"2>/dev/null || true"))
 
     def _docker_fio_running(self, job):
         """Is FIO still running on the client, as a tmux session or process?"""
@@ -1033,18 +1085,11 @@ class _LblkOutageMatrix(_LblkBase):
         sees it, so an io_u error during any outage -- graceful or not -- is a
         defect rather than something to triage away.
         """
-        # Stop the docker jobs first. The tmux session outlives the thread
-        # that launched it and was sized to outlast the whole matrix, so
-        # joining the thread proves nothing and waiting for the session to
-        # end would add hours. An io_u error during an outage is already in
-        # the log, which is what this gate reads.
-        if not self.k8s_test:
-            client = (self.fio_node or self.client_machines)[0]
-            for _n, _l, job, _h in handles:
-                self.ssh_obj.exec_command(
-                    node=client,
-                    command=(f"sudo tmux kill-session -t fio_{job} "
-                             f"2>/dev/null || true"))
+        # Let the jobs finish rather than killing them. Sized from measured
+        # cycle time, FIO ends on its own shortly after the last outage, so
+        # what gets validated is a completed run with a real summary instead
+        # of whatever a killed process happened to have flushed.
+        self._await_fio_done(handles)
         sleep_n_sec(10)
         for name, log, job, handle in handles:
             if isinstance(handle, threading.Thread):
