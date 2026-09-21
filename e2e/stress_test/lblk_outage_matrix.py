@@ -361,6 +361,8 @@ class _LblkOutageMatrix(_LblkBase):
                 kwargs["namespace"] = True
                 kwargs["max_namespace_per_subsys"] = 4
             self.sbcli_utils.add_lvol(**kwargs)
+            if namespaced:
+                return self._mount_namespaced(name)
             _dev, mount = self._connect_and_mount_dual(
                 name, mount_path=f"/mnt/{name}", format_disk=True)
             return mount
@@ -444,6 +446,59 @@ class _LblkOutageMatrix(_LblkBase):
                 f"openbao-init.txt on the runner -- then re-run.")
         self.logger.info("[matrix] KMS ready: %s",
                          " ".join(r[0] for r in rows))
+
+    def _mount_namespaced(self, name, retries=5, delay=4):
+        """Find a namespaced volume's device without connecting to it.
+
+        A namespaced volume joins an existing subsystem rather than opening
+        its own, so it has no controller of its own and must NOT be
+        nvme connect-ed. The client is already attached: connect answers
+        "already connected", no new controller appears, and a before/after
+        device diff finds nothing --
+
+          AssertionError: No new block device after connecting mxlivensvol191
+
+        which is how this failed while the namespace was present and working
+        the whole time. It is surfaced by rescanning the controllers and
+        locating it by (NQN, ns_id), the same way _create_namespaced_children
+        does in continuous_failover_ha_multi_outage.py.
+        """
+        lvol_id = self.sbcli_utils.get_lvol_id(name)
+        details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)[0]
+        nqn, ns_id = details.get("nqn"), details.get("ns_id")
+        if not isinstance(ns_id, int) or ns_id < 1:
+            raise LblkPreconditionError(
+                f"[matrix] {name} reports ns_id={ns_id!r}. Without a usable "
+                f"NSID the only way to pick a device is 'any head on this "
+                f"NQN', which on a shared subsystem is a sibling's device -- "
+                f"and the next step formats whatever it is handed.")
+
+        client = (self.fio_node or self.client_machines)[0]
+        for _ in range(retries):
+            self.ssh_obj.rescan_live_nvme_controllers(client)
+            device = self.ssh_obj.get_nvme_device_for_nqn(client, nqn,
+                                                          ns_id=ns_id)
+            if device:
+                mount = f"/mnt/{name}"
+                self.logger.info(
+                    "[matrix] %s is ns_id %s on %s (no connect needed) -> %s",
+                    name, ns_id, nqn[-24:], device)
+                self.ssh_obj.format_disk(node=client, device=device,
+                                         fs_type="ext4")
+                self.ssh_obj.mount_path(node=client, device=device,
+                                        mount_path=mount)
+                if not self.ssh_obj.is_mountpoint(client, mount):
+                    raise LblkPreconditionError(
+                        f"[matrix] {name} resolved to {device} but would not "
+                        f"mount at {mount}")
+                self._volume_registry[name] = {
+                    "device": device, "mount": mount, "lvol_id": lvol_id}
+                return mount
+            sleep_n_sec(delay)
+        raise LblkPreconditionError(
+            f"[matrix] {name} never surfaced on {client} as ns_id {ns_id} of "
+            f"{nqn}. The namespace exists on the target; the client did not "
+            f"see it after {retries} controller rescans.")
 
     def _pin_for(self, lvol_name):
         """nodeSelector a pod touching this volume must carry, or None."""
@@ -779,33 +834,6 @@ class _LblkOutageMatrix(_LblkBase):
                     ("crypto", dict(crypto=True)),
                     ("dhchap", dict(dhchap=True)),
                     ("nsvol", dict(namespaced=True))]
-        if not self.k8s_test:
-            # Docker only, and it is a finding rather than a preference.
-            #
-            # The static lane already holds a namespaced volume, which is the
-            # FIRST namespace in its subsystem and connects normally. A second
-            # namespaced volume packs into that SAME subsystem, so the client
-            # is already attached to it: `nvme connect` answers "already
-            # connected" and no new controller appears. The namespace exists
-            # on the target, but it never becomes visible to the host --
-            # _connect_and_mount_dual ran nvme ns-rescan on every live
-            # controller twice and the device never showed up, so the volume
-            # cannot be used:
-            #
-            #   AssertionError: No new block device after connecting
-            #   mxlivensvol191
-            #
-            # Raise it with the dev team: a namespace hot-added to a connected
-            # subsystem should be discoverable, or clients cannot use packed
-            # namespaces created after they attached. Until then the live lane
-            # here drops the flavour rather than failing the whole run over
-            # it. K8s is unaffected -- each PVC gets its own attachment.
-            self.logger.warning(
-                "[matrix] live lane skips the namespaced volume on docker: a "
-                "second namespace in an already-connected subsystem never "
-                "appears on the client, so it cannot carry IO. The static "
-                "lane still covers a namespaced volume.")
-            flavours = [f for f in flavours if f[0] != "nsvol"]
 
         handles = []
         for label, opts in flavours:
