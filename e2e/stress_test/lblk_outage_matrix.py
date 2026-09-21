@@ -116,9 +116,16 @@ class _LblkOutageMatrix(_LblkBase):
                           if n is not self._fio_home_node] or nodes
         cycles = []
         for outage in self.OUTAGES:
-            pool = (no_network_cut
-                    if outage == "interface_full_network_interrupt" else nodes)
-            cycles += [(node, outage) for node in pool]
+            # Named targets, not "pool": this loop used to bind its node list
+            # to `pool`, clobbering the storage pool created above. Every
+            # volume was then requested in a pool whose name was a list of
+            # node dicts, and the API answered "Pool not found:" followed by a
+            # dump of every storage node -- which reads like a cluster fault
+            # rather than a variable collision.
+            targets = (no_network_cut
+                       if outage == "interface_full_network_interrupt"
+                       else nodes)
+            cycles += [(node, outage) for node in targets]
 
         # Full coverage is every type on every node, and on a six-node cluster
         # that is 24 cycles at roughly ten minutes each -- about four hours.
@@ -129,8 +136,16 @@ class _LblkOutageMatrix(_LblkBase):
         cap = int(os.environ.get("LBLK_MATRIX_NODES", "0") or 0)
         if cap and cap < len(nodes):
             trimmed = nodes[:cap]
-            cycles = [(node, outage)
-                      for outage in self.OUTAGES for node in trimmed]
+            trimmed_no_cut = [n for n in trimmed
+                              if n is not self._fio_home_node] or trimmed
+            cycles = []
+            for outage in self.OUTAGES:
+                # Same exclusion as above: trimming the node count must not
+                # quietly put the network cut back on the node hosting FIO.
+                cycles += [(node, outage) for node in
+                           (trimmed_no_cut
+                            if outage == "interface_full_network_interrupt"
+                            else trimmed)]
             self.logger.warning(
                 "[matrix] LBLK_MATRIX_NODES=%d: running %d of %d nodes, so "
                 "%d cycles instead of %d. Coverage of outage TYPES is "
@@ -218,6 +233,12 @@ class _LblkOutageMatrix(_LblkBase):
         with the same payload, so a divergence between flavours points at the
         flavour rather than at the workload.
         """
+        if not isinstance(pool, str) or not pool:
+            raise LblkPreconditionError(
+                f"[matrix] pool must be a name, got {type(pool).__name__} "
+                f"{str(pool)[:120]!r}. The API accepts whatever it is handed "
+                f"and reports 'Pool not found' with the value echoed back, so "
+                f"a wrong type here surfaces as a cluster fault.")
         flavours = [
             ("plain", dict()),
             ("crypto", dict(crypto=True)),

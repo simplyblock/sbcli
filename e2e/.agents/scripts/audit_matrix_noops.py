@@ -78,6 +78,22 @@ for fl in ("plain", "crypto", "dhchap", "nsvol"):
     if f"'{fl}'" not in live:
         findings.append(f"live lane missing flavour {fl}")
 
+
+# 7. A local must not be rebound to a different kind of value. `pool` held the
+#    storage pool name and was then reused as the cycle loop's node list, so
+#    every volume was requested in a pool named after a list of node dicts and
+#    the API answered "Pool not found" with a dump of the whole cluster.
+import ast as _ast
+_tree = _ast.parse(inspect.getsource(C).lstrip())
+for _fn in [n for n in _ast.walk(_tree) if isinstance(n, _ast.FunctionDef)]:
+    _params = {a.arg for a in _fn.args.args} - {"self"}
+    for _n in _ast.walk(_fn):
+        if isinstance(_n, _ast.Assign):
+            for _t in _n.targets:
+                if isinstance(_t, _ast.Name) and _t.id in _params:
+                    findings.append(
+                        f"{_fn.name}() rebinds its parameter {_t.id!r}")
+
 print(f"audited {len(inspect.getsource(C).splitlines())} lines of the matrix")
 for f in findings:
     print("  FINDING " + f)
