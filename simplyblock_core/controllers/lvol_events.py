@@ -18,22 +18,13 @@ def _lvol_event(lvol, message, caused_by, event):
         logger.error(e)
         logger.error(f"Error fetching related objects for lvol event: {message}")
 
-    # Fall back to the POOL's cluster when the node record is unreachable.
-    # Dropping the event outright meant a volume whose node record was gone
-    # produced no create, delete or status entry in the cluster log at all —
-    # so the volumes that leaked through exactly that path (force delete with a
-    # missing node record) were also the ones with no trace to investigate.
-    # The event is the audit record; it must not depend on the node still
-    # existing.
-    cluster_id = snode.cluster_id if snode is not None else None
-    if cluster_id is None:
-        try:
-            cluster_id = db_controller.get_pool_by_id(lvol.pool_uuid).cluster_id
-        except Exception:
-            logger.error(
-                f"No cluster could be resolved for lvol {lvol.get_id()}; "
-                f"event not logged: {message}")
-            return
+    try:
+        cluster_id = db_controller.get_pool_by_id(lvol.pool_uuid).cluster_id
+    except Exception as e:
+        logger.error(
+            f"No cluster could be resolved for lvol {lvol.get_id()}; "
+            f"event not logged: {e}")
+        return
 
     ec.log_event_cluster(
         cluster_id=cluster_id,

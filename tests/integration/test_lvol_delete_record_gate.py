@@ -34,10 +34,12 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.controllers import lvol_controller as lc
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services import lvol_monitor
 
 CLUSTER_ID = "cluster-1"
@@ -125,11 +127,19 @@ def finish_env(db):
 
 
 def _finish(cluster, lvol, *, teardown, absent, peer_cleared=True):
-    """Run process_lvol_delete_finish with the data plane stubbed out."""
+    """Run process_lvol_delete_finish with the data plane stubbed out.
+
+    ``teardown``: ``None`` for a confirmed teardown (delete_lvol_from_node
+    returns normally), or an exception instance it should raise instead
+    (``PreconditionError`` for deferred, ``RuntimeError`` for failed).
+    ``absent``: ``True``/``False`` for lvol_bdev_absent_on_node's bool
+    return, or an exception instance for an unverifiable probe.
+    """
     with patch.object(lvol_monitor.lvol_controller, "delete_lvol_from_node",
-                      return_value=teardown) as del_node, \
+                      side_effect=teardown) as del_node, \
             patch.object(lvol_monitor.lvol_controller, "lvol_bdev_absent_on_node",
-                         return_value=absent), \
+                         side_effect=absent if isinstance(absent, Exception) else None,
+                         return_value=absent if not isinstance(absent, Exception) else None), \
             patch.object(lvol_monitor.snapshot_controller, "sync_delete_on_peer",
                          return_value=peer_cleared), \
             patch.object(lvol_monitor.snapshot_controller, "lvstore_op_lock",
@@ -149,29 +159,38 @@ class TestFinishGate:
 
     def test_confirmed_teardown_removes_the_record(self, db, finish_env):
         cluster, _leader, lvol = finish_env
-        _finish(cluster, lvol, teardown=True, absent=True)
+        _finish(cluster, lvol, teardown=None, absent=True)
         assert not _record_exists(db, lvol.get_id())
 
-    def test_unconfirmed_leader_teardown_keeps_the_record(self, db, finish_env):
+    def test_a_failed_leader_teardown_keeps_the_record(self, db, finish_env):
         """The headline leak: 'Failed to delete lvol from primary_node' was
-        logged and the record was dropped anyway. Covers both a genuine
-        failure and 'skip'/'queue' (deferred) — delete_lvol_from_node's bool
-        return cannot tell them apart, so neither may pass the gate."""
+        logged and the record was dropped anyway."""
         cluster, _leader, lvol = finish_env
-        _finish(cluster, lvol, teardown=False, absent=True)
+        _finish(cluster, lvol, teardown=RuntimeError("bdev stack not removed"),
+                absent=True)
         assert _record_exists(db, lvol.get_id())
         assert db.get_lvol_by_id(lvol.get_id()).status == LVol.STATUS_IN_DELETION
+
+    def test_a_deferred_leader_teardown_keeps_the_record(self, db, finish_env):
+        """'skip'/'queue' used to answer True — a node never touched, reported
+        as clean. Now it raises PreconditionError, which must not pass the
+        gate either -- deferred is not done."""
+        cluster, _leader, lvol = finish_env
+        _finish(cluster, lvol, teardown=PreconditionError("owed to a task"),
+                absent=True)
+        assert _record_exists(db, lvol.get_id())
 
     def test_a_surviving_bdev_keeps_the_record(self, db, finish_env):
         """An acknowledged sync-delete RPC is not proof. The post-condition was
         never checked at all."""
         cluster, _leader, lvol = finish_env
-        _finish(cluster, lvol, teardown=True, absent=False)
+        _finish(cluster, lvol, teardown=None, absent=False)
         assert _record_exists(db, lvol.get_id())
 
     def test_an_unverifiable_bdev_keeps_the_record(self, db, finish_env):
         cluster, _leader, lvol = finish_env
-        _finish(cluster, lvol, teardown=True, absent=None)
+        _finish(cluster, lvol, teardown=None,
+                absent=RPCException("proxy returned non-200"))
         assert _record_exists(db, lvol.get_id())
 
     def test_no_node_able_to_complete_the_teardown_keeps_the_record(
@@ -190,7 +209,7 @@ class TestFinishGate:
             node.status = StorageNode.STATUS_UNREACHABLE
             node.write_to_db(db.kv_store)
 
-        del_node = _finish(cluster, lvol, teardown=True, absent=True)
+        del_node = _finish(cluster, lvol, teardown=None, absent=True)
         assert _record_exists(db, lvol.get_id())
         del_node.assert_not_called()
 
@@ -198,14 +217,14 @@ class TestFinishGate:
             self, db, finish_env):
         """sync_delete_on_peer's return value was discarded entirely."""
         cluster, _leader, lvol = finish_env
-        _finish(cluster, lvol, teardown=True, absent=True,
+        _finish(cluster, lvol, teardown=None, absent=True,
                 peer_cleared=False)
         assert _record_exists(db, lvol.get_id())
 
     def test_cleared_peers_are_recorded_so_a_retry_does_not_rewalk(
             self, db, finish_env):
         cluster, _leader, lvol = finish_env
-        _finish(cluster, lvol, teardown=True, absent=False,
+        _finish(cluster, lvol, teardown=None, absent=False,
                 peer_cleared=True)
         # Record kept (the bdev survived), but the peer's completed leg is
         # remembered so the next pass does not re-walk a clean blob tree.
@@ -226,7 +245,8 @@ class TestFinishGate:
 
 
 # ---------------------------------------------------------------------------
-# delete_lvol_from_node — True only for a confirmed teardown
+# delete_lvol_from_node — a normal return only for a confirmed teardown;
+# PreconditionError for deferred, RuntimeError for failed.
 # ---------------------------------------------------------------------------
 
 
@@ -246,29 +266,30 @@ class TestDeleteLvolFromNodeOutcome:
                 patch.object(StorageNode, "rpc_client", MagicMock()):
             return lc.delete_lvol_from_node(self.lvol.get_id(), LEADER_ID, sync=True)
 
-    def test_skip_is_not_done(self):
-        assert self._run("skip") is False
+    def test_skip_is_deferred_not_done(self):
+        with pytest.raises(PreconditionError):
+            self._run("skip")
 
-    def test_queue_is_not_done(self):
-        assert self._run("queue") is False
+    def test_queue_is_deferred_not_done(self):
+        with pytest.raises(PreconditionError):
+            self._run("queue")
 
-    def test_an_unremovable_bdev_stack_is_not_done(self):
-        with patch("simplyblock_core.storage_node_ops.check_non_leader_for_operation",
-                   return_value="proceed"), \
+    def test_an_unremovable_bdev_stack_is_failed(self):
+        with pytest.raises(RuntimeError), \
+                patch("simplyblock_core.storage_node_ops.check_non_leader_for_operation",
+                     return_value="proceed"), \
                 patch.object(lc, "_remove_lvol_subsys_from_node", return_value=True), \
                 patch.object(lc, "_remove_bdev_stack", return_value=False), \
                 patch.object(StorageNode, "rpc_client", MagicMock()):
-            ret = lc.delete_lvol_from_node(self.lvol.get_id(), LEADER_ID, sync=True)
-        assert ret is False
+            lc.delete_lvol_from_node(self.lvol.get_id(), LEADER_ID, sync=True)
 
-    def test_a_confirmed_removal_is_done(self):
+    def test_a_confirmed_removal_returns_normally(self):
         with patch("simplyblock_core.storage_node_ops.check_non_leader_for_operation",
                    return_value="proceed"), \
                 patch.object(lc, "_remove_lvol_subsys_from_node", return_value=True), \
                 patch.object(lc, "_remove_bdev_stack", return_value=True), \
                 patch.object(StorageNode, "rpc_client", MagicMock()):
-            ret = lc.delete_lvol_from_node(self.lvol.get_id(), LEADER_ID, sync=True)
-        assert ret is True
+            lc.delete_lvol_from_node(self.lvol.get_id(), LEADER_ID, sync=True)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +374,7 @@ class TestForceDeleteWithMissingNode:
         lvol = _write_lvol(db, uuid="lvol-force-1", status=LVol.STATUS_ONLINE)
 
         with patch.object(lc, "delete_lvol_from_node",
-                          return_value=True) as del_node, \
+                          return_value=None) as del_node, \
                 patch.object(lc.lvol_events, "lvol_delete", MagicMock()) as ev, \
                 patch.object(lc.ops_gate, "assert_object_ops_allowed", MagicMock()), \
                 patch("simplyblock_core.controllers.migration_controller."

@@ -1,7 +1,7 @@
 """A teardown is only complete when the node has confirmed it.
 
 R26.3 field report: four lvols existed as bdevs in SPDK with no record in FDB.
-Three of the defects behind that live in this module and are pure logic:
+The defects behind that which live in this module and are pure logic:
 
   1. ``_remove_bdev_stack`` returned a constant ``True``. A failed removal was
      logged, the entry was stamped ``status='deleted'`` anyway, and
@@ -12,27 +12,33 @@ Three of the defects behind that live in this module and are pure logic:
      ``get_bdevs`` returns ``None`` both for "no such device" and for a non-200
      from the SPDK proxy, so one transient hiccup during a mass delete skipped
      the delete entirely and recorded it as done, leaving nothing in the log
-     but an INFO line.
+     but an INFO line. The probe now goes through ``RPCClient.bdev_get``
+     (tested in ``tests/unit/rpc/test_client.py``), which raises on a genuine
+     RPC failure instead of collapsing it into "gone".
 
   3. ``delete_lvol_from_node`` conflated "removed it", "the node is
      disconnected so I did not try" and "a task owns it": all three were
-     ``True``. It now returns ``True`` only when the teardown is confirmed
-     complete on the node.
+     ``True``. It now raises ``PreconditionError`` for a deferred teardown and
+     ``RuntimeError`` for a failed one, and returns normally only once the
+     teardown is confirmed complete.
 """
 
+import pytest
+
 from simplyblock_core.controllers import lvol_controller as lc
+from simplyblock_core.rpc_client import RPCException
 
 
 class _RPC:
-    """Minimal SPDK stub. ``probe`` is what get_bdevs_2 answers with, as the
-    ``(result, error)`` pair ``_request2`` really returns."""
+    """Minimal SPDK stub. ``probe`` is what ``bdev_get`` answers with: a bdev
+    dict, ``None`` (absent), or an exception instance to raise."""
 
-    def __init__(self, probe=([{"name": "x"}], None), delete=(True, None)):
+    def __init__(self, probe=({"name": "x"},), delete=(True, None)):
         self._probe = probe
         self._delete = delete
         self.deletes = []
 
-    def get_bdevs_2(self, name):
+    def bdev_get(self, name):
         if isinstance(self._probe, Exception):
             raise self._probe
         return self._probe
@@ -47,34 +53,6 @@ def _stack(**over):
             "params": {"lvs_name": "LVS_1", "name": "LVOL_1"}}
     bdev.update(over)
     return [bdev]
-
-
-class TestBdevPresenceProbe:
-    """``_bdev_present`` must never answer "absent" for a question the node
-    did not actually answer."""
-
-    def test_present_when_the_node_lists_it(self):
-        assert lc._bdev_present(_RPC(probe=([{"name": "x"}], None)), "LVS_1/LVOL_1") is True
-
-    def test_absent_on_enodev(self):
-        rpc = _RPC(probe=(None, {"code": -19, "message": "No such device"}))
-        assert lc._bdev_present(rpc, "LVS_1/LVOL_1") is False
-
-    def test_absent_on_an_empty_list(self):
-        assert lc._bdev_present(_RPC(probe=([], None)), "LVS_1/LVOL_1") is False
-
-    def test_unknown_when_the_proxy_returns_non_200(self):
-        # _request2 yields (None, None) for a non-200 — indistinguishable from
-        # "gone" through get_bdevs, which is the whole bug.
-        assert lc._bdev_present(_RPC(probe=(None, None)), "LVS_1/LVOL_1") is None
-
-    def test_unknown_on_an_unrelated_rpc_error(self):
-        rpc = _RPC(probe=(None, {"code": -110, "message": "timeout"}))
-        assert lc._bdev_present(rpc, "LVS_1/LVOL_1") is None
-
-    def test_unknown_when_the_call_raises(self):
-        assert lc._bdev_present(_RPC(probe=RuntimeError("connection error")),
-                                "LVS_1/LVOL_1") is None
 
 
 class TestRemoveBdevStack:
@@ -99,32 +77,33 @@ class TestRemoveBdevStack:
     def test_an_absent_bdev_is_confirmed_without_a_delete(self):
         """The optimisation the probe exists for: no second metadata walk."""
         stack = _stack()
-        rpc = _RPC(probe=(None, {"code": -19, "message": "No such device"}))
+        rpc = _RPC(probe=None)
 
         assert lc._remove_bdev_stack(stack, rpc, sync=True) is True
         assert stack[0]["status"] == "deleted"
         assert rpc.deletes == [], "an absent bdev must not be re-deleted"
 
-    def test_an_unknown_probe_still_attempts_the_delete(self):
+    def test_a_failed_probe_still_attempts_the_delete(self):
         """A failed probe is not evidence of anything. It used to short-circuit
         to "already deleted, skipping" and drop the delete on the floor."""
         stack = _stack()
-        rpc = _RPC(probe=(None, None))
+        rpc = _RPC(probe=RPCException("proxy returned non-200"))
 
         assert lc._remove_bdev_stack(stack, rpc, sync=True) is True
         assert rpc.deletes == [("LVS_1/LVOL_1", True)], (
-            "an unknown probe must fall through to the delete, not skip it")
+            "a failed probe must fall through to the delete, not skip it")
 
-    def test_an_unknown_probe_with_a_failing_delete_is_unconfirmed(self):
+    def test_a_failed_probe_with_a_failing_delete_is_unconfirmed(self):
         stack = _stack()
-        rpc = _RPC(probe=(None, None), delete=(None, {"code": -16}))
+        rpc = _RPC(probe=RPCException("proxy returned non-200"),
+                   delete=(None, {"code": -16}))
 
         assert lc._remove_bdev_stack(stack, rpc, sync=True) is False
         assert stack[0].get("status") != "deleted"
 
     def test_enodev_from_the_delete_counts_as_confirmation(self):
         stack = _stack()
-        rpc = _RPC(probe=(None, None),
+        rpc = _RPC(probe=RPCException("proxy returned non-200"),
                    delete=(None, {"code": -19, "message": "No such device"}))
 
         assert lc._remove_bdev_stack(stack, rpc, sync=True) is True
@@ -185,17 +164,19 @@ class TestLvolBdevAbsentOnNode:
         lvol_bdev = "LVOL_1"
 
     def test_absent_when_the_node_says_no_such_device(self):
-        node = self._Node(_RPC(probe=(None, {"code": -19})))
+        node = self._Node(_RPC(probe=None))
         assert lc.lvol_bdev_absent_on_node(self._Lvol(), node) is True
 
     def test_not_absent_when_the_bdev_is_still_listed(self):
-        node = self._Node(_RPC(probe=([{"name": "LVS_1/LVOL_1"}], None)))
+        node = self._Node(_RPC(probe={"name": "LVS_1/LVOL_1"}))
         assert lc.lvol_bdev_absent_on_node(self._Lvol(), node) is False
 
-    def test_unknown_is_not_absent(self):
-        node = self._Node(_RPC(probe=(None, None)))
-        assert lc.lvol_bdev_absent_on_node(self._Lvol(), node) is None
+    def test_a_failed_probe_raises_instead_of_answering_unknown(self):
+        node = self._Node(_RPC(probe=RPCException("proxy returned non-200")))
+        with pytest.raises(RPCException):
+            lc.lvol_bdev_absent_on_node(self._Lvol(), node)
 
-    def test_unknown_when_no_rpc_client_can_be_built(self):
+    def test_no_rpc_client_raises(self):
         node = self._Node(RuntimeError("node is gone"))
-        assert lc.lvol_bdev_absent_on_node(self._Lvol(), node) is None
+        with pytest.raises(RuntimeError):
+            lc.lvol_bdev_absent_on_node(self._Lvol(), node)

@@ -4,6 +4,7 @@ from datetime import datetime
 
 
 from simplyblock_core import constants, db_controller, utils
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.controllers import (health_controller, lvol_events, tasks_controller, lvol_controller,
@@ -274,7 +275,12 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
         if lvol.deletion_status != leader_node.get_id():
             with snapshot_controller.lvstore_op_lock(
                     cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
-                lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
+                try:
+                    lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
+                except (PreconditionError, RuntimeError) as e:
+                    logger.warning(
+                        f"LVol {lvol.get_id()}: teardown on {leader_node.get_id()[:8]} "
+                        f"not completed this pass: {e}")
             return
 
     # Both paths above set leader_node or returned/raised.
@@ -334,27 +340,41 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             break
     with snapshot_controller.lvstore_op_lock(
             cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
-        ret = lvol_controller.delete_lvol_from_node(
-            lvol.get_id(), primary_node.get_id(), sync=True,
-            force=leader_independent)
-    if not ret:
-        logger.error(
-            f"Failed to delete lvol from primary_node node: {primary_node.get_id()}; "
-            "keeping the record in_deletion")
-        # Durable retry in case this monitor process dies before the next
-        # pass; the record stays either way.
-        tasks_controller.add_lvol_sync_del_task(
-            cluster.get_id(), primary_node.get_id(), lvol_bdev_name, lvol.node_id)
-        return
+        try:
+            lvol_controller.delete_lvol_from_node(
+                lvol.get_id(), primary_node.get_id(), sync=True,
+                force=leader_independent)
+        except PreconditionError as e:
+            # Not a failure: a durable task (or delete_lvol_from_node itself,
+            # for a disconnected node) already owns finishing this. The record
+            # stays in_deletion for the next pass either way.
+            logger.warning(
+                f"LVol {lvol.get_id()}: teardown on primary_node "
+                f"{primary_node.get_id()} deferred: {e}")
+            return
+        except RuntimeError as e:
+            logger.error(
+                f"Failed to delete lvol from primary_node node: "
+                f"{primary_node.get_id()} ({e}); keeping the record in_deletion")
+            # Durable retry in case this monitor process dies before the next
+            # pass; the record stays either way.
+            tasks_controller.add_lvol_sync_del_task(
+                cluster.get_id(), primary_node.get_id(), lvol_bdev_name, lvol.node_id)
+            return
 
     # Post-condition, not just an acknowledged RPC: confirm the bdev is really
-    # gone from the leader. A tri-state probe — "could not ask" is not "clean".
-    absent = lvol_controller.lvol_bdev_absent_on_node(lvol, primary_node)
-    if absent is not True:
+    # gone from the leader. A failed probe is not "clean".
+    try:
+        absent = lvol_controller.lvol_bdev_absent_on_node(lvol, primary_node)
+    except Exception as e:
+        logger.error(
+            f"LVol {lvol.get_id()}: could not verify {lvol_bdev_name} is gone "
+            f"from {primary_node.get_id()[:8]} ({e}); keeping the record in_deletion")
+        return
+    if not absent:
         logger.error(
             f"LVol {lvol.get_id()}: sync delete of {lvol_bdev_name} reported "
-            f"success but the bdev is "
-            f"{'still present' if absent is False else 'unverifiable'} on "
+            f"success but the bdev is still present on "
             f"{primary_node.get_id()[:8]}; keeping the record in_deletion")
         return
 
@@ -608,7 +628,19 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                     # create on the same lvstore corrupts the replica blob tree.
                     with snapshot_controller.lvstore_op_lock(
                             cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
-                        lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
+                        try:
+                            lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
+                        except (PreconditionError, RuntimeError) as e:
+                            # Not fatal to this cycle's sweep -- a deferred or
+                            # failed issue here must not abort the rest of the
+                            # in_deletion lvols on this node this pass (that
+                            # blast radius is exactly what the outer
+                            # try/except in main()'s _sweep would otherwise
+                            # give it).
+                            logger.warning(
+                                f"LVol {lvol.get_id()}: async delete issue on "
+                                f"{leader_node.get_id()[:8]} not completed "
+                                f"this pass: {e}")
                     # NOTE no inline sleep here: the loop is SERIAL over every
                     # in-deletion lvol, so a per-object pause multiplies into
                     # minutes of added latency for every object in a mass-delete
