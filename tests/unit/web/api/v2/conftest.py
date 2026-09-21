@@ -186,9 +186,11 @@ def pool_controller(monkeypatch):
 def lvol_controller(monkeypatch):
     mock = MagicMock()
     mock.get_replication_info.return_value = None
+    mock.get_replication_info_bulk.return_value = {}
     monkeypatch.setattr(volume_module, 'lvol_controller', mock)
     monkeypatch.setattr(volume_replication_module, 'lvol_controller', mock)
     monkeypatch.setattr(replication_module, 'lvol_controller', mock)
+    monkeypatch.setattr(metrics_module, 'lvol_controller', mock)
     return mock
 
 

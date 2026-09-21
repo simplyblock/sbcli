@@ -8,6 +8,11 @@ is), ``resyncing`` (a divergence catch-up in flight), ``last_replicated_at``
 (the truthful ``lastSyncTime`` source), the last-cycle figures, and the
 ``rpo_target_seconds`` override of the derived lag budget.
 
+``get_replication_info_bulk`` backs the Prometheus replication metrics
+(design §11): the same fields, computed for a whole cluster's volumes with
+one get_job_tasks/get_replication_policies/get_replication_targets read
+instead of get_replication_info's own per-volume reads.
+
 The derivations read LVol, snapshot, task, relationship, and policy records
 through ``DBController`` accessors, so these tests belong to the FDB-backed
 tier. Nothing above the database runs: no shipping, no RPC, no storage node.
@@ -257,3 +262,86 @@ class TestLagBudget:
 
         # interval_min defaults to 1: max(3 * 60, 300) = 300.
         assert info["lag_budget_seconds"] == 300
+
+
+class TestReplicationInfoBulk:
+    """``get_replication_info_bulk`` backs the Prometheus replication metrics
+    (design §11): one get_job_tasks/get_replication_policies/
+    get_replication_targets read per cluster instead of get_replication_info's
+    own per-volume reads, so its regression risk is specifically the grouping
+    and label-resolution logic -- whether it reaches the SAME numbers
+    get_replication_info does, for the right volume, and no others.
+    """
+
+    def test_matches_the_single_volume_values_for_a_shipped_volume(self, db, node):
+        policy = _write_policy(db, rpo_target_seconds=600)
+        lvol = _write_lvol(db, "rsr-bulk-ship", policy_id=policy.get_id(), do_replicate=True)
+        now = int(time.time())
+        _write_shipped_snapshot(db, lvol, "rsr-bulk-snap-1", now - 120, used_size=1024,
+                                start_time=now - 115, end_time=now - 110)
+        _write_shipped_snapshot(db, lvol, "rsr-bulk-snap-2", now - 60, used_size=2048,
+                                start_time=now - 55, end_time=now - 43)
+        _write_shipped_snapshot(db, lvol, "rsr-bulk-snap-3", now - 30, done=False)
+
+        single = lvol_controller.get_replication_info("rsr-bulk-ship")
+        bulk = lvol_controller.get_replication_info_bulk(CLUSTER_ID, [lvol])[lvol.get_id()]
+
+        for field in ("lag_seconds", "outstanding_bytes", "last_cycle_bytes",
+                      "last_cycle_seconds", "state", "failing_count",
+                      "max_retry_reached"):
+            assert bulk[field] == single[field], field
+        assert bulk["lag_budget_seconds"] == 600
+
+    def test_non_replicating_lvol_is_absent(self, db, node):
+        _write_lvol(db, "rsr-bulk-plain", do_replicate=False)
+
+        result = lvol_controller.get_replication_info_bulk(CLUSTER_ID, [
+            _write_lvol(db, "rsr-bulk-plain2", do_replicate=False),
+        ])
+
+        assert result == {}
+
+    def test_never_shipped_volume_reports_defaults(self, db, node):
+        lvol = _write_lvol(db, "rsr-bulk-unshipped", do_replicate=True)
+
+        info = lvol_controller.get_replication_info_bulk(CLUSTER_ID, [lvol])[lvol.get_id()]
+
+        assert info["lag_seconds"] is None
+        assert info["outstanding_bytes"] == 0
+        assert info["state"] == "not_replicating"
+
+    def test_resolves_policy_and_peer_cluster(self, db, node):
+        policy = _write_policy(db, rpo_target_seconds=900)
+        lvol = _write_lvol(db, "rsr-bulk-policy", policy_id=policy.get_id(), do_replicate=True)
+
+        info = lvol_controller.get_replication_info_bulk(CLUSTER_ID, [lvol])[lvol.get_id()]
+
+        assert info["policy_id"] == policy.get_id()
+        assert info["policy_name"] == policy.policy_name
+        assert info["peer_cluster"] == TARGET_CLUSTER_ID
+        assert info["rpo_target_seconds"] == 900
+
+    def test_a_volume_with_no_policy_reports_no_peer_cluster(self, db, node):
+        lvol = _write_lvol(db, "rsr-bulk-nopolicy", do_replicate=True)
+
+        info = lvol_controller.get_replication_info_bulk(CLUSTER_ID, [lvol])[lvol.get_id()]
+
+        assert info["policy_id"] == ""
+        assert info["peer_cluster"] == ""
+
+    def test_two_volumes_do_not_cross_contaminate_items(self, db, node):
+        """The grouping-by-lvol-id step is this function's own logic, unlike
+        the per-volume math it reuses from _replication_cycle_stats -- a bug
+        here would put one volume's snapshots on another's ledger."""
+        policy = _write_policy(db)
+        lvol_a = _write_lvol(db, "rsr-bulk-a", policy_id=policy.get_id(), do_replicate=True)
+        lvol_b = _write_lvol(db, "rsr-bulk-b", policy_id=policy.get_id(), do_replicate=True)
+        now = int(time.time())
+        _write_shipped_snapshot(db, lvol_a, "rsr-bulk-snap-a", now - 30, used_size=1024)
+        _write_shipped_snapshot(db, lvol_b, "rsr-bulk-snap-b1", now - 30, used_size=2048)
+        _write_shipped_snapshot(db, lvol_b, "rsr-bulk-snap-b2", now - 20, used_size=4096)
+
+        result = lvol_controller.get_replication_info_bulk(CLUSTER_ID, [lvol_a, lvol_b])
+
+        assert result[lvol_a.get_id()]["last_cycle_bytes"] == 1024
+        assert result[lvol_b.get_id()]["last_cycle_bytes"] == 4096

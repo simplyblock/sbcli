@@ -454,3 +454,138 @@ class TestStatelessness:
 
         assert response.status_code == 200
         assert response.headers['content-type'].startswith('text/plain')
+
+
+class TestReplicationMetrics:
+    """design §11: the six replication metrics, sourced from
+    ``lvol_controller.get_replication_info_bulk`` (mocked here directly,
+    never the DB it reads from -- that function's own DB-reading logic is
+    covered by the FDB-backed tests in test_replication_status_read.py's
+    TestReplicationInfoBulk).
+    """
+
+    def _info(self, **overrides):
+        info = {
+            'outstanding_bytes': 0, 'state': 'in_sync',
+            'lag_seconds': None, 'last_cycle_seconds': None,
+            'last_cycle_bytes': None, 'rpo_target_seconds': 0,
+            'policy_id': '', 'policy_name': '', 'peer_cluster': '',
+        }
+        info.update(overrides)
+        return info
+
+    def test_values_present(self, client, db, cluster, pool, volume, lvol_controller):
+        _no_stats(db)
+        db.get_storage_nodes_by_cluster_id.return_value = []
+        volume.do_replicate = True
+        lvol_controller.get_replication_info_bulk.return_value = {
+            volume.get_id(): self._info(
+                outstanding_bytes=2048, state='in_sync',
+                lag_seconds=30, last_cycle_seconds=12, last_cycle_bytes=4096,
+                policy_id='pol-1', policy_name='nightly', peer_cluster='peer-1',
+            ),
+        }
+
+        body = client.get(METRICS_URL).text
+
+        labels = dict(lvol=volume.get_id(), policy='pol-1', peer_cluster='peer-1')
+        assert _value(body, 'simplyblock_replication_lag_seconds', **labels) == 30
+        assert _value(body, 'simplyblock_replication_backlog_bytes', **labels) == 2048
+        assert _value(body, 'simplyblock_replication_last_sync_seconds', **labels) == 12
+        assert _value(body, 'simplyblock_replication_last_sync_bytes', **labels) == 4096
+        assert _value(body, 'simplyblock_replication_degraded', **labels) == 0
+
+    def test_last_sync_omitted_when_no_completed_cycle(
+        self, client, db, cluster, pool, volume, lvol_controller,
+    ):
+        _no_stats(db)
+        db.get_storage_nodes_by_cluster_id.return_value = []
+        volume.do_replicate = True
+        lvol_controller.get_replication_info_bulk.return_value = {
+            volume.get_id(): self._info(state='not_replicating'),
+        }
+
+        body = client.get(METRICS_URL).text
+
+        assert not _samples(body, 'simplyblock_replication_last_sync_seconds')
+        assert not _samples(body, 'simplyblock_replication_last_sync_bytes')
+        assert not _samples(body, 'simplyblock_replication_lag_seconds')
+
+    def test_rpo_violation_omitted_without_a_declared_target(
+        self, client, db, cluster, pool, volume, lvol_controller,
+    ):
+        _no_stats(db)
+        db.get_storage_nodes_by_cluster_id.return_value = []
+        volume.do_replicate = True
+        lvol_controller.get_replication_info_bulk.return_value = {
+            volume.get_id(): self._info(lag_seconds=99999, rpo_target_seconds=0),
+        }
+
+        body = client.get(METRICS_URL).text
+
+        assert not _samples(body, 'simplyblock_replication_rpo_violation')
+
+    def test_rpo_violation_reports_when_lag_exceeds_the_target(
+        self, client, db, cluster, pool, volume, lvol_controller,
+    ):
+        _no_stats(db)
+        db.get_storage_nodes_by_cluster_id.return_value = []
+        volume.do_replicate = True
+        lvol_controller.get_replication_info_bulk.return_value = {
+            volume.get_id(): self._info(lag_seconds=700, rpo_target_seconds=600),
+        }
+
+        body = client.get(METRICS_URL).text
+
+        assert _value(
+            body, 'simplyblock_replication_rpo_violation',
+            lvol=volume.get_id(),
+        ) == 1
+
+    def test_rpo_violation_reports_zero_within_the_target(
+        self, client, db, cluster, pool, volume, lvol_controller,
+    ):
+        _no_stats(db)
+        db.get_storage_nodes_by_cluster_id.return_value = []
+        volume.do_replicate = True
+        lvol_controller.get_replication_info_bulk.return_value = {
+            volume.get_id(): self._info(lag_seconds=100, rpo_target_seconds=600),
+        }
+
+        body = client.get(METRICS_URL).text
+
+        assert _value(
+            body, 'simplyblock_replication_rpo_violation',
+            lvol=volume.get_id(),
+        ) == 0
+
+    def test_degraded_state_reports_one(self, client, db, cluster, pool, volume, lvol_controller):
+        _no_stats(db)
+        db.get_storage_nodes_by_cluster_id.return_value = []
+        volume.do_replicate = True
+        lvol_controller.get_replication_info_bulk.return_value = {
+            volume.get_id(): self._info(state='error'),
+        }
+
+        body = client.get(METRICS_URL).text
+
+        assert _value(
+            body, 'simplyblock_replication_degraded',
+            lvol=volume.get_id(),
+        ) == 1
+
+    def test_a_volume_absent_from_the_bulk_result_emits_no_replication_series(
+        self, client, db, cluster, pool, volume, lvol_controller,
+    ):
+        """A volume get_replication_info_bulk did not report on (e.g. it is
+        not do_replicate) contributes nothing -- absence, not a fabricated
+        zero, matching the rest of this exporter's philosophy."""
+        _no_stats(db)
+        db.get_storage_nodes_by_cluster_id.return_value = []
+        volume.do_replicate = True
+        lvol_controller.get_replication_info_bulk.return_value = {}
+
+        body = client.get(METRICS_URL).text
+
+        assert not _samples(body, 'simplyblock_replication_backlog_bytes')
+        assert not _samples(body, 'simplyblock_replication_degraded')
