@@ -1,9 +1,9 @@
 """What `sbctl cluster check-indices` reports back to its caller.
 
 The walk itself needs a real FoundationDB and lives in
-``tests/integration/test_database_indices.py``. What is checkable here is the
-verdict it turns into: the command's return value is its exit code, so it has to
-mean "nothing is left to do" — not "something was repaired".
+``tests/integration/models/indices/test_verifier.py``. What is checkable here is
+the verdict it turns into: the command's return value is its exit code, so it
+has to mean "nothing is left to do" — not "something was repaired".
 """
 import pytest
 

@@ -1,7 +1,7 @@
 """`sbctl cluster index-state` — the operator entry point to the kill switch.
 
 The switch itself (state record plus the clear) needs a real FoundationDB and
-lives in ``tests/integration/test_database_indices.py``. What is checkable here
+lives in ``tests/integration/models/indices/``. What is checkable here
 is the surface: that the command parses the way the kill switch is documented,
 and that a name like ``LVol.node_id`` resolves to the declaration it claims.
 """
