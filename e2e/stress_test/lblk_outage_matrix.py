@@ -53,6 +53,12 @@ class _LblkOutageMatrix(_LblkBase):
         "interface_full_network_interrupt",
     )
 
+    #: Outage types this platform leaves out. Empty here: docker cuts a
+    #: machine that does nothing but storage, so dropping its NICs isolates
+    #: exactly what the test means to isolate. Overridden on k8s.
+    #: LBLK_MATRIX_SKIP_OUTAGES overrides either, "" meaning skip nothing.
+    SKIP_OUTAGES = ()
+
     #: Where create_utility_pod and the FIO job mount a PVC inside the pod.
     #: On k8s nothing is mounted on the runner, so every read of a volume's
     #: contents goes through a pod and sees this path -- whatever the dual
@@ -114,8 +120,20 @@ class _LblkOutageMatrix(_LblkBase):
         self._fio_home_node = self._pick_fio_home(nodes)
         no_network_cut = [n for n in nodes
                           if n is not self._fio_home_node] or nodes
+        skip_env = os.environ.get("LBLK_MATRIX_SKIP_OUTAGES")
+        skip = ({o.strip() for o in skip_env.split(",") if o.strip()}
+                if skip_env is not None else set(self.SKIP_OUTAGES))
+        outages = [o for o in self.OUTAGES if o not in skip]
+        if not outages:
+            raise LblkPreconditionError(
+                f"[matrix] every outage type is skipped ({sorted(skip)}), so "
+                f"this run would prove nothing")
+        for o in sorted(skip):
+            self.logger.warning(
+                "[matrix] NOT exercising outage type %r on this platform", o)
+
         cycles = []
-        for outage in self.OUTAGES:
+        for outage in outages:
             # Named targets, not "pool": this loop used to bind its node list
             # to `pool`, clobbering the storage pool created above. Every
             # volume was then requested in a pool whose name was a list of
@@ -139,7 +157,7 @@ class _LblkOutageMatrix(_LblkBase):
             trimmed_no_cut = [n for n in trimmed
                               if n is not self._fio_home_node] or trimmed
             cycles = []
-            for outage in self.OUTAGES:
+            for outage in outages:
                 # Same exclusion as above: trimming the node count must not
                 # quietly put the network cut back on the node hosting FIO.
                 cycles += [(node, outage) for node in
@@ -151,7 +169,7 @@ class _LblkOutageMatrix(_LblkBase):
                 "%d cycles instead of %d. Coverage of outage TYPES is "
                 "unchanged; coverage of nodes is not.",
                 cap, len(trimmed), len(nodes), len(cycles),
-                len(self.OUTAGES) * len(nodes))
+                len(outages) * len(nodes))
         by_type = {}
         for node, outage in cycles:
             by_type.setdefault(outage, []).append(node.get("mgmt_ip"))
@@ -161,7 +179,7 @@ class _LblkOutageMatrix(_LblkBase):
         self.logger.info(
             "[matrix] %d cycles planned across %d outage type(s), "
             "~%.1fh at %ds per cycle",
-            len(cycles), len(self.OUTAGES),
+            len(cycles), len(outages),
             len(cycles) * self.SEC_PER_CYCLE / 3600.0, self.SEC_PER_CYCLE)
 
         self._build_static_set(pool)
@@ -185,7 +203,7 @@ class _LblkOutageMatrix(_LblkBase):
             "[matrix] %d cycles survived (%d outage types x %d nodes): %d "
             "static volume(s) byte identical throughout, live FIO "
             "uninterrupted on %d volume(s)",
-            len(cycles), len(self.OUTAGES), len(nodes), len(self._static),
+            len(cycles), len(outages), len(nodes), len(self._static),
             len(live))
 
     def _pick_fio_home(self, nodes):
@@ -847,4 +865,21 @@ class LblkOutageMatrixDocker(_LblkDockerMixin, _LblkOutageMatrix):
 
 
 class LblkOutageMatrixK8s(_LblkK8sMixin, _LblkOutageMatrix):
-    """Availability and durability across every outage type, k8s-native."""
+    """Availability and durability across every outage type, k8s-native.
+
+    The network cut is left out here, and only here. A k8s node is not just a
+    storage node: OVN's geneve overlay runs between the same node IPs, so a
+    blanket cut took every pod-to-pod link across nodes with it, FoundationDB
+    lost quorum and the control plane could no longer read its own database
+    -- FDBError 1031, on cycle 13 of 15, after twelve clean cycles.
+
+    _network_outage has since been narrowed to the node's own service ports
+    so the overlay and the database survive, but that has not been proven on
+    a real run, and an outage that breaks the cluster rather than the node
+    invalidates every cycle after it. Docker has no such entanglement and
+    keeps all four types.
+
+    Put it back with LBLK_MATRIX_SKIP_OUTAGES="".
+    """
+
+    SKIP_OUTAGES = ("interface_full_network_interrupt",)
