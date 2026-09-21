@@ -5133,6 +5133,34 @@ def _pick_drain_target(snode, lvol, tried, db_controller):
         # No replica online either. Nothing to exclude, and create_migration
         # will raise the real, more specific error.
         pass
+
+    # TEST ONLY -- never set in production. _get_next_3_nodes below picks
+    # randomly among up to 3 weighted candidates, so reproducing "the drain
+    # target's own secondary happens to BE the departing node" (the
+    # topology condition create_migration's _usable_replica fix addresses --
+    # see fix/migration-target-replica-offline-check) depends on that draw
+    # landing on the one node satisfying it, which a real cluster's ring
+    # topology makes at most one node in six. Forcing it here makes a real
+    # node-removal drain exercise that exact condition deterministically
+    # instead of waiting on chance across repeated full redeploys.
+    # check_target_viable still gates it -- this only changes which node is
+    # tried, never bypasses the checks that decide whether it is accepted.
+    if os.environ.get("SB_TEST_PREFER_TARGET_WHOSE_SECONDARY_IS_DEPARTING") == "1":
+        for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if (peer.secondary_node_id == snode.get_id()
+                    and peer.get_id() not in exclude
+                    and peer.status == StorageNode.STATUS_ONLINE):
+                ok, reason = migration_controller.check_target_viable(lvol.get_id(), peer.get_id())
+                if ok:
+                    logger.info(
+                        f"[REMOVAL] {snode.get_id()}: SB_TEST_PREFER_TARGET_WHOSE_SECONDARY_IS_DEPARTING "
+                        f"forcing drain target {peer.get_id()[:8]} for {lvol.get_id()[:8]}")
+                    return peer.get_id()
+                logger.info(
+                    f"[REMOVAL] {snode.get_id()}: SB_TEST_PREFER_TARGET_WHOSE_SECONDARY_IS_DEPARTING "
+                    f"candidate {peer.get_id()[:8]} not viable ({reason}); falling back to normal picker")
+                break
+
     candidates = lvol_controller._get_next_3_nodes(
         snode.cluster_id, lvol.size,
         namespaced=bool(getattr(lvol, "max_namespace_per_subsys", 1) > 1),

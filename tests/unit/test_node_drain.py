@@ -11,6 +11,7 @@ NODE_DRAIN_MAX_RESTARTS_PER_TARGET times, then move to the next candidate, and
 only when no candidate is left does the removal fail (RemovalGaveUp ->
 REMOVED_FAILED).
 """
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -369,3 +370,111 @@ class TestDrainTargetExcludesTheActingSource(unittest.TestCase):
             self.assertEqual(
                 storage_node_ops._pick_drain_target(snode, lvol, [], MagicMock()),
                 "b30f8f0c")
+
+
+class TestForceTargetWhoseSecondaryIsDeparting(unittest.TestCase):
+    """SB_TEST_PREFER_TARGET_WHOSE_SECONDARY_IS_DEPARTING (test-only, gated by
+    an env var never set in production): deterministically reproduce the
+    topology condition create_migration's _usable_replica fix addresses --
+    the drain target's own secondary happens to BE the departing node --
+    instead of waiting on _get_next_3_nodes's random draw to land on it.
+    """
+
+    def _snode_and_peer(self, peer_status=StorageNode.STATUS_ONLINE):
+        snode = MagicMock()
+        snode.get_id.return_value = "departing"
+        snode.cluster_id = "c1"
+        peer = MagicMock()
+        peer.get_id.return_value = "peer-whose-secondary-is-departing"
+        peer.secondary_node_id = "departing"
+        peer.status = peer_status
+        other = MagicMock()
+        other.get_id.return_value = "other-peer"
+        other.secondary_node_id = "someone-else"
+        other.status = StorageNode.STATUS_ONLINE
+        return snode, peer, other
+
+    def test_off_by_default(self):
+        """Without the env var, the normal random-weighted picker runs
+        unchanged -- confirms the override is truly opt-in."""
+        snode, peer, other = self._snode_and_peer()
+        db = MagicMock()
+        db.get_storage_nodes_by_cluster_id.return_value = [peer, other]
+        lvol = MagicMock()
+        lvol.get_id.return_value = "lvol-1"
+        lvol.size = 1024
+        lvol.max_namespace_per_subsys = 1
+        with patch.dict(os.environ, {}, clear=False), \
+             patch.object(storage_node_ops.lvol_controller, "_get_next_3_nodes",
+                          return_value=["other-peer"]), \
+             patch.object(storage_node_ops.migration_controller,
+                          "resolve_source_node", side_effect=ValueError("none")), \
+             patch.object(storage_node_ops.migration_controller,
+                          "check_target_viable", return_value=(True, "")):
+            os.environ.pop("SB_TEST_PREFER_TARGET_WHOSE_SECONDARY_IS_DEPARTING", None)
+            target = storage_node_ops._pick_drain_target(snode, lvol, [], db)
+        self.assertEqual(target, "other-peer")
+
+    def test_forces_the_peer_whose_secondary_is_departing_when_set(self):
+        snode, peer, other = self._snode_and_peer()
+        db = MagicMock()
+        db.get_storage_nodes_by_cluster_id.return_value = [other, peer]
+        lvol = MagicMock()
+        lvol.get_id.return_value = "lvol-1"
+        lvol.size = 1024
+        lvol.max_namespace_per_subsys = 1
+        with patch.dict(os.environ,
+                        {"SB_TEST_PREFER_TARGET_WHOSE_SECONDARY_IS_DEPARTING": "1"}), \
+             patch.object(storage_node_ops.migration_controller,
+                          "resolve_source_node", side_effect=ValueError("none")), \
+             patch.object(storage_node_ops.migration_controller,
+                          "check_target_viable", return_value=(True, "")):
+            target = storage_node_ops._pick_drain_target(snode, lvol, [], db)
+        self.assertEqual(target, "peer-whose-secondary-is-departing")
+
+    def test_still_gated_by_check_target_viable(self):
+        """Forcing the candidate never bypasses the real admission check --
+        an unviable forced candidate falls back to the normal picker."""
+        snode, peer, other = self._snode_and_peer()
+        db = MagicMock()
+        db.get_storage_nodes_by_cluster_id.return_value = [peer, other]
+        lvol = MagicMock()
+        lvol.get_id.return_value = "lvol-1"
+        lvol.size = 1024
+        lvol.max_namespace_per_subsys = 1
+        def _viable(lvol_id, target_id):
+            if target_id == "peer-whose-secondary-is-departing":
+                return False, "not viable"
+            return True, ""
+
+        with patch.dict(os.environ,
+                        {"SB_TEST_PREFER_TARGET_WHOSE_SECONDARY_IS_DEPARTING": "1"}), \
+             patch.object(storage_node_ops.lvol_controller, "_get_next_3_nodes",
+                          return_value=["other-peer"]), \
+             patch.object(storage_node_ops.migration_controller,
+                          "resolve_source_node", side_effect=ValueError("none")), \
+             patch.object(storage_node_ops.migration_controller,
+                          "check_target_viable", side_effect=_viable):
+            target = storage_node_ops._pick_drain_target(snode, lvol, [], db)
+        self.assertEqual(target, "other-peer")
+
+    def test_a_departing_secondary_peer_that_is_offline_is_not_forced(self):
+        """The forced candidate must itself be ONLINE -- an offline peer
+        cannot host anything, forced or not."""
+        snode, peer, other = self._snode_and_peer(peer_status=StorageNode.STATUS_OFFLINE)
+        db = MagicMock()
+        db.get_storage_nodes_by_cluster_id.return_value = [peer, other]
+        lvol = MagicMock()
+        lvol.get_id.return_value = "lvol-1"
+        lvol.size = 1024
+        lvol.max_namespace_per_subsys = 1
+        with patch.dict(os.environ,
+                        {"SB_TEST_PREFER_TARGET_WHOSE_SECONDARY_IS_DEPARTING": "1"}), \
+             patch.object(storage_node_ops.lvol_controller, "_get_next_3_nodes",
+                          return_value=["other-peer"]), \
+             patch.object(storage_node_ops.migration_controller,
+                          "resolve_source_node", side_effect=ValueError("none")), \
+             patch.object(storage_node_ops.migration_controller,
+                          "check_target_viable", return_value=(True, "")):
+            target = storage_node_ops._pick_drain_target(snode, lvol, [], db)
+        self.assertEqual(target, "other-peer")
