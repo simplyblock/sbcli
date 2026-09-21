@@ -93,24 +93,32 @@ class _LblkOutageMatrix(_LblkBase):
         # same node down four times in a row tests recovery from a warm cache
         # more than it tests the cluster, and it leaves the other nodes
         # untouched for a quarter of the run.
-        # Keep the client off the machines being broken.
+        # Where live FIO runs, and the one outage it cannot sit through.
         #
         # This cluster has no client-role nodes, so an unpinned FIO pod lands
-        # on a storage worker -- possibly the very one a cycle is about to cut
-        # off. A network outage blocks that node's traffic to its peers in
-        # both directions, so FIO running THERE loses its path to every other
-        # node and errors. That would be a test artefact: it says nothing
-        # about whether the cluster kept serving, only that the client was
-        # inside the blast radius.
+        # on a storage worker. Reserve one node for the client -- real
+        # deployments separate the two -- and pin every live FIO job there.
         #
-        # Real deployments separate clients from storage. Reserve one storage
-        # node to stand in for that, pin every live FIO job to its worker, and
-        # never outage it.
+        # That node still takes its turn at most outages. Losing SPDK on the
+        # machine the client happens to sit on is if anything the sharper
+        # test: the pod keeps its network, so it must carry on being served by
+        # the surviving peers, and the erasure coding has to do exactly what
+        # it exists for.
+        #
+        # The network cut is the exception. It drops that node's traffic to
+        # its peers in BOTH directions, so a client there cannot reach any
+        # other node either. FIO would fail for lack of a path rather than for
+        # lack of data, and the run would record a loss of availability that
+        # only means the client was inside the blast radius. So the reserved
+        # node sits that one out.
         self._fio_home_node = self._pick_fio_home(nodes)
-        outage_nodes = [n for n in nodes
-                        if n is not self._fio_home_node] or nodes
-        cycles = [(node, outage)
-                  for outage in self.OUTAGES for node in outage_nodes]
+        no_network_cut = [n for n in nodes
+                          if n is not self._fio_home_node] or nodes
+        cycles = []
+        for outage in self.OUTAGES:
+            pool = (no_network_cut
+                    if outage == "interface_full_network_interrupt" else nodes)
+            cycles += [(node, outage) for node in pool]
 
         # Full coverage is every type on every node, and on a six-node cluster
         # that is 24 cycles at roughly ten minutes each -- about four hours.
@@ -129,10 +137,16 @@ class _LblkOutageMatrix(_LblkBase):
                 "unchanged; coverage of nodes is not.",
                 cap, len(trimmed), len(nodes), len(cycles),
                 len(self.OUTAGES) * len(nodes))
+        by_type = {}
+        for node, outage in cycles:
+            by_type.setdefault(outage, []).append(node.get("mgmt_ip"))
+        for outage, ips in by_type.items():
+            self.logger.info("[matrix]   %-34s %d node(s): %s",
+                             outage, len(ips), ", ".join(ips))
         self.logger.info(
-            "[matrix] %d cycles planned: %d outage type(s) x %d node(s), "
+            "[matrix] %d cycles planned across %d outage type(s), "
             "~%.1fh at %ds per cycle",
-            len(cycles), len(self.OUTAGES), len(cycles) // len(self.OUTAGES),
+            len(cycles), len(self.OUTAGES),
             len(cycles) * self.SEC_PER_CYCLE / 3600.0, self.SEC_PER_CYCLE)
 
         self._build_static_set(pool)
