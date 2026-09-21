@@ -769,8 +769,7 @@ class _LblkBase(TestClusterBase):
         self.ssh_obj.notify_outage_started([ip])
 
         if outage_type == "graceful_shutdown":
-            # Control-plane API, so it works the same on both platforms.
-            self.sbcli_utils.shutdown_node(node_uuid=uuid)
+            self._issue_shutdown(uuid)
         elif outage_type == "container_stop":
             # Storage nodes are not ssh-reachable on k8s; the pod helper is
             # what every other k8s test uses for this.
@@ -808,6 +807,39 @@ class _LblkBase(TestClusterBase):
 
     #: Restart attempts before giving up on a node.
     RESTART_ATTEMPTS = 3
+
+    def _issue_shutdown(self, uuid):
+        """Graceful shutdown, through the operator on k8s.
+
+        Paired deliberately with _issue_restart. A shutdown driven through the
+        control-plane API and a restart driven through the operator is a
+        combination no real deployment produces, and it leaves the operator
+        with no record of why the node went down. Both halves go through
+        StorageNodeOps so the sequence is the one a k8s user performs.
+        """
+        if not self.k8s_test:
+            self.sbcli_utils.shutdown_node(node_uuid=uuid)
+            return
+        k8s = self._ensure_k8s_utils()
+        try:
+            cr_name = k8s.resolve_storage_node_cr_name(uuid)
+            ops_name = f"shutdown-{uuid[:8]}-{random.randint(1000, 9999)}"
+            k8s.create_storage_node_ops(name=ops_name,
+                                        storage_node_ref=cr_name,
+                                        action="shutdown")
+            self.logger.info("[lblk] StorageNodeOps %s: shutdown of %s (CR=%s)",
+                             ops_name, uuid, cr_name)
+            try:
+                k8s.wait_storage_node_ops_done(ops_name, timeout=600)
+            except (TimeoutError, AssertionError) as exc:
+                self.logger.warning(
+                    "[lblk] StorageNodeOps %s did not report success (%s); "
+                    "the offline wait decides", ops_name, str(exc)[:120])
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[lblk] could not drive the shutdown through StorageNodeOps "
+                "(%s); falling back to the control-plane API", str(exc)[:150])
+            self.sbcli_utils.shutdown_node(node_uuid=uuid)
 
     def _issue_restart(self, uuid):
         """Ask for a restart the way this platform expects.

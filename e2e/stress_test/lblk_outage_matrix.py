@@ -93,8 +93,24 @@ class _LblkOutageMatrix(_LblkBase):
         # same node down four times in a row tests recovery from a warm cache
         # more than it tests the cluster, and it leaves the other nodes
         # untouched for a quarter of the run.
+        # Keep the client off the machines being broken.
+        #
+        # This cluster has no client-role nodes, so an unpinned FIO pod lands
+        # on a storage worker -- possibly the very one a cycle is about to cut
+        # off. A network outage blocks that node's traffic to its peers in
+        # both directions, so FIO running THERE loses its path to every other
+        # node and errors. That would be a test artefact: it says nothing
+        # about whether the cluster kept serving, only that the client was
+        # inside the blast radius.
+        #
+        # Real deployments separate clients from storage. Reserve one storage
+        # node to stand in for that, pin every live FIO job to its worker, and
+        # never outage it.
+        self._fio_home_node = self._pick_fio_home(nodes)
+        outage_nodes = [n for n in nodes
+                        if n is not self._fio_home_node] or nodes
         cycles = [(node, outage)
-                  for outage in self.OUTAGES for node in nodes]
+                  for outage in self.OUTAGES for node in outage_nodes]
 
         # Full coverage is every type on every node, and on a six-node cluster
         # that is 24 cycles at roughly ten minutes each -- about four hours.
@@ -142,6 +158,42 @@ class _LblkOutageMatrix(_LblkBase):
             "uninterrupted on %d volume(s)",
             len(cycles), len(self.OUTAGES), len(nodes), len(self._static),
             len(live))
+
+    def _pick_fio_home(self, nodes):
+        """Reserve one storage node to host live FIO. Returns the node dict.
+
+        None on docker, where FIO runs on real client machines that were never
+        storage nodes, and None on a cluster with client-role nodes, where the
+        FIO job already keeps away from storage on its own.
+        """
+        self._fio_home_worker = None
+        if not self.k8s_test or not nodes:
+            return None
+        k8s = self._ensure_k8s_utils()
+        if k8s.has_client_nodes():
+            self.logger.info("[matrix] cluster has client-role nodes; FIO "
+                             "already avoids storage nodes")
+            return None
+
+        home = nodes[0]
+        ip = home.get("mgmt_ip")
+        try:
+            worker = k8s.get_pod_node_name(k8s.get_spdk_pod_name(ip))
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[matrix] could not resolve the worker behind %s (%s); live "
+                "FIO will be scheduled freely and a network outage on its "
+                "node may fail it for reasons unrelated to the product",
+                ip, str(exc)[:120])
+            return None
+        if not worker:
+            return None
+        self._fio_home_worker = worker
+        self.logger.warning(
+            "[matrix] no client-role nodes: reserving %s (%s) for live FIO "
+            "and excluding it from outages, so the client is never inside the "
+            "blast radius of the node being broken", worker, ip)
+        return home
 
     # ── the durability lane ───────────────────────────────────────────────
 
@@ -683,7 +735,9 @@ class _LblkOutageMatrix(_LblkBase):
                 name, mount_path=mount, log_path=log,
                 runtime=runtime, name=f"mxlive{label}",
                 rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
-                time_based=True, node_selector=self._pin_for(name))))
+                time_based=True,
+                node_selector=(self._pin_for(name)
+                               or getattr(self, "_fio_home_worker", None)))))
             self.logger.info("[matrix] live FIO started on %s volume %s",
                              label, name)
         return handles
