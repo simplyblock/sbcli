@@ -300,9 +300,12 @@ class _LblkOutageMatrix(_LblkBase):
         snap = f"mxsnap{random.randint(100, 999)}"
         snap_id = self._create_snapshot_dual(parent, snap)
         clone = f"mxclone{random.randint(100, 999)}"
-        _dev, cmount = self._create_clone_dual(
-            snap_id, clone, size=self.LVOL_SIZE,
-            mount_path=f"/mnt/{clone}", format_disk=False)
+        if self.k8s_test:
+            _dev, cmount = self._create_clone_dual(
+                snap_id, clone, size=self.LVOL_SIZE,
+                mount_path=f"/mnt/{clone}", format_disk=False)
+        else:
+            cmount = self._clone_and_attach(snap_id, clone)
         if self.k8s_test:
             # _create_clone_dual returns (pvc_name, pvc_name) on k8s -- its
             # "mount" is the claim name, not a path, because nothing is
@@ -527,7 +530,42 @@ class _LblkOutageMatrix(_LblkBase):
                 "sharing at all.")
         return parent
 
-    def _mount_namespaced(self, name, parent=None, retries=5, delay=4):
+    def _clone_and_attach(self, snap_id, clone):
+        """Create a clone on docker and attach it, whichever way it landed.
+
+        Where a clone ends up is not decided by what it was cloned FROM. The
+        backend puts it in any subsystem on that node with free namespace
+        slots, so once one volume on the node has slots -- and one must, to
+        host the namespaced child -- a clone can be packed in beside it. Then
+        there is no new controller to find and the connect path fails with
+
+          No new block device after connecting mxclone348
+
+        Choosing a differently-sourced parent did not avoid this, because the
+        source was never what governed it. So: try the ordinary connect, and
+        if the clone turns out to have joined an existing subsystem, resolve
+        it by (NQN, ns_id) exactly as a namespaced volume is resolved.
+
+        Never formatted either way. A clone carries its parent's bytes and
+        this test compares its md5 against them; mkfs would destroy the very
+        thing being checked.
+        """
+        self.sbcli_utils.add_clone(snapshot_id=snap_id, clone_name=clone)
+        try:
+            _dev, mount = self._connect_and_mount_dual(
+                clone, mount_path=f"/mnt/{clone}", format_disk=False)
+            if mount:
+                return mount
+            raise AssertionError("no mount returned")
+        except AssertionError as exc:
+            self.logger.info(
+                "[matrix] %s did not bring up a controller of its own (%s); "
+                "it joined an existing subsystem -- resolving by ns_id",
+                clone, str(exc)[:80])
+        return self._mount_namespaced(clone, format_fs=False)
+
+    def _mount_namespaced(self, name, parent=None, retries=5, delay=4,
+                          format_fs=True):
         """Find a namespaced volume's device without connecting to it.
 
         A namespaced volume joins an existing subsystem rather than opening
@@ -570,8 +608,9 @@ class _LblkOutageMatrix(_LblkBase):
                 self.logger.info(
                     "[matrix] %s is ns_id %s on %s (no connect needed) -> %s",
                     name, ns_id, nqn[-24:], device)
-                self.ssh_obj.format_disk(node=client, device=device,
-                                         fs_type="ext4")
+                if format_fs:
+                    self.ssh_obj.format_disk(node=client, device=device,
+                                             fs_type="ext4")
                 self.ssh_obj.mount_path(node=client, device=device,
                                         mount_path=mount)
                 if not self.ssh_obj.is_mountpoint(client, mount):
