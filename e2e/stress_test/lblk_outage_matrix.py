@@ -28,6 +28,7 @@ is a real finding about lblk rather than a bug in this test.
 import json
 import os
 import random
+import re
 import threading
 import time
 
@@ -964,6 +965,49 @@ class _LblkOutageMatrix(_LblkBase):
                      f"&& echo ALIVE || echo GONE)"))
         return "ALIVE" in (out or "")
 
+    #: Lines that mean the workload actually hit an error, as opposed to the
+    #: word "error" appearing in a summary. A clean FIO log says "err= 0";
+    #: only a non-zero err, or one of these phrases, is a failure.
+    FIO_ERROR_MARKERS = ("io_u error", "verify failed", "bad magic header",
+                         "hdr_fail", "data mismatch", "checksum error")
+
+    def _k8s_finish_fio(self, job, volume):
+        """Stop a live FIO job and fail on anything its log recorded.
+
+        The job runs for the length of the matrix, so there is nothing to wait
+        for: every io_u error raised during an outage is already in the log by
+        the time the last cycle finishes.
+        """
+        k8s = self._ensure_k8s_utils()
+        pods = k8s.get_job_pod_names(job) or []
+        if not pods:
+            raise LblkPreconditionError(
+                f"[matrix] live FIO job {job} ({volume}) has no pod to read, "
+                f"so nothing can be said about whether IO continued.")
+        hits = []
+        for pod in pods:
+            logs = k8s.get_pod_logs(pod, tail=4000) or ""
+            for line in logs.splitlines():
+                low = line.lower()
+                if any(m in low for m in self.FIO_ERROR_MARKERS):
+                    hits.append(f"{pod}: {line.strip()[:160]}")
+                elif re.search(r"\berr=\s*[1-9]", low):
+                    hits.append(f"{pod}: {line.strip()[:160]}")
+        try:
+            k8s.delete_job(job)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[matrix] could not delete FIO job %s: %s",
+                                job, str(exc)[:120])
+        if hits:
+            raise LblkPreconditionError(
+                f"[matrix] live FIO on {volume} recorded {len(hits)} IO "
+                f"error(s) across {len(self.OUTAGES)} outage types. With "
+                f"ndcs/npcs {self.ndcs}/{self.npcs} one node down is meant to "
+                f"be survivable, so this is a loss of availability:\n    "
+                + "\n    ".join(hits[:6]))
+        self.logger.info("[matrix] live FIO on %s: %d pod log(s), no IO "
+                         "errors", volume, len(pods))
+
     def _k8s_fio_running(self, job_name):
         """Is this FIO Job still moving IO?"""
         k8s = self._ensure_k8s_utils()
@@ -1011,11 +1055,16 @@ class _LblkOutageMatrix(_LblkBase):
                 # arguments" after all 12 cycles had passed.
                 handle.join(timeout=60)
             if self.k8s_test:
-                # k8s.validate_fio_job raises; _validate_fio_dual only logs a
-                # warning for "error"/"fail" and then says validation passed,
-                # which would have let an io_u error through on exactly the
-                # platform this lane is meant to gate.
-                self._ensure_k8s_utils().validate_fio_job(handle)
+                # NOT validate_fio_job: it calls wait_job_complete(timeout=600)
+                # and this job is deliberately sized to outlast the whole
+                # matrix, so it was still Running and the run failed with
+                #
+                #   FIO Job 'fio-mxliveplain' did not succeed (status=timeout)
+                #   (pod phase=Running)
+                #
+                # after all 12 cycles had passed. Same shape as the docker
+                # side: stop the job, then judge what it wrote.
+                self._k8s_finish_fio(handle, name)
             else:
                 self.common_utils.validate_fio_test(
                     node=self.client_machines[0], log_file=log,
