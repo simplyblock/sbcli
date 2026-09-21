@@ -828,9 +828,14 @@ class _LblkBase(TestClusterBase):
                 f"need at least 2 storage nodes to take one down, have {len(nodes)}")
         return random.choice(nodes)
 
-    #: How long a network-interrupt outage holds. Short enough that the
-    #: 600s offline wait in _outage_and_recover still has room afterwards.
+    #: How long a network-interrupt outage holds.
     NETWORK_OUTAGE_SEC = 120
+
+    #: How long to let the control plane bring a fenced node back by itself.
+    #: SPDK aborts when it loses its peers, the monitor sees the node offline
+    #: and queues a restart; that path is what this outage is for, so it gets
+    #: a generous window before the test intervenes.
+    AUTO_RESTART_SEC = 900
 
     def _outage_and_recover(self, node, outage_type):
         """Take one node down the requested way and bring it back."""
@@ -896,6 +901,38 @@ class _LblkBase(TestClusterBase):
                                                         timeout=300)
                 self.logger.info("[lblk] %s recovered", uuid)
                 return
+
+            # Recovery here is the product's job, not ours. Cut off from its
+            # peers, SPDK fences itself and aborts; the control plane sees the
+            # node offline and auto-restarts it, and it comes back once the
+            # links return. Forcing a restart would paper over that whole
+            # mechanism -- including the case where auto-restart never fires,
+            # which is a defect worth failing on rather than hiding behind our
+            # own restart call.
+            #
+            # A core dump from that abort is expected here: spdk_abort_node is
+            # how the fence is implemented.
+            self.logger.info("[lblk] %s: links restored, waiting for the "
+                             "control plane to auto-restart it", ip)
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    uuid, "online", timeout=self.AUTO_RESTART_SEC)
+                self.sbcli_utils.wait_for_health_status(uuid, True,
+                                                        timeout=300)
+                self.logger.info("[lblk] %s came back on its own -- "
+                                 "auto-restart worked", uuid)
+                return
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[lblk] %s did not auto-restart within %ds (%s); "
+                    "restarting it explicitly so the run can continue. "
+                    "Auto-restart after a network fence is meant to be "
+                    "automatic -- worth reporting.",
+                    uuid, self.AUTO_RESTART_SEC, str(exc)[:120])
+            self._restart_until_online(uuid, ip)
+            self.sbcli_utils.wait_for_health_status(uuid, True, timeout=300)
+            self.logger.info("[lblk] %s recovered", uuid)
+            return
         else:
             raise ValueError(f"unhandled outage type {outage_type!r}")
 
