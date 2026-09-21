@@ -28,6 +28,7 @@ is a real finding about lblk rather than a bug in this test.
 import json
 import os
 import random
+import threading
 import time
 
 from e2e_tests.lblk.test_lblk import (
@@ -274,7 +275,12 @@ class _LblkOutageMatrix(_LblkBase):
 
         # A clone carries its parent's bytes, so it is the cheapest check that
         # snapshot/clone on lblk preserves data across the same outages.
-        parent = self._static[0][0]
+        # Clone a volume WITHOUT namespace slots, so the clone opens its own
+        # subsystem and connects normally. self._static[0] is the namespaced
+        # child's host and is the one volume that would swallow it.
+        host = (getattr(self, "_ns_parent_info", None) or {}).get("name")
+        parent = next((n for n, _m in self._static if n != host),
+                      self._static[0][0])
         snap = f"mxsnap{random.randint(100, 999)}"
         snap_id = self._create_snapshot_dual(parent, snap)
         clone = f"mxclone{random.randint(100, 999)}"
@@ -379,10 +385,20 @@ class _LblkOutageMatrix(_LblkBase):
                 self.sbcli_utils.add_lvol(**kwargs)
                 return self._mount_namespaced(name, parent=parent)
 
-            # Every other volume is created with room for children, so any of
-            # them can host the namespaced one. 30 is what the failover suites
-            # use, well under the product's 50-per-subsystem limit.
-            kwargs["max_namespace_per_subsys"] = 30
+            # Slots go ONLY on the volume that will host the namespaced
+            # child -- the first one created. Handing them to every volume
+            # had a second effect I did not intend: a clone of a parent with
+            # free slots stays in the parent's subsystem instead of opening
+            # its own, so it too arrived with no new controller and
+            # _connect_and_mount_dual failed with
+            #
+            #   No new block device after connecting mxclone761
+            #
+            # which is the same discovery problem as the namespaced child,
+            # reached from a different direction. Restricting the slots keeps
+            # every clone in a subsystem of its own.
+            if not getattr(self, "_ns_parent_info", None):
+                kwargs["max_namespace_per_subsys"] = 30
             self.sbcli_utils.add_lvol(**kwargs)
             _dev, mount = self._connect_and_mount_dual(
                 name, mount_path=f"/mnt/{name}", format_disk=True)
@@ -957,7 +973,12 @@ class _LblkOutageMatrix(_LblkBase):
         """
         sleep_n_sec(10)
         for name, log, handle in handles:
-            if hasattr(handle, "join"):
+            # threading.Thread, not hasattr: on k8s the handle is the Job
+            # NAME and str.join exists, so this called "jobname".join(
+            # timeout=...) and died with "str.join() takes no keyword
+            # arguments" -- after all 12 cycles had passed. Same trap as
+            # _fs_fio in test_lblk.py, which was fixed and this was not.
+            if isinstance(handle, threading.Thread):
                 handle.join(timeout=self._fio_runtime)
             if self.k8s_test:
                 # k8s.validate_fio_job raises; _validate_fio_dual only logs a
