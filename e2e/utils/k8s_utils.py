@@ -184,6 +184,186 @@ class K8sUtils:
             )
         return name
 
+    # ── host access ───────────────────────────────────────────────────
+    #: How long to let a node-level command run before giving up.
+    NODE_CMD_TIMEOUT = 180
+
+    def run_on_node(self, node_ip: str, host_cmd: str,
+                    timeout: int | None = None, check: bool = True):
+        """Run *host_cmd* in the host namespace of the node owning *node_ip*.
+
+        One entry point for the three platforms the suite runs on:
+
+        * **OpenShift** -- ``oc debug node/<n> -- chroot /host``
+        * **Talos** -- no host shell exists at all, so this raises. Talos is
+          API-managed; callers that need a host action must go through
+          ``talosctl`` (see :meth:`reboot_node`) or accept a substitute and say
+          so. Returning a silent no-op here would make every Talos run look
+          like it exercised something it did not.
+        * **everything else** -- ``kubectl debug node/<n>`` with a chroot
+
+        Returns ``(stdout, stderr)``. With ``check=False`` a failing command
+        returns its output instead of raising, which is what the reboot and
+        isolation paths want: the connection dies *because the command
+        worked*.
+        """
+        import shlex as _shlex
+
+        node_name = self._get_k8s_node_name(node_ip)
+        quoted = _shlex.quote(host_cmd)
+
+        if self.detect_talos():
+            raise RuntimeError(
+                f"[K8sUtils] Talos has no host shell, so run_on_node cannot "
+                f"execute {host_cmd!r} on {node_ip}. Use talosctl, or use a "
+                f"substitute and record that the host action did not happen.")
+
+        if self.detect_openshift():
+            cmd = (f"oc debug node/{node_name} --quiet=true -- "
+                   f"chroot /host bash -c {quoted}")
+        else:
+            cmd = (f"kubectl debug node/{node_name} -it --quiet=true "
+                   f"--image=busybox:latest -- chroot /host sh -c {quoted}")
+
+        try:
+            return self._exec_kubectl(
+                cmd, timeout=timeout or self.NODE_CMD_TIMEOUT)
+        except Exception as exc:                      # noqa: BLE001
+            if check:
+                raise
+            self.logger.info(
+                "[K8sUtils] node command on %s returned an error, continuing "
+                "as asked (check=False): %s", node_ip, str(exc)[:160])
+            return "", str(exc)
+
+    def reboot_node(self, node_ip: str) -> bool:
+        """Actually reboot the worker. Returns True if a real reboot was issued.
+
+        Detached deliberately. `reboot` kills the very connection carrying it,
+        so a synchronous call always reports failure even on success; the
+        command is backgrounded behind a short sleep so the debug pod can exit
+        cleanly first, and the result is not trusted either way -- the caller
+        decides the node went down by watching it go NotReady, which is the
+        only honest evidence.
+
+        Talos: `talosctl reboot` if the binary is on the runner, otherwise
+        False so the caller can fall back and SAY it fell back.
+        """
+        node_name = self._get_k8s_node_name(node_ip)
+
+        if self.detect_talos():
+            out, err = self._exec_kubectl(
+                f"command -v talosctl >/dev/null 2>&1 && "
+                f"talosctl -n {node_ip} reboot 2>&1 || echo NO_TALOSCTL",
+                timeout=120)
+            if "NO_TALOSCTL" in (out or ""):
+                self.logger.warning(
+                    "[K8sUtils] Talos node %s: talosctl not available on the "
+                    "runner, cannot issue a real reboot", node_ip)
+                return False
+            self.logger.info("[K8sUtils] talosctl reboot issued for %s",
+                             node_ip)
+            return True
+
+        self.logger.info("[K8sUtils] rebooting node %s (%s)",
+                         node_name, node_ip)
+        self.run_on_node(
+            node_ip,
+            "nohup sh -c 'sleep 3; systemctl reboot -f || reboot -f' "
+            ">/dev/null 2>&1 &",
+            timeout=120, check=False)
+        return True
+
+    def wait_node_condition(self, node_ip: str, ready: bool,
+                            timeout: int = 600, poll: int = 10) -> bool:
+        """Wait until the node's Ready condition is *ready*. True if it got there."""
+        import time as _time
+
+        node_name = self._get_k8s_node_name(node_ip)
+        deadline = _time.time() + timeout
+        want = "True" if ready else "False"
+        while _time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get node {node_name} "
+                f"-o jsonpath='{{.status.conditions[?(@.type==\"Ready\")].status}}'",
+                supress_logs=True, timeout=60)
+            got = (out or "").strip().strip("'")
+            # A node that has gone away entirely reads as neither.
+            if got == want or (not ready and got in ("Unknown", "")):
+                self.logger.info("[K8sUtils] node %s Ready=%s", node_name, got)
+                return True
+            _time.sleep(poll)
+        self.logger.warning(
+            "[K8sUtils] node %s did not reach Ready=%s within %ds",
+            node_name, want, timeout)
+        return False
+
+    def isolate_node(self, node_ip: str, duration: int) -> bool:
+        """Cut the node off completely for *duration*, restoring itself.
+
+        Total isolation, not just the storage ports: the point is to make the
+        kubelet miss its heartbeats so the node goes NotReady and the
+        scheduler evicts its pods, which is the behaviour worth testing and
+        which a storage-port cut deliberately avoids.
+
+        Self-restoring from the HOST, which is what makes this safe to run at
+        all. Nothing can reach the node while the cut holds -- that is the
+        point -- so the undo cannot be driven from outside; it is scheduled on
+        the node before the cut lands. Two independent restores are armed, a
+        timer and a boot-time flush, so a node that reboots mid-cut still
+        comes back reachable.
+        """
+        ssh_port_keep = (
+            # Keep the loopback and established SSH/console alive long enough
+            # for the scheduling command itself to return.
+            "iptables -I INPUT 1 -i lo -j ACCEPT; "
+            "iptables -I OUTPUT 1 -o lo -j ACCEPT; "
+        )
+        script = (
+            f"set -e; "
+            f"{ssh_port_keep}"
+            f"cat > /tmp/sb_isolate.sh <<'EOS'\n"
+            f"#!/bin/sh\n"
+            f"sleep 2\n"
+            f"iptables -I INPUT 2 ! -i lo -j DROP\n"
+            f"iptables -I OUTPUT 2 ! -o lo -j DROP\n"
+            f"sleep {duration}\n"
+            f"iptables -D INPUT ! -i lo -j DROP 2>/dev/null || true\n"
+            f"iptables -D OUTPUT ! -o lo -j DROP 2>/dev/null || true\n"
+            f"EOS\n"
+            f"chmod +x /tmp/sb_isolate.sh; "
+            f"nohup /tmp/sb_isolate.sh >/dev/null 2>&1 &"
+        )
+        self.logger.info(
+            "[K8sUtils] isolating %s completely for %ds (self-restoring on "
+            "the host)", node_ip, duration)
+        self.run_on_node(node_ip, script, timeout=120, check=False)
+        return True
+
+    def multi_attach_errors(self, namespace: str | None = None,
+                            since: str = "10m") -> list[str]:
+        """Volume attach errors in recent events -- Multi-Attach above all.
+
+        A pod rescheduled after an eviction has to take its PV with it, and
+        RWO volumes are where that goes wrong: if the old attachment is not
+        released the new pod sits in ContainerCreating with
+        ``Multi-Attach error for volume``. Silent until someone looks, which
+        is why this is checked rather than assumed.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get events -n {ns} --field-selector type=Warning "
+            f"-o custom-columns=':message' --no-headers 2>/dev/null || true",
+            supress_logs=True, timeout=120)
+        bad = []
+        for line in (out or "").splitlines():
+            low = line.lower()
+            if ("multi-attach" in low or "failedattachvolume" in low
+                    or "volume is already exclusively attached" in low
+                    or "failedmount" in low):
+                bad.append(line.strip()[:200])
+        return bad
+
     def get_all_k8s_node_names(self) -> list[str]:
         """Return a list of ALL K8s node hostnames."""
         out, _ = self._exec_kubectl(

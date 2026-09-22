@@ -705,6 +705,82 @@ class _LblkBase(TestClusterBase):
                    f"bash -c {shlex.quote(command)}")
         return k8s.exec_in_spdk_container(node_ip, wrapped)
 
+    def _isolate_and_verify_eviction(self, ip):
+        """Cut the node off until k8s evicts it, then check the pods landed.
+
+        What is actually being asserted, in order:
+
+        1. the node goes NotReady -- otherwise the cut did not bite and
+           everything after it is vacuous;
+        2. pods that were on it are gone from it;
+        3. the FIO pod is Running somewhere else;
+        4. no Multi-Attach / FailedAttachVolume events, which is the failure
+           this is really hunting. An RWO volume whose old attachment is not
+           released leaves the rescheduled pod stuck in ContainerCreating, and
+           nothing else in the suite would notice.
+
+        Data is expected to be rewritten, not preserved: the rescheduled FIO
+        pod gets its volume back empty of whatever was in page cache, and the
+        run's integrity guarantees come from the static volumes and the raw
+        crc32c region, which are checked separately after every cycle.
+        """
+        k8s = self._ensure_k8s_utils()
+        before = self._pods_on_node(ip)
+        self.logger.info("[lblk] isolating %s for %ds; %d pod(s) on it now",
+                         ip, self.NODE_ISOLATION_SEC, len(before))
+
+        k8s.isolate_node(ip, self.NODE_ISOLATION_SEC)
+
+        if not k8s.wait_node_condition(ip, ready=False, timeout=240):
+            # Say so and carry on: the checks below would pass trivially, and
+            # a green that proves nothing is worse than a named gap.
+            self.logger.warning(
+                "[lblk] %s never went NotReady during isolation -- eviction "
+                "was not triggered, so this cycle did not test rescheduling.",
+                ip)
+            k8s.wait_node_condition(ip, ready=True, timeout=600)
+            return
+
+        # Give the scheduler the eviction window plus enough to place the pods.
+        self.logger.info("[lblk] %s is NotReady; waiting out the eviction "
+                         "window", ip)
+        sleep_n_sec(self.NODE_ISOLATION_SEC // 2)
+
+        still = self._pods_on_node(ip)
+        self.logger.info("[lblk] %d pod(s) still recorded on %s after "
+                         "eviction", len(still), ip)
+
+        if not k8s.wait_node_condition(ip, ready=True,
+                                       timeout=self.NODE_REBOOT_SEC):
+            raise LblkPreconditionError(
+                f"[lblk] {ip} did not come back Ready after its isolation "
+                f"ended. The cut is self-restoring on the host, so the node "
+                f"should have rejoined on its own.")
+
+        bad = k8s.multi_attach_errors()
+        if bad:
+            raise LblkPreconditionError(
+                f"[lblk] volume attach errors after {ip} was isolated and its "
+                f"pods rescheduled -- an RWO volume did not detach from the "
+                f"old node in time:\n    " + "\n    ".join(bad[:6]))
+        self.logger.info("[lblk] %s rejoined, pods rescheduled, no "
+                         "Multi-Attach errors", ip)
+
+    def _pods_on_node(self, ip):
+        """Names of pods currently scheduled on the node owning *ip*."""
+        k8s = self._ensure_k8s_utils()
+        try:
+            node = k8s._get_k8s_node_name(ip)
+            out, _ = k8s._exec_kubectl(
+                f"kubectl get pods -n {k8s.namespace} -o wide --no-headers "
+                f"2>/dev/null | awk '$7==\"{node}\" {{print $1}}' || true",
+                supress_logs=True, timeout=120)
+            return [p.strip() for p in (out or "").splitlines() if p.strip()]
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[lblk] could not list pods on %s: %s",
+                                ip, str(exc)[:120])
+            return []
+
     def _network_outage(self, node_ip, duration):
         """Cut a storage node off the network for *duration*, self-restoring.
 
@@ -871,6 +947,24 @@ class _LblkBase(TestClusterBase):
     #: How long a network-interrupt outage holds.
     NETWORK_OUTAGE_SEC = 120
 
+    #: A deliberately brief cut. Long enough for peers to notice and for the
+    #: IO path to stutter, far too short for the kubelet to miss enough
+    #: heartbeats to matter -- so nothing is evicted and the question is purely
+    #: whether the data path rides it out. The opposite end of the same axis
+    #: from NODE_ISOLATION_SEC, and worth having both: most real blips are
+    #: seconds, not minutes, and a suite that only tests the long one never
+    #: exercises recover-without-failover at all.
+    SHORT_NETWORK_OUTAGE_SEC = 30
+
+    #: Long enough to force eviction. A node stops being Ready after ~40s of
+    #: missed heartbeats, and the default `node.kubernetes.io/unreachable`
+    #: toleration holds pods for 300s after that before the scheduler moves
+    #: them. 420 clears both with room to spare.
+    NODE_ISOLATION_SEC = 420
+
+    #: How long to wait for a rebooted worker to come back Ready.
+    NODE_REBOOT_SEC = 900
+
     #: How long to let the control plane bring a fenced node back by itself.
     #: SPDK aborts when it loses its peers, the monitor sees the node offline
     #: and queues a restart; that path is what this outage is for, so it gets
@@ -895,15 +989,68 @@ class _LblkBase(TestClusterBase):
                                                self.cluster_id)
         elif outage_type == "storage_node_reboot":
             if self.k8s_test:
-                # Rebooting a worker is an infrastructure operation with no
-                # kubectl equivalent. Restarting the pod is the closest thing
-                # the suite has, and is named honestly rather than pretending
-                # a node reboot happened.
-                self.logger.info("[lblk] no node-reboot equivalent on k8s; "
-                                 "restarting the SPDK pod instead")
-                self._ensure_k8s_utils().stop_spdk_pod(ip)
+                # A real reboot, not a pod restart. There IS a kubectl route to
+                # the host -- the same one the core-dump collector uses -- so
+                # `oc debug node/<n> -- chroot /host` on OpenShift and
+                # `kubectl debug node/<n>` elsewhere. Restarting the pod tested
+                # SPDK coming back; it never tested the kubelet coming back,
+                # the volumes re-attaching, or the CSI plugin re-registering,
+                # which is most of what a reboot actually exercises.
+                #
+                # Talos has no host shell at all, so reboot_node tries
+                # talosctl and returns False if it is not on the runner. Then
+                # and only then we fall back -- and say that we did, rather
+                # than reporting a reboot that did not happen.
+                k8s = self._ensure_k8s_utils()
+                if k8s.reboot_node(ip):
+                    if not k8s.wait_node_condition(ip, ready=False,
+                                                   timeout=300):
+                        self.logger.warning(
+                            "[lblk] %s never went NotReady after the reboot "
+                            "was issued -- it may have come back inside the "
+                            "poll, or the reboot did not take", ip)
+                    k8s.wait_node_condition(ip, ready=True,
+                                            timeout=self.NODE_REBOOT_SEC)
+                else:
+                    self.logger.warning(
+                        "[lblk] could not issue a real reboot on %s; "
+                        "restarting the SPDK pod instead. This cycle does NOT "
+                        "cover kubelet restart, volume re-attach or CSI "
+                        "re-registration.", ip)
+                    k8s.stop_spdk_pod(ip)
             else:
                 self.ssh_obj.reboot_node(ip)
+        elif outage_type == "node_network_isolation":
+            # The one outage that tests SCHEDULING rather than storage.
+            #
+            # Every other outage here leaves the node Ready, on purpose -- the
+            # existing network cut drops only the storage ports precisely so
+            # the kubelet keeps its heartbeat. That means nothing in the suite
+            # has ever exercised what happens when k8s gives up on a node and
+            # moves its pods: whether the FIO pod comes back somewhere else,
+            # whether its RWO volume detaches in time, or whether it wedges in
+            # ContainerCreating behind "Multi-Attach error for volume".
+            #
+            # Docker has no analogue -- there is no scheduler to react -- so
+            # this is k8s-only and the docker leaf simply never plans it.
+            if not self.k8s_test:
+                raise LblkPreconditionError(
+                    "node_network_isolation is a k8s-only outage: it tests pod "
+                    "eviction and rescheduling, which docker has no analogue "
+                    "for.")
+            self._isolate_and_verify_eviction(ip)
+        elif outage_type == "short_network_interrupt":
+            # Same cut as the full one, held for seconds rather than minutes,
+            # so the node never goes NotReady and nothing is evicted. What is
+            # under test is the data path riding out a blip -- the common case
+            # in the field, and the one a minutes-long outage never reaches.
+            self._network_outage(ip, self.SHORT_NETWORK_OUTAGE_SEC)
+            sleep_n_sec(self.SHORT_NETWORK_OUTAGE_SEC + 20)
+            self._restore_network(ip)
+            self.sbcli_utils.wait_for_health_status(uuid, True, timeout=300)
+            self.logger.info("[lblk] %s rode out a %ds blip", ip,
+                             self.SHORT_NETWORK_OUTAGE_SEC)
+            return
         elif outage_type == "interface_full_network_interrupt":
             # Self-restoring, so unlike the others nothing has to reach the
             # node to end it -- which is also why the offline wait has to
@@ -1228,7 +1375,23 @@ class _LblkFunctional(_LblkBase):
 class _LblkIntegrity(_LblkBase):
     """Raw crc32c integrity across steady state, restart and outages."""
 
-    OUTAGE_TYPES = ("graceful_shutdown", "container_stop", "storage_node_reboot")
+    #: The integrity lane brackets each fault with a raw crc32c verify, so
+    #: what it costs to add an outage type is one more bracket. The network
+    #: ones are included on the platform each means something on --
+    #: node_network_isolation only exists on k8s, and the full cut is docker's
+    #: because on k8s it takes the overlay with it (see the matrix's k8s leaf).
+    OUTAGE_TYPES = ("graceful_shutdown", "container_stop",
+                    "storage_node_reboot", "short_network_interrupt")
+
+    #: Added per platform on top of OUTAGE_TYPES.
+    K8S_ONLY_OUTAGES = ("node_network_isolation",)
+    DOCKER_ONLY_OUTAGES = ("interface_full_network_interrupt",)
+
+    def _outage_types(self):
+        """OUTAGE_TYPES plus whatever this platform alone can express."""
+        return tuple(self.OUTAGE_TYPES) + tuple(
+            self.K8S_ONLY_OUTAGES if self.k8s_test
+            else self.DOCKER_ONLY_OUTAGES)
 
     def run(self):
         self._init_lblk()
@@ -1281,7 +1444,8 @@ class _LblkIntegrity(_LblkBase):
         self._verify_all("after snapshot+clone")
         self._scan_spdk_logs("after snapshot+clone")
 
-        for n, outage in enumerate(self.OUTAGE_TYPES):
+        outage_types = self._outage_types()
+        for n, outage in enumerate(outage_types):
             self._churn_all(runtime=30)
             # Alternate which lvol carries the metadata work so both the
             # primary and the secondary lvstore see some.
@@ -1301,7 +1465,7 @@ class _LblkIntegrity(_LblkBase):
             self.check_core_dump()
 
         self.logger.info("[lblk] integrity held across %d outage types, with "
-                         "snapshot+clone before each", len(self.OUTAGE_TYPES))
+                         "snapshot+clone before each", len(outage_types))
 
 
 # ── integration: device faults with no NVMe equivalent ────────────────────

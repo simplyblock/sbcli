@@ -54,14 +54,22 @@ class _LblkOutageMatrix(_LblkBase):
         "graceful_shutdown",
         "container_stop",
         "storage_node_reboot",
+        "short_network_interrupt",
         "interface_full_network_interrupt",
+        "node_network_isolation",
     )
 
-    #: Outage types this platform leaves out. Empty here: docker cuts a
-    #: machine that does nothing but storage, so dropping its NICs isolates
-    #: exactly what the test means to isolate. Overridden on k8s.
+    #: Outage types this platform leaves out.
+    #:
+    #: Docker skips node_network_isolation and nothing else: that outage tests
+    #: pod eviction and rescheduling, and docker has no scheduler to react --
+    #: dropping a docker node's NICs is already what
+    #: interface_full_network_interrupt does. Everything else applies, because
+    #: a docker node does nothing but storage, so isolating it isolates
+    #: exactly what the test means to.
+    #:
     #: LBLK_MATRIX_SKIP_OUTAGES overrides either, "" meaning skip nothing.
-    SKIP_OUTAGES = ()
+    SKIP_OUTAGES = ("node_network_isolation",)
 
     #: Where create_utility_pod and the FIO job mount a PVC inside the pod.
     #: On k8s nothing is mounted on the runner, so every read of a volume's
@@ -161,7 +169,9 @@ class _LblkOutageMatrix(_LblkBase):
             # dump of every storage node -- which reads like a cluster fault
             # rather than a variable collision.
             targets = (no_network_cut
-                       if outage == "interface_full_network_interrupt"
+                       if outage in ("interface_full_network_interrupt",
+                                     "short_network_interrupt",
+                                     "node_network_isolation")
                        else nodes)
             cycles += [(node, outage) for node in targets]
 
@@ -1272,4 +1282,16 @@ class LblkOutageMatrixK8s(_LblkK8sMixin, _LblkOutageMatrix):
     Put it back with LBLK_MATRIX_SKIP_OUTAGES="".
     """
 
+    #: interface_full_network_interrupt stays out (see above). The two new
+    #: ones are k8s's to run, and they replace what it loses:
+    #:
+    #: * short_network_interrupt -- the same storage-port cut, 30s, so the node
+    #:   never leaves Ready. Tests the data path riding out a blip, which is
+    #:   what the skipped outage was for, at a duration that cannot take OVN
+    #:   and FoundationDB down with it.
+    #: * node_network_isolation -- total isolation, held past the 300s
+    #:   unreachable toleration so the scheduler evicts and moves the pods.
+    #:   k8s-only by definition. This one WILL disturb the overlay, which is
+    #:   the point: it is the only way to reach eviction, and the cut restores
+    #:   itself from a timer on the host, so the node rejoins without help.
     SKIP_OUTAGES = ("interface_full_network_interrupt",)
