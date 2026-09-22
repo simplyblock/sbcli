@@ -1,4 +1,3 @@
-# coding=utf-8
 """Backup policies: retention limits, tiered schedules, and the merges they cause.
 
 A policy decides *when* a backup is taken and when two are folded together. What

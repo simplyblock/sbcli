@@ -1,4 +1,3 @@
-# coding=utf-8
 """The self-describing part of a backup: a JSON manifest stored alongside its data.
 
 The data plane writes only opaque objects keyed ``{s3_id}/{mid}/{extent}``, and
@@ -42,7 +41,7 @@ for where the two genuinely differ and where they should be collapsed.
 """
 import json
 import logging
-from typing import Annotated, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Literal, Union
 from uuid import UUID
 
 import boto3
@@ -83,7 +82,7 @@ class Source(BaseModel):
 
     #: Absent when the cluster's own record of its name was no longer readable
     #: at the time the manifest was written.
-    cluster_name: Optional[str] = None
+    cluster_name: str | None = None
 
 
 class Volume(BaseModel):
@@ -115,20 +114,20 @@ class Volume(BaseModel):
     snapshot_name: str
     size: int
 
-    pool_name: Optional[str] = None
+    pool_name: str | None = None
 
     #: "default" is not among these: it is the request-time way of saying "the
     #: cluster's", which the volume no longer has once it exists. A volume whose
     #: record does not say is recorded as absent rather than as a guess.
-    ha_type: Optional[Literal["single", "ha"]] = None
+    ha_type: Literal["single", "ha"] | None = None
 
-    fabric: Optional[Literal["tcp", "rdma", "tcp,rdma"]] = None
-    lvol_priority_class: Optional[int] = None
-    max_size: Optional[int] = None
-    rw_ios_per_sec: Optional[int] = None
-    rw_mbytes_per_sec: Optional[int] = None
-    r_mbytes_per_sec: Optional[int] = None
-    w_mbytes_per_sec: Optional[int] = None
+    fabric: Literal["tcp", "rdma", "tcp,rdma"] | None = None
+    lvol_priority_class: int | None = None
+    max_size: int | None = None
+    rw_ios_per_sec: int | None = None
+    rw_mbytes_per_sec: int | None = None
+    r_mbytes_per_sec: int | None = None
+    w_mbytes_per_sec: int | None = None
 
 
 class _KeyDescriptor(BaseModel):
@@ -157,7 +156,7 @@ class _KeyDescriptor(BaseModel):
     #: somehow, so this is the one field they share.
     dek_path: str
 
-    def read_keys(self, kms: KMS) -> Tuple[SecretStr, SecretStr]:
+    def read_keys(self, kms: KMS) -> tuple[SecretStr, SecretStr]:
         """Read this backup's data encryption keys out of an open KMS.
 
         Here rather than at the call site because how a backend is addressed is
@@ -174,7 +173,7 @@ class FDBKeyDescriptor(_KeyDescriptor):
 
     type: Literal["fdb"] = "fdb"
 
-    def read_keys(self, kms: KMS) -> Tuple[SecretStr, SecretStr]:
+    def read_keys(self, kms: KMS) -> tuple[SecretStr, SecretStr]:
         # LocalKMS has no key-encryption key at all: it stores DEKs as they are,
         # its KEK operations are no-ops, and it ignores the name it is passed.
         return kms.get_data_encryption_keys(self.dek_path, "")
@@ -191,11 +190,11 @@ class HCPKeyDescriptor(_KeyDescriptor):
 
     #: Absent where the originating cluster's Vault settings did not record
     #: them; a reader then falls back on its own configuration.
-    vault_base_url: Optional[HttpUrl] = None
-    transit_mount: Optional[str] = None
-    kv_mount: Optional[str] = None
+    vault_base_url: HttpUrl | None = None
+    transit_mount: str | None = None
+    kv_mount: str | None = None
 
-    def read_keys(self, kms: KMS) -> Tuple[SecretStr, SecretStr]:
+    def read_keys(self, kms: KMS) -> tuple[SecretStr, SecretStr]:
         return kms.get_data_encryption_keys(self.dek_path, self.kek_name)
 
 
@@ -233,7 +232,7 @@ class DataPlane(BaseModel):
     #: Object body size for both data and metadata objects. Absent when the
     #: writing cluster's record was unreadable -- a reader then has to fall back
     #: on the data plane's own default, which is why it is not silently 0.
-    cluster_size: Optional[int] = None
+    cluster_size: int | None = None
 
     #: Whether the object bodies are ISA-L compressed. Not detectable by
     #: inspecting them, and reading them under the wrong answer yields garbage
@@ -260,13 +259,13 @@ class BackupManifest(BaseModel):
     #: backup -- so the write amplification of a merge would be the length of the
     #: chain, and a partial failure would leave the bucket advertising object keys
     #: the data plane had already unmapped.
-    prev_backup_id: Optional[UUID] = None
+    prev_backup_id: UUID | None = None
 
     #: Where this backup's key lives, or absent for a backup that is not
     #: encrypted at all. One optional document rather than a flag beside it: two
     #: fields for one fact can contradict each other, and a manifest is read
     #: exactly when nobody is left who could say which one was right.
-    encryption: Optional[KeyDescriptor] = None
+    encryption: KeyDescriptor | None = None
 
     source: Source
     volume: Volume
@@ -281,7 +280,7 @@ class LocatedManifests(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     location: BackupLocation
-    manifests: List[BackupManifest]
+    manifests: list[BackupManifest]
 
 
 class BackupExport(BaseModel):
@@ -300,7 +299,7 @@ class BackupExport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = EXPORT_SCHEMA_VERSION
-    groups: List[LocatedManifests]
+    groups: list[LocatedManifests]
 
 
 class ManifestError(Exception):
@@ -369,7 +368,7 @@ def read(config: BackupConfig, backup_id: UUID) -> BackupManifest:
     return _parse(body, manifest_key(backup_id))
 
 
-def list_all(config: BackupConfig) -> List[BackupManifest]:
+def list_all(config: BackupConfig) -> list[BackupManifest]:
     """Every manifest in the bucket, newest first.
 
     This is the disaster-recovery entry point: with a bucket and credentials it

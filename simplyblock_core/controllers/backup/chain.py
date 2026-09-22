@@ -1,4 +1,3 @@
-# coding=utf-8
 """The restorable unit: a backup and every backup it is a delta against.
 
 A single backup is a delta. What can actually be restored is the line of them
@@ -31,7 +30,8 @@ Nothing here reads the database. Callers supply the population to walk over.
 """
 from dataclasses import dataclass
 from typing import (
-    Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar, Union)
+    TypeVar, Union)
+from collections.abc import Iterable, Mapping, Sequence
 from uuid import UUID
 
 from simplyblock_core import constants
@@ -80,7 +80,7 @@ def _id_of(link: Link) -> UUID:
     return UUID(link.uuid) if isinstance(link, Backup) else link.backup_id
 
 
-def _prev_id_of(link: Link) -> Optional[UUID]:
+def _prev_id_of(link: Link) -> UUID | None:
     """The backup a link is a delta against, or ``None`` at the root of a chain."""
     if isinstance(link, Backup):
         return UUID(link.prev_backup_id) if link.prev_backup_id else None
@@ -101,12 +101,12 @@ def _encrypted(link: Link) -> bool:
     return link.encrypted if isinstance(link, Backup) else link.encryption is not None
 
 
-def _index(links: Iterable[L]) -> Dict[UUID, L]:
+def _index(links: Iterable[L]) -> dict[UUID, L]:
     return {_id_of(link): link for link in links}
 
 
 def _walk(head_id: UUID, links: Mapping[UUID, L], *,
-          absence: str = "not among the backups given") -> List[L]:
+          absence: str = "not among the backups given") -> list[L]:
     """Follow ``prev_backup_id`` from a head back to a root, oldest first.
 
     Args:
@@ -176,7 +176,7 @@ class BackupChain:
 
     #: Oldest first, ending at the head -- the reverse of the order the data
     #: plane's ``s3_ids`` argument wants; see :meth:`s3_ids_newest_first`.
-    links: Tuple[Link, ...]
+    links: tuple[Link, ...]
 
     @classmethod
     def assemble(cls, location: BackupLocation, encrypted: bool,
@@ -239,13 +239,13 @@ class BackupChain:
         them into one population is all it takes for the walk to cross that
         boundary, and for the rules to apply across it.
         """
-        population: Dict[UUID, Link] = {**_index(pending.values()), **_index(stored)}
+        population: dict[UUID, Link] = {**_index(pending.values()), **_index(stored)}
         links = _walk(head.backup_id, population,
                       absence="neither in this import nor already known")
         return cls.assemble(location_of(head, location),
                             head.encryption is not None, links)
 
-    def require_restorable(self, *, length: Optional[int] = None,
+    def require_restorable(self, *, length: int | None = None,
                            completed: bool = False,
                            what: str = "This chain") -> None:
         """Refuse a chain that could not be restored, naming the rule it breaks.
@@ -299,7 +299,7 @@ class BackupChain:
                 "Incomplete backups in chain: "
                 + ", ".join(link.uuid for link in incomplete))
 
-    def records(self) -> List[Backup]:
+    def records(self) -> list[Backup]:
         """The chain's links as stored records, oldest first.
 
         A chain walked over manifests describes backups this cluster may know
@@ -318,7 +318,7 @@ class BackupChain:
 
         return [link for link in self.links if isinstance(link, Backup)]
 
-    def s3_ids_newest_first(self) -> List[int]:
+    def s3_ids_newest_first(self) -> list[int]:
         """The chain as the data plane's ``bdev_lvol_s3_recovery`` wants it.
 
         Newest first: it claims each cluster for the first id that offers it
