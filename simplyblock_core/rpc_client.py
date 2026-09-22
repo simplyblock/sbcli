@@ -729,7 +729,7 @@ class RPCClient:
                 "(cold paths only)")
         return self._request("bdev_get_bdevs", None)
 
-    def bdev_get(self, name) -> dict | None:
+    def bdev_get(self, name) -> Optional[dict]:
         """Single bdev lookup by exact name, mirroring ``subsystem_get``.
         ``None`` means the bdev does not exist (SPDK answers ENODEV, or the
         filtered lookup comes back empty). Raises ``RPCConnectionError`` /
