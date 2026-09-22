@@ -157,7 +157,7 @@ class TestBdevLvolS3Merge(unittest.TestCase):
         mock_req.side_effect = RPCRemoteError("The same transfer task already exists.", code=-errno.EEXIST)
         client = _make_client()
 
-        self.assertTrue(client.bdev_lvol_s3_merge(1, 2, cluster_batch=16))
+        self.assertTrue(client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, s3_bdev="s3_lvs0"))
 
     @patch.object(RPCClient, "_request3")
     def test_merge_eexist_propagates_when_disallowed(self, mock_req):
@@ -165,7 +165,7 @@ class TestBdevLvolS3Merge(unittest.TestCase):
         client = _make_client()
 
         with self.assertRaises(RPCRemoteError):
-            client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, allow_exist=False)
+            client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, s3_bdev="s3_lvs0", allow_exist=False)
 
     @patch.object(RPCClient, "_request3")
     def test_merge_other_rpc_error_propagates_regardless_of_allow_exist(self, mock_req):
@@ -173,15 +173,16 @@ class TestBdevLvolS3Merge(unittest.TestCase):
         client = _make_client()
 
         with self.assertRaises(RPCRemoteError):
-            client.bdev_lvol_s3_merge(1, 2, cluster_batch=16)
+            client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, s3_bdev="s3_lvs0")
 
     @patch.object(RPCClient, "_request3")
     def test_merge_success_passes_through(self, mock_req):
         mock_req.return_value = True
         client = _make_client()
 
-        self.assertTrue(client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, lvs_name="lvs0"))
-        mock_req.assert_called_once_with("bdev_lvol_s3_merge", s3_id=1, old_s3_id=2, cluster_batch=16, lvs_name="lvs0")
+        self.assertTrue(client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, s3_bdev="s3_lvs0", lvs_name="lvs0"))
+        mock_req.assert_called_once_with("bdev_lvol_s3_merge", s3_id=1, old_s3_id=2, cluster_batch=16,
+                                        s3_bdev="s3_lvs0", lvs_name="lvs0")
 
 
 class TestBdevLvolS3MergeStat(unittest.TestCase):
@@ -199,3 +200,4 @@ class TestBdevLvolS3MergeStat(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
