@@ -14738,6 +14738,67 @@ def safe_delete_bdev(name, node_id):
             return False
 
 
+#: Lvstore residents that belong to the NODE, not to any volume or snapshot
+#: record, so they are never orphans. Kept in one place because auto_repair and
+#: the lvol monitor's periodic sweep must agree on it.
+NON_OBJECT_LVSTORE_BLOB_NAMES = ("hublvol", "transferhub")
+
+
+def find_orphan_lvstore_blobs(node_id):
+    """Blobs in ``node_id``'s lvstore that no LVol/SnapShot record claims.
+
+    The same comparison ``auto_repair`` performs for its ``diff_list``, lifted
+    out so it can also run unattended. auto_repair is an operator-invoked CLI
+    command that prints to stdout: it is the only thing in the product that
+    ever compared SPDK's inventory against the database, so a record dropped
+    while its blob survived stayed invisible until somebody thought to run it
+    by hand — which is how four such volumes accumulated unnoticed in R26.3.
+
+    Matching is on BLOBID, not name: the blobid is the identity SPDK and the
+    records actually share, and it survives the name-shape differences between
+    them (``snap_bdev`` is stored qualified as ``<lvstore>/<name>`` while the
+    lvstore dump names blobs bare).
+
+    Records are collected cluster-wide rather than per-node on purpose. A
+    record whose ``node_id`` has moved (fail-over, migration) still owns its
+    blob, and reporting a live volume as an orphan is far worse than missing
+    one.
+
+    Returns a list of ``{"blobid", "name", "uuid", "ref"}`` dicts. Raises on
+    RPC or lookup failure — the caller decides how loud that is.
+    """
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+
+    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        raise RPCException(f"Failed to get lvstore info for {snode.lvstore}")
+    lvs_uuid = ret[0].get("uuid")
+    if not lvs_uuid:
+        raise RPCException(f"Failed to get lvstore uuid for {snode.lvstore}")
+
+    dump = snode.rpc_client().bdev_lvs_dump_tree(lvs_uuid)
+    if not dump or "lvols" not in dump:
+        raise RPCException(f"Failed to dump the lvstore tree of {snode.lvstore}")
+
+    claimed = {lv.blobid for lv in db_controller.get_lvols(snode.cluster_id) if lv.blobid}
+    claimed |= {sn.blobid for sn in db_controller.get_snapshots(snode.cluster_id) if sn.blobid}
+
+    orphans = []
+    for entry in dump["lvols"]:
+        if entry.get("name") in NON_OBJECT_LVSTORE_BLOB_NAMES:
+            continue
+        if entry.get("blobid") in claimed:
+            continue
+        orphans.append({
+            "blobid": entry.get("blobid"),
+            "name": entry.get("name"),
+            "uuid": entry.get("uuid"),
+            "ref": entry.get("ref"),
+        })
+    return orphans
+
+
 def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, force_remove_worng_ref=False):
     db_controller = DBController()
     try:

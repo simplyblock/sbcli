@@ -810,6 +810,9 @@ class _RollbackRPC:
     def get_bdevs(self, name):
         return [{"name": name}]
 
+    def bdev_get(self, name):
+        return {"name": name}
+
     def delete_lvol(self, name, sync=False):
         self.deletes.append((name, sync))
         return True, None
