@@ -203,6 +203,17 @@ def _validate_new_task_node_restart(cluster_id, node_id):
     return False
 
 
+def get_active_node_add_task(cluster_id, node_addr):
+    """Return the UUID of an in-flight add-node task for node_addr, or False.
+
+    What _validate_new_task_node_add's dedup guard finds when it declines to
+    create a second task for the same host — exposed so a caller that got
+    False back from add_node_add_task can still hand its own caller a task to
+    track, rather than reporting failure for a duplicate the guard caught on
+    purpose."""
+    return _validate_new_task_node_add(cluster_id, node_addr)
+
+
 def _validate_new_task_node_add(cluster_id, node_addr):
     # FN_NODE_ADD has no node_id (the node doesn't exist yet) — the only
     # identity a caller (the operator posting "add this host") has is the
