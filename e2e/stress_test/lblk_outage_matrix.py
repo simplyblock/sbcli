@@ -976,6 +976,23 @@ class _LblkOutageMatrix(_LblkBase):
                 runtime=runtime, name=job,
                 rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
                 time_based=True,
+                # run_fio_test defaults to --max_latency=20s; create_fio_job
+                # has no equivalent and never set one. So the two platforms
+                # were not measuring the same thing: on docker a single IO
+                # slower than 20s KILLED the job with err=110, and deliberately
+                # stopping a storage node is precisely when IO stalls. That is
+                # what ended mxliveplain 21s into cycle 8 on 2026-09-21, while
+                # k8s -- same outage, same volume flavours -- could not have
+                # tripped it whatever the cluster did.
+                #
+                # This lane asks whether IO CONTINUES and whether the data is
+                # right, not whether it stays under an arbitrary ceiling during
+                # an outage we ourselves injected. Latency under outage is
+                # worth measuring, but as a measurement, not as a fatal trip in
+                # the middle of a node kill. Turning it off also makes the EIO
+                # from that same moment interpretable: it now either reproduces
+                # on its own or it does not.
+                use_latency=False,
                 node_selector=(self._pin_for(name)
                                or getattr(self, "_fio_home_worker", None)))))
             self.logger.info("[matrix] live FIO started on %s volume %s",
@@ -1056,12 +1073,35 @@ class _LblkOutageMatrix(_LblkBase):
                              f"2>/dev/null || true"))
 
     def _docker_fio_running(self, job):
-        """Is FIO still running on the client, as a tmux session or process?"""
+        """Is FIO still running on the client, as a tmux session or process?
+
+        Both halves of this check used to answer "yes" unconditionally.
+
+        `pgrep -f` matches the FULL command line of every process, and the
+        shell running this very command has `fio_<job>` in its own cmdline --
+        which `fio.*<job>` matches inside that single token. So the fallback
+        found itself, every time. On the run of 2026-09-21 mxliveplain died at
+        22:39:23, 21s into cycle 8, and this reported it "still running" at
+        22:39:45 and after all eight remaining cycles; the failure only
+        surfaced at final validation two hours later. _await_fio_done then sat
+        from 22:58 to 00:27 waiting for four processes that had already gone.
+        `[f]io` cannot match the literal string that produced it, which is the
+        oldest fix there is for exactly this. BOTH patterns need it, not just
+        the pgrep one: they share a command line, so a bare `fio_<job>` in the
+        tmux half is still a `[f]io.*<job>` match for the pgrep half. As a grep
+        pattern `[f]io_<job>` matches the session name exactly as before.
+
+        `tmux has-session -t` resolves a target by exact name, then PREFIX,
+        then pattern, so `fio_mxlive` would happily match `fio_mxlivecrypto`.
+        Comparing against `list-sessions` output is exact, and greps tmux's
+        output rather than the process table.
+        """
         client = (self.fio_node or self.client_machines)[0]
         out, _err = self.ssh_obj.exec_command(
             node=client,
-            command=(f"sudo tmux has-session -t fio_{job} 2>/dev/null "
-                     f"&& echo ALIVE || (pgrep -f 'fio.*{job}' >/dev/null "
+            command=(f"sudo tmux list-sessions -F '#S' 2>/dev/null "
+                     f"| grep -qx '[f]io_{job}' && echo ALIVE "
+                     f"|| (pgrep -f '[f]io.*{job}' >/dev/null "
                      f"&& echo ALIVE || echo GONE)"))
         return "ALIVE" in (out or "")
 
