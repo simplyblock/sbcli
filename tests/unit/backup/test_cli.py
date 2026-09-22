@@ -14,8 +14,8 @@ import pytest
 from simplyblock_cli import clibase
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup.manifest import (
-    BackupExport, BackupManifest, DataPlane, FDBKeyDescriptor,
-    LocatedManifests, Source, Volume)
+    BackupExport, BackupManifest, ManifestDataPlane, FDBKeyDescriptor,
+    LocatedManifests, ManifestSource, ManifestVolume)
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 
 
@@ -33,11 +33,11 @@ def _manifest(seed: str = "b-1", prev=None) -> BackupManifest:
         completed_at=200,
         size=4096,
         prev_backup_id=_id(prev) if prev is not None else None,
-        source=Source(cluster_id=_id("cluster"), node_id=_id("node")),
-        volume=Volume(lvol_id=_id("volume"), lvol_name="vol",
+        source=ManifestSource(cluster_id=_id("cluster"), node_id=_id("node")),
+        volume=ManifestVolume(lvol_id=_id("volume"), lvol_name="vol",
                       snapshot_id=_id("snapshot"), snapshot_name="snap",
                       size=4096),
-        dataplane=DataPlane(),
+        dataplane=ManifestDataPlane(),
     )
 
 
@@ -145,11 +145,11 @@ class TestDiscoverRendering:
             size=4096,
             prev_backup_id=_id(prev) if prev is not None else None,
             encryption=FDBKeyDescriptor(dek_path="keys/x") if encrypted else None,
-            source=Source(cluster_id=_id("cluster"), node_id=_id("node")),
-            volume=Volume(lvol_id=_id("volume"), lvol_name="vol",
+            source=ManifestSource(cluster_id=_id("cluster"), node_id=_id("node")),
+            volume=ManifestVolume(lvol_id=_id("volume"), lvol_name="vol",
                           snapshot_id=_id("snapshot"), snapshot_name="snap",
                           size=4096),
-            dataplane=DataPlane(),
+            dataplane=ManifestDataPlane(),
         )
 
     def test_a_complete_chain_shows_its_length(self):

@@ -11,13 +11,13 @@ import pytest
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
-    DataPlane,
+    ManifestDataPlane,
     FDBKeyDescriptor,
     HCPKeyDescriptor,
     ManifestError,
     MANIFEST_SCHEMA_VERSION,
-    Source,
-    Volume,
+    ManifestSource,
+    ManifestVolume,
 )
 
 
@@ -40,11 +40,11 @@ def _manifest(**overrides):
         "created_at": 100,
         "completed_at": 200,
         "size": 4096,
-        "source": Source(cluster_id=CLUSTER_ID, node_id=NODE_ID),
-        "volume": Volume(lvol_id=VOLUME_ID, lvol_name="vol",
+        "source": ManifestSource(cluster_id=CLUSTER_ID, node_id=NODE_ID),
+        "volume": ManifestVolume(lvol_id=VOLUME_ID, lvol_name="vol",
                          snapshot_id=SNAPSHOT_ID, snapshot_name="snap",
                          size=4096),
-        "dataplane": DataPlane(),
+        "dataplane": ManifestDataPlane(),
     }
     fields.update(overrides)
     return BackupManifest(**fields)
@@ -104,7 +104,7 @@ class TestSchema:
     def test_records_the_encoding_the_bucket_cannot_reveal(self):
         """Compression is not detectable from the objects, and reading them
         under the wrong answer yields garbage rather than an error."""
-        manifest = _manifest(dataplane=DataPlane(with_compression=True))
+        manifest = _manifest(dataplane=ManifestDataPlane(with_compression=True))
         restored = backup_manifest._parse(manifest.model_dump_json().encode(), "k")
         assert restored.dataplane.with_compression is True
 

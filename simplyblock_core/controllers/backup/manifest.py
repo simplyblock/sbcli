@@ -69,7 +69,7 @@ def manifest_key(backup_id: UUID) -> str:
     return f"{MANIFEST_PREFIX}{backup_id}.json"
 
 
-class Source(BaseModel):
+class ManifestSource(BaseModel):
     """Where this backup came from. Provenance for an operator reading a bucket.
 
     Nothing may resolve configuration or keys through these -- that dependency
@@ -85,7 +85,7 @@ class Source(BaseModel):
     cluster_name: str | None = None
 
 
-class Volume(BaseModel):
+class ManifestVolume(BaseModel):
     """The shape of the volume this backup was taken from.
 
     Split in two by what is knowable. The identity and size come off the backup
@@ -216,7 +216,7 @@ def parse_key_descriptor(record: dict) -> KeyDescriptor:
     return _key_descriptor_adapter.validate_python(record)
 
 
-class DataPlane(BaseModel):
+class ManifestDataPlane(BaseModel):
     """How the objects are encoded, so a later format change is detectable.
 
     Everything here has to be recorded because reading the bucket cannot
@@ -267,9 +267,9 @@ class BackupManifest(BaseModel):
     #: exactly when nobody is left who could say which one was right.
     encryption: KeyDescriptor | None = None
 
-    source: Source
-    volume: Volume
-    dataplane: DataPlane
+    source: ManifestSource
+    volume: ManifestVolume
+    dataplane: ManifestDataPlane
 
 
 EXPORT_SCHEMA_VERSION = 1

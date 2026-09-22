@@ -146,7 +146,7 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     # and every value above comes off an untyped record -- an ha_type the model
     # does not recognise has to be caught here, while the backup is still being
     # written, not by whoever reads the manifest during a recovery.
-    volume = backup_manifest.Volume.model_validate({
+    volume = backup_manifest.ManifestVolume.model_validate({
         "lvol_id": backup.lvol_id,
         "lvol_name": backup.lvol_name,
         "snapshot_id": backup.snapshot_id,
@@ -175,13 +175,13 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         prev_backup_id=UUID(backup.prev_backup_id) if backup.prev_backup_id else None,
         encryption=(backup_manifest.parse_key_descriptor(backup.encryption)
                     if backup.encryption else None),
-        source=backup_manifest.Source(
+        source=backup_manifest.ManifestSource(
             cluster_id=UUID(backup.cluster_id),
             cluster_name=cluster_name,
             node_id=UUID(backup.node_id),
         ),
         volume=volume,
-        dataplane=backup_manifest.DataPlane(
+        dataplane=backup_manifest.ManifestDataPlane(
             cluster_size=cluster_size,
             with_compression=location.with_compression,
         ),
