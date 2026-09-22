@@ -29,6 +29,8 @@ import json
 import os
 import random
 import re
+
+from utils.fio_defaults import FIO_MAX_LATENCY
 import threading
 import time
 
@@ -1117,29 +1119,57 @@ class _LblkOutageMatrix(_LblkBase):
             raise LblkPreconditionError(
                 f"[matrix] live FIO job {job} ({volume}) has no pod to read, "
                 f"so nothing can be said about whether IO continued.")
-        hits = []
+        io_errors, lat_breaches = [], []
+        worst_ns = 0
         for pod in pods:
             logs = k8s.get_pod_logs(pod, tail=4000) or ""
             for line in logs.splitlines():
-                low = line.lower()
-                if any(m in low for m in self.FIO_ERROR_MARKERS):
-                    hits.append(f"{pod}: {line.strip()[:160]}")
+                low = line.strip().lower()
+                m = re.search(r"latency of (\d+) nsec", low)
+                if m:
+                    worst_ns = max(worst_ns, int(m.group(1)))
+                # err=110 is ETIMEDOUT from our own --max_latency, never the
+                # storage saying no. Keep it out of the IO-error bucket: FIO's
+                # summary repeats it per job block, so counting it as an error
+                # both overstates the damage and hides a real EIO among it.
+                is_lat = ("max latency exceeded" in low
+                          or re.search(r"\berr=\s*110\b", low))
+                if is_lat:
+                    lat_breaches.append(f"{pod}: {line.strip()[:160]}")
+                elif any(mk in low for mk in self.FIO_ERROR_MARKERS):
+                    io_errors.append(f"{pod}: {line.strip()[:160]}")
                 elif re.search(r"\berr=\s*[1-9]", low):
-                    hits.append(f"{pod}: {line.strip()[:160]}")
+                    io_errors.append(f"{pod}: {line.strip()[:160]}")
         try:
             k8s.delete_job(job)
         except Exception as exc:                      # noqa: BLE001
             self.logger.warning("[matrix] could not delete FIO job %s: %s",
                                 job, str(exc)[:120])
-        if hits:
+        worst_s = worst_ns / 1e9
+        if io_errors:
             raise LblkPreconditionError(
-                f"[matrix] live FIO on {volume} recorded {len(hits)} IO "
-                f"error(s) across {len(self.OUTAGES)} outage types. With "
-                f"ndcs/npcs {self.ndcs}/{self.npcs} one node down is meant to "
-                f"be survivable, so this is a loss of availability:\n    "
-                + "\n    ".join(hits[:6]))
-        self.logger.info("[matrix] live FIO on %s: %d pod log(s), no IO "
-                         "errors", volume, len(pods))
+                f"[matrix] live FIO on {volume}: IO ERRORS. The storage failed "
+                f"IO outright across {len(self.OUTAGES)} outage types. "
+                f"With ndcs/npcs {self.ndcs}/{self.npcs} one node down is meant "
+                f"to be survivable, so this is a loss of availability."
+                + (f" Worst single IO also took {worst_s:.1f}s."
+                   if worst_s else "")
+                + "\n    " + "\n    ".join(io_errors[:6]))
+        if lat_breaches:
+            raise LblkPreconditionError(
+                f"[matrix] live FIO on {volume}: LATENCY BREACH, no IO errors. "
+                f"Every IO was eventually served and no data was lost -- FIO "
+                f"ended the job because a single IO exceeded "
+                f"--max_latency={FIO_MAX_LATENCY}"
+                + (f"; the worst took {worst_s:.1f}s" if worst_s else "")
+                + ". At --iodepth=1 that is one operation blocked that long, "
+                "not queueing. Not the same finding as an EIO, and not a "
+                "threshold artefact either: the ceiling detected the stall, "
+                "it did not cause it.\n    "
+                + "\n    ".join(lat_breaches[:4]))
+        self.logger.info("[matrix] live FIO on %s: %d pod log(s), no IO errors "
+                         "and no latency breach (worst IO %.3fs)",
+                         volume, len(pods), worst_s)
 
     def _k8s_fio_running(self, job_name):
         """Is this FIO Job still moving IO?"""
