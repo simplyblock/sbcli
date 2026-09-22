@@ -31,306 +31,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
-
-
-# --------------------------------------------------------------------------
-# Backup runner: terminates instead of looping forever.
-#
-# The backup runner's loop is inline under ``if __name__ == '__main__'`` (it has
-# no ``def main()``), so it is driven at the ``process_task`` level here. The
-# other runners below are driven through their real ``main()``.
-# --------------------------------------------------------------------------
-
-@pytest.fixture
-def runner(monkeypatch):
-    """Import the backup runner with its FDB writes and events neutralised.
-
-    The module's ``while True`` loop is guarded by ``if __name__ ==
-    '__main__'``, so importing it only defines functions and a (kv_store=None)
-    ``DBController`` singleton — safe under the unit tier's stubbed ``fdb``.
-    """
-    import simplyblock_core.services.tasks_runner_backup as runner
-    monkeypatch.setattr(runner, "backup_events", MagicMock())
-    # Model writes would otherwise dereference the None kv_store and exit(1).
-    monkeypatch.setattr(Backup, "write_to_db", MagicMock())
-    monkeypatch.setattr(JobSchedule, "write_to_db", MagicMock())
-    return runner
-
-
-def _backup_task(retry, max_retry):
-    task = JobSchedule()
-    task.uuid = "task-1"
-    task.function_name = JobSchedule.FN_BACKUP
-    task.function_params = {"backup_id": "bk-1"}
-    task.retry = retry
-    task.max_retry = max_retry
-    task.canceled = False
-    # Recent enough that the 4h time-based timeout does not fire first.
-    task.date = int(__import__("time").time())
-    return task
-
-
-def _cluster():
-    cl = MagicMock()
-    cl.backup_timeout_seconds = 14400
-    return cl
-
-
-def test_backup_fails_when_max_retry_reached(runner, monkeypatch):
-    """retry >= max_retry must fail the backup and finish the task, not poll."""
-    backup = Backup()
-    backup.uuid = "bk-1"
-    backup.status = Backup.STATUS_IN_PROGRESS
-
-    fake_db = MagicMock()
-    fake_db.get_backup_by_id.return_value = backup
-    monkeypatch.setattr(runner, "db", fake_db)
-    # If the ceiling is missing this would run and (in the incident) re-issue
-    # the crash-inducing RPC; assert it is never reached.
-    run_backup = MagicMock()
-    monkeypatch.setattr(runner, "_run_backup", run_backup)
-
-    task = _backup_task(retry=10, max_retry=10)
-    runner.process_task(task, _cluster())
-
-    assert backup.status == Backup.STATUS_FAILED
-    assert task.status == JobSchedule.STATUS_DONE
-    assert "max retry" in task.function_result
-    run_backup.assert_not_called()
-
-
-def test_backup_runs_below_max_retry(runner, monkeypatch):
-    """Below the ceiling the task still advances (dispatches its step)."""
-    monkeypatch.setattr(runner, "db", MagicMock())
-    run_backup = MagicMock()
-    monkeypatch.setattr(runner, "_run_backup", run_backup)
-
-    task = _backup_task(retry=9, max_retry=10)
-    runner.process_task(task, _cluster())
-
-    run_backup.assert_called_once_with(task)
-
-
-def test_no_process_poll_counts_as_a_retry(runner, monkeypatch):
-    """The 'No process' re-issue branch must advance task.retry, otherwise the
-    ceiling can never bind to that path and the backup re-issues forever."""
-    backup = Backup()
-    backup.uuid = "bk-1"
-    backup.status = Backup.STATUS_IN_PROGRESS
-    backup.snapshot_id = "snap-1"
-
-    snode = MagicMock()
-    snode.status = StorageNode.STATUS_ONLINE
-    rpc = MagicMock()
-    rpc.bdev_lvol_transfer_stat.return_value = {"transfer_state": "No process"}
-    snode.rpc_client.return_value = rpc
-
-    snapshot = MagicMock()
-    snapshot.snap_bdev = "lvs/snap0"
-
-    fake_db = MagicMock()
-    fake_db.get_backup_by_id.return_value = backup
-    fake_db.get_storage_node_by_id.return_value = snode
-    fake_db.get_snapshot_by_id.return_value = snapshot
-    monkeypatch.setattr(runner, "db", fake_db)
-
-    task = _backup_task(retry=3, max_retry=10)
-    runner._run_backup(task)
-
-    assert task.retry == 4, "No-process re-issue must count toward the ceiling"
-    assert backup.status == Backup.STATUS_PENDING
-    rpc.bdev_lvol_s3_backup.assert_not_called()  # this poll only resets state
-
-
-# --------------------------------------------------------------------------
-# FDB backup runner: terminates instead of looping forever.
-#
-# Same shape as the S3 backup runner above — its loop is also inline under
-# ``if __name__ == '__main__'`` (no ``def main()``), so it is driven at the
-# ``process_fdb_backup_task`` level here.
-# --------------------------------------------------------------------------
-
-@pytest.fixture
-def fdb_backup_runner(monkeypatch):
-    import simplyblock_core.services.tasks_runner_fdb_backup as runner
-    monkeypatch.setattr(runner, "fdb_backup_events", MagicMock())
-    monkeypatch.setattr(JobSchedule, "write_to_db", MagicMock())
-    return runner
-
-
-def _fdb_backup_task(retry, max_retry):
-    task = JobSchedule()
-    task.uuid = "task-1"
-    task.cluster_id = "cl-1"
-    task.function_name = JobSchedule.FN_FDB_BACKUP
-    task.function_params = {}
-    task.retry = retry
-    task.max_retry = max_retry
-    task.canceled = False
-    task.status = JobSchedule.STATUS_NEW
-    return task
-
-
-def test_fdb_backup_fails_when_max_retry_reached(fdb_backup_runner, monkeypatch):
-    """retry >= max_retry must finish the task instead of re-issuing the backup."""
-    fake_db = MagicMock()
-    task = _fdb_backup_task(retry=10, max_retry=10)
-    fake_db.get_task_by_id.return_value = task
-    monkeypatch.setattr(fdb_backup_runner, "db", fake_db)
-    create_backup = MagicMock()
-    monkeypatch.setattr(
-        fdb_backup_runner.fdb_backup_controller, "create_backup", create_backup)
-
-    fdb_backup_runner.process_fdb_backup_task(task)
-
-    assert task.status == JobSchedule.STATUS_DONE
-    assert "max retry" in task.function_result
-    create_backup.assert_not_called()
-    fdb_backup_runner.fdb_backup_events.fdb_backup_failed.assert_called_once_with(
-        task.cluster_id, task)
-
-
-def test_fdb_backup_runs_below_max_retry(fdb_backup_runner, monkeypatch):
-    """Below the ceiling the task still advances (dispatches its step)."""
-    fake_db = MagicMock()
-    task = _fdb_backup_task(retry=9, max_retry=10)
-    fake_db.get_task_by_id.return_value = task
-    monkeypatch.setattr(fdb_backup_runner, "db", fake_db)
-    create_backup = MagicMock(return_value=False)
-    monkeypatch.setattr(
-        fdb_backup_runner.fdb_backup_controller, "create_backup", create_backup)
-
-    fdb_backup_runner.process_fdb_backup_task(task)
-
-    create_backup.assert_called_once_with(task.cluster_id)
-    assert task.retry == 10
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-
-
-# --------------------------------------------------------------------------
-# Backup runner: _run_merge polls bdev_lvol_s3_merge_stat instead of
-# assuming success. Merge has no lvol, so it can't use bdev_lvol_transfer_stat
-# like backup/restore above -- these cover its own stat RPC's four states.
-# --------------------------------------------------------------------------
-
-def _merge_task(retry=0, max_retry=10, merge_started=True):
-    task = JobSchedule()
-    task.uuid = "task-1"
-    task.function_name = JobSchedule.FN_BACKUP_MERGE
-    task.function_params = {
-        "keep_backup_id": "keep-1",
-        "old_backup_id": "old-1",
-        "merge_started": merge_started,
-    }
-    task.retry = retry
-    task.max_retry = max_retry
-    task.canceled = False
-    task.date = int(__import__("time").time())
-    return task
-
-
-def _merge_backups(old_status=Backup.STATUS_MERGING):
-    keep_backup = Backup()
-    keep_backup.uuid = "keep-1"
-    keep_backup.s3_id = 10
-    keep_backup.node_id = "node-1"
-    keep_backup.prev_backup_id = "old-1"
-
-    old_backup = Backup()
-    old_backup.uuid = "old-1"
-    old_backup.s3_id = 20
-    old_backup.prev_backup_id = "older-0"
-    old_backup.status = old_status
-
-    return keep_backup, old_backup
-
-
-def _merge_db(keep_backup, old_backup, snode, rpc):
-    snode.rpc_client.return_value = rpc
-    fake_db = MagicMock()
-    fake_db.get_backup_by_id.side_effect = lambda bid: {
-        "keep-1": keep_backup, "old-1": old_backup,
-    }[bid]
-    fake_db.get_storage_node_by_id.return_value = snode
-    return fake_db
-
-
-def _online_snode():
-    snode = MagicMock()
-    snode.status = StorageNode.STATUS_ONLINE
-    return snode
-
-
-def test_merge_done_finalizes(runner, monkeypatch):
-    keep_backup, old_backup = _merge_backups()
-    rpc = MagicMock()
-    rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "Done"}
-    monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
-
-    task = _merge_task()
-    runner._run_merge(task)
-
-    rpc.bdev_lvol_s3_merge_stat.assert_called_once_with(10, 20)
-    assert keep_backup.status == Backup.STATUS_COMPLETED
-    assert keep_backup.prev_backup_id == "older-0"
-    assert old_backup.status == Backup.STATUS_MERGED
-    assert task.status == JobSchedule.STATUS_DONE
-
-
-def test_merge_failed_reverts_old_backup_and_terminates(runner, monkeypatch):
-    """A 'Failed' merge must not be silently recorded as a success (the bug
-    this whole runner rewrite exists to fix), and must not be blindly
-    retried -- XFER_STATE_FAILED can be reached after the data plane has
-    already started deleting old_backup's S3 objects."""
-    keep_backup, old_backup = _merge_backups(old_status=Backup.STATUS_MERGING)
-    rpc = MagicMock()
-    rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "Failed"}
-    monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
-
-    task = _merge_task(retry=0)
-    runner._run_merge(task)
-
-    assert old_backup.status == Backup.STATUS_COMPLETED, "must revert MERGING, not leave it stuck"
-    assert keep_backup.status != Backup.STATUS_COMPLETED, "keep_backup must not be finalized on failure"
-    assert task.status == JobSchedule.STATUS_DONE
-    assert task.retry == 0, "terminal failure is not a retry"
-
-
-def test_merge_in_progress_stays_suspended(runner, monkeypatch):
-    keep_backup, old_backup = _merge_backups()
-    rpc = MagicMock()
-    rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "In progress"}
-    monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
-
-    task = _merge_task()
-    runner._run_merge(task)
-
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-    assert task.function_params["merge_started"] is True
-    assert old_backup.status == Backup.STATUS_MERGING, "unchanged while still running"
-
-
-def test_merge_no_process_resets_and_counts_as_a_retry(runner, monkeypatch):
-    """Mirrors test_no_process_poll_counts_as_a_retry above: the re-issue
-    branch must advance task.retry, otherwise the ceiling never binds here
-    and a merge that keeps reporting 'No process' loops forever."""
-    keep_backup, old_backup = _merge_backups()
-    rpc = MagicMock()
-    rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "No process"}
-    monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
-
-    task = _merge_task(retry=3)
-    runner._run_merge(task)
-
-    assert task.retry == 4, "No-process re-issue must count toward the ceiling"
-    assert task.function_params["merge_started"] is False
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-    rpc.bdev_lvol_s3_merge.assert_not_called()  # this poll only resets state
 
 
 # --------------------------------------------------------------------------
@@ -472,6 +176,9 @@ def _wire_base(runner, monkeypatch, task):
     monkeypatch.setattr(runner, "db", db)
     monkeypatch.setattr(JobSchedule, "write_to_db", MagicMock())
     _patch_clock(monkeypatch, runner, task)
+    # Every runner claims the lease before running a task; grant it so the loop
+    # reaches the work under test instead of skipping the task as foreign-owned.
+    monkeypatch.setattr(runner.tasks_controller, "claim_task", lambda *a, **k: True)
     return db, cluster, node
 
 
@@ -483,88 +190,6 @@ def _wire_base(runner, monkeypatch, task):
 # runners get tested: the parametrised test below discovers them from the source
 # tree, so a new retry-driven runner shows up as a failing case until a spec is
 # added here.
-
-def _spec_cluster_expand(runner, monkeypatch):
-    task = _make_task(JobSchedule.FN_CLUSTER_EXPAND, new_node_id="new-1")
-    _wire_base(runner, monkeypatch, task)
-    monkeypatch.setattr(runner.tasks_controller, "claim_task",
-                        lambda *a, **k: True)
-    # The actual expansion work fails every cycle.
-    monkeypatch.setattr(
-        runner, "integrate_new_node_into_cluster",
-        MagicMock(side_effect=RuntimeError("expand boom")))
-    return task
-
-
-def _spec_node_add(runner, monkeypatch):
-    task = _make_task(JobSchedule.FN_NODE_ADD)
-    _wire_base(runner, monkeypatch, task)
-    monkeypatch.setattr(runner, "ThreadPoolExecutor", _InlineExecutor)
-    monkeypatch.setattr(runner, "_inflight", set())
-    monkeypatch.setattr(runner.tasks_controller, "claim_task",
-                        lambda *a, **k: True)
-    # add_node fails (returns falsy) every cycle.
-    monkeypatch.setattr(runner.storage_node_ops, "add_node",
-                        MagicMock(return_value=False))
-    return task
-
-
-def _spec_replication_final(runner, monkeypatch):
-    # The endgame params are pre-set so each pass skips the shrink machinery
-    # and goes straight to run_cutover, which is mocked to fail every cycle.
-    # The target node stays ONLINE on purpose: an offline target deliberately
-    # does NOT burn task.retry (waiting out an outage is transient), so the
-    # ceiling must be driven by the work itself failing. Each failure walks
-    # the hub-attempt ladder (REPL_CUTOVER_MAX_HUB_ATTEMPTS cooldown attempts
-    # per burned retry); the fake clock's giant steps make every cooldown
-    # already elapsed by the next poll.
-    task = _make_task(
-        JobSchedule.FN_REPLICATION_FINAL,
-        lvol_id="lv-1", tgt_node_id="tgt-1", src_node_id="src-1",
-        tgt_lvol_composite="lvs_tgt/LVOL_1", tgt_map_id=1,
-        tgt_snap_composite="lvs_tgt/SNAP_1",
-        shrink_snap_id="S_endgame", shrink_round=0)
-    db, _cluster, _node = _wire_base(runner, monkeypatch, task)
-    db.get_lvol_by_id.return_value = MagicMock()
-    monkeypatch.setattr(runner.replication_final_step, "run_cutover",
-                        lambda *a, **k: (False, "boom"))
-    return task
-
-
-def _spec_jc_comp(runner, monkeypatch):
-    task = _make_task(JobSchedule.FN_JC_COMP_RESUME)
-    _wire_base(runner, monkeypatch, task)
-    # A task is always active on the same node -> resume is deferred, retry each
-    # poll (this is the branch that increments task.retry).
-    monkeypatch.setattr(runner.tasks_controller, "get_active_node_tasks",
-                        lambda *a, **k: [MagicMock()])
-    return task
-
-
-def _spec_restart(runner, monkeypatch):
-    task = _make_task(JobSchedule.FN_NODE_RESTART)
-    _db, _cluster, node = _wire_base(runner, monkeypatch, task)
-    # Node is offline and stays unreachable -> restart keeps failing, retry
-    # each poll.
-    node.status = StorageNode.STATUS_OFFLINE
-    monkeypatch.setattr(runner, "_restart_pool", _InlineExecutor())
-    monkeypatch.setattr(runner, "_restart_next_attempt", {})
-    monkeypatch.setattr(runner, "_restart_inflight", {})
-    monkeypatch.setattr(runner, "_node_inflight", {})
-    monkeypatch.setattr(runner.tasks_controller, "claim_task",
-                        lambda *a, **k: True)
-    monkeypatch.setattr(runner.tasks_controller, "is_auto_restart_paused",
-                        lambda *a, **k: False)
-    monkeypatch.setattr(runner.tasks_controller, "add_node_to_auto_restart",
-                        MagicMock())
-    monkeypatch.setattr(runner.storage_node_ops, "set_node_status", MagicMock())
-    # Node never reachable -> the reachability check fails and retry advances.
-    monkeypatch.setattr(runner.health_controller, "_check_node_ping",
-                        lambda *a, **k: False)
-    monkeypatch.setattr(runner.health_controller, "_check_node_api",
-                        lambda *a, **k: False)
-    return task
-
 
 def _spec_batch_migration(runner, monkeypatch):
     task = _make_task(JobSchedule.FN_LVOL_BATCH_MIG, group_id="grp-1")
@@ -618,11 +243,6 @@ def _spec_batch_migration(runner, monkeypatch):
 
 # name -> spec for the runners driven through their real main() loop.
 _MAIN_DRIVEN_SPECS = {
-    "tasks_runner_cluster_expand.py": _spec_cluster_expand,
-    "tasks_runner_node_add.py": _spec_node_add,
-    "tasks_runner_replication_final.py": _spec_replication_final,
-    "tasks_runner_jc_comp.py": _spec_jc_comp,
-    "tasks_runner_restart.py": _spec_restart,
     "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
 
@@ -630,10 +250,29 @@ _MAIN_DRIVEN_SPECS = {
 # generic drive-main harness. The backup runner's loop is inline under
 # ``if __name__ == '__main__'`` (no ``def main()``), so it is exercised at the
 # ``process_task`` level by ``test_backup_*`` above.
-_COVERED_ELSEWHERE = {
-    "tasks_runner_backup.py": "driven via process_task in test_backup_* above",
-    "tasks_runner_fdb_backup.py":
-        "driven via process_fdb_backup_task in test_fdb_backup_* above",
+_COVERED_ELSEWHERE: dict = {}
+
+# Runners migrated onto the shared driver (``task_runner_base``). They no longer
+# own a loop or a retry counter — the driver enforces the ceiling for all of
+# them at once, covered by tests/unit/tasks/test_task_runner_base.py. They are
+# therefore not discovered by _retry_driven_runner_files(); listing them here
+# keeps that disappearance deliberate rather than silent, and
+# test_migrated_runners_delegate_retry below pins that they really did hand the
+# retry counter over.
+_DRIVER_MIGRATED = {
+    "tasks_runner_fdb_backup.py",
+    "tasks_runner_jc_comp.py",
+    "tasks_runner_replication_final.py",
+    "tasks_runner_sync_lvol_del.py",
+    "tasks_runner_backup.py",
+    "tasks_runner_cluster_expand.py",
+    "tasks_runner_node_add.py",
+    "tasks_runner_restart.py",
+    "tasks_runner_migration.py",
+    "tasks_runner_new_dev_migration.py",
+    "tasks_runner_failed_migration.py",
+    "tasks_runner_node_removal.py",
+    "tasks_runner_port_allow.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
@@ -641,11 +280,7 @@ _COVERED_ELSEWHERE = {
 # recovery (see _migration_retry_allowed) rather than a fixed count. Value is
 # the reason, surfaced in the skip message.
 INTENTIONALLY_UNBOUNDED = {
-    "tasks_runner_migration.py": "created with max_retry=-1; retry gated on resource recovery",
-    "tasks_runner_failed_migration.py": "created with max_retry=-1; retry gated on resource recovery",
-    "tasks_runner_new_dev_migration.py": "created with max_retry=-1; retry gated on resource recovery",
     "tasks_runner_lvol_migration.py": "created with max_retry=-1; retry gated on resource recovery",
-    "tasks_runner_node_removal.py": "created with max_retry=-1; multi-hour removal gated on failure-migration completion",
 }
 
 _INCREMENTS_RETRY = re.compile(r"\.retry\s*\+=\s*1")
@@ -707,6 +342,21 @@ def test_registries_are_not_stale():
     names = {p.name for p in _runner_files()}
     listed = (set(_MAIN_DRIVEN_SPECS)
               | set(_COVERED_ELSEWHERE)
-              | set(INTENTIONALLY_UNBOUNDED))
+              | set(INTENTIONALLY_UNBOUNDED)
+              | _DRIVER_MIGRATED)
     missing = listed - names
     assert not missing, f"listed runners no longer exist: {missing}"
+
+
+@pytest.mark.parametrize("name", sorted(_DRIVER_MIGRATED))
+def test_migrated_runners_delegate_retry(name):
+    """A runner listed as migrated must not have kept a retry counter of its
+    own: the driver owns task.retry, and a runner that still increments it
+    would be applying two ceilings at once."""
+    source = (Path(_runner_files()[0]).parent / name).read_text(encoding='utf-8')
+    assert not _INCREMENTS_RETRY.search(source), (
+        f"{name} is listed as migrated to task_runner_base but still increments "
+        "task.retry itself")
+    assert "serve(SPEC)" in source, (
+        f"{name} is listed as migrated to task_runner_base but does not run the "
+        "shared driver")
