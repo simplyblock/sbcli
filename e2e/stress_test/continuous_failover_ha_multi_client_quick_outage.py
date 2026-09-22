@@ -418,7 +418,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                 size=self.fio_size, name=f"{name}_fio", rw="randrw",
                 bs=self._short_bs(), nrfiles=8, iodepth=1, numjobs=2,
                 time_based=True, runtime=runtime, log_avg_msec=1000,
-                iolog_file=det["iolog_base_path"], max_latency="30s",
+                iolog_file=det["iolog_base_path"],
                 verify="md5", verify_dump=1, verify_fatal=1, retries=6,
                 use_latency=False
             )

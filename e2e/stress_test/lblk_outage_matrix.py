@@ -96,11 +96,6 @@ class _LblkOutageMatrix(_LblkBase):
     #: _assert_fio_alive reports that as a sizing note rather than a failure.
     FIO_MAX_RUNTIME = 6000
 
-    #: Latency ceiling for the live lane, on both platforms. Matches the k8s
-    #: failover lane (continuous_k8s_native_failover), which is the nearest
-    #: analogue to this test; the scale-break lane's 20s is documented there
-    #: as a deliberate tightening from this parent value.
-    FIO_MAX_LATENCY = "40s"
 
     def run(self):
         self._init_lblk()
@@ -982,24 +977,15 @@ class _LblkOutageMatrix(_LblkBase):
                 runtime=runtime, name=job,
                 rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
                 time_based=True,
-                # Both platforms, same ceiling, stated out loud. Left to
-                # the defaults they disagreed: run_fio_test applies
-                # --max_latency=20s of its own while create_fio_job applies
-                # none, so a single IO slower than 20s killed the job with
-                # err=110 on docker and k8s could not trip it whatever the
-                # cluster did. That is what ended mxliveplain 21s into cycle 8
-                # on 2026-09-21 -- and stopping a storage node is precisely
-                # when IO stalls, so the lane was failing on an outage it
-                # injected on purpose.
-                #
-                # 40s is the house value for an outage lane, not a number
-                # picked to make this pass: continuous_k8s_native_failover
-                # uses max_latency=40s, and the scale-break test tightens to
-                # 20s and documents it as "(parent: 40s)". Keeping a real
-                # ceiling matters -- dropping it entirely would let a ten
-                # minute stall through unnoticed -- but it has to be a ceiling
-                # a deliberate node kill is allowed to approach.
-                max_latency=self.FIO_MAX_LATENCY,
+                # The latency ceiling is not set here: it is
+                # utils.fio_defaults.FIO_MAX_LATENCY, applied to both
+                # platforms by _run_fio_dual. Left to the old defaults
+                # they disagreed -- run_fio_test applied 20s of its own
+                # while create_fio_job applied none -- so a single IO
+                # slower than 20s killed the job with err=110 on docker
+                # and k8s could not trip it whatever the cluster did.
+                # That is what ended mxliveplain 21s into cycle 8 on
+                # 2026-09-21.
                 node_selector=(self._pin_for(name)
                                or getattr(self, "_fio_home_worker", None)))))
             self.logger.info("[matrix] live FIO started on %s volume %s",

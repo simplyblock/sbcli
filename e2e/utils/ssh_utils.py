@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime
 import threading
 import random
+from utils.fio_defaults import FIO_MAX_LATENCY
 import string
 import re
 import subprocess
@@ -1266,7 +1267,11 @@ class SshUtils:
         numjobs     = kwargs.get("numjobs", 2)
         nrfiles     = kwargs.get("nrfiles", 8)
         log_avg_ms  = kwargs.get("log_avg_msec", 1000)
-        max_latency  = kwargs.get("max_latency", "20s")
+        # NOT kwargs: the ceiling is a suite-wide constant so that "did
+        # IO stay under it" means the same thing in every lane and on
+        # both platforms. use_latency stays a choice -- whether to have
+        # a ceiling at all is a different question from what it is.
+        max_latency = FIO_MAX_LATENCY
         use_latency = kwargs.get("use_latency", True)
         output_fmt  = f' --output-format={kwargs["output_format"]} ' if kwargs.get("output_format") else ''
         output_file = f" --output={kwargs['output_file']} " if kwargs.get("output_file") else ''

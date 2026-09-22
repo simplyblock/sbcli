@@ -46,6 +46,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from exceptions.custom_exception import LvolNotConnectException
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
 
@@ -929,7 +930,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"verify_backlog=4096\n"
             f"verify_backlog_batch=32\n"
             f"randseed={randseed}\n"
-            f"max_latency=40s\n"
+            f"max_latency={FIO_MAX_LATENCY}\n"
             f"write_iolog=/spdkvol/{name}-iolog.log\n"
             f"log_avg_msec=1000\n"
             f"write_bw_log=/spdkvol/{name}-fio\n"
@@ -6044,7 +6045,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
       - r/w mix: 70/30
       - iodepth: 32
       - numjobs: 1 (one job per PVC to stay within capacity)
-      - max_latency: 20s
+      - max_latency: suite-wide (utils.fio_defaults.FIO_MAX_LATENCY)
       - runtime: 15 min per iteration
       - no verify (scale test, not integrity test)
     """
@@ -6104,7 +6105,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
         Key differences from parent:
           - rwmixread=70 (parent: 50)
           - iodepth=32  (parent: 1)
-          - max_latency=20s (parent: 40s)
+          - max_latency: suite-wide, same as parent
           - No verify, no warmup
         """
         bs = f"{2 ** random.randint(2, 7)}k"
@@ -6125,7 +6126,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             f"time_based\n"
             f"runtime={self.FIO_RUNTIME}\n"
             f"group_reporting\n"
-            f"max_latency=20s\n"
+            f"max_latency={FIO_MAX_LATENCY}\n"
             f"write_iolog=/spdkvol/{name}-iolog.log\n"
             f"log_avg_msec=1000\n"
             f"write_bw_log=/spdkvol/{name}-fio\n"

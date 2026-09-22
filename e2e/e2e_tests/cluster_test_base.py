@@ -5,6 +5,7 @@ import time
 import boto3
 import requests
 from utils.sbcli_utils import SbcliUtils
+from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.ssh_utils import SshUtils, RunnerK8sLog, _compress_and_cleanup_old_dumps
 from exceptions.custom_exception import LvolNotConnectException
 from utils.k8s_utils import K8sUtils, K8sSbcliUtils
@@ -1276,7 +1277,7 @@ class TestClusterBase:
                       runtime=300, name=None, rw="randrw", size="1G",
                       bs="4K", iodepth=1, numjobs=2, nrfiles=8,
                       time_based=True, verify=None, verify_fatal=False,
-                      node_selector=None, max_latency=None, **kwargs):
+                      node_selector=None, **kwargs):
         """Start FIO. Returns thread (Docker) or job_name str (K8s).
 
         verify: e.g. "md5" or "crc32c". Opt-in and off by default, so existing
@@ -1287,13 +1288,11 @@ class TestClusterBase:
         verify_fatal: fail the FIO job itself on a mismatch. Leave False where
             a mismatch should be reported but not fail the run, which is the
             case on hardware with no 4K atomic-write guarantee.
-        max_latency: e.g. "40s". Explicit rather than left to kwargs, because
-            kwargs reaches run_fio_test on docker and is read by NOTHING on
-            the k8s branch, which builds its fio config by hand -- so setting
-            it through kwargs gated docker and silently did nothing on k8s.
-            The two defaults also differ when this is None: run_fio_test
-            applies --max_latency=20s of its own, create_fio_job applies none.
-            Pass it to make the platforms agree.
+        The latency ceiling is NOT a parameter. It comes from
+        utils.fio_defaults.FIO_MAX_LATENCY on both branches, because it used
+        to reach run_fio_test through kwargs on docker and be read by nothing
+        on the k8s branch, which builds its fio config by hand -- so one call
+        gated docker and silently no-opped on k8s.
         """
         fio_name = name or f"fio_{lvol_name}"
 
@@ -1306,7 +1305,7 @@ class TestClusterBase:
             cm_name = f"fiocfg-{job_name}"
 
             time_cfg = f"time_based\nruntime={runtime}" if time_based else ""
-            lat_cfg = f"max_latency={max_latency}\n" if max_latency else ""
+            lat_cfg = f"max_latency={FIO_MAX_LATENCY}\n"
             verify_cfg = ""
             if verify:
                 verify_cfg = f"verify={verify}\nverify_state_save=0\n"
@@ -1349,9 +1348,7 @@ class TestClusterBase:
                     name=fio_name, runtime=runtime, rw=rw, bs=bs,
                     size=size, iodepth=iodepth, numjobs=numjobs,
                     nrfiles=nrfiles, time_based=time_based,
-                    debug=self.fio_debug,
-                    **({"max_latency": max_latency} if max_latency else {}),
-                    **kwargs,
+                    debug=self.fio_debug, **kwargs,
                 ),
             )
             fio_thread.start()

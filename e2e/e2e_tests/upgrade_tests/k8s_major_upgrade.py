@@ -126,6 +126,7 @@ from datetime import datetime
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
 
@@ -442,7 +443,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"verify_backlog=4096\n"
             f"verify_backlog_batch=32\n"
             f"randseed={randseed}\n"
-            f"max_latency=20s\n"
+            f"max_latency={FIO_MAX_LATENCY}\n"
             f"\n"
             f"[job1]\n"
         )
