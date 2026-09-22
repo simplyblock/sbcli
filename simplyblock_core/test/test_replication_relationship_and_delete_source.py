@@ -154,21 +154,15 @@ def test_newest_relationship_wins(monkeypatch):
 # --- --delete-source ordering ----------------------------------------------
 
 
-class _Task:
-    max_retry = 100
-
-    def __init__(self, delete_source):
-        self.function_params = {"lvol_id": "SRC1", "replication_id": "REP1",
-                                "final_state": LVolReplication.STATE_CUTOVER_DONE,
-                                "delete_source": delete_source}
-        self.status = JobSchedule.STATUS_RUNNING
-        self.function_result = ""
-        self.retry = 0
-        self.canceled = False
-        self.writes = 0
-
-    def write_to_db(self, kv=None):
-        self.writes += 1
+def _task(delete_source):
+    task = JobSchedule()
+    task.uuid = "cutover-1"
+    task.status = JobSchedule.STATUS_RUNNING
+    task.max_retry = 100
+    task.function_params = {"lvol_id": "SRC1", "replication_id": "REP1",
+                            "final_state": LVolReplication.STATE_CUTOVER_DONE,
+                            "delete_source": delete_source}
+    return task
 
 
 def _run_finalize(monkeypatch, delete_source, delete_raises=False):
@@ -210,14 +204,15 @@ def _run_finalize(monkeypatch, delete_source, delete_raises=False):
         events.append(("delete", lvol.get_id()))
     monkeypatch.setattr(lvol_controller, "delete_lvol", _delete)
 
-    task = _Task(delete_source)
+    task = _task(delete_source)
+    view = task.frozen_view()
     # The handler's success path. The task's terminal state is written by the
     # task runner afterwards, so what this observes is the ordering of the
     # source retirement against the durable cutover state.
-    trf._record_cutover_done(task)
+    trf._record_cutover_done(view)
     task.function_result = "cutover done"
-    trf._stop_source_replication(task)
-    trf._delete_source_if_requested(task)
+    trf._stop_source_replication(view)
+    trf._delete_source_if_requested(view)
     return task, events
 
 

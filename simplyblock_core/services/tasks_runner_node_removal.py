@@ -7,6 +7,7 @@ from simplyblock_core.services.task_runner_base import (
     TaskDefer,
     TaskProgress,
     serve,
+    set_result,
 )
 
 
@@ -37,7 +38,7 @@ def process_task(task):
     if not storage_node_ops.node_removal_orchestrate(task.node_id, force_remove=force_remove):
         raise TaskProgress("removal in progress, retrying")
 
-    task.function_result = "Node removed"
+    set_result(task, "Node removed")
 
 
 SPEC = RunnerSpec(

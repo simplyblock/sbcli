@@ -99,7 +99,7 @@ def test_happy_path_returns_and_updates_state(monkeypatch):
     calls = _install(monkeypatch, nodes, rep, (True, None))
 
     task = _task()
-    assert runner.task_runner(task, []) is None
+    assert runner.task_runner(task.frozen_view(), []) is None
 
     assert len(calls) == 1
     assert calls[0][5] == "replicate"
@@ -122,7 +122,7 @@ def test_failure_enters_hub_cooldown_without_burning_a_retry(monkeypatch):
 
     task = _task()
     with pytest.raises(TaskDefer, match="boom"):
-        runner.task_runner(task, [])
+        runner.task_runner(task.frozen_view(), [])
 
     assert task.retry == 0, "a transient hub attempt must not burn task.retry"
     assert task.function_params["cutover_hub_attempts"] == 1
@@ -142,7 +142,7 @@ def test_failure_burns_a_retry_once_hub_attempts_are_exhausted(monkeypatch):
 
     task = _task(cutover_hub_attempts=constants.REPL_CUTOVER_MAX_HUB_ATTEMPTS)
     with pytest.raises(TaskRetry, match="boom"):
-        runner.task_runner(task, [])
+        runner.task_runner(task.frozen_view(), [])
 
     assert "cutover_hub_attempts" not in task.function_params
     assert "cutover_retry_after" not in task.function_params
@@ -156,7 +156,7 @@ def test_target_offline_defers_without_burning_a_retry(monkeypatch):
     calls = _install(monkeypatch, nodes, rep, (True, None))
 
     with pytest.raises(TaskDefer, match="target node not online"):
-        runner.task_runner(_task(), [])
+        runner.task_runner(_task().frozen_view(), [])
     assert calls == []
 
 
@@ -165,7 +165,7 @@ def test_missing_source_node_is_retryable_without_cutover(monkeypatch):
     calls = _install(monkeypatch, {"T1": _node("T1")}, rep, (True, None))
 
     with pytest.raises(TaskRetry, match="source node not found"):
-        runner.task_runner(_task(), [])
+        runner.task_runner(_task().frozen_view(), [])
     assert calls == []
 
 
@@ -175,7 +175,7 @@ def test_missing_lvol_id_is_retryable(monkeypatch):
     calls = _install(monkeypatch, nodes, rep, (True, None))
 
     with pytest.raises(TaskRetry, match="missing lvol_id"):
-        runner.task_runner(_task(lvol_id=""), [])
+        runner.task_runner(_task(lvol_id="").frozen_view(), [])
     assert calls == []
 
 
@@ -205,24 +205,24 @@ class _ShrinkDB:
         return self._snaps[sid]
 
 
-class _ShrinkTask:
-    max_retry = 100
-    canceled = False
-
-    def __init__(self, params):
-        self.function_params = params
-        self.function_result = ""
-        self.retry = 0
-        self.status = "running"
-
-    def write_to_db(self, kv=None):
-        pass
+def _shrink_task(params):
+    task = JobSchedule()
+    task.uuid = "shrink-1"
+    task.status = JobSchedule.STATUS_RUNNING
+    task.max_retry = 100
+    task.function_params = dict(params)
+    return task
 
 
 def _mk(monkeypatch, snaps, params):
     import simplyblock_core.services.tasks_runner_replication_final as runner
     monkeypatch.setattr(runner, "db", _ShrinkDB(snaps))
-    return runner, _ShrinkTask(params)
+    return runner, _shrink_task(params)
+
+
+def _shrink(runner, task, lvol=None):
+    """Drive one shrink pass the way the driver would: on a read-only view."""
+    return runner._shrink_step(task.frozen_view(), lvol or _ShrinkLvol())
 
 
 def test_shrink_waits_until_replicated(monkeypatch):
@@ -240,7 +240,7 @@ def test_shrink_waits_until_replicated(monkeypatch):
                        {"shrink_round": 1, "shrink_snap_id": "S1",
                         "shrink_deadline": 2**60})
     with pytest.raises(TaskDefer, match="waiting"):
-        runner._shrink_step(task, _ShrinkLvol())
+        _shrink(runner, task)
 
 
 def test_a_fast_round_converges_instead_of_taking_another(monkeypatch):
@@ -265,7 +265,7 @@ def test_a_fast_round_converges_instead_of_taking_another(monkeypatch):
     import simplyblock_core.controllers.snapshot_controller as sc
     monkeypatch.setattr(sc, "add", _add)
 
-    runner._shrink_step(task, _ShrinkLvol())  # returns => the freeze may start
+    _shrink(runner, task)  # returns => the freeze may start
     assert taken == [], "a converged round must not take another snapshot"
     assert "converged" in task.function_result
 
@@ -297,7 +297,7 @@ def test_shrink_takes_next_snapshot_immediately(monkeypatch):
     monkeypatch.setattr(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 0)
 
     with pytest.raises(TaskDefer):
-        runner._shrink_step(task, _ShrinkLvol())
+        _shrink(runner, task)
     assert taken and taken[0][0] == "LV1"
     assert task.function_params["shrink_round"] == 2
     assert task.function_params["shrink_snap_id"] == "S2"
@@ -314,7 +314,7 @@ def test_shrink_hands_over_when_it_cannot_converge(monkeypatch):
                         "cutover_lvs": "LVS_1",
                         "shrink_started_at": _time.time() - 60})
     # Returning (rather than raising) is what hands over to the freeze.
-    runner._shrink_step(task, _ShrinkLvol())
+    _shrink(runner, task)
     assert "not converged" in task.function_result
 
 
@@ -327,4 +327,4 @@ def test_shrink_deadline_proceeds_to_cutover(monkeypatch):
                        {"shrink_round": 1, "shrink_snap_id": "S1",
                         "shrink_deadline": 1})
     # Returning (rather than raising) is what hands over to the freeze.
-    runner._shrink_step(task, _ShrinkLvol())
+    _shrink(runner, task)

@@ -24,6 +24,7 @@ from simplyblock_core.services.task_runner_base import (
     TaskDefer,
     TaskRetry,
     serve,
+    set_result,
 )
 
 logger = utils.get_logger(__name__)
@@ -155,7 +156,7 @@ def _run_sync_op(task):
             _alert_repeated_failure(
                 task, task.node_id, f"Deferred lvol {op} for {lvol_id}", msg)
             raise TaskRetry(msg)
-        task.function_result = f"registered lvol {lvol_id} on {task.node_id}"
+        set_result(task, f"registered lvol {lvol_id} on {task.node_id}")
     elif op == "resize":
         # Converge to the CURRENT DB size — resize_lvol persists the new
         # size after the fan-out, so this always applies the latest
@@ -164,7 +165,7 @@ def _run_sync_op(task):
         if not node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib):
             raise TaskDefer("resize RPC failed, retrying")
-        task.function_result = f"resized lvol {lvol_id} on {task.node_id} to {size_in_mib} MiB"
+        set_result(task, f"resized lvol {lvol_id} on {task.node_id} to {size_in_mib} MiB")
     else:
         raise TaskAbort(f"unknown op {op!r}")
 
@@ -247,7 +248,7 @@ def _run_sync_del(task):
                 f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
         logger.error(f"Sync delete completed with error: {err}")
 
-    task.function_result = f"bdev {lvol_bdev_name} deleted"
+    set_result(task, f"bdev {lvol_bdev_name} deleted")
 
 
 def process_task(task):

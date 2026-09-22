@@ -19,6 +19,7 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     EXPAND_PHASE_COMPLETED,
     EXPAND_PHASE_IN_PROGRESS,
 )
+import simplyblock_core.services.task_runner_base as trb
 from simplyblock_core.services.task_runner_base import TaskAbort, TaskRetry
 import simplyblock_core.services.tasks_runner_cluster_expand as runner
 
@@ -34,6 +35,9 @@ def _task(status=JobSchedule.STATUS_NEW, retry=0, max_retry=3,
     t.retry = retry
     t.max_retry = max_retry
     t.canceled = canceled
+    # A real row: the handler records its result through ``set_result``, a
+    # compare-and-set against the store rather than a write to this object.
+    t.write_to_db(trb.db.kv_store)
     return t
 
 
@@ -72,7 +76,7 @@ class TestProcessTask(unittest.TestCase):
     def test_missing_new_node_id_aborts(self):
         task = _task(new_node_id=None)
         with self.assertRaises(TaskAbort):
-            runner.process_task(task)
+            runner.process_task(task.frozen_view())
         self.integrate.assert_not_called()
 
     def test_happy_path_completes_and_queues_dev_mig(self):
@@ -88,10 +92,11 @@ class TestProcessTask(unittest.TestCase):
         self.integrate.side_effect = _integrate
 
         task = _task()
-        runner.process_task(task)
+        runner.process_task(task.frozen_view())
 
         self.integrate.assert_called_once()
-        self.assertIn("expansion complete", task.function_result)
+        self.assertIn("expansion complete",
+                      trb.db.get_task_by_id(task.uuid).function_result)
         # Only the two ONLINE devices get a migration task.
         self.assertEqual(self.tc.add_new_device_mig_task.call_count, 2)
 
@@ -104,7 +109,7 @@ class TestProcessTask(unittest.TestCase):
         # Suspending and counting the retry is the driver's half of the
         # contract; the handler only has to not swallow the failure.
         with self.assertRaises(RuntimeError):
-            runner.process_task(task)
+            runner.process_task(task.frozen_view())
 
         self.tc.add_new_device_mig_task.assert_not_called()
 
@@ -114,7 +119,7 @@ class TestProcessTask(unittest.TestCase):
         self.integrate.side_effect = lambda c, snode, **kw: None
 
         with self.assertRaises(TaskRetry):
-            runner.process_task(_task())
+            runner.process_task(_task().frozen_view())
 
         self.tc.add_new_device_mig_task.assert_not_called()
 
@@ -140,8 +145,7 @@ class TestProcessTask(unittest.TestCase):
             c.expand_state = {"phase": EXPAND_PHASE_COMPLETED}
         self.integrate.side_effect = _integrate
 
-        task = _task()
-        runner.process_task(task)
+        runner.process_task(_task().frozen_view())
 
         # By the time integrate ran, the state was rearmed to in_progress and
         # the cursor preserved.

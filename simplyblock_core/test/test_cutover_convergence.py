@@ -21,22 +21,20 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.services import tasks_runner_replication_final as runner
 from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 
 
-class _Task:
-    def __init__(self, **params):
-        self.function_params = dict(params)
-        self.function_result = ""
-        self.status = ""
-        self.retry = 0
-        self.max_retry = 0
-        self.canceled = False
-        self.cluster_id = "CL"
-
-    def write_to_db(self, *a, **kw):
-        pass
+def _task(**params):
+    """A task row, of which the code under test only ever sees a frozen view."""
+    task = JobSchedule()
+    task.uuid = "cutover-1"
+    task.cluster_id = "CL"
+    task.status = JobSchedule.STATUS_RUNNING
+    task.max_retry = 0
+    task.function_params = dict(params)
+    return task
 
 
 def _lvol(uuid="LV1", lvs="LVS_1"):
@@ -76,7 +74,7 @@ class TestConvergence(unittest.TestCase):
         lvstore instead of handing straight over to the freeze.
         """
         clock = _Clock()
-        task = _Task(shrink_snap_id="S0", shrink_round=1,
+        task = _task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=10 ** 9, lvol_id="LV1")
         if exclusive:
             task.function_params["cutover_lvs"] = "LVS_1"
@@ -93,10 +91,11 @@ class TestConvergence(unittest.TestCase):
         def _take(task_, lvol_):
             state["i"] += 1
             taken.append(state["i"])
-            task_.function_params["shrink_round"] += 1
-            task_.function_params["shrink_snap_id"] = "S%d" % state["i"]
-            task_.function_params["shrink_started_at"] = clock.now
-            return "S%d" % state["i"], None
+            snap_id = "S%d" % state["i"]
+            updated = runner._record(
+                task_, shrink_round=task_.function_params["shrink_round"] + 1,
+                shrink_snap_id=snap_id, shrink_started_at=clock.now)
+            return snap_id, None, updated
 
         patches: list = [
             patch.object(runner.time, "time", clock),
@@ -115,7 +114,7 @@ class TestConvergence(unittest.TestCase):
         # failing is a raise. `outcome is None` therefore means "freeze now".
         outcome = None
         try:
-            runner._shrink_step(task, _lvol())
+            runner._shrink_step(task.frozen_view(), _lvol())
         except (TaskDefer, TaskRetry) as e:
             outcome = e
         return outcome, task, taken, clock
@@ -176,26 +175,26 @@ class TestConvergence(unittest.TestCase):
     def test_a_vanished_snapshot_is_an_error(self):
         # This one runs on the real clock, so the deadline has to be a real
         # future epoch -- 10**9 is 2001 and would trip the timeout instead.
-        task = _Task(shrink_snap_id="S0", shrink_round=1,
+        task = _task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=10 ** 12, lvol_id="LV1")
         with patch.object(runner, "_shrink_round_done", return_value=None):
             with self.assertRaises(TaskRetry) as caught:
-                runner._shrink_step(task, _lvol())
+                runner._shrink_step(task.frozen_view(), _lvol())
         self.assertIn("disappeared", str(caught.exception))
 
     def test_the_deadline_still_bounds_the_phase(self):
         """The deadline bounds the phase by handing over to the freeze, not by
         failing: proceeding with a slightly larger residual always beats
         burning a retry on another 900-second shrink window."""
-        task = _Task(shrink_snap_id="S0", shrink_round=1,
+        task = _task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=0, lvol_id="LV1")
         with patch.object(runner, "_shrink_round_done", return_value=False):
-            runner._shrink_step(task, _lvol())   # returns => hands over
+            runner._shrink_step(task.frozen_view(), _lvol())   # returns => hands over
 
     def test_it_yields_the_pass_when_the_budget_runs_out(self):
         """A very slow transfer must not hog the runner forever."""
         clock = _Clock()
-        task = _Task(shrink_snap_id="S0", shrink_round=1,
+        task = _task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=10 ** 9, lvol_id="LV1")
         task.function_params["shrink_started_at"] = clock.now
         with patch.object(runner.time, "time", clock), \
@@ -204,7 +203,7 @@ class TestConvergence(unittest.TestCase):
              patch.object(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 5):
             # Yielding the pass is a defer, not a failure: no retry is consumed.
             with self.assertRaises(TaskDefer) as caught:
-                runner._shrink_step(task, _lvol())
+                runner._shrink_step(task.frozen_view(), _lvol())
         self.assertIn("waiting", str(caught.exception))
 
 
@@ -412,9 +411,9 @@ class TestRoundOneIsMeasured(unittest.TestCase):
     def test_every_round_is_stamped_where_it_is_taken(self):
         import inspect
         src = inspect.getsource(runner._take_shrink_snapshot)
-        self.assertIn('params["shrink_started_at"] = time.time()', src)
-        self.assertIn('params["shrink_round"] = params.get("shrink_round", 0) + 1',
-                      src, "the round number and its stamp must move together")
+        self.assertIn("shrink_started_at=time.time()", src)
+        self.assertIn('shrink_round=params.get("shrink_round", 0) + 1', src,
+                      "the round number and its stamp must move together")
 
     def test_the_controller_enqueues_no_round_of_its_own(self):
         """Commit takes no snapshot, so it must not claim a round in flight."""
@@ -427,17 +426,17 @@ class TestRoundOneIsMeasured(unittest.TestCase):
     def test_an_unmeasured_round_is_not_treated_as_converged(self):
         """Belt and braces for tasks enqueued without the stamp."""
         clock = _Clock()
-        task = _Task(shrink_snap_id="S0", shrink_round=1,
+        task = _task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=10 ** 9, lvol_id="LV1")
         # deliberately NO shrink_started_at
         taken = []
 
         def _take(task_, lvol_):
             taken.append(task_.function_params["shrink_round"])
-            task_.function_params["shrink_round"] += 1
-            task_.function_params["shrink_snap_id"] = "S1"
-            task_.function_params["shrink_started_at"] = clock.now
-            return "S1", None
+            updated = runner._record(
+                task_, shrink_round=task_.function_params["shrink_round"] + 1,
+                shrink_snap_id="S1", shrink_started_at=clock.now)
+            return "S1", None, updated
 
         with patch.object(runner.time, "time", clock), \
              patch.object(runner.time, "sleep", clock.sleep), \
@@ -446,7 +445,7 @@ class TestRoundOneIsMeasured(unittest.TestCase):
              patch.object(constants, "REPL_CUTOVER_MIN_INLINE_SEC", 0), \
              patch.object(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 0):
             with self.assertRaises(TaskDefer):
-                runner._shrink_step(task, _lvol())
+                runner._shrink_step(task.frozen_view(), _lvol())
 
         self.assertEqual(taken, [1],
                          "it must take another round instead of freezing")
@@ -595,13 +594,14 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
         self.addCleanup(tp.stop)
 
     def _me(self):
-        t = MagicMock()
+        # A real row, not a mock: the handler persists through the CAS helpers
+        # and rebinds to what they hand back, which a mock would silently turn
+        # into another mock.
+        t = self.JobSchedule()
+        t.uuid = "T_me"
         t.function_name = self.JobSchedule.FN_REPLICATION_FINAL
-        t.get_id.return_value = "T_me"
         t.cluster_id = "CL"
         t.status = self.JobSchedule.STATUS_NEW
-        t.canceled = False
-        t.retry = 0
         t.max_retry = 8
         t.create_dt = "2026-06-01"
         t.function_params = {
@@ -626,7 +626,7 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
         me, owner = self._me(), self._owner()
 
         with self.assertRaises(TaskDefer) as caught:
-            runner.task_runner(me, [me, owner])
+            runner.task_runner(me.frozen_view(), [me, owner])
 
         self.assertEqual(me.retry, 0, "queueing is not a failure")
         self.assertIn("queued for lvstore", str(caught.exception))
@@ -643,7 +643,7 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
         with patch.object(runner, "_group_id_for_lvol", return_value="CL/G1"):
             # It proceeds into the shrink phase, which this fixture makes raise.
             with self.assertRaises(AssertionError):
-                runner.task_runner(me, [me, owner])
+                runner.task_runner(me.frozen_view(), [me, owner])
 
 
 class TestCutoverFailuresAreVisible(unittest.TestCase):
@@ -662,7 +662,7 @@ class TestCutoverFailuresAreVisible(unittest.TestCase):
 
     def _task(self, retry=0):
         from simplyblock_core.models.job_schedule import JobSchedule
-        t = _Task(lvol_id="LV1")
+        t = _task(lvol_id="LV1")
         t.status = JobSchedule.STATUS_RUNNING
         t.retry = retry
         t.max_retry = 8
@@ -673,7 +673,7 @@ class TestCutoverFailuresAreVisible(unittest.TestCase):
         task = self._task()
         with self.assertLogs(runner.logger, level="WARNING") as logs:
             with self.assertRaises(TaskRetry):
-                runner._cutover_failed(task, "target subsystem is full")
+                runner._cutover_failed(task.frozen_view(), "target subsystem is full")
         self.assertIn("target subsystem is full", "\n".join(logs.output))
         self.assertEqual(task.function_params["last_error"],
                          "target subsystem is full")
@@ -686,7 +686,7 @@ class TestCutoverFailuresAreVisible(unittest.TestCase):
 
         task = self._task(retry=8)
         with self.assertRaises(TaskRetry) as caught:
-            runner._cutover_failed(task, "target subsystem is full")
+            runner._cutover_failed(task.frozen_view(), "target subsystem is full")
 
         # What the driver's _fail() persists onto the row from that exception.
         task.function_result = str(caught.exception)

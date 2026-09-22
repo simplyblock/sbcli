@@ -13,6 +13,7 @@ from simplyblock_core.services.task_runner_base import (
     TaskRetry,
     checkpoint,
     serve,
+    set_result,
 )
 from simplyblock_core.snode_client import SNodeClientException
 
@@ -239,7 +240,7 @@ def task_runner_device(task):
 
     if device.status == NVMeDevice.STATUS_ONLINE and device.io_error is False:
         logger.info(f"Device is online: {device.get_id()}")
-        task.function_result = "Device is online"
+        set_result(task, "Device is online")
         return
 
     if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
@@ -262,7 +263,7 @@ def task_runner_device(task):
         raise TaskRetry(f"Device is {device.status}, retry")
 
     logger.info(f"Device is online: {device.get_id()}")
-    task.function_result = "done"
+    set_result(task, "done")
     tasks_controller.add_device_mig_task_for_node(task.node_id)
 
 
@@ -364,7 +365,7 @@ def task_runner_node(task):
     # a still-False health_check from auxiliary checks.
     if node.status == StorageNode.STATUS_ONLINE:
         logger.info(f"Node is online: {node.get_id()}")
-        task.function_result = "Node is online"
+        set_result(task, "Node is online")
         return
 
     # A restart already in flight makes this task redundant — unless it is our
@@ -579,7 +580,7 @@ def task_runner_node(task):
         # False at the moment we re-read the DB.
         if node.status == StorageNode.STATUS_ONLINE:
             logger.info(f"Node is online: {node.get_id()}")
-            task.function_result = "done"
+            set_result(task, "done")
             return
 
         raise TaskRetry("Node did not come back online")

@@ -29,16 +29,24 @@ flow:
 - **raise** :class:`TaskAbort` — a permanent, non-retryable stop (missing param,
   object gone, "not needed"). Finish the task (``STATUS_DONE``) with the reason.
 
-Two task fields ARE the handler's to set: ``function_result`` (the message the
-outcome is recorded with) and ``function_params`` (where a multi-cycle handler
-records progress — ``recovery_started``, ``merge_started``, ``fail_count``).
-Both are carried onto the row when the driver commits the outcome.
+The task the handler receives is a frozen view: writing to it, or to its
+``function_params``, raises :class:`~simplyblock_core.models.job_schedule.FrozenTaskError`.
+The driver re-reads the row once the handler hands control back, so an in-memory
+write there would be dropped — and silently dropping it is exactly what stalled
+a migration indefinitely (2026-09-22). Two fields remain the handler's to set,
+but it persists them itself:
 
-A handler that does something destructive should re-read the task immediately
-before doing it. The driver's pre-run re-fetch is authoritative for the
-*lifecycle* decisions it makes, but it happens before the handler starts, and by
-the time a long handler reaches its point of no return the task may have been
-canceled.
+- ``function_params`` — multi-cycle progress (``recovery_started``,
+  ``merge_started``) — through :func:`checkpoint`.
+- ``function_result`` — only when a message must survive a *successful* return,
+  through :func:`set_result`. Every other outcome carries its message in the
+  signal raised, which the driver records.
+
+:func:`checkpoint` doubles as the cancellation probe a destructive handler
+needs: it returns None when the task was canceled or finished underneath it. The
+driver's pre-run re-fetch is authoritative for the *lifecycle* decisions it
+makes, but it happens before the handler starts, and by the time a long handler
+reaches its point of no return the task may have been canceled.
 
 DB errors are deliberately NOT caught: an unhandled ``get_clusters`` /
 ``get_job_tasks`` failure propagates out of :func:`serve`, exits the process
@@ -124,10 +132,12 @@ def _commit(task: JobSchedule, apply: Callable[[JobSchedule], None],
     has since taken. That pair of lost updates is what re-ran a restart against
     an already-recovered node (2026-07-29 double restart).
 
-    Only the two fields a handler owns are carried over from ``task``:
-    ``function_result`` and ``function_params`` (where handlers record progress
-    like ``recovery_started`` / ``merge_started``, which must survive so the
-    next attempt does not repeat the step).
+    Only the driver's own fields are written: ``status``, ``retry``, ``owner``
+    and ``updated_at``. The handler's fields — ``function_result`` and
+    ``function_params`` — are never copied from ``task``, because that copy was
+    read before the handler ran. Carrying them over is what erased a migration's
+    start marker and stalled it indefinitely (2026-09-22); handlers persist
+    their own state through :func:`checkpoint` and :func:`set_result`.
 
     A terminal commit may finish a canceled task — that IS the cancellation
     being carried out; a non-terminal one would be reviving it.
@@ -135,8 +145,6 @@ def _commit(task: JobSchedule, apply: Callable[[JobSchedule], None],
     Returns the committed task, or None if another actor already owns the
     outcome — the caller must stop driving it.
     """
-    result = task.function_result
-    params = task.function_params
     now = str(datetime.datetime.now(datetime.UTC))
     won = {"ok": False}
 
@@ -145,8 +153,6 @@ def _commit(task: JobSchedule, apply: Callable[[JobSchedule], None],
             return False
         if not terminal and fresh.canceled:
             return False
-        fresh.function_result = result
-        fresh.function_params = params
         apply(fresh)
         fresh.updated_at = now
         won["ok"] = True
@@ -158,6 +164,15 @@ def _commit(task: JobSchedule, apply: Callable[[JobSchedule], None],
                     f"concurrently; another actor owns the outcome")
         return None
     return committed
+
+
+def _frozen_or_none(task: JobSchedule | None) -> JobSchedule | None:
+    """Freeze what a handler-facing helper hands back.
+
+    A handler carries on with the task these return, so they must reject writes
+    for the same reason the driver's own hand-off does.
+    """
+    return None if task is None else task.frozen_view()
 
 
 def checkpoint(task: JobSchedule, **params) -> JobSchedule | None:
@@ -176,7 +191,37 @@ def checkpoint(task: JobSchedule, **params) -> JobSchedule | None:
     def _apply(fresh: JobSchedule) -> None:
         fresh.function_params = dict(fresh.function_params, **params)
 
-    return _commit(task, _apply)
+    return _frozen_or_none(_commit(task, _apply))
+
+
+def drop_params(task: JobSchedule, *names: str) -> JobSchedule | None:
+    """Remove keys from the task's ``function_params``, atomically.
+
+    The counterpart to :func:`checkpoint`, for a marker whose absence is what
+    the next attempt reads — a migration start marker dropped so the attempt
+    starts a fresh migration rather than polling the one that just errored.
+    """
+    def _apply(fresh: JobSchedule) -> None:
+        fresh.function_params = {k: v for k, v in fresh.function_params.items()
+                                 if k not in names}
+
+    return _frozen_or_none(_commit(task, _apply))
+
+
+def set_result(task: JobSchedule, message: str) -> JobSchedule | None:
+    """Record the handler's outcome message on the task row.
+
+    Only needed for a message that must survive a handler's *successful*
+    return. Every other outcome carries its message in the signal it raises
+    (``TaskDefer("…")``), which the driver records for you.
+
+    Returns the fresh task, or None if the task was canceled or finished
+    underneath the handler.
+    """
+    def _apply(fresh: JobSchedule) -> None:
+        fresh.function_result = message
+
+    return _frozen_or_none(_commit(task, _apply))
 
 
 @dataclass
@@ -405,38 +450,55 @@ class TaskRunner:
                 return
             task = running
 
-        # Drop the previous attempt's result so a task that fails and later
-        # succeeds does not finish carrying the stale failure message. Handlers
-        # that set a success message overwrite this; the rest get "completed".
-        # Kept first: the handler cannot see what the last attempt reported, so
-        # recognizing a repeated failure is the driver's job (see _fail).
+        # What the row said before this attempt. Used twice below: to tell a
+        # repeated failure from a new one, and to tell a result this attempt
+        # produced from one left behind by an earlier attempt.
         previous_result = task.function_result
-        task.function_result = ""
 
+        # The handler's signal, held while the row is re-read: the outcome is
+        # decided before the re-read and recorded after it. None == returned.
+        signal: Exception | None = None
         try:
             # Heartbeat the lease for the duration of the handler: TASK_LEASE_TTL
             # is far shorter than a node-add / restart / migration, so a lease
             # refreshed only on task writes would go stale mid-handler and let a
             # second host claim and double-drive the task.
             with tasks_controller.task_lease_heartbeat(task):
+                # A frozen view, never the driver's own object: the handler
+                # persists its state itself, and a write to what it was handed
+                # would be dropped by the re-read below. Frozen, that write
+                # raises instead of vanishing.
                 if self.spec.wants_cycle_tasks:
-                    self.spec.handler(task, cycle_tasks)
+                    self.spec.handler(task.frozen_view(), cycle_tasks)
                 else:
-                    self.spec.handler(task)
-        except TaskProgress as e:
-            self._progress(task, str(e))
-        except TaskDefer as e:
-            self._defer(task, str(e))
-        except TaskAbort as e:
-            self._finish(task, str(e) or "aborted")
-        except TaskRetry as e:
-            self._fail(task, str(e) or "retry", previous_result)
-        except Exception as e:  # noqa: BLE001 - unexpected == retryable failure
-            logger.error(f"{self.spec.name}: task {uuid} handler raised: {e}")
-            logger.exception(e)
-            self._fail(task, f"unhandled error: {e}", previous_result)
+                    self.spec.handler(task.frozen_view())
+        except Exception as e:  # noqa: BLE001 - contain any handler failure
+            signal = e
+            if not isinstance(e, (TaskProgress, TaskDefer, TaskAbort, TaskRetry)):
+                logger.error(f"{self.spec.name}: task {uuid} handler raised: {e}")
+                logger.exception(e)
+
+        # Re-read before recording the outcome. The handler may have committed
+        # to the row (checkpoint / set_result) and the copy above predates that,
+        # so every decision and write from here on is made against what the
+        # handler actually persisted.
+        task = db.get_task_by_id(uuid)
+        if task is None:
+            self._forget(uuid)
+            return
+
+        if isinstance(signal, TaskProgress):
+            self._progress(task, str(signal))
+        elif isinstance(signal, TaskDefer):
+            self._defer(task, str(signal))
+        elif isinstance(signal, TaskAbort):
+            self._finish(task, str(signal) or "aborted")
+        elif isinstance(signal, TaskRetry):
+            self._fail(task, str(signal) or "retry", previous_result)
+        elif signal is not None:
+            self._fail(task, f"unhandled error: {signal}", previous_result)
         else:
-            self._succeed(task)
+            self._succeed(task, previous_result)
 
     # -- outcome transitions (the only places task state is mutated) --------
 
@@ -445,24 +507,31 @@ class TaskRunner:
         return _commit(task, apply, terminal=terminal, context=self.spec.name)
 
     @staticmethod
-    def _to(status: str) -> Callable[[JobSchedule], None]:
+    def _to(status: str, result: str | None = None) -> Callable[[JobSchedule], None]:
         def _apply(task: JobSchedule) -> None:
             task.status = status
+            if result is not None:
+                task.function_result = result
         return _apply
 
-    def _succeed(self, task: JobSchedule) -> None:
-        if not task.function_result:
-            task.function_result = "completed"
-        self._write_terminal(task)
+    def _succeed(self, task: JobSchedule, previous_result: str = "") -> None:
+        # "completed" unless the handler recorded something itself this attempt.
+        # A result equal to what the row already held before the handler ran was
+        # left by an earlier attempt — a failure message, or the last progress
+        # report — and must not become this task's final word.
+        result = task.function_result
+        if not result or result == previous_result:
+            result = "completed"
+        self._write_terminal(task, result)
 
     def _finish(self, task: JobSchedule, result: str) -> None:
         """Terminal DONE for a non-handler-success reason (canceled, max retry,
         abort)."""
-        task.function_result = result
-        self._write_terminal(task)
+        self._write_terminal(task, result)
 
-    def _write_terminal(self, task: JobSchedule) -> None:
-        committed = self._cas(task, self._to(JobSchedule.STATUS_DONE), terminal=True)
+    def _write_terminal(self, task: JobSchedule, result: str) -> None:
+        committed = self._cas(task, self._to(JobSchedule.STATUS_DONE, result),
+                              terminal=True)
         self._forget(task.uuid)
         if committed is None or self.spec.on_finish is None:
             # Losing the transition means someone else finished the task and
@@ -479,11 +548,9 @@ class TaskRunner:
             logger.exception(e)
 
     def _progress(self, task: JobSchedule, reason: str) -> None:
-        if reason:
-            task.function_result = reason
         # Status stays RUNNING — see TaskProgress. The commit still happens, to
         # record the progress message and refresh the lease.
-        if self._cas(task, self._to(JobSchedule.STATUS_RUNNING)) is None:
+        if self._cas(task, self._to(JobSchedule.STATUS_RUNNING, reason or None)) is None:
             self._forget(task.uuid)
             return
         self._clear_backoff(task.uuid)
@@ -500,20 +567,25 @@ class TaskRunner:
             logger.exception(e)
 
     def _defer(self, task: JobSchedule, reason: str) -> None:
-        if reason:
-            task.function_result = reason
-        if self._cas(task, self._to(JobSchedule.STATUS_SUSPENDED)) is None:
+        if self._cas(task, self._to(JobSchedule.STATUS_SUSPENDED, reason or None)) is None:
             self._forget(task.uuid)
             return
         self._clear_backoff(task.uuid)
 
     def _fail(self, task: JobSchedule, reason: str, previous_result: str = "") -> None:
+        """Record a failed attempt: message, retry count, suspension, backoff.
+
+        This is the only place a failure message is written, which is what lets
+        a later successful attempt tell one apart from its own result — see
+        :meth:`_succeed`. The message therefore has to land on the row here
+        rather than being left on a copy for someone else to carry over.
+        """
         logger.error(f"{self.spec.name}: task {task.uuid} failed: {reason}")
-        task.function_result = reason
 
         def _apply(fresh: JobSchedule) -> None:
             fresh.retry += 1
             fresh.status = JobSchedule.STATUS_SUSPENDED
+            fresh.function_result = reason
 
         committed = self._cas(task, _apply)
         if committed is None:

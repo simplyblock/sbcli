@@ -10,6 +10,7 @@ from simplyblock_core.services.task_runner_base import (
     TaskDefer,
     TaskRetry,
     serve,
+    set_result,
 )
 
 logger = utils.get_logger(__name__)
@@ -49,7 +50,7 @@ def process_task(task):
             raise TaskAbort(f"JC {node.jm_vuid} compression not needed")
         raise TaskRetry("JC comp resume failed, retry task")
 
-    task.function_result = f"JC {node.jm_vuid} compression resumed on node"
+    set_result(task, f"JC {node.jm_vuid} compression resumed on node")
 
 
 SPEC = RunnerSpec(

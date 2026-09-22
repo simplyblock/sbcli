@@ -4,7 +4,7 @@ from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import fdb_backup_controller, fdb_backup_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.services.task_runner_base import RunnerSpec, TaskRetry, serve
+from simplyblock_core.services.task_runner_base import RunnerSpec, TaskRetry, serve, set_result
 
 logger = utils.get_logger(__name__)
 
@@ -39,7 +39,7 @@ def process_fdb_backup_task(task):
     if not fdb_backup_controller.create_backup(task.cluster_id):
         raise TaskRetry("failed to create backup")
 
-    task.function_result = "Backup created"
+    set_result(task, "Backup created")
     prune_old_backups(task.cluster_id)
 
 

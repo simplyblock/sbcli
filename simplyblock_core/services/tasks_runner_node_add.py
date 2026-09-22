@@ -10,6 +10,7 @@ from simplyblock_core.services.task_runner_base import (
     TaskDefer,
     TaskRetry,
     serve,
+    set_result,
 )
 
 
@@ -96,7 +97,7 @@ def process_task(task):
         res, msg = False, f"Node add raised: {e}"
 
     if res:
-        task.function_result = msg
+        set_result(task, msg)
         return
 
     # The one guaranteed topology reboot per node must not eat the retry

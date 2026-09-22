@@ -30,7 +30,9 @@ from simplyblock_core.services.task_runner_base import (
     TaskAbort,
     TaskDefer,
     TaskRetry,
+    checkpoint,
     serve,
+    set_result,
 )
 
 logger = utils.get_logger(__name__)
@@ -133,7 +135,7 @@ def _run_backup(task):
         backup.status = Backup.STATUS_COMPLETED
         backup.write_to_db()
         backup_events.backup_completed(backup.cluster_id, backup.node_id, backup)
-        task.function_result = "Backup completed"
+        set_result(task, "Backup completed")
         return
 
     if state == "Failed":
@@ -230,7 +232,10 @@ def _release_restore_s3_bdev(task, snode) -> None:
         backup_device.delete_restore_s3_bdev(snode, _restore_s3_bdev(task, snode))
 
     task.function_params["s3_config"] = None
-    task.write_to_db(db.kv_store)
+
+
+def _scrub_s3_config(task) -> None:
+    task.function_params = dict(task.function_params, s3_config=None)
 
 
 def _run_restore(task):
@@ -272,7 +277,7 @@ def _run_restore(task):
 
         # Don't re-issue the RPC on subsequent polls, and give the data plane
         # time to start the transfer before the first one.
-        task.function_params["recovery_started"] = True
+        checkpoint(task, recovery_started=True)
         raise TaskDefer("Restore started")
 
     state = _transfer_state(rpc_client, lvol_name)
@@ -286,12 +291,12 @@ def _run_restore(task):
             logger.warning(
                 f"Backup {backup_id} no longer exists, "
                 f"skipping restore-completed event for {lvol_name}")
-        task.function_result = f"Restore completed: {lvol_name}"
+        set_result(task, f"Restore completed: {lvol_name}")
         return
 
     if state == "Failed":
         fail_count = task.function_params.get("fail_count", 0) + 1
-        task.function_params["fail_count"] = fail_count
+        checkpoint(task, fail_count=fail_count)
         reason = f"S3 transfer failed on data plane (attempt {fail_count})"
         if fail_count < 3:
             raise TaskRetry(reason)
@@ -308,7 +313,7 @@ def _run_restore(task):
         raise TaskAbort(reason)
 
     if state == "No process":
-        task.function_params["recovery_started"] = False
+        checkpoint(task, recovery_started=False)
         raise TaskDefer("No process, restarting recovery")
 
     raise TaskDefer("Restore in progress")
@@ -339,7 +344,7 @@ def _run_merge(task):
         if not ret:
             raise TaskRetry("bdev_lvol_s3_merge RPC failed")
 
-        task.function_params["merge_started"] = True
+        checkpoint(task, merge_started=True)
         # Give the data plane time to complete the merge before finalizing.
         raise TaskDefer("Merge started")
 
@@ -379,7 +384,7 @@ def _run_merge(task):
             # cannot be aborted here -- retry the manifest work instead.
             raise TaskRetry(f"Merge done, manifest update failed: {e}")
 
-        task.function_result = "Merge completed"
+        set_result(task, "Merge completed")
         logger.info(f"Merge completed: {old_backup_id} merged into {keep_backup_id}")
         return
 
@@ -395,7 +400,7 @@ def _run_merge(task):
 
     if state == "No process":
         # Never started, or its result was already swept — re-issue.
-        task.function_params["merge_started"] = False
+        checkpoint(task, merge_started=False)
         raise TaskRetry("merge not running on the data plane; re-issuing")
 
     # "In progress" — still running, come back next pass.
@@ -445,10 +450,16 @@ def finalize_resource(task):
 
     elif task.function_name == JobSchedule.FN_BACKUP_RESTORE:
         _set_lvol_restore_failed(task, reason)
-        try:
-            _release_restore_s3_bdev(task, db.get_storage_node_by_id(task.node_id))
-        except KeyError:
-            _release_restore_s3_bdev(task, None)
+        if task.function_params.get("s3_config"):
+            try:
+                snode = db.get_storage_node_by_id(task.node_id)
+            except KeyError:
+                snode = None
+            _release_restore_s3_bdev(task, snode)
+            # Not `drop_params`: this runs after the terminal write, and a task
+            # already DONE is exactly what the handler-facing helpers refuse to
+            # touch. The scrub still has to land, so it commits directly.
+            db.atomic_update(task, _scrub_s3_config)
 
     elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
         old_backup_id = task.function_params.get("old_backup_id")

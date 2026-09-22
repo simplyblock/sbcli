@@ -18,6 +18,8 @@ from simplyblock_core.services.task_runner_base import (
     TaskProgress,
     TaskRetry,
     checkpoint,
+    drop_params,
+    set_result,
 )
 
 logger = utils.get_logger(__name__)
@@ -129,11 +131,11 @@ def require_recovery_progress(task, unavailable):
 
     if not unavailable:
         if previous:
-            task.function_params.pop(MIGRATION_WAIT_UNAVAILABLE_KEY, None)
+            drop_params(task, MIGRATION_WAIT_UNAVAILABLE_KEY)
         return
 
     recovered = set(previous) - set(unavailable)
-    task.function_params[MIGRATION_WAIT_UNAVAILABLE_KEY] = unavailable
+    checkpoint(task, **{MIGRATION_WAIT_UNAVAILABLE_KEY: unavailable})
     if previous and recovered:
         logger.info("Migration retry allowed after recovery event for task %s: %s",
                     task.uuid, sorted(recovered))
@@ -143,12 +145,14 @@ def require_recovery_progress(task, unavailable):
                     f"restarting migration: {unavailable}")
 
 
-def start_migration(task, start):
+def start_migration(task, start, **params):
     """Issue the data-plane migration and record that it was issued.
 
     ``start`` is the runner's own RPC call, returning falsy on failure. The
     marker is checkpointed immediately: a crash between the RPC and the end of
-    the handler would otherwise lose it and start a second migration.
+    the handler would otherwise lose it and start a second migration. Any
+    ``params`` are recorded in the same commit, so a marker can never land
+    without the context written alongside it.
     """
     try:
         started = start()
@@ -158,7 +162,8 @@ def start_migration(task, start):
     if not started:
         raise TaskRetry("Failed to start device migration task, retry later")
 
-    return checkpoint(task, migration={"name": task.function_params["distr_name"]})
+    return checkpoint(task, migration={"name": task.function_params["distr_name"]},
+                      **params)
 
 
 def report_migration_status(task, res, allow_all_errors=False, allowed_error_codes=None):
@@ -174,21 +179,21 @@ def report_migration_status(task, res, allow_all_errors=False, allowed_error_cod
 
     if migration_status == "completed":
         if error_code == 0:
-            task.function_result = "Done"
+            set_result(task, "Done")
             return
         if error_code in allowed_error_codes or allow_all_errors:
-            task.function_result = f"mig completed with status: {error_code}"
+            set_result(task, f"mig completed with status: {error_code}")
             return
         # Drop the marker so the next attempt starts a fresh migration rather
         # than polling the one that just errored.
-        del task.function_params['migration']
+        drop_params(task, 'migration')
         raise TaskRetry(f"mig error: {error_code}, retrying")
 
     if migration_status == "failed":
         raise TaskAbort(migration_status)
 
     if migration_status == "none":
-        del task.function_params['migration']
+        drop_params(task, 'migration')
         raise TaskRetry("mig retry after restart")
 
     raise TaskProgress(f"Status: {migration_status}, progress:{progress}")

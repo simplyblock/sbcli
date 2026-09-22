@@ -16,6 +16,7 @@ from simplyblock_core.services.task_runner_base import (
     TaskAbort,
     TaskDefer,
     serve,
+    set_result,
 )
 
 logger = utils.get_logger(__name__)
@@ -979,7 +980,7 @@ def exec_port_allow_task(task):
     except Exception as e:
         logger.error(f"Device re-admit after port allow failed: {e}")
 
-    task.function_result = f"Port {port_number} allowed on node"
+    set_result(task, f"Port {port_number} allowed on node")
 
 
 SPEC = RunnerSpec(
