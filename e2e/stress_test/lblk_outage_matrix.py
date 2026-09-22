@@ -96,6 +96,12 @@ class _LblkOutageMatrix(_LblkBase):
     #: _assert_fio_alive reports that as a sizing note rather than a failure.
     FIO_MAX_RUNTIME = 6000
 
+    #: Latency ceiling for the live lane, on both platforms. Matches the k8s
+    #: failover lane (continuous_k8s_native_failover), which is the nearest
+    #: analogue to this test; the scale-break lane's 20s is documented there
+    #: as a deliberate tightening from this parent value.
+    FIO_MAX_LATENCY = "40s"
+
     def run(self):
         self._init_lblk()
         self.assert_cluster_is_lblk()
@@ -976,23 +982,24 @@ class _LblkOutageMatrix(_LblkBase):
                 runtime=runtime, name=job,
                 rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
                 time_based=True,
-                # run_fio_test defaults to --max_latency=20s; create_fio_job
-                # has no equivalent and never set one. So the two platforms
-                # were not measuring the same thing: on docker a single IO
-                # slower than 20s KILLED the job with err=110, and deliberately
-                # stopping a storage node is precisely when IO stalls. That is
-                # what ended mxliveplain 21s into cycle 8 on 2026-09-21, while
-                # k8s -- same outage, same volume flavours -- could not have
-                # tripped it whatever the cluster did.
+                # Both platforms, same ceiling, stated out loud. Left to
+                # the defaults they disagreed: run_fio_test applies
+                # --max_latency=20s of its own while create_fio_job applies
+                # none, so a single IO slower than 20s killed the job with
+                # err=110 on docker and k8s could not trip it whatever the
+                # cluster did. That is what ended mxliveplain 21s into cycle 8
+                # on 2026-09-21 -- and stopping a storage node is precisely
+                # when IO stalls, so the lane was failing on an outage it
+                # injected on purpose.
                 #
-                # This lane asks whether IO CONTINUES and whether the data is
-                # right, not whether it stays under an arbitrary ceiling during
-                # an outage we ourselves injected. Latency under outage is
-                # worth measuring, but as a measurement, not as a fatal trip in
-                # the middle of a node kill. Turning it off also makes the EIO
-                # from that same moment interpretable: it now either reproduces
-                # on its own or it does not.
-                use_latency=False,
+                # 40s is the house value for an outage lane, not a number
+                # picked to make this pass: continuous_k8s_native_failover
+                # uses max_latency=40s, and the scale-break test tightens to
+                # 20s and documents it as "(parent: 40s)". Keeping a real
+                # ceiling matters -- dropping it entirely would let a ten
+                # minute stall through unnoticed -- but it has to be a ceiling
+                # a deliberate node kill is allowed to approach.
+                max_latency=self.FIO_MAX_LATENCY,
                 node_selector=(self._pin_for(name)
                                or getattr(self, "_fio_home_worker", None)))))
             self.logger.info("[matrix] live FIO started on %s volume %s",

@@ -50,7 +50,10 @@ if "bool(handle)" in alive:
                     "(always true for a k8s job name)")
 
 # 3. Final validation must raise on k8s, not warn.
-fin = src("_finish_live_fio")
+# The per-volume verdict moved into _judge_one_fio when _finish_live_fio
+# stopped raising on the first failure; read both, so neither the caller nor
+# the helper can quietly lose the raising path.
+fin = src("_finish_live_fio") + src("_judge_one_fio")
 if "_validate_fio_dual" in fin:
     findings.append("_finish_live_fio uses _validate_fio_dual, which only "
                     "warns on k8s")
