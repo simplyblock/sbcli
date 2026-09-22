@@ -22,7 +22,8 @@ from stress_test.continuous_k8s_native_failover import (
     K8sNativeFailoverTest,
     K8sNativeResilientFailoverTest,
 )
-from utils.md_journal import assert_journal_enabled, scan_log_for_corruption
+from utils.md_journal import (MdJournalAbsent, assert_journal_enabled,
+                              scan_log_for_corruption)
 from utils.raw_device_verify import RawDeviceVerifier
 
 
@@ -54,11 +55,27 @@ class _LblkStressMixin:
                 f"[lblk-stress] cluster device_mode is {mode!r}, not 'lblk'. "
                 f"This soak would exercise the NVMe path instead.")
         self.assert_devices_are_aio()
+        journalled = True
         for ip, _port, prefix, sock, lvs in self._journal_targets():
-            if lvs:
+            if not lvs:
+                continue
+            try:
                 assert_journal_enabled(self.ssh_obj, ip, prefix, sock,
                                        lvs_name=lvs, logger=self.logger)
-        self.logger.info("[lblk-stress] cluster is lblk and journalled")
+            except MdJournalAbsent as exc:
+                # Deliberate as of 2026-09-22: the md journal was reverted from
+                # the spdk build to investigate a CRC mismatch. Soaking the
+                # rest of lblk is still worth doing; refusing to start is not.
+                journalled = False
+                self.journal_absent = True
+                self.logger.warning(
+                    "[lblk-stress] NO MD JOURNAL IN THIS BUILD -- %s. Soaking "
+                    "anyway; this run does NOT cover torn-write protection on "
+                    "metadata pages.", str(exc)[:200])
+                break
+        self.logger.info("[lblk-stress] cluster is lblk%s",
+                         " and journalled" if journalled
+                         else " (no md journal in this build)")
 
     def assert_devices_are_aio(self):
         """Every storage device must be backed by an AIO bdev.

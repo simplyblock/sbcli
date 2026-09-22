@@ -30,6 +30,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 from utils.md_journal import (
+    MdJournalAbsent,
     MdJournalError,
     call_rpc,
     assert_journal_enabled,
@@ -274,18 +275,48 @@ class _LblkBase(TestClusterBase):
                         self._spdk_sock(port), node.get("lvstore")))
         return out
 
-    def assert_journals_live(self):
-        """The journal must be enabled on every lvstore.
+    #: True once a node has told us this SPDK build has no md journal, so the
+    #: run summary and every later journal check can say so rather than
+    #: rediscovering it.
+    journal_absent = False
 
-        Without it the cluster runs unprotected on devices that may not give a
-        4K atomic write, which is the whole reason these tests exist.
+    def assert_journals_live(self):
+        """The journal must be enabled on every lvstore that can have one.
+
+        Two different facts, kept apart on purpose:
+
+        * the RPC is not registered -> the build was shipped without the md
+          journal. As of 2026-09-22 that is deliberate: it was reverted from
+          spdk to investigate a CRC mismatch, so `spdk:main-latest` has none.
+          Blocking here stops us testing everything else lblk does, so the run
+          continues with the gap recorded loudly.
+        * the RPC answers and reports not-enabled -> the feature is present and
+          did not come up. That is a defect and still fails the run.
+
+        What the gap costs, stated plainly so a green run is not over-read: the
+        journal's only safety contribution is torn-write detection on 4K
+        metadata pages (design doc S9: "no transactions or multi-page atomicity
+        are needed"). A page can only tear where the device's atomic unit is
+        under 4K. Without the journal that protection is gone, and on hardware
+        with 512b sectors so is metadata crash-safety.
         """
         checked = 0
         for ip, _port, prefix, sock, lvs in self._journal_targets():
             if not lvs:
                 continue
-            stats = assert_journal_enabled(self._spdk_runner, ip, prefix, sock,
-                                           lvs_name=lvs, logger=self.logger)
+            try:
+                stats = assert_journal_enabled(
+                    self._spdk_runner, ip, prefix, sock,
+                    lvs_name=lvs, logger=self.logger)
+            except MdJournalAbsent as exc:
+                self.journal_absent = True
+                self.logger.warning(
+                    "[lblk] NO MD JOURNAL IN THIS BUILD -- %s. Continuing: the "
+                    "control plane never references the md journal (no hits in "
+                    "simplyblock_core/cli/web), so lblk runs without it. But "
+                    "this run does NOT cover torn-write protection on metadata "
+                    "pages. Do not read a pass as covering it.", str(exc)[:200])
+                return 0
             checked += 1
             self._journal_lvs = self._journal_lvs or (ip, prefix, sock, lvs)
             if stats.get("used_slots", 0) > stats.get("num_slots", 1) * 0.9:
@@ -461,6 +492,8 @@ class _LblkBase(TestClusterBase):
         been touched.
         """
         heads = {}
+        if self.journal_absent:
+            return heads
         for ip, _port, prefix, sock, lvs in self._journal_targets():
             if not lvs:
                 continue
@@ -468,6 +501,9 @@ class _LblkBase(TestClusterBase):
                 st = get_stats(self._spdk_runner, ip, prefix, sock,
                                lvs_name=lvs, logger=None)
                 heads[lvs] = (st or {}).get("mem_head")
+            except MdJournalAbsent:
+                self.journal_absent = True
+                return {}
             except MdJournalError as exc:
                 self.logger.warning("[md-journal] could not sample %s: %s",
                                     lvs, exc)
@@ -573,6 +609,10 @@ class _LblkBase(TestClusterBase):
             try:
                 return get_stats(self._spdk_runner, ip, prefix, sock,
                                  lvs_name=lvs, logger=self.logger)
+            except MdJournalAbsent:
+                # Retrying cannot help: the RPC is not in this binary.
+                self.journal_absent = True
+                raise
             except MdJournalError as exc:
                 if time.time() >= deadline:
                     raise MdJournalError(
@@ -1338,6 +1378,21 @@ class _LblkJournalRecovery(_LblkBase):
         self._init_lblk()
         self.assert_cluster_is_lblk()
         self.assert_journals_live()
+        if self.journal_absent:
+            # Everything below drives bdev_lvol_set_md_journal_drain and reads
+            # ring counters. With no journal in the build there is no ring and
+            # nothing to replay, so this is genuinely not applicable -- unlike
+            # the other lanes, which still test real lblk behaviour without it.
+            raise LblkPreconditionError(
+                "[lblk] md journal recovery cannot run on this build: "
+                "bdev_lvol_get_md_journal_stats is not registered, so there "
+                "is no ring to pause, fill or replay. This is NOT a product "
+                "defect -- the journal was reverted from spdk on 2026-09-22 "
+                "to investigate a CRC mismatch. Drop this test from the run "
+                "list until it is restored; the other lblk lanes still test "
+                "real behaviour without it. (The suite has no skip that does "
+                "not also fail the run, so this fails loudly rather than "
+                "passing and implying replay was verified.)")
 
         pool = self._make_pool()
         self._create_and_connect(f"lblkjr{random.randint(100, 999)}", pool)

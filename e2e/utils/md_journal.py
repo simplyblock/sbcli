@@ -110,6 +110,14 @@ BLOBSTORE_BENIGN_MARKERS = (
 )
 
 
+class MdJournalAbsent(RuntimeError):
+    """The SPDK build does not carry the md journal feature at all.
+
+    Distinct from MdJournalError, which means the journal should be there and
+    is not working. Raised only on JSON-RPC -32601 (method not registered).
+    """
+
+
 class MdJournalError(RuntimeError):
     """Journal is absent, unhealthy, or reported corruption."""
 
@@ -199,6 +207,13 @@ def call_rpc(ssh_obj, node, exec_prefix, sock, method, params=None,
         raise MdJournalError(f"{method} returned non-JSON from {node}: "
                              f"{blob[:400]}")
     if "error" in doc:
+        # -32601 is JSON-RPC "Method not found": the RPC is not registered in
+        # this SPDK binary, which means the build has no md journal at all --
+        # a different thing from a journal that failed to start.
+        if (doc["error"] or {}).get("code") == -32601:
+            raise MdJournalAbsent(
+                f"{method} is not registered on {node}: this SPDK build has "
+                f"no md journal ({doc['error']})")
         raise MdJournalError(f"{method} failed on {node}: {doc['error']}")
     if logger:
         logger.info("[md-journal] %s -> %s", method, doc.get("result"))
@@ -254,6 +269,10 @@ def assert_journal_enabled(ssh_obj, node, exec_prefix, sock, lvs_name=None,
     try:
         stats = get_stats(ssh_obj, node, exec_prefix, sock,
                           lvs_name=lvs_name, uuid=uuid, logger=logger)
+    except MdJournalAbsent:
+        # Let the caller decide. Whether a journal-less build is acceptable is
+        # a policy question about the run, not something this helper can know.
+        raise
     except MdJournalError as exc:
         raise MdJournalError(
             f"no md journal on {lvs_name or uuid} at {node}: {exc}. On an lblk "
