@@ -132,21 +132,43 @@ def authorized_cluster(
         return None
 
 
+def authenticated_admin_token(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+) -> bool:
+    """FastAPI dependency: whether the bearer token matches a configured static admin token.
+
+    A static admin token grants the same authority as an admin service account,
+    for callers that cannot present a Kubernetes-issued token to this cluster's
+    own TokenReview endpoint — e.g. a remote operator authenticating across a
+    cluster boundary. Configured via ``SB_ADMIN_TOKENS``; empty by default.
+    """
+    token = credentials.credentials
+    return any(
+        hmac.compare_digest(admin_token.get_secret_value(), token)
+        for admin_token in _web_settings.admin_tokens
+    )
+
+
 def verify_api_token(
     sa_name: Annotated[str | None, Depends(authenticated_service_account)],
     authorized_cluster_id: Annotated[UUID | None, Depends(authorized_cluster)],
+    is_admin_token: Annotated[bool, Depends(authenticated_admin_token)] = False,
     cluster_id: UUID | None = None,
 ) -> None:
     """FastAPI dependency: enforce authentication and per-cluster authorization.
 
     Succeeds when either:
-    - the token authenticates as an admin service account, or
+    - the token authenticates as an admin service account,
+    - the token matches a configured static admin token, or
     - the token authenticates as a cluster, and that cluster matches *cluster_id*
       (or no specific cluster is being addressed).
 
     Raises 401 otherwise.
     """
     if sa_name is not None and sa_name in _web_settings.k8s_admin_service_accounts:
+        return
+
+    if is_admin_token:
         return
 
     if authorized_cluster_id is None:
