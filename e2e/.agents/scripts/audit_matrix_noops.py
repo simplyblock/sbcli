@@ -4,7 +4,9 @@ Looks for the failure mode that has bitten repeatedly here: a step that
 iterates an empty collection, or checks a value that is always truthy, and
 therefore reports success without testing anything.
 """
+import ast as _ast
 import inspect
+import re as _re
 import sys
 
 sys.path.insert(0, ".")
@@ -90,7 +92,6 @@ for fl in ("plain", "crypto", "dhchap", "nsvol"):
 #    storage pool name and was then reused as the cycle loop's node list, so
 #    every volume was requested in a pool named after a list of node dicts and
 #    the API answered "Pool not found" with a dump of the whole cluster.
-import ast as _ast
 _tree = _ast.parse(inspect.getsource(C).lstrip())
 for _fn in [n for n in _ast.walk(_tree) if isinstance(n, _ast.FunctionDef)]:
     _params = {a.arg for a in _fn.args.args} - {"self"}
@@ -105,7 +106,6 @@ for _fn in [n for n in _ast.walk(_tree) if isinstance(n, _ast.FunctionDef)]:
 # 8. handles is a tuple built in one place and unpacked in three. An arity
 #    mismatch is a runtime ValueError deep into a multi-hour run, so check
 #    that every unpack matches the append.
-import re as _re
 _src = inspect.getsource(C)
 _app = _re.search(r"handles\.append\(\((.*?)self\._run_fio_dual", _src, _re.S)
 if _app:
