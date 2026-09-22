@@ -14318,7 +14318,14 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     distr_page_size = page_size_in_blocks
     # distr_page_size = (ndcs + npcs) * page_size_in_blocks
     # cluster_sz = ndcs * page_size_in_blocks
-    cluster_sz = page_size_in_blocks * constants.LVOL_CLUSTER_RATIO
+    # TEST ONLY -- lvstore cluster_sz forced to 4 MiB (2 x page_size_in_blocks).
+    # Deliberately NOT done via constants.LVOL_CLUSTER_RATIO: that constant is
+    # also read by services/lvol_stat_collector.py to convert
+    # num_allocated_clusters into bytes, and raising it there would re-scale
+    # reported used-capacity for lvstores already formatted with the old
+    # cluster size. Scoped here so only newly created lvstores are affected.
+    # Revert before merging.
+    cluster_sz = page_size_in_blocks * 2
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 1
