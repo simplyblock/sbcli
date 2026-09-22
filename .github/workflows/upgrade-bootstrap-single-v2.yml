@@ -1113,10 +1113,28 @@ jobs:
           done
           NUM_CHUNKS=${#_CHUNK_STARTS[@]}
 
+          # `python3` on the mgmt node is /root/.local/bin/python3, which does NOT
+          # have sbcli: it only sees a stray site-packages/simplyblock_core/ with
+          # no __init__.py, so the import succeeds as an empty namespace package
+          # and `-m ...collect_logs` dies with "No module named". sbcli lives in
+          # the uv tool install behind sbctl, so derive the interpreter from
+          # sbctl's shebang and confirm it can import the module before using it.
+          COLLECT_PY=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" '
+            for c in "$(head -1 "$(command -v sbctl 2>/dev/null)" 2>/dev/null | sed "s|^#!||")" \
+                     /root/.local/share/uv/tools/sbctl/bin/python \
+                     python3; do
+              [ -n "$c" ] || continue
+              "$c" -c "import simplyblock_core.scripts.collect_logs" >/dev/null 2>&1 \
+                && { echo "$c"; exit 0; }
+            done
+            echo python3' 2>/dev/null | tail -1)
+          COLLECT_PY=${COLLECT_PY:-python3}
+          echo "  collect_logs interpreter: ${COLLECT_PY}"
+
           run_collect() {
             local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
             ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "python3 -m simplyblock_core.scripts.collect_logs \
+              "${COLLECT_PY} -m simplyblock_core.scripts.collect_logs \
                 '${iso}' '${mins}' \
                 --mode docker \
                 --output-dir '${outdir}' \
