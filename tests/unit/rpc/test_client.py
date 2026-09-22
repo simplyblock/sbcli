@@ -42,6 +42,40 @@ class TestGetBdevs(unittest.TestCase):
         self.assertEqual(mock_req.call_count, 2)
 
 
+class TestBdevGet(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request3")
+    def test_bdev_get_delegates_filtering_to_rpc(self, mock_req):
+        mock_req.return_value = [{"name": "LVS_1/LVOL_1"}]
+        client = _make_client()
+
+        self.assertEqual(client.bdev_get("LVS_1/LVOL_1")["name"], "LVS_1/LVOL_1")
+        mock_req.assert_called_once_with("bdev_get_bdevs", name="LVS_1/LVOL_1")
+
+    @patch.object(RPCClient, "_request3")
+    def test_bdev_get_filter_miss_returns_none(self, mock_req):
+        mock_req.return_value = []
+        client = _make_client()
+        self.assertIsNone(client.bdev_get("LVS_1/GONE"))
+
+    @patch.object(RPCClient, "_request3")
+    def test_bdev_get_no_such_device_returns_none(self, mock_req):
+        # SPDK returns ENODEV (-19) "No such device" when the bdev is gone;
+        # treat it as absent rather than propagating the error.
+        mock_req.side_effect = RPCRemoteError("No such device", code=-errno.ENODEV)
+        client = _make_client()
+        self.assertIsNone(client.bdev_get("LVS_1/GONE"))
+
+    @patch.object(RPCClient, "_request3")
+    def test_bdev_get_other_rpc_error_propagates(self, mock_req):
+        # Generic RPC failures must still surface — an unknown answer is not
+        # "absent" (the bug a bare `if not get_bdevs(name)` probe had).
+        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
+        client = _make_client()
+        with self.assertRaises(RPCException):
+            client.bdev_get("LVS_1/LVOL_1")
+
+
 class TestSubsystem(unittest.TestCase):
 
     @patch.object(RPCClient, "_request3")

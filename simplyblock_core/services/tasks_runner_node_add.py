@@ -28,7 +28,7 @@ MAX_CONCURRENT_NODE_ADDS = constants.NODE_ADD_MAX_PARALLEL
 # dispatch loop never hands the same task to two workers. (Cross-host
 # duplicate execution is separately prevented by the per-task lease in
 # tasks_controller.claim_task.)
-_inflight = set()
+_inflight: set[str] = set()
 _inflight_lock = threading.Lock()
 
 # target node_addr values currently being driven by a worker, guarded by the
@@ -42,7 +42,7 @@ _inflight_lock = threading.Lock()
 # produced 6 node records for a 4-slot host). This is belt-and-suspenders
 # for the task-creation-time dedup — it protects against any duplicate task
 # that already exists, regardless of how it got created.
-_inflight_addrs = set()
+_inflight_addrs: set[str] = set()
 
 
 def process_task(task, cl):

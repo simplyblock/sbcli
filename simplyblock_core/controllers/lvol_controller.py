@@ -15,6 +15,7 @@ from simplyblock_core.controllers import snapshot_controller, pool_controller, l
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import KMSException, create_kms_connection, lvol_dek_path, pool_kek_name
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.controllers.host_auth import (
     _get_dhchap_group, _register_dhchap_keys_on_node, _register_pool_dhchap_keys_on_node)
 from simplyblock_core.models.cluster import Cluster
@@ -29,6 +30,48 @@ from simplyblock_core.prom_client import PromClient
 
 
 logger = utils.get_logger(__name__)
+
+
+def rollback_create_record(lvol) -> None:
+    """Erase a failed create's record — unless a blob outlived the attempt.
+
+    ``release_lvol_ns_slot`` removes the record (and with it the namespace-slot
+    claim, which the record IS) in one transaction. That is correct only when
+    the attempt left nothing on any node. Once the attempt got as far as
+    creating a blob, the rollback flips the record to in_deletion
+    (``_fail_after_bdev`` / ``_create_bdev_stack``) and the record MUST survive:
+    lvol_monitor's delete state machine owns finishing that teardown, and
+    erasing it here strands the blob in SPDK with nothing left to find it by.
+
+    Only ``add_lvol_ha``'s leader-failure branch performed this check; every
+    other create/clone rollback called ``release_lvol_ns_slot`` straight out,
+    which is how a create whose rollback RPCs failed produced an lvol that
+    exists in SPDK and not in FDB, with no delete event in the cluster log.
+    """
+    db_controller = DBController()
+    try:
+        fresh = db_controller.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return  # already gone
+    if fresh.status == LVol.STATUS_IN_DELETION:
+        logger.warning(
+            "LVol %s rollback left data-plane state behind; keeping the record "
+            "in in_deletion for lvol_monitor to complete", lvol.get_id())
+        return
+    db_controller.release_lvol_ns_slot(fresh)
+
+
+def lvol_bdev_absent_on_node(lvol, snode) -> bool:
+    """Is ``lvol``'s bdev really gone from ``snode``'s lvstore?
+
+    The post-condition the delete protocol never checked. A successful
+    ``delete_lvol(..., sync=True)`` RPC is an acknowledgement, not proof — and
+    several paths reach the record removal without having issued one at all.
+    Raises on any RPC/connection failure rather than returning an ambiguous
+    "unknown" — the caller must treat that the same as "not confirmed absent".
+    """
+    rpc_client = snode.rpc_client(timeout=5, retry=2)
+    return rpc_client.bdev_get(f"{lvol.lvs_name}/{lvol.lvol_bdev}") is None
 
 
 def _create_crypto_lvol(rpc_client, lvol, cluster):
@@ -828,7 +871,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     node_id=host_node.get_id()):
                 lvol_bdev, error = add_lvol_on_node(lvol, host_node)
             if error:
-                db_controller.release_lvol_ns_slot(lvol)
+                # Guarded: add_lvol_on_node can fail AFTER _create_bdev_stack
+                # produced the blob. The HA branch below has always checked for
+                # that; this one erased the record unconditionally, orphaning
+                # the bdev in SPDK whenever the rollback could not remove it.
+                rollback_create_record(lvol)
                 return False, error
 
             lvol.nodes = [host_node.get_id()]
@@ -837,7 +884,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         else:
             msg = f"Host node in not online: {host_node.get_id()}"
             logger.error(msg)
-            db_controller.release_lvol_ns_slot(lvol)
+            rollback_create_record(lvol)
             return False, msg
 
     if ha_type == "ha":
@@ -873,7 +920,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             if primary_node is None:
                 msg = "No leader available for lvol create"
                 logger.error(msg)
-                db_controller.release_lvol_ns_slot(lvol)
+                rollback_create_record(lvol)
                 return False, msg
 
             precheck_started = time.time()
@@ -890,7 +937,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 if action == "reject":
                     msg = f"Cannot create lvol: non-leader {nl.get_id()[:8]} unreachable but fabric healthy"
                     logger.error(msg)
-                    db_controller.release_lvol_ns_slot(lvol)
+                    rollback_create_record(lvol)
                     return False, msg
                 elif action == "proceed":
                     secondary_nodes.append(nl)
@@ -931,18 +978,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 # record: the lvol monitor's delete state machine owns completing
                 # that delete (poll → finish → sync replicas). Erasing it here
                 # orphaned the async delete with no sync follow-up — 27 open
-                # delete windows in run 20260721-213609.
-                try:
-                    fresh = db_controller.get_lvol_by_id(lvol.get_id())
-                except KeyError:
-                    fresh = None
-                if fresh is not None and fresh.status == LVol.STATUS_IN_DELETION:
-                    logger.warning(
-                        "LVol %s rollback left an in-flight async delete; keeping "
-                        "the record in in_deletion for the monitor to complete",
-                        lvol.get_id())
-                else:
-                    db_controller.release_lvol_ns_slot(lvol)
+                # delete windows in run 20260721-213609. That check now lives in
+                # rollback_create_record, which every create/clone rollback uses.
+                rollback_create_record(lvol)
                 return False, str(result)
 
             lvol_bdev = result
@@ -1201,11 +1239,31 @@ def _fail_after_bdev(lvol, rpc_client, msg):
     missing namespaced subsystem, a listener add error, an add_ns error) leaves
     the SPDK clone-blob in place, which then blocks the parent snapshot delete
     with "vbdev_lvol_destroy: ... has N clones". Logs but does not raise on
-    rollback failure so the caller still sees the original error."""
+    rollback failure so the caller still sees the original error.
+
+    The deletion intent is persisted FIRST, before any teardown RPC. It used to
+    be written after ``_remove_bdev_stack`` and inside the same ``try``, so a
+    rollback whose RPCs raised never reached the status write -- and the
+    caller's ``release_lvol_ns_slot`` then erased a record whose blob was still
+    on the node, with no delete event ever logged. Persisting the intent up
+    front makes that unrepresentable: from here on the record is only ever
+    removed by the monitor's delete state machine, which has to confirm the
+    teardown first.
+    """
+    db_controller = DBController()
     try:
-        _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
         lvol.status = LVol.STATUS_IN_DELETION
-        lvol.write_to_db(DBController().kv_store)
+        lvol.write_to_db(db_controller.kv_store)
+    except Exception:
+        logger.exception(
+            "rollback: could not persist in_deletion for %s -- its bdev may "
+            "survive this failed create", lvol.get_id())
+
+    try:
+        if not _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client):
+            logger.error(
+                "rollback of bdev stack incomplete for %s; the record stays "
+                "in_deletion for lvol_monitor to finish", lvol.get_id())
     except Exception:
         logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
     return False, msg
@@ -1720,6 +1778,16 @@ def recreate_lvol(lvol_id):
 
 
 def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
+    """Remove every bdev in *bdev_stack*. True only when ALL of them are gone.
+
+    This used to ``return True`` unconditionally: a failed removal was logged
+    and then the entry was stamped ``status='deleted'`` anyway, so
+    ``delete_lvol_from_node`` reported success and the monitor went on to erase
+    the FDB record while the bdev was still registered in SPDK. A bdev that was
+    not confirmed removed now leaves its ``status`` untouched (so a retry
+    re-attempts it) and drags the result to False.
+    """
+    all_removed = True
     for bdev in bdev_stack:
         # if 'status' in bdev and bdev['status'] == 'deleted':
         #     continue
@@ -1730,7 +1798,12 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
         if type == "bdev_distr":
             ret = rpc_client.bdev_distrib_delete(name)
         elif type == "bmap_init":
-            pass
+            # Nothing to remove — it is a bookkeeping entry, not a bdev. It
+            # fell through to the failure log below and reported "Failed to
+            # delete BDev" on every single delete; now that the result is
+            # honest that noise would fail the whole teardown.
+            bdev['status'] = 'deleted'
+            continue
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "crypto" and not sync:
@@ -1740,43 +1813,73 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
 
         elif type == "bdev_lvstore":
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
-        elif type == "bdev_lvol":
-            name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
-            if not rpc_client.get_bdevs(name):
-                # Already gone (e.g. the monitor's finish-phase re-issues the
-                # leader delete after the async pass completed). Re-deleting
-                # walks the snapshot/clone metadata a second time and errors
-                # on every entry the first pass cleaned ("Clone entry not
-                # found", 1382x in run mass_create_delete_docker-20260716) —
-                # skip instead.
+        elif type in ("bdev_lvol", "bdev_lvol_clone"):
+            if type == "bdev_lvol":
+                name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
+            # Already gone (e.g. the monitor's finish-phase re-issues the
+            # leader delete after the async pass completed)? Re-deleting walks
+            # the snapshot/clone metadata a second time and errors on every
+            # entry the first pass cleaned ("Clone entry not found", 1382x in
+            # run mass_create_delete_docker-20260716) — skip instead.
+            #
+            # The probe used to be `if not rpc_client.get_bdevs(name)`, which
+            # reads a failed RPC as "already deleted": one non-200 from the
+            # SPDK proxy during a mass delete skipped the delete entirely,
+            # stamped the entry deleted, and the record was removed with the
+            # blob still on disk — leaving nothing in the log but an INFO
+            # line. A failed probe must not be read as "absent". It is only an
+            # optimisation, so when the probe itself fails the delete is
+            # attempted anyway and ITS result decides.
+            try:
+                present = rpc_client.bdev_get(name) is not None
+            except RPCException as e:
+                logger.warning(
+                    f"Could not determine whether BDev {name} still exists "
+                    f"({e}); attempting the delete and judging by its result")
+                present = True
+            if not present:
                 logger.info(f"BDev {name} already deleted, skipping")
                 bdev['status'] = 'deleted'
                 continue
-            ret, _ = rpc_client.delete_lvol(name, sync=sync)
-        elif type == "bdev_lvol_clone":
-            if not rpc_client.get_bdevs(name):
-                logger.info(f"BDev {name} already deleted, skipping")
+            ret, err = rpc_client.delete_lvol(name, sync=sync)
+            if not ret and isinstance(err, dict) and err.get("code") == -19:
+                # "No such device" from the delete itself is confirmation that
+                # the bdev is gone — the one answer that closes the question.
+                logger.info(f"BDev {name} reported absent by the delete")
                 bdev['status'] = 'deleted'
                 continue
-            ret, _ = rpc_client.delete_lvol(name,  sync=sync)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
 
         if not ret:
             logger.error(f"Failed to delete BDev {name}")
+            all_removed = False
+            continue
 
         bdev['status'] = 'deleted'
-    return True
+    return all_removed
 
 
-def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=False):
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=False) -> None:
+    """Tear ``lvol_id`` down on ``node_id``.
+
+    Returns normally once the teardown is confirmed complete on this node
+    (subsystem/namespace and every bdev gone), or when nothing was owed here
+    in the first place. Raises ``PreconditionError`` when the teardown could
+    not be attempted yet — a durable task owns it, or the node is
+    disconnected. That is expected, not a failure, but the caller must not
+    treat it as done. Raises ``RuntimeError`` when it was attempted and
+    failed — something of the object may still be on the node.
+    """
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
-        return True
+        # The record (or the node) is already gone: whatever this node held
+        # went with it, so nothing is owed.
+        return
 
     # Per design: gate sync deletes on non-leader nodes.
     from simplyblock_core.storage_node_ops import check_non_leader_for_operation
@@ -1786,14 +1889,16 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=F
             logger.info(f"Skipping sync delete of {lvol_id} on {node_id[:8]}: node disconnected")
             lvol.deletion_status = node_id
             lvol.write_to_db(db_controller.kv_store)
-            return True
+            raise PreconditionError(
+                f"node {node_id[:8]} is disconnected; teardown of {lvol_id} deferred")
         elif action in ("queue", "retry"):
             # Durable deferral (DB task) — the in-memory drain queue is
             # per-process and lossy (incident 2026-07-10).
             tasks_controller.add_lvol_sync_del_task(
                 snode.cluster_id, node_id,
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.node_id)
-            return True
+            raise PreconditionError(
+                f"teardown of {lvol_id} on {node_id[:8]} handed to a durable task")
     # action == "proceed" — execute now
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
@@ -1811,20 +1916,19 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=F
     # online-expand incident (CI 27398880537) — abort so the delete is
     # retried instead of leaving surviving namespaces without a device.
     if not _remove_lvol_subsys_from_node(lvol, rpc_client) and not force:
-        logger.error(
+        raise RuntimeError(
             f"Namespace/subsystem removal not confirmed for {lvol.get_id()} "
             f"on {node_id[:8]}; aborting bdev delete")
-        return False
 
     # 2- remove bdevs
     logger.info("Removing bdev stack")
-    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, sync)
-    if not ret:
-        return False
+    if not _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, sync):
+        raise RuntimeError(
+            f"Bdev stack of {lvol.get_id()} not fully removed on "
+            f"{node_id[:8]}; the teardown is NOT complete")
 
     lvol.deletion_status = node_id
     lvol.write_to_db(db_controller.kv_store)
-    return True
 
 
 # nvmf_subsystem_remove_ns is asynchronous inside SPDK: the RPC response can
@@ -1998,11 +2102,18 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
     }
 
     if lvol.ha_type == 'single':
-        with snapshot_controller.lvstore_op_lock(
-                snode.cluster_id, lvol.lvs_name, node_id=lvol.node_id, enabled=_inner, **_inner_kw):
-            ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
-        if not ret and not force_delete:
-            raise RuntimeError("Failed to delete lvol from node")
+        try:
+            with snapshot_controller.lvstore_op_lock(
+                    snode.cluster_id, lvol.lvs_name, node_id=lvol.node_id, enabled=_inner, **_inner_kw):
+                delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
+        except PreconditionError:
+            # A durable task (or the monitor) owns the teardown -- the record
+            # is already in_deletion, so this is not a failure to report to
+            # the API caller.
+            pass
+        except RuntimeError:
+            if not force_delete:
+                raise
 
     elif lvol.ha_type == "ha":
         from simplyblock_core.storage_node_ops import (
@@ -2079,11 +2190,17 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
         def _delete_on_leader(leader):
             with snapshot_controller.lvstore_op_lock(
                     snode.cluster_id, lvol.lvs_name, node_id=leader.get_id(), enabled=_inner, **_inner_kw):
-                ret = delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
-                if ret:
-                    async_completed["done"] = _wait_async_delete(
-                        leader.rpc_client(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-            return ret if ret else None
+                try:
+                    delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
+                except PreconditionError:
+                    # Not a leader failure -- a durable task (or the monitor)
+                    # owns the teardown, so this must not trigger a failover
+                    # onto another node (execute_on_leader_with_failover reads
+                    # a raised exception as exactly that).
+                    return True
+                async_completed["done"] = _wait_async_delete(
+                    leader.rpc_client(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+            return True
 
         success, actual_leader, result = execute_on_leader_with_failover(
             all_nodes, lvol.lvs_name, _delete_on_leader)
@@ -2201,6 +2318,50 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
     logger.debug(lvol)
     if snode is None:
         logger.error(f"lvol node id not found: {lvol.node_id}")
+
+        # The PRIMARY's node record is gone — but for an HA volume the blob
+        # lives on every member of the LVS, and the peers' records usually
+        # still exist. This branch used to erase the record here without a
+        # single RPC and without an event, so the bdev survived on each
+        # surviving peer with nothing left in FDB or the cluster log to find it
+        # by. Tear it down wherever we still can before letting the record go.
+        unconfirmed = []
+        for peer_id in lvol.nodes:
+            if peer_id == lvol.node_id:
+                continue
+            try:
+                peer = db_controller.get_storage_node_by_id(peer_id)
+            except KeyError:
+                continue  # gone with its lvstore; owes nothing
+            if peer.status != StorageNode.STATUS_ONLINE:
+                unconfirmed.append(peer_id)
+                continue
+            try:
+                delete_lvol_from_node(lvol.get_id(), peer_id, sync=True, force=True)
+            except Exception:
+                logger.exception(
+                    f"force delete: teardown of {lvol.get_id()} on "
+                    f"{peer_id[:8]} raised")
+                unconfirmed.append(peer_id)
+
+        if unconfirmed:
+            # force_delete is an explicit operator override, so the record
+            # still goes — but never silently: this is the one place the
+            # control plane knowingly leaves data-plane state behind, and the
+            # orphan sweep has to be able to correlate it afterwards.
+            logger.error(
+                f"force delete of {lvol.get_id()} ({lvol.lvs_name}/"
+                f"{lvol.lvol_bdev}) could not confirm teardown on "
+                f"{[n[:8] for n in unconfirmed]}; removing the record anyway — "
+                f"the bdev may survive in SPDK with no record referencing it")
+
+        # Emit the delete event before the record goes. Without it this path
+        # produced no cluster-log entry at all, which is why volumes removed
+        # through it looked like they had simply never been deleted.
+        try:
+            lvol_events.lvol_delete(lvol)
+        except Exception:
+            logger.exception(f"failed to log delete event for {lvol.get_id()}")
 
         db_controller.release_lvol_ns_slot(lvol)
 
@@ -3198,12 +3359,19 @@ def move(lvol_id, node_id, force=False):
 
     if migrate(lvol_id, node_id):
         if src_node.status == StorageNode.STATUS_ONLINE:
-            # delete lvol
-            if lvol.ha_type == 'single':
-                delete_lvol_from_node(lvol_id, lvol.node_id, clear_data=False)
-            elif lvol.ha_type == "ha":
-                for nodes_id in lvol.nodes:
-                    delete_lvol_from_node(lvol_id, nodes_id, clear_data=False)
+            # delete lvol. Best-effort cleanup of the source: the migrate
+            # already succeeded, so a deferred/failed teardown here must not
+            # fail the move -- the monitor's delete state machine owns
+            # finishing it.
+            try:
+                if lvol.ha_type == 'single':
+                    delete_lvol_from_node(lvol_id, lvol.node_id, clear_data=False)
+                elif lvol.ha_type == "ha":
+                    for nodes_id in lvol.nodes:
+                        delete_lvol_from_node(lvol_id, nodes_id, clear_data=False)
+            except Exception:
+                logger.exception(
+                    f"move: cleanup of {lvol_id} on the source node raised")
 
             # remove from storage node
             # src_node.lvols.remove(lvol_id)
@@ -3721,7 +3889,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
                                          primary_nsid=new_lvol.ns_id)
     if error:
         logger.error(error)
-        db_controller.release_lvol_ns_slot(new_lvol)
+        rollback_create_record(new_lvol)
         return None, error
 
     new_lvol.lvol_uuid = lvol_bdev['uuid']
@@ -3747,8 +3915,16 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
                                              min_cntlid=_peer_cntlid, ns_uuid=_src_ns_uuid)
         if error:
             logger.error(error)
-            delete_lvol_from_node(new_lvol, target_node)
-            db_controller.release_lvol_ns_slot(new_lvol)
+            # IDs, not objects: delete_lvol_from_node(lvol_id, node_id) hits
+            # `except KeyError: return` when handed the records, so this
+            # rollback reported success while deleting nothing -- leaving the
+            # target's namespace behind to collide with the next attempt.
+            try:
+                delete_lvol_from_node(new_lvol.get_id(), target_node.get_id())
+            except Exception:
+                logger.exception("rollback: could not remove %s from %s",
+                                 new_lvol.get_id(), target_node.get_id()[:8])
+            rollback_create_record(new_lvol)
             return None, error
 
     return new_lvol, None
@@ -4388,7 +4564,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
         logger.error(error)
-        db_controller.release_lvol_ns_slot(new_lvol)
+        rollback_create_record(new_lvol)
         return False, error
 
     new_lvol.lvol_uuid = lvol_bdev['uuid']
@@ -4399,11 +4575,16 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         lvol_bdev, error = add_lvol_on_node(new_lvol, secondary_node, is_primary=False)
         if error:
             logger.error(error)
-            # remove lvol from primary
-            ret = delete_lvol_from_node(new_lvol, source_node)
-            if not ret:
-                logger.error("")
-            db_controller.release_lvol_ns_slot(new_lvol)
+            # IDs, not objects: delete_lvol_from_node(lvol_id, node_id) hits
+            # `except KeyError: return` when handed the records, so this
+            # rollback reported success while deleting nothing -- leaving the
+            # primary's namespace behind to collide with the next attempt.
+            try:
+                delete_lvol_from_node(new_lvol.get_id(), source_node.get_id())
+            except Exception:
+                logger.exception("rollback: could not remove %s from %s",
+                                 new_lvol.get_id(), source_node.get_id()[:8])
+            rollback_create_record(new_lvol)
             return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
