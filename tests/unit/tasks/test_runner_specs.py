@@ -27,6 +27,22 @@ def _task(**params):
     return task
 
 
+@pytest.fixture(autouse=True)
+def write_through_cas(monkeypatch):
+    """Let the handler-facing CAS helpers reach the task these tests hold.
+
+    ``checkpoint`` / ``set_result`` / ``drop_params`` commit through
+    ``atomic_update`` rather than mutating the object they are given, so without
+    a store behind them a handler's writes would go nowhere and every assertion
+    on ``task.function_result`` would pass vacuously.
+    """
+    def atomic_update(obj, mutate):
+        mutate(obj)
+        return obj
+
+    monkeypatch.setattr(trb.db, "atomic_update", atomic_update)
+
+
 def _cluster(status=Cluster.STATUS_ACTIVE):
     cluster = MagicMock()
     cluster.status = status
@@ -566,6 +582,30 @@ def test_sibling_gate_releases_a_task_already_migrating(mig):
     mig.tasks_controller.get_active_node_mig_task.return_value = "other-task"
     task = _task(distr_name="distr-1", migration={"name": "distr-1"})
     assert mig.no_sibling_migration(task) is True
+
+
+def test_a_running_migration_task_does_not_block_itself(monkeypatch):
+    """The device-migration sibling scan walks every task on the node, this one
+    included. A RUNNING task matches its own row, and the only way out of the
+    scan is the start marker — which it has not written yet if it was
+    interrupted between going RUNNING and issuing the migration. Without a
+    self-check it is then skipped on every pass, for good.
+
+    Second half of the 2026-09-22 stall: the erased start marker is what stopped
+    the three migrations, this is what made it permanent.
+    """
+    import simplyblock_core.services.tasks_runner_migration as runner
+
+    task = _task(distr_name="distrib_10")
+    task.uuid = "task-1"
+    task.function_name = JobSchedule.FN_DEV_MIG
+    task.status = JobSchedule.STATUS_RUNNING
+
+    db = MagicMock()
+    db.get_job_tasks.return_value = [task]      # the only task there is: itself
+    monkeypatch.setattr(runner, "db", db)
+
+    assert runner._is_eligible(task, MagicMock()) is True
 
 
 # -- failed migration -------------------------------------------------------

@@ -32,7 +32,7 @@ def _online_device_count(cluster_id, primaries_only=False):
     return online
 
 
-def _wait_for_cluster_recovery(task):
+def _wait_for_cluster_recovery(task, reason):
     """Gate a not-yet-started migration on the cluster being whole enough.
 
     Whether waiting costs a retry depends on why: with nothing unavailable the
@@ -42,7 +42,7 @@ def _wait_for_cluster_recovery(task):
     """
     unavailable = mig.cluster_unavailable_state(task.cluster_id)
     if not unavailable:
-        raise TaskRetry(task.function_result or "waiting to start migration, retrying")
+        raise TaskRetry(reason or "waiting to start migration, retrying")
     mig.require_recovery_progress(task, unavailable)
 
 
@@ -55,8 +55,7 @@ def task_runner(task):
         raise TaskAbort(f"Node removed: {task.node_id}")
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-        task.function_result = "node is not online, retrying"
-        _wait_for_cluster_recovery(task)
+        _wait_for_cluster_recovery(task, "node is not online, retrying")
         raise TaskDefer("node is not online, retrying")
 
     mig.require_active_cluster(task)
@@ -71,10 +70,10 @@ def task_runner(task):
         online_devices = _online_device_count(task.cluster_id, primaries_only=True)
         wanted = task.function_params.get("migration_devices", 0)
         if online_devices < wanted:
-            task.function_result = (f"only {online_devices} devices online, waiting for "
-                                    f"more devices to be online")
-            _wait_for_cluster_recovery(task)
-            raise TaskDefer(task.function_result)
+            waiting = (f"only {online_devices} devices online, waiting for "
+                       f"more devices to be online")
+            _wait_for_cluster_recovery(task, waiting)
+            raise TaskDefer(waiting)
 
         mig.require_recovery_progress(task, mig.cluster_unavailable_state(task.cluster_id))
 
@@ -88,12 +87,12 @@ def task_runner(task):
                         f"deferring migration")
 
     if not mig.migration_started(task):
-        # Recorded alongside the start so a later poll can tell how much of the
-        # cluster the migration was sized against.
-        task.function_params["migration_devices"] = _online_device_count(task.cluster_id)
+        # Recorded alongside the start, in the same commit, so a later poll can
+        # tell how much of the cluster the migration was sized against.
         started = mig.start_migration(task, lambda: rpc_client.distr_migration_expansion_start(
             task.function_params["distr_name"], mig.qos_high_priority(snode.cluster_id),
-            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS))
+            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS),
+            migration_devices=_online_device_count(task.cluster_id))
         if started is None:
             raise TaskAbort("canceled while starting migration")
         task = started
@@ -120,6 +119,11 @@ def _is_eligible(task, cluster):
         if sibling.function_name not in [JobSchedule.FN_FAILED_DEV_MIG,
                                          JobSchedule.FN_DEV_MIG,
                                          JobSchedule.FN_NEW_DEV_MIG]:
+            continue
+        if sibling.uuid == task.uuid:
+            # A RUNNING task would otherwise match itself and be held back
+            # forever, since the only way out of this scan is the start marker
+            # it has not written yet.
             continue
         if sibling.node_id != task.node_id or sibling.canceled:
             continue

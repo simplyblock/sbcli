@@ -19,6 +19,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import tasks_runner_sync_lvol_del as runner
+from simplyblock_core.services import task_runner_base
 from simplyblock_core.services.task_runner_base import TaskAbort, TaskDefer
 
 
@@ -59,6 +60,17 @@ class TestRunLvolSyncOpTask(unittest.TestCase):
         patcher = patch.object(runner, "db")
         self.db = patcher.start()
         self.addCleanup(patcher.stop)
+
+        # set_result() commits through atomic_update rather than mutating the
+        # task it is given, so without a store behind it the handler's message
+        # would never reach the task these tests assert on.
+        def write_through(obj, mutate):
+            mutate(obj)
+            return obj
+
+        cas = patch.object(task_runner_base.db, "atomic_update", write_through)
+        cas.start()
+        self.addCleanup(cas.stop)
 
     def _run(self, task, lvol=None, node=None, phase=""):
         self.db.get_lvol_by_id.return_value = lvol or _lvol()

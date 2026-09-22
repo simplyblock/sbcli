@@ -15,6 +15,7 @@ from simplyblock_core.services.task_runner_base import (
     TaskAbort,
     TaskRetry,
     serve,
+    set_result,
 )
 
 
@@ -61,7 +62,7 @@ def process_task(task):
         if dev.status == NVMeDevice.STATUS_ONLINE:
             tasks_controller.add_new_device_mig_task(dev.get_id())
 
-    task.function_result = f"expansion complete: {new_node_id}"
+    set_result(task, f"expansion complete: {new_node_id}")
 
 
 SPEC = RunnerSpec(

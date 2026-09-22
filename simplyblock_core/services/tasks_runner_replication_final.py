@@ -33,9 +33,13 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import replication_final_step
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
+    TaskAbort,
     TaskDefer,
     TaskRetry,
+    checkpoint,
+    drop_params,
     serve,
+    set_result,
 )
 
 logger = utils.get_logger(__name__)
@@ -100,14 +104,22 @@ def _group_id_for_lvol(lvol):
     return group.get_id() if group else ""
 
 
-def _release_lvs_claim(task):
-    """Let other volumes on this LVS replicate again.
+def _record(task, **params):
+    """Persist handler progress and hand back the task carrying it.
 
-    No write of its own: the driver persists the task on whichever outcome
-    follows this call.
+    Every write below used to be an in-memory mutation of ``function_params``
+    that the driver carried onto the row when it committed the outcome. It no
+    longer does, so each one commits here and the caller rebinds.
     """
-    task.function_params.pop("cutover_lvs", None)
-    task.function_params.pop("cutover_group", None)
+    updated = checkpoint(task, **params)
+    if updated is None:
+        raise TaskAbort("task canceled or finished underneath the cutover")
+    return updated
+
+
+def _release_lvs_claim(task):
+    """Let other volumes on this LVS replicate again."""
+    drop_params(task, "cutover_lvs", "cutover_group")
 
 
 def _record_cutover_done(task):
@@ -145,8 +157,8 @@ def _record_cutover_done(task):
                     "failback: removed stale failed_over replication record %s",
                     prior_replication_id)
 
-    params["end_time"] = int(time.time())
-    task.function_result = "cutover done"
+    checkpoint(task, end_time=int(time.time()))
+    set_result(task, "cutover done")
 
     _stop_source_replication(task)
     _delete_source_if_requested(task)
@@ -213,7 +225,8 @@ def _cutover_failed(task, err) -> NoReturn:
     # Keep the reason where the max-retry branch cannot overwrite it, and say
     # it out loud: a task that quietly retries to death costs a whole lab run
     # to diagnose (run 20260827_194551 -- 20 tasks, 160 attempts, no log line).
-    params["last_error"] = result
+    task = _record(task, last_error=result)
+    params = task.function_params
     logger.warning("cutover attempt %d/%d failed for lvol %s: %s",
                    task.retry + 1, task.max_retry,
                    params.get("lvol_id"), result)
@@ -236,11 +249,11 @@ def _cutover_failed(task, err) -> NoReturn:
             except KeyError:
                 node_offline = True
         hub_attempts = params.get("cutover_hub_attempts", 0) + 1
-        params["cutover_hub_attempts"] = hub_attempts
+        task = _record(task, cutover_hub_attempts=hub_attempts)
         if node_offline or hub_attempts <= constants.REPL_CUTOVER_MAX_HUB_ATTEMPTS:
             # Transient: add a cooldown, do NOT burn task.retry.
-            params["cutover_retry_after"] = (
-                int(time.time()) + constants.REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC)
+            _record(task, cutover_retry_after=(
+                int(time.time()) + constants.REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC))
             logger.warning(
                 "cutover for lvol %s: connectivity failure (attempt %d, node_offline=%s); "
                 "waiting %ds before retry",
@@ -357,18 +370,15 @@ def _acquire_lvs_claim(task, lvol, tasks):
         # A consistency group cuts over AS A GROUP, so a sibling member joins
         # the owner rather than queueing behind it.
         if not (own_group and own_group == owner_group):
-            params["shrink_deadline"] = (
-                int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+            _record(task, shrink_deadline=(
+                int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
             raise TaskDefer(f"queued for lvstore {lvs_name} behind "
                             f"{owner_lvol[:8]} (delta already converged)")
-    params["cutover_lvs"] = lvs_name
-    params["cutover_group"] = own_group
     xfer_timing.stamp("lvs_claim_acquired", lvol=lvol.get_id(), lvs=lvs_name,
                       round=params.get("shrink_round"))
-    # Checkpoint, against the driver's usual ownership of task writes: the claim
-    # has to be visible to the other hosts' scans for the whole cutover, not
-    # only once the driver next writes the task.
-    task.write_to_db(db.kv_store)
+    # Committed immediately: the claim has to be visible to the other hosts'
+    # scans for the whole cutover, not only once the task next changes state.
+    return _record(task, cutover_lvs=lvs_name, cutover_group=own_group)
 
 
 def _await_cutover_proceed(task, params):
@@ -432,8 +442,8 @@ def task_runner(task: JobSchedule, tasks):
     if tgt_node.status != StorageNode.STATUS_ONLINE:
         logger.warning("cutover for lvol %s waiting: target node %s is %s",
                        lvol_id, tgt_node.get_id(), tgt_node.status)
-        params["last_error"] = (
-            f"target node {tgt_node.get_id()[:8]} is {tgt_node.status}")
+        _record(task, last_error=(
+            f"target node {tgt_node.get_id()[:8]} is {tgt_node.status}"))
         # Deferred rather than failed: a node being offline is transient, and
         # burning a retry per pass would exhaust them all before it recovers.
         raise TaskDefer("target node not online, waiting")
@@ -470,25 +480,27 @@ def task_runner(task: JobSchedule, tasks):
             xfer_timing.stamp("await_catchup", lvol=lvol_id, ms=lag * 1000.0)
             # Not a failure: no retry burned, and the deadline is pushed out
             # because catching up is legitimate progress, not a stall.
-            params["shrink_deadline"] = (
-                int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+            _record(task, shrink_deadline=(
+                int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
             raise TaskDefer(
                 "waiting for replication to catch up before the endgame "
                 "(lag %.0fs > %ds)" % (lag, constants.REPL_CUTOVER_ENDGAME_LAG_SEC))
 
         # Caught up (or no measurement): take the lvstore for the endgame.
-        _acquire_lvs_claim(task, lvol, tasks)
+        task = _acquire_lvs_claim(task, lvol, tasks)
+        params = task.function_params
         xfer_timing.stamp("endgame_entered", lvol=lvol_id, ms=(lag or 0) * 1000.0)
 
     # The first iterative snapshot belongs to the endgame, not to task creation:
     # taken here, its delta covers only the catch-up residual.
     if not params.get("shrink_snap_id"):
-        _, snap_err = _take_shrink_snapshot(task, lvol)
+        # The snapshot exists once this returns, and a later attempt must chain
+        # onto it rather than take a second one — so the round it recorded is
+        # committed before anything else can fail.
+        _, snap_err, task = _take_shrink_snapshot(task, lvol)
         if snap_err:
             raise TaskRetry(snap_err)
-        # Checkpoint: the snapshot exists now, and a later attempt must chain
-        # onto it rather than take a second one.
-        task.write_to_db(db.kv_store)
+        params = task.function_params
 
     # ---- SHRINK PHASE --------------------------------------------------- #
     # Skip shrink entirely once the cutover clone is prepared: tgt_lvol_composite
@@ -503,10 +515,14 @@ def task_runner(task: JobSchedule, tasks):
     # The freeze runs under the claim. A volume whose very first round was
     # already fast enough reaches here without having taken it.
     if not params.get("cutover_lvs"):
-        _acquire_lvs_claim(task, lvol, tasks)
+        task = _acquire_lvs_claim(task, lvol, tasks)
+        params = task.function_params
     if "tgt_lvol_composite" not in params:
         with xfer_timing.phase("prepare_cutover", lvol=lvol_id):
-            _prepare_cutover(task, lvol, src_node, tgt_node)
+            prepared = _prepare_cutover(task, lvol, src_node, tgt_node)
+        if prepared is None:
+            raise TaskAbort("canceled while preparing cutover")
+        task = prepared
         params = task.function_params
 
     _await_cutover_proceed(task, params)
@@ -576,10 +592,9 @@ def _take_shrink_snapshot(task, lvol):
             snap_type=SnapShot.TYPE_INTERNAL)
     if err:
         return None, f"shrink round {params.get('shrink_round', 0) + 1} snapshot failed: {err}"
-    params["shrink_round"] = params.get("shrink_round", 0) + 1
-    params["shrink_snap_id"] = new_snap
-    params["shrink_started_at"] = time.time()
-    return new_snap, None
+    task = _record(task, shrink_round=params.get("shrink_round", 0) + 1,
+                   shrink_snap_id=new_snap, shrink_started_at=time.time())
+    return new_snap, None, task
 
 
 def _shrink_round_done(snap_id):
@@ -691,13 +706,14 @@ def _shrink_step(task, lvol):
                               snap=params.get("shrink_snap_id"),
                               round=params["shrink_round"],
                               ms=elapsed * 1000.0)
-            params["shrink_round_done_at"] = time.time()
+            task = _record(task, shrink_round_done_at=time.time())
+            params = task.function_params
 
         # Every round is an endgame round now -- the lvstore is held before the
         # first iterative snapshot is taken.
         if elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC:
-            task.function_result = (f"converged in {params['shrink_round']} rounds "
-                                    f"(last {elapsed:.2f}s)")
+            set_result(task, f"converged in {params['shrink_round']} rounds "
+                             f"(last {elapsed:.2f}s)")
             return
 
         if params["shrink_round"] >= constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS:
@@ -708,8 +724,8 @@ def _shrink_step(task, lvol):
                 "(last round %.2fs > %.2fs target); freezing anyway",
                 lvol.get_id(), params["shrink_round"], elapsed,
                 constants.REPL_CUTOVER_CONVERGE_TARGET_SEC)
-            task.function_result = (f"not converged after {params['shrink_round']} "
-                                    f"rounds (last {elapsed:.2f}s)")
+            set_result(task, f"not converged after {params['shrink_round']} "
+                             f"rounds (last {elapsed:.2f}s)")
             return
 
         # IMMEDIATELY take the next snapshot. This is the whole mechanism: the
@@ -717,11 +733,11 @@ def _shrink_step(task, lvol):
         # so waiting here -- for the scheduler or for anything else -- puts
         # those seconds straight into the freeze. It happens before any
         # yielding decision for exactly that reason.
-        _, err = _take_shrink_snapshot(task, lvol)
+        # The round's snapshot exists once this returns and must not be retaken.
+        _, err, task = _take_shrink_snapshot(task, lvol)
         if err:
             raise TaskRetry(err)
-        # Checkpoint: the round's snapshot exists now and must not be retaken.
-        task.write_to_db(db.kv_store)
+        params = task.function_params
 
         # Re-arm the inline window from what this round just measured: rounds
         # near convergence are short and stay inline, a slow one hands the
@@ -736,8 +752,13 @@ def _shrink_step(task, lvol):
 def _prepare_cutover(task, lvol, src_node, tgt_node):
     """Build the target clone on the last replicated snapshot and record the
     relationship. Runs once, immediately after the shrink phase, so the base is
-    guaranteed to be the freshly replicated shrink snapshot."""
+    guaranteed to be the freshly replicated shrink snapshot.
+
+    Returns the task carrying what it established, or None if the task was
+    canceled underneath it."""
     from simplyblock_core.controllers import lvol_controller
+
+    prepared: dict = {}
 
     # Same resolution as fail-over: the destination is the cluster the volume
     # replicates INTO, and the pool comes from its policy's target. The source
@@ -787,25 +808,24 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
         if (prior.target_lvol and prior.target_lvol.get_id() == lvol.get_id()
                 and prior.source_cluster_id == tgt_node.cluster_id
                 and prior.source_lvol):
-            task.function_params["failback_source_lvol_id"] = prior.source_lvol.get_id()
-            task.function_params["failback_prior_replication_id"] = prior.get_id()
+            prepared["failback_source_lvol_id"] = prior.source_lvol.get_id()
+            prepared["failback_prior_replication_id"] = prior.get_id()
             logger.info(
                 "failback cutover detected: original source UUID %s will be "
                 "preserved on new clone %s after cutover",
                 prior.source_lvol.get_id(), new_lvol.get_id())
             break
 
-    task.function_params.update({
+    prepared.update({
         "tgt_lvol_composite": new_lvol.top_bdev,
         "tgt_map_id": tgt_map_id,
         "tgt_snap_composite": snapshot.snap_bdev,
         "replication_id": rep.get_id(),
     })
-    # Checkpoint the task itself, against the driver's usual ownership of task
-    # writes: the clone and the LVolReplication record above already exist, so a
-    # crash before the cutover completes must not let the next attempt build a
-    # second clone.
-    task.write_to_db(db.kv_store)
+    # Checkpointed rather than left for the outcome: the clone and the
+    # LVolReplication record above already exist, so a crash before the cutover
+    # completes must not let the next attempt build a second clone.
+    return checkpoint(task, **prepared)
 
 
 def _any_cutover_in_flight(tasks):

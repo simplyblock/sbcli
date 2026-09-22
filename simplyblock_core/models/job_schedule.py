@@ -1,6 +1,11 @@
 import datetime
+from types import MappingProxyType
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
+
+
+class FrozenTaskError(RuntimeError):
+    """A write to a task that was handed out for reading only."""
 
 
 class JobSchedule(BaseModel):
@@ -57,6 +62,33 @@ class JobSchedule(BaseModel):
     # gives a soft lease: a different host may take over only once the lease
     # goes stale (see constants.TASK_LEASE_TTL_SEC). See tasks_controller.claim_task.
     owner: str = ""
+
+    # Set only on the view handed to a task handler. Deliberately not
+    # annotated: the leading underscore keeps it out of the serialized
+    # attributes (BaseModel._annotated_attrs).
+    _frozen = False
+
+    def __setattr__(self, name, value):
+        if self._frozen:
+            raise FrozenTaskError(
+                f"{name}: this task is read-only. The driver re-reads the row "
+                f"after the handler returns, so an in-memory write here would "
+                f"be dropped; persist it with task_runner_base.checkpoint() or "
+                f"set_result()."
+            )
+        super().__setattr__(name, value)
+
+    def frozen_view(self):
+        """An independent read-only copy, for handing to a task handler.
+
+        Both the attributes and ``function_params`` reject writes, so a handler
+        that mutates what it was given fails where it stands rather than losing
+        the write silently.
+        """
+        view = JobSchedule().from_dict(self.to_dict())
+        view.function_params = MappingProxyType(view.function_params)
+        view._frozen = True
+        return view
 
     def watch_scope(self):
         return (self.cluster_id,)

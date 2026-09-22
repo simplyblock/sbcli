@@ -14,13 +14,14 @@ driver's writes are compare-and-set against the current row and deliberately do
 not mutate the stale object it was holding.
 """
 import copy
+import dataclasses
 import threading
 import time
 from unittest.mock import MagicMock
 
 import pytest
 
-from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.job_schedule import FrozenTaskError, JobSchedule
 import simplyblock_core.services.task_runner_base as trb
 
 
@@ -172,7 +173,7 @@ def test_success_message_comes_from_the_handler(monkeypatch):
     store = _wire(monkeypatch, task)
 
     def handler(t):
-        t.function_result = "Backup created"
+        trb.set_result(t, "Backup created")
 
     _runner(handler)._process(task, MagicMock(), [])
 
@@ -477,20 +478,82 @@ def test_retry_is_counted_on_the_fresh_row(monkeypatch):
     assert store.row().retry == 6
 
 
-def test_handler_progress_is_carried_onto_the_fresh_row(monkeypatch):
+def test_handler_checkpoint_survives_the_outcome_commit(monkeypatch):
     """Handlers record progress in function_params (recovery_started,
-    merge_started, fail_count) — a CAS that only wrote the lifecycle fields
-    would drop it and the next attempt would re-issue the RPC."""
+    merge_started, fail_count) so the next attempt does not re-issue the RPC.
+
+    Regression for the 2026-09-22 migration stall: the driver used to commit
+    the outcome from the copy it held before the handler ran, which erased
+    every checkpoint the handler had committed in between.
+    """
     task = _task()
     store = _wire(monkeypatch, task)
 
     def handler(t):
-        t.function_params["recovery_started"] = True
+        trb.checkpoint(t, recovery_started=True)
         raise trb.TaskDefer("Restore started")
 
     _runner(handler)._process(task, MagicMock(), [])
 
     assert store.row().function_params["recovery_started"] is True
+
+
+def test_start_marker_survives_a_progress_report(monkeypatch):
+    """The exact shape that stalled three device migrations: a handler starts
+    the work, checkpoints the marker that says so, then reports the work as
+    still running. Losing the marker made the task restart from scratch — and,
+    via the sibling scan, never run again."""
+    task = _task()
+    task.function_params = {"distr_name": "distrib_10"}
+    store = _wire(monkeypatch, task)
+
+    def handler(t):
+        started = trb.checkpoint(t, migration={"name": "distrib_10"})
+        assert started is not None
+        raise trb.TaskProgress("Status: running, progress:76")
+
+    _runner(handler)._process(task, MagicMock(), [])
+
+    row = store.row()
+    assert row.status == JobSchedule.STATUS_RUNNING
+    assert row.function_params["migration"] == {"name": "distrib_10"}
+    assert row.function_result == "Status: running, progress:76"
+
+
+def test_the_task_handed_to_a_handler_rejects_writes(monkeypatch):
+    """The only thing standing between a handler that writes the old way and a
+    silently dropped write: the driver re-reads the row afterwards, so an
+    in-memory mutation would go nowhere."""
+    task = _task()
+    _wire(monkeypatch, task)
+    seen = {}
+
+    def handler(t):
+        with pytest.raises(FrozenTaskError):
+            t.function_result = "written in memory"
+        with pytest.raises(TypeError):
+            t.function_params["marker"] = True
+        seen["params"] = dict(t.function_params)
+
+    _runner(handler)._process(task, MagicMock(), [])
+
+    assert seen["params"] == {}
+
+
+def test_a_handler_reads_what_it_checkpointed(monkeypatch):
+    """checkpoint() hands back the task carrying the write, so a handler that
+    goes on to read its own marker sees it."""
+    task = _task()
+    _wire(monkeypatch, task)
+    seen = {}
+
+    def handler(t):
+        fresh = trb.checkpoint(t, marker="set")
+        seen["marker"] = fresh.function_params.get("marker")
+
+    _runner(handler)._process(task, MagicMock(), [])
+
+    assert seen["marker"] == "set"
 
 
 def test_on_finish_is_skipped_when_another_actor_finished_the_task(monkeypatch):
@@ -730,3 +793,53 @@ def test_progress_does_not_resurrect_a_concurrently_canceled_task(monkeypatch):
 
     assert store.row().canceled is True
     assert store.row().status == JobSchedule.STATUS_DONE
+
+
+# -- the guarantee, across every runner -------------------------------------
+
+_OUTCOMES = [
+    pytest.param(None, JobSchedule.STATUS_DONE, id="returns"),
+    pytest.param(trb.TaskProgress("in progress"), JobSchedule.STATUS_RUNNING, id="progress"),
+    pytest.param(trb.TaskDefer("blocked"), JobSchedule.STATUS_SUSPENDED, id="defer"),
+    pytest.param(trb.TaskAbort("stop"), JobSchedule.STATUS_DONE, id="abort"),
+    pytest.param(trb.TaskRetry("failed"), JobSchedule.STATUS_SUSPENDED, id="retry"),
+]
+
+
+def _driver_specs():
+    """Every runner the shared driver actually drives."""
+    from simplyblock_core.services import task_runners
+    specs = []
+    for name in task_runners.runner_names():
+        spec = task_runners.load_spec(name)
+        if spec is not None:
+            specs.append(pytest.param(spec, id=name))
+    return specs
+
+
+@pytest.mark.parametrize("signal,expected_status", _OUTCOMES)
+@pytest.mark.parametrize("spec", _driver_specs())
+def test_a_checkpoint_survives_every_outcome_of_every_runner(monkeypatch, spec, signal,
+                                                             expected_status):
+    """The driver's contract, pinned once per runner rather than once overall.
+
+    A handler that records progress and then signals any outcome must find that
+    progress on the row afterwards. Driving each real spec — rather than a
+    synthetic one — means a runner added later is covered on arrival, and a spec
+    whose configuration breaks the guarantee fails here.
+    """
+    task = _task()
+    store = _wire(monkeypatch, task)
+
+    def handler(t, *_cycle_tasks):
+        trb.checkpoint(t, progress_marker=True)
+        if signal is not None:
+            raise signal
+
+    runner = trb.TaskRunner(dataclasses.replace(
+        spec, handler=handler, is_eligible=lambda *_: True,
+        on_finish=None, on_failure=None, on_cycle=None))
+    runner._process(task, MagicMock(), [])
+
+    assert store.row().function_params["progress_marker"] is True
+    assert store.row().status == expected_status
