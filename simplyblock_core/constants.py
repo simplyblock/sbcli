@@ -215,10 +215,9 @@ LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC = int(
 LVOL_MONITOR_ORPHAN_CHECK = str(
     os.getenv("LVOL_MONITOR_ORPHAN_CHECK", "1")).lower() in ("1", "true", "yes")
 
-# One full lvol+snapshot read per cluster per sweep, plus one RPC per node, so
-# this runs far less often than the subsystem check.
+# One full lvol+snapshot read per cluster per sweep, once a day.
 LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC = int(
-    os.getenv("LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC", "1800"))
+    os.getenv("LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC", "86400"))
 
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
