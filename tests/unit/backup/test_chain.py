@@ -16,7 +16,7 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.controllers.backup.chain import BackupChain, location_of
 from simplyblock_core.controllers.backup.manifest import (
-    BackupManifest, DataPlane, FDBKeyDescriptor, Source, Volume)
+    BackupManifest, ManifestDataPlane, FDBKeyDescriptor, ManifestSource, ManifestVolume)
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import BackupLocation
@@ -52,11 +52,11 @@ def _manifest(name, prev=None, s3_id=1, with_compression=False,
         size=4096,
         prev_backup_id=_id(prev) if prev is not None else None,
         encryption=FDBKeyDescriptor(dek_path="keys/x") if encrypted else None,
-        source=Source(cluster_id=_id("cluster"), node_id=_id("node")),
-        volume=Volume(
+        source=ManifestSource(cluster_id=_id("cluster"), node_id=_id("node")),
+        volume=ManifestVolume(
             lvol_id=_id("volume"), lvol_name="vol",
             snapshot_id=_id("snapshot"), snapshot_name="snap", size=4096),
-        dataplane=DataPlane(with_compression=with_compression),
+        dataplane=ManifestDataPlane(with_compression=with_compression),
     )
 
 
