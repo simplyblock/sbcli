@@ -1179,6 +1179,12 @@ class _LblkOutageMatrix(_LblkBase):
         # of whatever a killed process happened to have flushed.
         self._await_fio_done(handles)
         sleep_n_sec(10)
+        # Judge all four, then report together. This used to raise on the
+        # first one, so when the plain volume failed on 2026-09-21 the crypto,
+        # dhchap and namespaced jobs were never looked at at all -- and the
+        # single most useful thing about a four-flavour lane is whether a
+        # failure hit one of them or all of them.
+        failures = []
         for name, log, job, handle in handles:
             if isinstance(handle, threading.Thread):
                 # Reaping the launcher, which has long since returned. NOT
@@ -1187,22 +1193,38 @@ class _LblkOutageMatrix(_LblkBase):
                 # timeout=...) and died with "str.join() takes no keyword
                 # arguments" after all 12 cycles had passed.
                 handle.join(timeout=60)
-            if self.k8s_test:
-                # NOT validate_fio_job: it calls wait_job_complete(timeout=600)
-                # and this job is deliberately sized to outlast the whole
-                # matrix, so it was still Running and the run failed with
-                #
-                #   FIO Job 'fio-mxliveplain' did not succeed (status=timeout)
-                #   (pod phase=Running)
-                #
-                # after all 12 cycles had passed. Same shape as the docker
-                # side: stop the job, then judge what it wrote.
-                self._k8s_finish_fio(handle, name)
+            try:
+                self._judge_one_fio(name, log, handle)
+            except Exception as exc:                  # noqa: BLE001
+                failures.append(f"{name}: {str(exc)[:400]}")
+                self.logger.error("[matrix] live FIO on %s FAILED: %s",
+                                  name, str(exc)[:200])
             else:
-                self.common_utils.validate_fio_test(
-                    node=self.client_machines[0], log_file=log,
-                    md5_severity=self._md5_severity)
-            self.logger.info("[matrix] live FIO on %s completed clean", name)
+                self.logger.info("[matrix] live FIO on %s completed clean",
+                                 name)
+        if failures:
+            raise LblkPreconditionError(
+                f"[matrix] {len(failures)} of {len(handles)} live FIO "
+                f"volume(s) did not survive the outages:\n    "
+                + "\n    ".join(failures))
+
+    def _judge_one_fio(self, name, log, handle):
+        """Hold one live FIO job to zero IO errors."""
+        if self.k8s_test:
+            # NOT validate_fio_job: it calls wait_job_complete(timeout=600)
+            # and this job is deliberately sized to outlast the whole matrix,
+            # so it was still Running and the run failed with
+            #
+            #   FIO Job 'fio-mxliveplain' did not succeed (status=timeout)
+            #   (pod phase=Running)
+            #
+            # after all 12 cycles had passed. Same shape as the docker side:
+            # stop the job, then judge what it wrote.
+            self._k8s_finish_fio(handle, name)
+        else:
+            self.common_utils.validate_fio_test(
+                node=self.client_machines[0], log_file=log,
+                md5_severity=self._md5_severity)
 
 
 class LblkOutageMatrixDocker(_LblkDockerMixin, _LblkOutageMatrix):
