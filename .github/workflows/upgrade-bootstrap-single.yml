@@ -1189,11 +1189,23 @@ jobs:
           NUM_CHUNKS=${#_CHUNK_STARTS[@]}
 
           # `python3` on the mgmt node is /root/.local/bin/python3, which does NOT
-          # have sbcli: it only sees a stray site-packages/simplyblock_core/ with
-          # no __init__.py, so the import succeeds as an empty namespace package
-          # and `-m ...collect_logs` dies with "No module named". sbcli lives in
-          # the uv tool install behind sbctl, so derive the interpreter from
-          # sbctl's shebang and confirm it can import the module before using it.
+          # have sbcli. What it finds instead is
+          # /usr/local/lib/python3.12/site-packages/simplyblock_core/ holding only
+          # scripts/prometheus.yml and scripts/alerting/alert_resources.yaml and
+          # no __init__.py -- so `import simplyblock_core` succeeds as an empty
+          # namespace package and `-m ...collect_logs` dies with "No module named".
+          #
+          # That directory is NOT junk and must not be deleted. The product writes
+          # it: render_and_deploy_alerting_configs (simplyblock_core/utils) renders
+          # the templates and sudo-mv's them into <parent-of-package>/
+          # simplyblock_core/scripts/, and docker-compose-swarm-monitoring.yml
+          # mounts ./prometheus.yml from there into the Prometheus container. It is
+          # live monitoring config. It outlived the package only because a sudo mv
+          # is not pip-managed, so it stayed put when sbcli moved to the uv tool
+          # install behind sbctl.
+          #
+          # So: resolve the interpreter instead of touching the path. Derive it
+          # from sbctl's shebang and confirm it can import the module.
           COLLECT_PY=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" '
             for c in "$(head -1 "$(command -v sbctl 2>/dev/null)" 2>/dev/null | sed "s|^#!||")" \
                      /root/.local/share/uv/tools/sbctl/bin/python \
