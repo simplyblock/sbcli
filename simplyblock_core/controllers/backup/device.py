@@ -1,4 +1,3 @@
-# coding=utf-8
 """The S3 devices a node reads and writes backups through.
 
 A device holds exactly one bucket with one set of credentials, so a node runs one

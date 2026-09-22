@@ -1,4 +1,3 @@
-# coding=utf-8
 """Volume backup to a secondary store.
 
 Five modules, in dependency order -- each one may use the ones above it:

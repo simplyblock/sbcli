@@ -1,4 +1,3 @@
-# coding=utf-8
 """Typed configuration describing where backup objects live and how to read them.
 
 Two models, deliberately split so that "backups never carry credentials" is
@@ -23,7 +22,7 @@ stays wrapped so the plaintext is produced only by ``BaseModel.write_to_db``'s
 own ``unwrap_secrets`` pass, at the last possible moment.
 """
 from enum import IntEnum
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 from pydantic import (
     BaseModel,
@@ -76,10 +75,10 @@ class BackupLocation(BaseModel):
     #: globally unique, so S3 can be asked where a bucket lives, and every layer
     #: below already treats an absent region this way (boto3's own resolution,
     #: and `if (region && *region)` in the data plane's init_client).
-    region: Optional[str] = Field(default=None, min_length=1)
+    region: str | None = Field(default=None, min_length=1)
 
     #: Absent means the AWS SDK resolves the endpoint from the region.
-    endpoint: Optional[HttpUrl] = None
+    endpoint: HttpUrl | None = None
 
     secondary_target: SecondaryTarget = SecondaryTarget.S3
     with_compression: bool = False
@@ -93,7 +92,7 @@ class BackupLocation(BaseModel):
     use_path_style: bool = False
 
     @property
-    def endpoint_url(self) -> Optional[str]:
+    def endpoint_url(self) -> str | None:
         """The endpoint as the AWS SDK and boto3 want it, without a trailing slash."""
         return str(self.endpoint).rstrip("/") if self.endpoint is not None else None
 
@@ -157,10 +156,10 @@ class BackupConfig(BackupLocation):
     """A cluster's backup configuration: a location plus how to authenticate to it."""
 
     #: Absent means the node's own IAM role / the AWS default provider chain.
-    credentials: Optional[S3Credentials] = None
+    credentials: S3Credentials | None = None
 
     #: Absent means the data plane's own default (32 at the time of writing).
-    s3_thread_pool_size: Optional[int] = Field(default=None, ge=1)
+    s3_thread_pool_size: int | None = Field(default=None, ge=1)
 
     def location(self) -> BackupLocation:
         return BackupLocation.model_validate(
@@ -185,4 +184,4 @@ class UnresolvedBackupConfig(BackupConfig):
 
     # Widening a base field, which mypy reads as a plain incompatible assignment
     # -- no pydantic plugin is configured (pyproject.toml).
-    bucket_name: Annotated[Optional[str], Field(min_length=1)] = None  # type: ignore[assignment]
+    bucket_name: Annotated[str | None, Field(min_length=1)] = None  # type: ignore[assignment]
