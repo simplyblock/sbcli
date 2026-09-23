@@ -1518,6 +1518,19 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
                     return False, True, f"Snapshot transfer {state} for {snap_uuid}"
 
                 t['transfer_done'] = True
+                # Persist immediately, before post-processing runs. SPDK tears
+                # down the source-side transfer task as soon as it reports
+                # Done, so a retry that re-polls bdev_lvol_transfer_stat for
+                # this snap would find the task gone and read that as
+                # Failed/No process -- indistinguishable from a real failure,
+                # and wiping transfer_context here would force a full
+                # re-transfer of data that already landed. Writing
+                # transfer_done=True now, ahead of _post_process_snap (which
+                # can itself raise before reaching its own persist below),
+                # guarantees a retry resumes at post-processing and never
+                # touches bdev_lvol_transfer_stat for this snap again.
+                migration.transfer_context = ctx
+                migration.write_to_db(db.kv_store)
 
             # Transfer done.  Post-process only if predecessor is also done.
             if not prev_post_done:
@@ -3540,6 +3553,14 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, pri
                     migration.write_to_db(db.kv_store)
                     return False, True, f"Snapshot transfer {state} for {snap_uuid}"
                 t['transfer_done'] = True
+                # Persist immediately, before post-processing -- see the
+                # matching comment in _handle_snap_copy. SPDK destroys the
+                # source-side transfer task as soon as it reports Done, so a
+                # retry that re-polls bdev_lvol_transfer_stat for this snap
+                # would misread the now-gone task as Failed/No process and
+                # force a full re-transfer of already-landed data.
+                migration.transfer_context = ctx
+                migration.write_to_db(db.kv_store)
 
             # Transfer done — record without add_clone/convert.
             ok, err = _post_process_snap_group(snap, migration)
