@@ -318,11 +318,17 @@ jobs:
             cid=$(echo "${json_out}" | jq -r '.[0].id // .[0].uuid // .[0].UUID // empty' 2>/dev/null) || true
           fi
 
-          # Fallback: table format
+          # Fallback: match the UUID by its shape. Not `awk NR==4` -- sbctl
+          # prefixes its output with an index-building WARNING, which shifts
+          # the table down a row and returns the +---+ separator instead. The
+          # same expression also rescues the JSON path above when that warning
+          # lands on stdout and jq refuses the whole string.
           if [ -z "${cid}" ] || [ "${cid}" = "null" ]; then
             table_out=$(kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- \
-              sbctl cluster list 2>/dev/null) || true
-            cid=$(echo "${table_out}" | awk 'NR==4{print $2}') || true
+              sbctl cluster list 2>&1) || true
+            cid=$(printf '%s\n' "${table_out}" | tr -d '\r' \
+              | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+              | head -1) || true
           fi
 
           if [ -n "${cid}" ] && [ "${cid}" != "null" ] && [ "${cid}" != "+" ]; then

@@ -1400,6 +1400,22 @@ jobs:
                 exit 1
               fi
 
+
+              # Backfill the secondary indices now the cluster is up. The
+              # warning sbctl emits without them says what it costs: reads of
+              # StorageNode.cluster_id FALL BACK TO A FULL SCAN, and these
+              # suites poll node status constantly -- wait_for_storage_node_status
+              # alone is hundreds of lookups per run. An upgrade runs this
+              # automatically, so this just puts a fresh cluster where an
+              # upgraded one already is. Documented idempotent and safe on a
+              # live cluster.
+              #
+              # Never fatal: a cluster that cannot backfill is worth knowing
+              # about, but it is not a reason to refuse to run the tests.
+              echo "Backfilling database indices..."
+              kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbctl cluster build-indices 2>&1 | tail -5 || true
+
               echo "Parsed CLUSTER_ID=${CLUSTER_ID}"
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV

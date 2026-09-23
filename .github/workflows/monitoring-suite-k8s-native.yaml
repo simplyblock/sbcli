@@ -1112,13 +1112,27 @@ jobs:
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1) || true
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "Cluster is active!"
-              CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
-              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
-              if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
-                JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list --json 2>&1) || true
-                CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
-                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
+              # Match the UUID by its shape, not by its position: sbctl
+              # prefixes its output with an index-building WARNING, which
+              # shifts every table row down one and makes `awk NR==4` return
+              # the +---+ separator. The secret is NOT in `cluster list` at
+              # all -- that last column is Replicate, and blank.
+              CLUSTER_ID=$(printf '%s\n' "$OUTPUT" | tr -d '\r' \
+                | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+                | head -1)
+              CLUSTER_SECRET=""
+              if [ -n "$CLUSTER_ID" ]; then
+                CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                  sbctl cluster get-secret "$CLUSTER_ID" 2>/dev/null \
+                  | tr -d '\r' | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' \
+                  | tail -n 1 | xargs) || true
               fi
+
+              # Backfill the secondary indices: without them sbctl reads fall
+              # back to a full scan, and these suites poll node status
+              # constantly. Idempotent, and never fatal.
+              kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbctl cluster build-indices 2>&1 | tail -5 || true
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
               exit 0
