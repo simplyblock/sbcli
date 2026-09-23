@@ -2401,24 +2401,28 @@ class K8sNativeFailoverTest(TestClusterBase):
         self._k8s_stop_spdk_pod(node_ip, node)
 
     def _note_eviction_expected(self, node_ip: str, duration: int):
-        """Record that this cut should move pods, so recovery can check it.
+        """Arm the volume-attach check for this node. Always.
 
-        Only for cuts past the unreachable toleration. A 30s blip moves
-        nothing, and asserting that pods were rescheduled after one would fail
-        for the right reason and the wrong cause.
+        Not gated on whether the outage was long enough to evict. Multi-Attach
+        does not require a full eviction -- any detach/attach cycle can strand
+        a VolumeAttachment, and the pod that wants that volume then waits
+        forever in ContainerCreating. "No volume failed to attach" holds after
+        a 30s blip as much as after a 10-minute isolation, so it is asserted
+        after both.
+
+        *duration* is kept for the log and to widen the event window: a longer
+        outage means a longer stretch of events belongs to it.
         """
-        if duration >= self.EVICTION_THRESHOLD_SEC:
-            self._eviction_expected = getattr(self, "_eviction_expected", set())
-            self._eviction_expected.add(node_ip)
-            self.logger.info(
-                "[K8s] %s was unreachable for %ds, past the %ds toleration -- "
-                "expecting its pods to be evicted and rescheduled",
-                node_ip, duration, self.EVICTION_THRESHOLD_SEC)
-        else:
-            self.logger.info(
-                "[K8s] %s was unreachable for %ds, inside the %ds toleration "
-                "-- nothing should have moved, so the attach check is not "
-                "armed for it", node_ip, duration, self.EVICTION_THRESHOLD_SEC)
+        self._eviction_expected = getattr(self, "_eviction_expected", set())
+        self._eviction_expected.add(node_ip)
+        self._attach_window_sec = max(
+            getattr(self, "_attach_window_sec", 0), int(duration))
+        past = duration >= self.EVICTION_THRESHOLD_SEC
+        self.logger.info(
+            "[K8s] %s was unreachable for %ds (%s the %ds toleration) -- "
+            "checking its volumes re-attached either way",
+            node_ip, duration,
+            "past" if past else "inside", self.EVICTION_THRESHOLD_SEC)
 
     def assert_no_volume_attach_errors(self, label: str = ""):
         """Fail if a rescheduled pod could not take its volume with it.
@@ -2432,17 +2436,21 @@ class K8sNativeFailoverTest(TestClusterBase):
         if not expected:
             return
         self._ensure_k8s_utils()
-        bad = self.k8s_utils.multi_attach_errors()
+        # Window scoped to this outage plus its recovery, so a real failure in
+        # an earlier iteration cannot re-fail every iteration after it.
+        window = getattr(self, "_attach_window_sec", 0) + 600
+        bad = self.k8s_utils.multi_attach_errors(within_sec=window)
         self._eviction_expected = set()
+        self._attach_window_sec = 0
         if bad:
             raise RuntimeError(
-                f"[K8s] volume attach errors after pods were evicted from "
+                f"[K8s] volume attach errors after the outage on "
                 f"{sorted(expected)}{(' (' + label + ')') if label else ''} -- "
-                f"an RWO volume did not detach from the old node in time:\n    "
-                + "\n    ".join(bad[:6]))
+                f"a volume did not re-attach, so whatever wants it is stuck:"
+                f"\n    " + "\n    ".join(bad[:6]))
         self.logger.info(
-            "[K8s] pods evicted from %s were rescheduled with no Multi-Attach "
-            "errors", sorted(expected))
+            "[K8s] volumes on %s all re-attached after the outage, no "
+            "Multi-Attach errors", sorted(expected))
 
     def _operator_shutdown_node(self, node: str):
         """Shut down a storage node via a StorageNodeOps CR.
@@ -2593,6 +2601,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                 # About to make this node unreachable on purpose: reset its SSH
                 # unreachable clock so a planned outage cannot trip the 2h rule.
                 self.ssh_obj.notify_outage_started([node_ip])
+                # Every outage arms the attach check, including the ones
+                # that never evict: a pod recreated in place still detaches
+                # and re-attaches its volume, and that is enough to strand a
+                # VolumeAttachment.
+                self._note_eviction_expected(node_ip, 0)
                 if outage_type == "container_stop":
                     self._k8s_stop_spdk_pod(node_ip, node)
                 elif outage_type == "graceful_shutdown":

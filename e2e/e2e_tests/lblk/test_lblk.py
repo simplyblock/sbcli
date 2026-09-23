@@ -1029,18 +1029,16 @@ class _LblkBase(TestClusterBase):
                         self.logger.info(
                             "[lblk] %s was NotReady for %.0fs across the "
                             "reboot", ip, down)
-                        if down >= self.EVICTION_TOLERATION_SEC:
-                            bad = k8s.multi_attach_errors()
-                            if bad:
-                                raise LblkPreconditionError(
-                                    f"[lblk] {ip} was down {down:.0f}s across "
-                                    f"its reboot, long enough for its pods to "
-                                    f"be rescheduled, and their volumes did "
-                                    f"not follow:\n    "
-                                    + "\n    ".join(bad[:6]))
-                            self.logger.info(
-                                "[lblk] pods moved off %s during the reboot "
-                                "and got their volumes back cleanly", ip)
+                        bad = k8s.multi_attach_errors(within_sec=900)
+                        if bad:
+                            raise LblkPreconditionError(
+                                f"[lblk] {ip} was down {down:.0f}s across its "
+                                f"reboot and a volume did not re-attach "
+                                f"afterwards:\n    "
+                                + "\n    ".join(bad[:6]))
+                        self.logger.info(
+                            "[lblk] volumes re-attached cleanly after the "
+                            "reboot of %s", ip)
                 else:
                     self.logger.warning(
                         "[lblk] could not issue a real reboot on %s; "

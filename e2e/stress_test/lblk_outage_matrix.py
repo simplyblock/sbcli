@@ -77,6 +77,12 @@ class _LblkOutageMatrix(_LblkBase):
     #: helper happened to return as "mount".
     K8S_MOUNT = "/spdkvol"
 
+    #: How far back _assert_attached looks for volume-attach events. One
+    #: cycle's worth: the outage, its recovery, and the checks since. Long
+    #: enough to catch this cycle's failure, short enough that the previous
+    #: cycle's is not re-reported against this one.
+    ATTACH_WINDOW_SEC = 900
+
     #: Static payload per volume. Large enough to span many stripes -- and so
     #: to involve every node's parity -- small enough that re-md5ing five
     #: volumes after each of four outages is not the bulk of the runtime.
@@ -225,6 +231,7 @@ class _LblkOutageMatrix(_LblkBase):
             self._assert_static_unchanged(where)
             self._verify_raw(where)
             self._scan_spdk_logs(where)
+            self._assert_attached(where)
             self._assert_fio_alive(live, where)
 
         self._finish_live_fio(live)
@@ -870,6 +877,31 @@ class _LblkOutageMatrix(_LblkBase):
             node = self.client_machines[0]
             self.ssh_obj.exec_command(node=node, command=f"sudo {cmd}")
             self.ssh_obj.exec_command(node=node, command="sudo sync")
+
+    def _assert_attached(self, context):
+        """After any outage, nothing may be stuck waiting for a volume.
+
+        k8s only -- docker has no attach/detach controller to get this wrong.
+
+        Deliberately not gated on whether the outage should have moved pods.
+        Multi-Attach does not need a full eviction: any detach/attach cycle
+        can strand a VolumeAttachment, and the pod that wants that volume then
+        waits in ContainerCreating indefinitely with nothing failing. A pod
+        restarted in place re-attaches its volume too, so the assertion is
+        worth making after every cycle, not only the long ones.
+        """
+        if not self.k8s_test:
+            return
+        k8s = self._ensure_k8s_utils()
+        # One cycle's worth of events: the outage, its recovery and the checks
+        # since. Scoped so an earlier cycle's failure cannot re-fail this one.
+        bad = k8s.multi_attach_errors(within_sec=self.ATTACH_WINDOW_SEC)
+        if bad:
+            raise LblkPreconditionError(
+                f"[matrix] volume attach error {context} -- something is "
+                f"waiting for a volume it cannot get:\n    "
+                + "\n    ".join(bad[:6]))
+        self.logger.info("[matrix] volumes all attached %s", context)
 
     def _assert_static_unchanged(self, context):
         """Every static volume must hash exactly as it did before any fault."""

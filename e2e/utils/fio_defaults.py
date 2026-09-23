@@ -15,8 +15,16 @@ Change the value HERE and it changes everywhere.
 #: Longest a single IO may take before FIO fails the job (`--max_latency`).
 #:
 #: This is a correctness gate, not a performance target. Storage that stalls
-#: a single IO for 20 seconds is indistinguishable from storage that dropped
+#: a single IO for this long is indistinguishable from storage that dropped
 #: it, and every outage lane in the suite exists to prove the cluster does not
 #: do that -- so a node being deliberately killed is not a licence to exceed
-#: it. If a test cannot hold 20s through an outage, that is the finding.
-FIO_MAX_LATENCY = "20s"
+#: it. If a test cannot hold the ceiling through an outage, that is the
+#: finding, not a reason to raise it.
+#:
+#: 40s, matching what continuous_k8s_native_failover used before this module
+#: existed. It was briefly 20s, which is the value the scale-break lane picks
+#: deliberately for a load test; for an outage lane 40s is the house number.
+#: Neither choice was ever the issue -- the k8s run of 2026-09-22 measured a
+#: single 4K read at 76s and a write at 64s, so the stalls that matter clear
+#: either ceiling by a wide margin.
+FIO_MAX_LATENCY = "40s"
