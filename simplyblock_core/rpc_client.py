@@ -729,6 +729,20 @@ class RPCClient:
                 "(cold paths only)")
         return self._request("bdev_get_bdevs", None)
 
+    def bdev_get(self, name) -> Optional[dict]:
+        """Single bdev lookup by exact name, mirroring ``subsystem_get``.
+        ``None`` means the bdev does not exist (SPDK answers ENODEV, or the
+        filtered lookup comes back empty). Raises ``RPCConnectionError`` /
+        ``RPCHTTPError`` / ``RPCProtocolError`` for a transport-level failure,
+        or ``RPCRemoteError`` for any other RPC error — callers must not read
+        an unknown answer as "absent"."""
+        try:
+            return single_or_none(self._request3("bdev_get_bdevs", name=name))
+        except RPCRemoteError as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
+
     def resize_lvol(self, lvol_bdev, blockcnt):
         params = {
             "lvol_bdev": lvol_bdev,
