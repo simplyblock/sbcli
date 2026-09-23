@@ -103,6 +103,8 @@ from stress_test.large_scale_lvol_stress import (
 from stress_test.dual_outage_matrix import (
     DualOutageMatrixDocker,
     DualOutageMatrixK8s,
+    LblkDualOutageMatrixDocker,
+    LblkDualOutageMatrixK8s,
 )
 from e2e_tests.lblk.test_lblk import (
     LblkFunctionalDocker,
@@ -480,6 +482,8 @@ ALL_TESTS = [
     LargeScaleLvolK8s,
     DualOutageMatrixDocker,
     DualOutageMatrixK8s,
+    LblkDualOutageMatrixDocker,
+    LblkDualOutageMatrixK8s,
     LblkFunctionalDocker,
     LblkFunctionalK8s,
     LblkIntegrityDocker,
@@ -785,6 +789,8 @@ def get_stress_tests():
         LargeScaleLvolK8s,
         DualOutageMatrixDocker,
         DualOutageMatrixK8s,
+        LblkDualOutageMatrixDocker,
+        LblkDualOutageMatrixK8s,
         LblkStressDocker,
         LblkStressK8s,
         LblkMultiOutageStressDocker,

@@ -63,6 +63,8 @@ from stress_test.continuous_failover_ha_multi_outage_all_nodes import (
     RandomMultiClientMultiFailoverAllNodesTest,
 )
 from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest
+from stress_test.lblk_stress import (_LblkDockerPlatform, _LblkK8sPlatform,
+                                     _LblkStressMixin)
 from utils.common_utils import sleep_n_sec
 
 
@@ -611,3 +613,40 @@ class DualOutageMatrixDocker(_DualOutageDocker):
 
 class DualOutageMatrixK8s(_DualOutageK8s):
     """Dual-outage matrix on k8s-native. Case chosen with `stress.py --case`."""
+
+
+# ── lblk variants ─────────────────────────────────────────────────────────
+# The same matrix on a cluster whose devices are AIO bdevs over ordinary block
+# devices, with the raw crc32c bracket added around every outage pair.
+#
+# Worth a lane of its own rather than trusting the nvme result. Two
+# simultaneous outages drive two concurrent failovers, so two lvstores mutate
+# metadata at once. On nvme a 4K metadata page cannot tear, so that
+# concurrency is a control-plane question. On a device with no 4K atomic write
+# it is a durability question as well, and the md journal is the only thing
+# between the two -- which is what the crc32c bracket checks and what the
+# parents' filesystem-level md5 can mask.
+#
+# _LblkStressMixin comes FIRST so its hooks wrap the dual matrix's rather than
+# replacing them: both layers override perform_n_plus_k_outages and
+# restart_nodes_after_failover, and both call super(), so the chain runs
+# lblk -> dual -> base with every layer intact.
+
+class LblkDualOutageMatrixDocker(_LblkStressMixin, _LblkDockerPlatform,
+                                 _DualOutageDocker):
+    """Dual-outage matrix on lblk, docker."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Otherwise the logs land under the nvme matrix's name and an lblk run
+        # is indistinguishable from an nvme one after the fact.
+        self.test_name = "lblk_dual_outage_matrix_docker"
+
+
+class LblkDualOutageMatrixK8s(_LblkStressMixin, _LblkK8sPlatform,
+                              _DualOutageK8s):
+    """Dual-outage matrix on lblk, k8s-native."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lblk_dual_outage_matrix_k8s"
