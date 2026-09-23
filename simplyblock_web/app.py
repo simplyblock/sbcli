@@ -24,6 +24,8 @@ logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
 logging.getLogger().setLevel(constants.LOG_WEB_LEVEL)
 
+MAX_REQUEST_ID_LENGTH = 128
+
 # Prevent external libraries from logging secrets (tokens, response bodies)
 # at DEBUG level while keeping our own loggers at DEBUG.
 for _ext_logger_name in (
@@ -46,11 +48,22 @@ access_logger.propagate = False
 core_utils.init_sentry_sdk()
 
 
+def _request_id_from_header(value: str | None) -> str:
+    if value is None:
+        return uuid.uuid4().hex[:8]
+
+    request_id = value.strip()
+    if not request_id or len(request_id) > MAX_REQUEST_ID_LENGTH or '\r' in request_id or '\n' in request_id:
+        return uuid.uuid4().hex[:8]
+
+    return request_id
+
+
 class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         client_ip = request.client.host if request.client else '-'
         request_size = request.headers.get('content-length', '-')
-        request_id = request.headers.get('x-request-id') or uuid.uuid4().hex[:8]
+        request_id = _request_id_from_header(request.headers.get('x-request-id'))
         token = core_utils.request_id_var.set(request_id)
 
         # Query strings can carry credentials (?secret=…, ?token=…) and have
@@ -61,27 +74,31 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
         except Exception:
-            logger.exception('Unhandled exception during %s %s (%.1fms)',
-                             request.method, path, (time.monotonic() - start) * 1000)
-            core_utils.request_id_var.reset(token)
+            try:
+                logger.exception('Unhandled exception during %s %s (%.1fms)',
+                                 request.method, path, (time.monotonic() - start) * 1000)
+            finally:
+                core_utils.request_id_var.reset(token)
             raise
         duration_ms = (time.monotonic() - start) * 1000
 
         response_size = response.headers.get('content-length', '-')
 
-        access_logger.info(
-            '%s %s',
-            request.method,
-            path,
-            extra={
-                'client_ip': client_ip,
-                'request_size': request_size,
-                'status_code': response.status_code,
-                'response_size': response_size,
-                'duration_ms': duration_ms,
-            },
-        )
-        core_utils.request_id_var.reset(token)
+        try:
+            access_logger.info(
+                '%s %s',
+                request.method,
+                path,
+                extra={
+                    'client_ip': client_ip,
+                    'request_size': request_size,
+                    'status_code': response.status_code,
+                    'response_size': response_size,
+                    'duration_ms': duration_ms,
+                },
+            )
+        finally:
+            core_utils.request_id_var.reset(token)
         return response
 
 
