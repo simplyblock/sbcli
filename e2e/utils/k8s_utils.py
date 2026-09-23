@@ -349,6 +349,47 @@ class K8sUtils:
         "failedmount",
     )
 
+    def pods_stuck_on_volumes(self, namespace: str | None = None,
+                              within_sec: int = 900) -> list[str]:
+        """Pods that are NOT running AND are complaining about a volume.
+
+        This, not the raw event list, is the question worth asking. A
+        Multi-Attach event on its own is routine: delete a pod using an RWO
+        volume and create another one immediately, and the second is told the
+        volume is still exclusively attached until the first attachment is
+        released. The attach controller retries and it clears. Our own
+        seed/md5 utility pods do exactly that back to back, so an event-only
+        check fails on the test's own setup -- which is what happened on the
+        k8s run of 2026-09-23, where a Multi-Attach raised at 09:59:13 during
+        volume seeding failed a cycle that ran at 10:05.
+
+        What actually matters is whether anything is STILL waiting. A pod that
+        is Running got its volume, whatever was logged on the way. So: take
+        the pods that are not Running or Succeeded, and report only those with
+        a recent volume complaint against them.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pods -n {ns} "
+            f"-o custom-columns=':metadata.name,:status.phase' --no-headers "
+            f"2>/dev/null || true", supress_logs=True, timeout=120)
+        pending = set()
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] not in ("Running", "Succeeded"):
+                pending.add(parts[0])
+        if not pending:
+            return []
+
+        stuck = []
+        for entry in self.multi_attach_errors(namespace=ns,
+                                              within_sec=within_sec):
+            # entries read "[<age>] <pod>: <message>"
+            name = entry.split("] ", 1)[-1].split(":", 1)[0].strip()
+            if name in pending:
+                stuck.append(entry)
+        return stuck
+
     def multi_attach_errors(self, namespace: str | None = None,
                             within_sec: int = 900) -> list[str]:
         """Volume attach errors from the last *within_sec* seconds.

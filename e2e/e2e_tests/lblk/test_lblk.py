@@ -757,14 +757,13 @@ class _LblkBase(TestClusterBase):
                 f"ended. The cut is self-restoring on the host, so the node "
                 f"should have rejoined on its own.")
 
-        bad = k8s.multi_attach_errors()
+        bad = k8s.pods_stuck_on_volumes()
         if bad:
             raise LblkPreconditionError(
-                f"[lblk] volume attach errors after {ip} was isolated and its "
-                f"pods rescheduled -- an RWO volume did not detach from the "
-                f"old node in time:\n    " + "\n    ".join(bad[:6]))
-        self.logger.info("[lblk] %s rejoined, pods rescheduled, no "
-                         "Multi-Attach errors", ip)
+                f"[lblk] pod(s) still not running after {ip} was isolated and "
+                f"its pods rescheduled -- an RWO volume did not detach from "
+                f"the old node in time:\n    " + "\n    ".join(bad[:6]))
+        self.logger.info("[lblk] %s rejoined and every pod is running", ip)
 
     def _pods_on_node(self, ip):
         """Names of pods currently scheduled on the node owning *ip*."""
@@ -1029,16 +1028,16 @@ class _LblkBase(TestClusterBase):
                         self.logger.info(
                             "[lblk] %s was NotReady for %.0fs across the "
                             "reboot", ip, down)
-                        bad = k8s.multi_attach_errors(within_sec=900)
+                        bad = k8s.pods_stuck_on_volumes(within_sec=900)
                         if bad:
                             raise LblkPreconditionError(
                                 f"[lblk] {ip} was down {down:.0f}s across its "
-                                f"reboot and a volume did not re-attach "
-                                f"afterwards:\n    "
+                                f"reboot and pod(s) are still not running, "
+                                f"waiting for a volume:\n    "
                                 + "\n    ".join(bad[:6]))
                         self.logger.info(
-                            "[lblk] volumes re-attached cleanly after the "
-                            "reboot of %s", ip)
+                            "[lblk] every pod running again after the reboot "
+                            "of %s", ip)
                 else:
                     self.logger.warning(
                         "[lblk] could not issue a real reboot on %s; "

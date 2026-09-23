@@ -2439,7 +2439,11 @@ class K8sNativeFailoverTest(TestClusterBase):
         # Window scoped to this outage plus its recovery, so a real failure in
         # an earlier iteration cannot re-fail every iteration after it.
         window = getattr(self, "_attach_window_sec", 0) + 600
-        bad = self.k8s_utils.multi_attach_errors(within_sec=window)
+        # Pods still stuck, not raw events: a Multi-Attach that the attach
+        # controller retried and cleared is routine pod churn on an RWO
+        # volume, and our own utility pods produce it. Only something still
+        # not Running is a failure.
+        bad = self.k8s_utils.pods_stuck_on_volumes(within_sec=window)
         self._eviction_expected = set()
         self._attach_window_sec = 0
         if bad:

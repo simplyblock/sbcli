@@ -889,19 +889,43 @@ class _LblkOutageMatrix(_LblkBase):
         waits in ContainerCreating indefinitely with nothing failing. A pod
         restarted in place re-attaches its volume too, so the assertion is
         worth making after every cycle, not only the long ones.
+
+        STUCK pods, not raw events. A Multi-Attach event by itself is routine:
+        delete a pod holding an RWO volume and create another immediately, and
+        the second is told the volume is still exclusively attached until the
+        first attachment is released; the controller retries and it clears.
+        Our own seed and md5 utility pods do exactly that, back to back. On
+        2026-09-23 an event-only check failed cycle 1 on a Multi-Attach raised
+        at 09:59:13 during volume SEEDING -- before any outage -- because the
+        seed pod took 31s to delete and the md5 pod was created the same
+        second it finished. It resolved; the run had already used the volume
+        successfully by the time the check looked.
+
+        A pod that is Running got its volume, whatever was logged getting
+        there. Only a pod still not Running, with a volume complaint against
+        it, is the failure this is for.
         """
         if not self.k8s_test:
             return
         k8s = self._ensure_k8s_utils()
-        # One cycle's worth of events: the outage, its recovery and the checks
-        # since. Scoped so an earlier cycle's failure cannot re-fail this one.
-        bad = k8s.multi_attach_errors(within_sec=self.ATTACH_WINDOW_SEC)
-        if bad:
+        # Scoped to this cycle so an earlier one's churn is not re-reported
+        # against it.
+        stuck = k8s.pods_stuck_on_volumes(within_sec=self.ATTACH_WINDOW_SEC)
+        if stuck:
             raise LblkPreconditionError(
-                f"[matrix] volume attach error {context} -- something is "
-                f"waiting for a volume it cannot get:\n    "
-                + "\n    ".join(bad[:6]))
-        self.logger.info("[matrix] volumes all attached %s", context)
+                f"[matrix] volume attach error {context} -- pod(s) still not "
+                f"running and still waiting for a volume:\n    "
+                + "\n    ".join(stuck[:6]))
+        # Transient ones are worth seeing without failing on: a rise in them
+        # is a signal even when everything eventually attached.
+        seen = k8s.multi_attach_errors(within_sec=self.ATTACH_WINDOW_SEC)
+        if seen:
+            self.logger.info(
+                "[matrix] %d volume-attach event(s) %s, all resolved -- every "
+                "pod is running. First: %s",
+                len(seen), context, seen[0][:160])
+        else:
+            self.logger.info("[matrix] volumes all attached %s", context)
 
     def _assert_static_unchanged(self, context):
         """Every static volume must hash exactly as it did before any fault."""
