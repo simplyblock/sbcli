@@ -48,9 +48,6 @@ def _discard_previous_config() -> None:
             os.remove(path)
         except FileNotFoundError:
             continue  # A first install has none, which is the ordinary case.
-        except OSError as e:
-            logger.warning(f"The previous node configuration {path} could not be removed: {e}")
-            continue
         logger.info(f"Discarded the previous node configuration {path}")
 
 
