@@ -26,6 +26,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.services import replication_final_step
 
 logger = utils.get_logger(__name__)
 
@@ -2944,6 +2945,45 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
     return data
 
 
+def replication_source_online(lvol: LVol) -> bool:
+    """Whether *lvol*'s own storage node is genuinely up right now.
+
+    Distinguishes day-one protection of a volume that has always lived here
+    (its source node is healthy, so a promote is a no-op) from a genuine
+    unplanned fail-over (the source was never demoted BECAUSE it is
+    unreachable -- the premise force=true already accepts). Both leave
+    replication_demote_state empty, so that field alone cannot tell them
+    apart; this mirrors the target-node check replicate_lvol_on_target_cluster
+    already makes for the destination side, applied to the source instead.
+    """
+    db_controller = DBController()
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    return bool(node) and node.status == StorageNode.STATUS_ONLINE
+
+
+def _replication_role(db_controller: DBController, lvol: LVol) -> str:
+    """Which end of its replication relationship *lvol* is.
+
+    The newest relationship record involving the volume decides: failed_over
+    trumps the side, because that is the state a DR orchestrator acts on.
+    Without a record — which is a volume's whole healthy replicated life,
+    since relationships only materialize at cutover or fail-over — the volume
+    is a source as soon as replication is configured, and none otherwise.
+    """
+    lvol_id = lvol.get_id()
+    for rep in reversed(db_controller.get_lvol_replication_objects()):
+        source_id = rep.source_lvol.get_id() if rep.source_lvol else ""
+        target_id = rep.target_lvol.get_id() if rep.target_lvol else ""
+        if lvol_id not in (source_id, target_id):
+            continue
+        if rep.state == LVolReplication.STATE_FAILED_OVER:
+            return "failed_over"
+        return "source" if lvol_id == source_id else "secondary"
+    if lvol.replication_policy_id or lvol.do_replicate:
+        return "source"
+    return "none"
+
+
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
     lvol = None
@@ -2966,6 +3006,16 @@ def get_replication_info(lvol_id_or_name):
         "last_replication_time": "",
         "last_replication_duration": "",
         "replicated_count": 0,
+        # The typed steady-state status fields. last_replicated_at is the
+        # newest fully replicated snapshot's creation time (the truthful
+        # lastSyncTime source for a DR orchestrator), and the last_cycle
+        # figures describe THAT snapshot's shipping, numerically, where the
+        # display strings above describe the newest task of any state.
+        "last_replicated_at": None,
+        "last_cycle_seconds": None,
+        "last_cycle_bytes": None,
+        "role": "none",                 # source|secondary|failed_over|none
+        "resyncing": False,             # a divergence catch-up is in flight
         # Replication progress monitoring.
         "lag_seconds": None,            # how far the target is behind the source
         "lag": "",                      # human-readable lag
@@ -2992,9 +3042,15 @@ def get_replication_info(lvol_id_or_name):
         "tasks": [],
     }
     node = db_controller.get_storage_node_by_id(lvol.node_id)
+    out["role"] = _replication_role(db_controller, lvol)
     # Each replication task maps 1:1 to a source snapshot for this lvol.
     items = []  # list of (task, snap)
+    final_cutover_active = False
     for task in db_controller.get_job_tasks(node.cluster_id):
+        if (task.function_name == JobSchedule.FN_REPLICATION_FINAL
+                and not task.canceled and task.status != JobSchedule.STATUS_DONE
+                and task.function_params.get("lvol_id") == lvol.get_id()):
+            final_cutover_active = True
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
@@ -3008,110 +3064,253 @@ def get_replication_info(lvol_id_or_name):
             tasks.append(task)
             items.append((task, snap))
 
+    # The final cutover reconciles independently of the snapshot pipeline, so
+    # it flags a resync even when no shipping task is queued.
+    out["resyncing"] = final_cutover_active
+
     if items:
-        now = int(time.time())
-        tasks = sorted(tasks, key=lambda x: x.date)
-        snaps = sorted(snaps, key=lambda x: x.created_at)
-        out["snaps"] = [s.to_dict() for s in snaps]
-        out["tasks"] = [t.to_dict() for t in tasks]
-        # A snapshot is replicated once its task is done or a counterpart exists
-        # on the other side. BOTH directions count: fail-back records the copy
-        # in source_replicated_snap_uuid and never sets the target one, so a
-        # target-only test reported every failing-back volume as 0 replicated
-        # and left lag_seconds None for ever — no gate on lag could ever pass.
-        def _is_replicated(task, snap):
-            return (task.status == JobSchedule.STATUS_DONE
-                    or bool(snap.target_replicated_snap_uuid)
-                    or bool(snap.source_replicated_snap_uuid))
-
-        replicated = [s for (t, s) in items if _is_replicated(t, s)]
-        outstanding = [s for (t, s) in items if not _is_replicated(t, s)]
-
-        # Count what actually replicated, not every snapshot that has a task —
-        # the latter reported healthy replication for volumes where nothing had
-        # reached the target at all.
-        out["replicated_count"] = len(replicated)
-
-        outstanding_bytes = sum(s.used_size for s in outstanding)
-        out["outstanding_count"] = len(outstanding)
-        out["outstanding_bytes"] = outstanding_bytes
-        out["outstanding"] = utils.humanbytes(outstanding_bytes)
-
-        interval_sec = max(1, lvol.replication_interval_min or 1) * 60
-        out["cadence_target_seconds"] = interval_sec
-        if outstanding:
-            oldest_outstanding = max(0, now - min(s.created_at for s in outstanding))
-            out["oldest_outstanding_seconds"] = oldest_outstanding
-            out["oldest_outstanding"] = utils.strfdelta_seconds(oldest_outstanding)
-            # The interval is a target: one snapshot still in flight within its
-            # own interval is the pipeline keeping up. Anything older than that
-            # means the backlog is not being worked off at the requested rate.
-            out["cadence_met"] = oldest_outstanding <= interval_sec
-
-        # Time lag = age of the most recent point-in-time that exists on the
-        # target (the newest successfully-replicated snapshot).
-        if replicated:
-            last_replicated_created = max(s.created_at for s in replicated)
-            lag_seconds = max(0, now - last_replicated_created)
-            out["lag_seconds"] = lag_seconds
-            out["lag"] = utils.strfdelta_seconds(lag_seconds)
-
-        last_task = tasks[-1]
-        last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
-        out["last_snapshot_id"] = last_snap.get_id()
-        out["last_replication_time"] = last_task.updated_at
-        if "end_time" in last_task.function_params and "start_time" in last_task.function_params:
-            duration = utils.strfdelta_seconds(
-                last_task.function_params["end_time"] - last_task.function_params["start_time"])
-        elif "start_time" in last_task.function_params:
-            duration = utils.strfdelta_seconds(now - last_task.function_params["start_time"])
-        else:
-            duration = ""
-        out["last_replication_duration"] = duration
-
-        # --- health verdict -------------------------------------------------
-        # A task that keeps retrying is the ONLY signal that replication is
-        # broken (network partition, node down, no LVS leader). It used to be
-        # buried in task.function_result, so a volume could sit hours behind
-        # while every status view looked normal.
-        failing = [t for t in tasks
-                   if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
-        gave_up = [t for t in tasks
-                   if t.status == JobSchedule.STATUS_DONE
-                   and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
-        out["failing_count"] = len(failing)
-        out["max_retry_reached"] = len(gave_up)
-        if failing:
-            out["last_error"] = str(failing[-1].function_result or "")
-        elif gave_up:
-            out["last_error"] = str(gave_up[-1].function_result or "")
-
-        # Lag budget: three snapshot intervals (one missed cycle is not an
-        # incident), floor 5 min so a tiny interval does not flap the verdict.
-        lag_budget = max(3 * interval_sec, 300)
-        lag = out["lag_seconds"]
-        oldest_outstanding = out["oldest_outstanding_seconds"]
-        if gave_up:
-            out["state"] = "error"
-        elif failing:
-            out["state"] = "degraded"
-        elif lag is not None and lag > lag_budget:
-            out["state"] = "lagging"
-        elif oldest_outstanding is not None and oldest_outstanding > lag_budget:
-            # A backlog older than the budget is lagging even when lag_seconds
-            # says nothing — which is exactly the case that mattered: an initial
-            # sync that never completes has NO replicated snapshot, so lag stays
-            # None and the volume reported "replicating"/healthy indefinitely
-            # while its transfers were stuck (lab 2026-08-20, case 4).
-            out["state"] = "lagging"
-        elif out["outstanding_count"] > 0:
-            out["state"] = "replicating"
-        else:
-            out["state"] = "in_sync"
-        out["healthy"] = out["state"] in ("in_sync", "replicating")
-        out["lag_budget_seconds"] = lag_budget
+        policy = None
+        if lvol.replication_policy_id:
+            try:
+                policy = db_controller.get_replication_policy_by_id(
+                    lvol.replication_policy_id)
+            except KeyError:
+                policy = None
+        cycle_stats = _replication_cycle_stats(db_controller, lvol, items, policy)
+        out["resyncing"] = out["resyncing"] or cycle_stats.pop("resyncing")
+        out.update(cycle_stats)
 
     return out
+
+
+def _replication_cycle_stats(db_controller, lvol, items, policy):
+    """The lag/backlog/state math for a volume with at least one
+    replication-mapped (task, snapshot) pair.
+
+    Split out of get_replication_info so get_replication_info_bulk can supply
+    pre-fetched items and a pre-resolved policy instead of the per-volume
+    get_job_tasks/get_replication_policy_by_id reads this block used to make
+    on its own -- each an unscoped-or-worse full-table scan, safe to pay once
+    per lvol lookup but not once per volume on every metrics scrape.
+    """
+    now = int(time.time())
+    tasks = sorted((t for t, _ in items), key=lambda x: x.date)
+    snaps = sorted((s for _, s in items), key=lambda x: x.created_at)
+    out: dict[str, Any] = {
+        "snaps": [s.to_dict() for s in snaps],
+        "tasks": [t.to_dict() for t in tasks],
+    }
+
+    # A snapshot is replicated once its task is done or a counterpart exists
+    # on the other side. BOTH directions count: fail-back records the copy
+    # in source_replicated_snap_uuid and never sets the target one, so a
+    # target-only test reported every failing-back volume as 0 replicated
+    # and left lag_seconds None for ever — no gate on lag could ever pass.
+    def _is_replicated(task, snap):
+        return (task.status == JobSchedule.STATUS_DONE
+                or bool(snap.target_replicated_snap_uuid)
+                or bool(snap.source_replicated_snap_uuid))
+
+    replicated_pairs = [(t, s) for (t, s) in items if _is_replicated(t, s)]
+    outstanding_pairs = [(t, s) for (t, s) in items if not _is_replicated(t, s)]
+    replicated = [s for (_, s) in replicated_pairs]
+    outstanding = [s for (_, s) in outstanding_pairs]
+
+    # A fail-back ships toward the recovered source under
+    # replicate_to_source tasks; while one is outstanding the volume is
+    # reconciling a divergence.
+    out["resyncing"] = any(
+        t.function_params.get("replicate_to_source")
+        for (t, _) in outstanding_pairs)
+
+    # Count what actually replicated, not every snapshot that has a task —
+    # the latter reported healthy replication for volumes where nothing had
+    # reached the target at all.
+    out["replicated_count"] = len(replicated)
+
+    outstanding_bytes = sum(s.used_size for s in outstanding)
+    out["outstanding_count"] = len(outstanding)
+    out["outstanding_bytes"] = outstanding_bytes
+    out["outstanding"] = utils.humanbytes(outstanding_bytes)
+
+    interval_sec = max(1, lvol.replication_interval_min or 1) * 60
+    out["cadence_target_seconds"] = interval_sec
+    out["oldest_outstanding_seconds"] = None
+    out["oldest_outstanding"] = ""
+    out["cadence_met"] = True
+    if outstanding:
+        oldest_outstanding = max(0, now - min(s.created_at for s in outstanding))
+        out["oldest_outstanding_seconds"] = oldest_outstanding
+        out["oldest_outstanding"] = utils.strfdelta_seconds(oldest_outstanding)
+        # The interval is a target: one snapshot still in flight within its
+        # own interval is the pipeline keeping up. Anything older than that
+        # means the backlog is not being worked off at the requested rate.
+        out["cadence_met"] = oldest_outstanding <= interval_sec
+
+    # Time lag = age of the most recent point-in-time that exists on the
+    # target (the newest successfully-replicated snapshot).
+    out["lag_seconds"] = None
+    out["lag"] = ""
+    out["last_replicated_at"] = None
+    out["last_cycle_bytes"] = None
+    out["last_cycle_seconds"] = None
+    if replicated:
+        last_replicated_created = max(s.created_at for s in replicated)
+        lag_seconds = max(0, now - last_replicated_created)
+        out["lag_seconds"] = lag_seconds
+        out["lag"] = utils.strfdelta_seconds(lag_seconds)
+        out["last_replicated_at"] = last_replicated_created
+
+        # The last COMPLETED cycle: what shipped, and how long it took.
+        # The display fields below describe the newest task of any
+        # state, which may still be in flight.
+        last_done_task, last_done_snap = max(
+            replicated_pairs, key=lambda pair: pair[1].created_at)
+        out["last_cycle_bytes"] = last_done_snap.used_size
+        done_params = last_done_task.function_params
+        if "end_time" in done_params and "start_time" in done_params:
+            out["last_cycle_seconds"] = max(
+                0, int(done_params["end_time"]) - int(done_params["start_time"]))
+
+    last_task = tasks[-1]
+    last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
+    out["last_snapshot_id"] = last_snap.get_id()
+    out["last_replication_time"] = last_task.updated_at
+    if "end_time" in last_task.function_params and "start_time" in last_task.function_params:
+        duration = utils.strfdelta_seconds(
+            last_task.function_params["end_time"] - last_task.function_params["start_time"])
+    elif "start_time" in last_task.function_params:
+        duration = utils.strfdelta_seconds(now - last_task.function_params["start_time"])
+    else:
+        duration = ""
+    out["last_replication_duration"] = duration
+
+    # --- health verdict -------------------------------------------------
+    # A task that keeps retrying is the ONLY signal that replication is
+    # broken (network partition, node down, no LVS leader). It used to be
+    # buried in task.function_result, so a volume could sit hours behind
+    # while every status view looked normal.
+    failing = [t for t in tasks
+               if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
+    gave_up = [t for t in tasks
+               if t.status == JobSchedule.STATUS_DONE
+               and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
+    out["failing_count"] = len(failing)
+    out["max_retry_reached"] = len(gave_up)
+    out["last_error"] = ""
+    if failing:
+        out["last_error"] = str(failing[-1].function_result or "")
+    elif gave_up:
+        out["last_error"] = str(gave_up[-1].function_result or "")
+
+    # Lag budget: three snapshot intervals (one missed cycle is not an
+    # incident), floor 5 min so a tiny interval does not flap the verdict.
+    # A declared RPO objective on the volume's policy replaces the
+    # heuristic: the operator alerts on the target they promised.
+    lag_budget = max(3 * interval_sec, 300)
+    if policy is not None and policy.rpo_target_seconds > 0:
+        lag_budget = policy.rpo_target_seconds
+    lag = out["lag_seconds"]
+    oldest_outstanding = out["oldest_outstanding_seconds"]
+    if gave_up:
+        out["state"] = "error"
+    elif failing:
+        out["state"] = "degraded"
+    elif lag is not None and lag > lag_budget:
+        out["state"] = "lagging"
+    elif oldest_outstanding is not None and oldest_outstanding > lag_budget:
+        # A backlog older than the budget is lagging even when lag_seconds
+        # says nothing — which is exactly the case that mattered: an initial
+        # sync that never completes has NO replicated snapshot, so lag stays
+        # None and the volume reported "replicating"/healthy indefinitely
+        # while its transfers were stuck (lab 2026-08-20, case 4).
+        out["state"] = "lagging"
+    elif out["outstanding_count"] > 0:
+        out["state"] = "replicating"
+    else:
+        out["state"] = "in_sync"
+    out["healthy"] = out["state"] in ("in_sync", "replicating")
+    out["lag_budget_seconds"] = lag_budget
+
+    return out
+
+
+# Fields a not-yet-shipped replicating volume reports -- the same defaults
+# get_replication_info's own `out` dict starts with, for the volumes
+# _replication_cycle_stats never runs on because they have no
+# FN_SNAPSHOT_REPLICATION items yet.
+_REPLICATION_METRICS_DEFAULTS: dict[str, Any] = {
+    "lag_seconds": None,
+    "outstanding_bytes": 0,
+    "last_cycle_bytes": None,
+    "last_cycle_seconds": None,
+    "state": "not_replicating",
+    "failing_count": 0,
+    "max_retry_reached": 0,
+}
+
+
+def get_replication_info_bulk(cluster_id: str, lvols: list[LVol]) -> dict[str, dict]:
+    """The subset of get_replication_info's fields the metrics exporter needs
+    (lag, backlog, last-cycle size/duration, degraded/error state), for every
+    do_replicate volume in *lvols*, computed with ONE get_job_tasks and ONE
+    get_replication_policies/get_replication_targets read for the whole
+    cluster rather than the several per-volume, effectively-global-scan reads
+    get_replication_info makes on its own (get_job_tasks refetched per call,
+    get_replication_policy_by_id's unscoped table scan, and
+    _replication_role's unscoped get_lvol_replication_objects, which this
+    function never calls at all -- none of these metrics need role).
+
+    *lvols* and *cluster_id* are the caller's own already-fetched values
+    (metrics.py's collector loop already holds both), so this never re-reads
+    the lvol list itself.
+    """
+    replicating = [lv for lv in lvols if lv.do_replicate]
+    if not replicating:
+        # No cluster-wide reads for a cluster with nothing to report --
+        # matches take_due_internal_snapshots' own "only load when at least
+        # one volume actually replicates" reasoning (snapshot_monitor.py).
+        return {}
+
+    db_controller = DBController()
+
+    items_by_lvol: dict[str, list[tuple[JobSchedule, SnapShot]]] = {}
+    snapshot_cache: dict[str, SnapShot] = {}
+    for task in db_controller.get_job_tasks(cluster_id):
+        if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+            continue
+        snapshot_id = task.function_params.get("snapshot_id")
+        if not snapshot_id:
+            continue
+        snap = snapshot_cache.get(snapshot_id)
+        if snap is None:
+            try:
+                snap = db_controller.get_snapshot_by_id(snapshot_id)
+            except KeyError:
+                continue
+            snapshot_cache[snapshot_id] = snap
+        items_by_lvol.setdefault(snap.lvol.get_id(), []).append((task, snap))
+
+    policies = {p.get_id(): p for p in db_controller.get_replication_policies(cluster_id)}
+    targets = {t.get_id(): t for t in db_controller.get_replication_targets(cluster_id)}
+
+    result: dict[str, dict] = {}
+    for lvol in replicating:
+        policy = policies.get(lvol.replication_policy_id) if lvol.replication_policy_id else None
+        items = items_by_lvol.get(lvol.get_id(), [])
+        info = dict(_REPLICATION_METRICS_DEFAULTS)
+        if items:
+            info.update(_replication_cycle_stats(db_controller, lvol, items, policy))
+
+        info["policy_id"] = policy.get_id() if policy else ""
+        info["policy_name"] = policy.policy_name if policy else ""
+        info["rpo_target_seconds"] = policy.rpo_target_seconds if policy else 0
+        target = targets.get(policy.target_id) if policy else None
+        info["peer_cluster"] = target.target_cluster_id if target else ""
+
+        result[lvol.get_id()] = info
+
+    return result
 
 
 def get_lvol(lvol_id_or_name):
@@ -3771,6 +3970,69 @@ def replication_trigger(lvol_id):
         out["last_replication_duration"] = duration
 
     return out
+
+
+def demote_lvol(lvol_id):
+    """Fence the source and confirm the last write replicated (P0-3).
+
+    The lossless half of a planned swap (design-csi-addons-replication.md
+    §5.2): after this returns {"demoted": True}, the peer's planned promote
+    is guaranteed to lose nothing. Demote never touches a target volume --
+    that is a separate, later call, possibly on a different cluster, once
+    Ramen has rescheduled the workload there.
+
+    Unlike replication_commit's live cutover, there is no in-flight write to
+    race: DemoteVolume is only called once Kubernetes has already unmounted
+    the workload, so there is no freeze window to bound, just fence-then-ship
+    to make durable. Synchronous and idempotent, re-driven by the caller
+    (the driver's DemoteVolume RPC calls this repeatedly) until it reports
+    done; each call does only the work its current state calls for.
+
+    Returns {"demoted": bool} or (False, error).
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    if lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE:
+        return {"demoted": True}
+
+    if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_PENDING:
+        # First call: fence BEFORE triggering the final snapshot, never after --
+        # a write accepted on a still-optimized path after the snapshot is the
+        # delta of record is silently lost (fence_source_paths' own invariant).
+        source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+        replication_final_step.fence_source_paths(
+            source_node, source_node.lvstore, lvol.nqn, lvol.ns_id)
+
+        snap_id, err = snapshot_controller.add(
+            lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
+        if err:
+            return False, err
+
+        lvol.replication_demote_snapshot_id = snap_id
+        lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+        lvol.write_to_db(db_controller.kv_store)
+        return {"demoted": False}
+
+    # Already pending: only check whether the snapshot being waited on has
+    # landed. Never re-fence (harmless but pointless) or re-trigger (would
+    # orphan the first snapshot's wait and never converge).
+    try:
+        snap = db_controller.get_snapshot_by_id(lvol.replication_demote_snapshot_id)
+    except KeyError as e:
+        return False, str(e)
+
+    if not getattr(snap, "target_replicated_snap_uuid", ""):
+        return {"demoted": False}
+
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lvol.write_to_db(db_controller.kv_store)
+    return {"demoted": True}
+
 
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
                       from_policy=False):
@@ -4543,7 +4805,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
-def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
+def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
                                      pin_snapshot_id=None):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
@@ -4610,6 +4872,25 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generat
             continue
         return target_snap
     return None
+
+
+def latest_replicated_snapshot(lvol_id: str) -> SnapShot | None:
+    """The newest fully replicated snapshot of *lvol_id*, on the secondary,
+    as a cloneable object.
+
+    Exposes the same selection ``replicate_lvol_on_target_cluster`` applies
+    internally, without cloning: a test-failover drill (design §14) has to
+    know the safe point BEFORE deciding whether to touch anything, and must
+    never trigger a real fail-over just to find out what it is.
+
+    Returns the target-cluster ``SnapShot``, or ``None`` when nothing has
+    replicated yet. Raises ``KeyError`` when the volume itself does not
+    exist.
+    """
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id)
 
 
 def _evict_stale_namespace(new_lvol, target_node, superseded=None):
@@ -4759,7 +5040,7 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
     Returns (new_lvol, snapshot_used, error).
     """
     for _ in range(attempts):
-        snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
+        snapshot = last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
                                                     generation=generation,
                                                     pin_snapshot_id=pin_snapshot_id)
         if not snapshot:

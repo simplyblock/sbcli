@@ -705,7 +705,8 @@ class CLIWrapperBase:
             interval_min=args.interval_min, mode=args.mode,
             keep_replicated=args.keep_replicated,
             retention_schedule=args.retention_schedule,
-            consistency_group=args.consistency_group)
+            consistency_group=args.consistency_group,
+            rpo_target_seconds=args.rpo_target_seconds)
 
     def cluster__replication_policy_snapshot(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller
@@ -724,6 +725,7 @@ class CLIWrapperBase:
             "Mode": p.mode,
             "Keep": p.keep_replicated,
             "Retention": p.retention_schedule or "-",
+            "RPO (sec)": getattr(p, "rpo_target_seconds", 0) or "-",
             "CG": "yes" if getattr(p, "consistency_group", False) else "-",
             "Status": p.status,
         } for p in replication_policy_controller.list_policies(args.cluster_id)]

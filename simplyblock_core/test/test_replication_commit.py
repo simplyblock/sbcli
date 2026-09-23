@@ -104,7 +104,7 @@ def patched(monkeypatch):
 
     monkeypatch.setattr(lvol_controller.snapshot_controller, "add", _fake_snap_add)
 
-    monkeypatch.setattr(lvol_controller, "_last_replicated_target_snapshot",
+    monkeypatch.setattr(lvol_controller, "last_replicated_target_snapshot",
                         lambda db, lid, cid, generation=0, pin_snapshot_id=None: _snap())
 
     create_calls = []

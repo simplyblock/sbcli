@@ -105,7 +105,17 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
         }
     )
     if not task_id_or_false:
-        raise ValueError('Failed to create add-node task')
+        # add_node_add_task's anti-race guard declines to create a second task
+        # for a node_addr that already has one in flight, on purpose -- a
+        # retried request racing SPDK's config-slot classify-then-create logic
+        # produced 6 nodes for a 4-slot host (2026-07-23). That is not a
+        # failure here: a task already exists and tracking it is what this
+        # caller wants, so it is looked up and returned as the result instead
+        # of reporting the duplicate as an error.
+        task_id_or_false = tasks_controller.get_active_node_add_task(
+            cluster.get_id(), parameters.node_address)
+        if not task_id_or_false:
+            raise ValueError('Failed to create add-node task')
 
     return util.creation_response(
         request, response_format,

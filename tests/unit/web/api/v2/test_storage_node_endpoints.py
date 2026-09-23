@@ -78,6 +78,41 @@ class TestCreateStorageNode:
         assert response.json() == TASK_ID
         assert response.headers['Location'].endswith(f'/tasks/{TASK_ID}/')
 
+    def test_returns_the_existing_task_when_an_add_is_already_in_flight(
+            self, client, db, cluster, tasks_controller):
+        # add_node_add_task's anti-race guard (tasks_controller._validate_new_
+        # task_node_add) returns False when a task for this node_addr is
+        # already running, on purpose -- a retried request creating a SECOND
+        # concurrent add-node task raced SPDK's config-slot classify-then-
+        # create logic and produced 6 nodes for a 4-slot host (2026-07-23).
+        # That is not a failure from this endpoint's point of view: a task
+        # already exists and tracking it is exactly what the caller wants, so
+        # the response must still be 201 with that task's id, not a 500 for
+        # what the operator's own retry produced.
+        tasks_controller.add_node_add_task.return_value = False
+        tasks_controller.get_active_node_add_task.return_value = TASK_ID
+
+        response = client.post(f'{BASE}/', json={
+            'node_address': '10.0.0.10:5000',
+            'interface_name': 'eth0',
+        })
+
+        assert response.status_code == 201
+        tasks_controller.get_active_node_add_task.assert_called_once_with(
+            CLUSTER_ID, '10.0.0.10:5000')
+        assert response.json() == TASK_ID
+
+    def test_raises_when_no_task_was_created_and_none_is_already_in_flight(
+            self, client, db, cluster, tasks_controller):
+        tasks_controller.add_node_add_task.return_value = False
+        tasks_controller.get_active_node_add_task.return_value = False
+
+        with pytest.raises(ValueError):
+            client.post(f'{BASE}/', json={
+                'node_address': '10.0.0.10:5000',
+                'interface_name': 'eth0',
+            })
+
     def test_expand_flag_forwarded(self, client, db, cluster, tasks_controller):
         tasks_controller.add_node_add_task.return_value = TASK_ID
 

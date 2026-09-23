@@ -3,6 +3,7 @@
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
 from simplyblock_core.utils.nvme import NvmeConnectEntry
 
+from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
     STORAGE_NODE_ID,
     CLUSTER_ID,
@@ -16,6 +17,7 @@ from tests.unit.web.api.v2._factories import (
 
 TARGETS_URL = f'/api/v2/clusters/{CLUSTER_ID}/replication/targets/'
 POLICIES_URL = f'/api/v2/clusters/{CLUSTER_ID}/replication/policies/'
+RELATIONSHIPS_URL = f'/api/v2/clusters/{CLUSTER_ID}/replication/relationships/'
 
 
 class TestListTargets:
@@ -239,7 +241,7 @@ class TestCreatePolicy:
         args, kwargs = replication_policy_controller.add_policy.call_args
         assert args == (CLUSTER_ID, 'nightly', REPLICATION_TARGET_ID)
         assert kwargs == {'interval_min': 5, 'mode': 'failover', 'keep_replicated': 3,
-                          'consistency_group': False}
+                          'consistency_group': False, 'rpo_target_seconds': None}
 
     def test_consistency_group_flag_reaches_the_controller(
             self, client, db, cluster, replication_policy,
@@ -259,6 +261,35 @@ class TestCreatePolicy:
         assert response.status_code == 201
         _args, kwargs = replication_policy_controller.add_policy.call_args
         assert kwargs['consistency_group'] is True
+
+    def test_rpo_target_reaches_the_controller(self, client, db, cluster, replication_policy,
+                                               replication_policy_controller):
+        """The declared RPO objective: RPO compliance is computed against
+        this target, not the derived lag budget, so it must land on the
+        policy record."""
+        replication_policy_controller.add_policy.return_value = \
+            f'{CLUSTER_ID}/{REPLICATION_POLICY_ID}'
+
+        response = client.post(POLICIES_URL, json={
+            'policy_name': 'nightly',
+            'target_id': REPLICATION_TARGET_ID,
+            'rpo_target_seconds': 600,
+        })
+
+        assert response.status_code == 201
+        _args, kwargs = replication_policy_controller.add_policy.call_args
+        assert kwargs['rpo_target_seconds'] == 600
+
+    def test_negative_rpo_target_rejected(self, client, db, cluster,
+                                          replication_policy_controller):
+        response = client.post(POLICIES_URL, json={
+            'policy_name': 'nightly',
+            'target_id': REPLICATION_TARGET_ID,
+            'rpo_target_seconds': -1,
+        })
+
+        assert response.status_code == 422
+        replication_policy_controller.add_policy.assert_not_called()
 
     def test_unknown_mode_rejected(self, client, db, cluster, replication_policy_controller):
         response = client.post(POLICIES_URL, json={
@@ -290,6 +321,20 @@ class TestPolicyInstance:
         assert response.status_code == 200
         assert response.json()['id'] == REPLICATION_POLICY_ID
 
+    def test_detail_reports_the_rpo_target(self, client, db, cluster, replication_policy):
+        replication_policy.rpo_target_seconds = 600
+
+        body = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/').json()
+
+        assert body['rpo_target_seconds'] == 600
+
+    def test_unset_rpo_target_serializes_as_null(self, client, db, cluster, replication_policy):
+        """0 on the record means "no declared objective" — the API reports
+        that as null rather than a target of zero seconds."""
+        body = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/').json()
+
+        assert body['rpo_target_seconds'] is None
+
     def test_policy_of_another_cluster_is_not_found(self, client, db, cluster, replication_policy):
         replication_policy.cluster_id = TARGET_CLUSTER_ID
 
@@ -319,3 +364,75 @@ class TestPolicyInstance:
         assert body['detail'] == 'boom'
         replication_policy_controller.failover_policy.assert_called_once_with(
             f'{CLUSTER_ID}/{REPLICATION_POLICY_ID}')
+
+
+class TestLatestReplicatedSnapshot:
+    """The per-volume read: the newest fully replicated snapshot, on the
+    secondary, as a cloneable object. A test-failover drill resolves its
+    test point through this without touching real replication state."""
+
+    def test_returns_the_target_side_snapshot(self, client, db, cluster, lvol_controller):
+        snap = factories.make_snapshot(
+            uuid='cccccccc-cccc-cccc-cccc-cccccccccccc',
+            cluster_id=TARGET_CLUSTER_ID, pool_uuid=TARGET_POOL_ID,
+            lvol=factories.make_volume(), group_id='', group_seq=0)
+        lvol_controller.latest_replicated_snapshot.return_value = snap
+
+        response = client.get(RELATIONSHIPS_URL + f'{VOLUME_ID}/latest-snapshot')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['snapshot_id'] == 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+        assert body['cluster_id'] == TARGET_CLUSTER_ID
+        assert body['pool_id'] == TARGET_POOL_ID
+        assert body['lvol_id'] == VOLUME_ID
+        lvol_controller.latest_replicated_snapshot.assert_called_once_with(VOLUME_ID)
+
+    def test_nothing_replicated_yet_is_a_404(self, client, db, cluster, lvol_controller):
+        lvol_controller.latest_replicated_snapshot.return_value = None
+
+        response = client.get(RELATIONSHIPS_URL + f'{VOLUME_ID}/latest-snapshot')
+
+        assert response.status_code == 404
+
+    def test_unknown_volume_is_a_404(self, client, db, cluster, lvol_controller):
+        lvol_controller.latest_replicated_snapshot.side_effect = KeyError('LVol not found')
+
+        response = client.get(RELATIONSHIPS_URL + f'{VOLUME_ID}/latest-snapshot')
+
+        assert response.status_code == 404
+
+
+class TestLatestReplicatedGeneration:
+    """The consistency-group form of the latest-replicated-snapshot read:
+    one complete generation, every member as a cloneable object on the
+    secondary."""
+
+    def test_returns_the_generation_and_its_members(self, client, db, cluster,
+                                                     replication_policy,
+                                                     replication_policy_controller):
+        member = factories.make_snapshot(
+            uuid='dddddddd-dddd-dddd-dddd-dddddddddddd',
+            cluster_id=TARGET_CLUSTER_ID, pool_uuid=TARGET_POOL_ID,
+            lvol=factories.make_volume(), group_id='some-group', group_seq=3)
+        replication_policy_controller.latest_replicated_generation.return_value = (
+            3, {VOLUME_ID: member})
+
+        response = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/latest-generation')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['group_seq'] == 3
+        assert len(body['members']) == 1
+        assert body['members'][0]['snapshot_id'] == 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+        replication_policy_controller.latest_replicated_generation.assert_called_once_with(
+            f'{CLUSTER_ID}/{REPLICATION_POLICY_ID}')
+
+    def test_refusal_maps_to_400(self, client, db, cluster, replication_policy,
+                                 replication_policy_controller):
+        replication_policy_controller.latest_replicated_generation.side_effect = \
+            ReplicationConfigError('no generation is fully replicated for every member yet')
+
+        response = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/latest-generation')
+
+        assert response.status_code == 400

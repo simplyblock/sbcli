@@ -22,7 +22,9 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_l
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metric
 from prometheus_client.registry import Collector
 
+from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import CpuStats, ReactorStats, ThreadStats
 
 
@@ -39,6 +41,12 @@ _POOL_LABELS = _CLUSTER_LABELS + ['pool', 'pool_name']
 # rides along for human-facing filters and legends. It adds no series, being
 # functionally dependent on the uuid.
 _LVOL_LABELS = _CLUSTER_LABELS + ['pool', 'pool_name', 'lvol', 'lvol_name', 'pvc_name']
+# Extends _LVOL_LABELS with the replication relationship, rather than the
+# design's own minimal "volume, policy, peer_cluster" (design §11): `lvol`
+# over `volume` so these series join with every other lvol-level metric in
+# this file on a shared label name, and `policy_name`/`pvc_name` ride along
+# the same way `pool_name` does above.
+_REPLICATION_LABELS = _LVOL_LABELS + ['policy', 'policy_name', 'peer_cluster']
 
 # Cumulative SPDK counters. Exported as counters so that PromQL `rate()` handles
 # an SPDK restart natively; the collectors' `_ps` fields, which hand-derived
@@ -195,6 +203,65 @@ def _health_family(level: str, labelnames: Sequence[str], entries: Iterable[tupl
     return family
 
 
+def _replication_families(entries: Iterable[tuple[list[str], dict]]) -> Iterator[Metric]:
+    """Replication health per volume (design §11): lag, backlog, last-cycle
+    size/duration, RPO compliance, and degraded state.
+
+    `entries` pairs a label-value list with one of
+    ``lvol_controller.get_replication_info_bulk``'s per-volume info dicts.
+    Matching `_health_family`'s "omit rather than fabricate" philosophy: a
+    field the info dict reports as `None` (no completed cycle yet) is left
+    off its series rather than published as a misleading zero, and
+    `rpo_violation` is omitted entirely for a volume whose policy declares no
+    `rpo_target_seconds` -- a 0 there would read as "in compliance", which is
+    not a claim this design can make without a declared target.
+    """
+    lag = GaugeMetricFamily(
+        f'{NAMESPACE}_replication_lag_seconds',
+        'Age of the newest fully replicated snapshot',
+        labels=_REPLICATION_LABELS)
+    backlog = GaugeMetricFamily(
+        f'{NAMESPACE}_replication_backlog_bytes',
+        'Queued-but-unshipped snapshot bytes',
+        labels=_REPLICATION_LABELS)
+    last_sync_seconds = GaugeMetricFamily(
+        f'{NAMESPACE}_replication_last_sync_seconds',
+        'Duration of the last completed shipping cycle',
+        labels=_REPLICATION_LABELS)
+    last_sync_bytes = GaugeMetricFamily(
+        f'{NAMESPACE}_replication_last_sync_bytes',
+        'Size of the last shipped snapshot',
+        labels=_REPLICATION_LABELS)
+    rpo_violation = GaugeMetricFamily(
+        f'{NAMESPACE}_replication_rpo_violation',
+        "1 while lag exceeds the policy's declared rpo_target_seconds, else 0",
+        labels=_REPLICATION_LABELS)
+    degraded = GaugeMetricFamily(
+        f'{NAMESPACE}_replication_degraded',
+        "1 while the status read's state is degraded or error",
+        labels=_REPLICATION_LABELS)
+
+    for labelvalues, info in entries:
+        backlog.add_metric(labelvalues, info['outstanding_bytes'])
+        degraded.add_metric(labelvalues, 1 if info['state'] in ('degraded', 'error') else 0)
+        if info['lag_seconds'] is not None:
+            lag.add_metric(labelvalues, info['lag_seconds'])
+        if info['last_cycle_seconds'] is not None:
+            last_sync_seconds.add_metric(labelvalues, info['last_cycle_seconds'])
+        if info['last_cycle_bytes'] is not None:
+            last_sync_bytes.add_metric(labelvalues, info['last_cycle_bytes'])
+        if info['rpo_target_seconds'] > 0:
+            violated = info['lag_seconds'] is not None and info['lag_seconds'] > info['rpo_target_seconds']
+            rpo_violation.add_metric(labelvalues, 1 if violated else 0)
+
+    yield lag
+    yield backlog
+    yield last_sync_seconds
+    yield last_sync_bytes
+    yield rpo_violation
+    yield degraded
+
+
 def _threshold_families(entries: Iterable[tuple[list[str], object]]) -> Iterator[Metric]:
     """Configured capacity thresholds, as ratios to match the byte gauges.
 
@@ -287,6 +354,7 @@ class SimplyblockCollector(Collector):
         pool_objects: list[tuple[list[str], object]] = []
         lvol_stats: list[tuple[list[str], dict]] = []
         lvol_objects: list[tuple[list[str], object]] = []
+        replication_entries: list[tuple[list[str], dict]] = []
 
         for cluster in db.get_clusters():
             cluster_labels = [cluster.get_id(), cluster.cluster_name]
@@ -328,6 +396,7 @@ class SimplyblockCollector(Collector):
                 if pool_records:
                     pool_stats.append((pool_labels, pool_records[0].get_clean_dict()))
 
+            cluster_lvols: list[tuple[list[str], LVol]] = []
             for lvol in db.get_lvols(cluster.get_id()):
                 # `pool` carries the pool uuid, matching the pool-level label.
                 # v1 set it to the pool *name* here but to the pool id on pool
@@ -337,9 +406,25 @@ class SimplyblockCollector(Collector):
                     lvol.get_id(), lvol.lvol_name, lvol.pvc_name,
                 ]
                 lvol_objects.append((lvol_labels, lvol))
+                cluster_lvols.append((lvol_labels, lvol))
                 lvol_records = db.get_lvol_stats(lvol, limit=1)
                 if lvol_records:
                     lvol_stats.append((lvol_labels, lvol_records[0].get_clean_dict()))
+
+            # One bulk read for the whole cluster rather than one
+            # get_replication_info call per replicating volume -- see
+            # get_replication_info_bulk's own docstring for why that
+            # matters at scrape time.
+            repl_info = lvol_controller.get_replication_info_bulk(
+                cluster.get_id(), [lv for _, lv in cluster_lvols])
+            for lvol_labels, lvol in cluster_lvols:
+                info = repl_info.get(lvol.get_id())
+                if info is None:
+                    continue
+                replication_entries.append((
+                    lvol_labels + [info['policy_id'], info['policy_name'], info['peer_cluster']],
+                    info,
+                ))
 
         yield from _stat_families('cluster', _CLUSTER_LABELS, cluster_stats)
         yield _status_family('cluster', _CLUSTER_LABELS, cluster_objects)
@@ -360,6 +445,8 @@ class SimplyblockCollector(Collector):
         yield from _stat_families('lvol', _LVOL_LABELS, lvol_stats)
         yield _status_family('lvol', _LVOL_LABELS, lvol_objects)
         yield _health_family('lvol', _LVOL_LABELS, lvol_objects)
+
+        yield from _replication_families(replication_entries)
 
 
 @api.get('', response_class=Response, include_in_schema=False)

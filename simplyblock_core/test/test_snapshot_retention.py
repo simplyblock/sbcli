@@ -136,7 +136,7 @@ def test_failover_generation_walks_back_through_history():
     asking for more generations than exist is an error, not a silent newest."""
     import inspect
     from simplyblock_core.controllers import lvol_controller as lc
-    src = inspect.getsource(lc._last_replicated_target_snapshot)
+    src = inspect.getsource(lc.last_replicated_target_snapshot)
     assert "generation" in src
     assert "snaps[generation:]" in src
     assert "only" in src and "exist" in src        # explicit out-of-range error
