@@ -340,28 +340,67 @@ class K8sUtils:
         self.run_on_node(node_ip, script, timeout=120, check=False)
         return True
 
+    #: Substrings that mean a pod could not get its volume. Matched
+    #: case-insensitively against event messages.
+    VOLUME_ATTACH_MARKERS = (
+        "multi-attach",
+        "failedattachvolume",
+        "volume is already exclusively attached",
+        "failedmount",
+    )
+
     def multi_attach_errors(self, namespace: str | None = None,
-                            since: str = "10m") -> list[str]:
-        """Volume attach errors in recent events -- Multi-Attach above all.
+                            within_sec: int = 900) -> list[str]:
+        """Volume attach errors from the last *within_sec* seconds.
 
         A pod rescheduled after an eviction has to take its PV with it, and
         RWO volumes are where that goes wrong: if the old attachment is not
         released the new pod sits in ContainerCreating with
         ``Multi-Attach error for volume``. Silent until someone looks, which
         is why this is checked rather than assumed.
+
+        The time bound is the point. Events live about an hour and these
+        suites loop every few minutes, so an unbounded query makes iteration 5
+        fail on iteration 2's events -- and once a real failure lands, every
+        later iteration echoes it and a new failure is indistinguishable from
+        the old one. Bounded, each iteration is judged on its own outage.
+
+        An event with no usable timestamp is INCLUDED: a check that hunts a
+        rare failure should not drop evidence because a field was missing.
         """
         ns = namespace or self.namespace
         out, _ = self._exec_kubectl(
             f"kubectl get events -n {ns} --field-selector type=Warning "
-            f"-o custom-columns=':message' --no-headers 2>/dev/null || true",
+            f"-o json 2>/dev/null || true",
             supress_logs=True, timeout=120)
+        try:
+            items = (json.loads(out or "{}") or {}).get("items", []) or []
+        except ValueError:
+            self.logger.warning(
+                "[K8sUtils] could not parse events as JSON; "
+                "reporting no attach errors rather than guessing")
+            return []
+
+        now = datetime.now(UTC)
         bad = []
-        for line in (out or "").splitlines():
-            low = line.lower()
-            if ("multi-attach" in low or "failedattachvolume" in low
-                    or "volume is already exclusively attached" in low
-                    or "failedmount" in low):
-                bad.append(line.strip()[:200])
+        for ev in items:
+            msg = (ev.get("message") or "").strip()
+            if not any(m in msg.lower() for m in self.VOLUME_ATTACH_MARKERS):
+                continue
+            stamp = (ev.get("lastTimestamp") or ev.get("eventTime")
+                     or (ev.get("series") or {}).get("lastObservedTime"))
+            age = None
+            if stamp:
+                try:
+                    age = (now - datetime.fromisoformat(
+                        stamp.replace("Z", "+00:00"))).total_seconds()
+                except ValueError:
+                    age = None
+            if age is not None and age > within_sec:
+                continue
+            where = (ev.get("involvedObject") or {}).get("name", "?")
+            when = f"{age:.0f}s ago" if age is not None else "age unknown"
+            bad.append(f"[{when}] {where}: {msg[:180]}")
         return bad
 
     def get_all_k8s_node_names(self) -> list[str]:
