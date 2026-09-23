@@ -109,8 +109,27 @@ class K8sNativeFailoverTest(TestClusterBase):
         # self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt"]
         # self.outage_types2 = ["container_stop", "graceful_shutdown", "interface_full_network_interrupt"]
 
-        self.outage_types = ["graceful_shutdown"]
-        self.outage_types2 = ["container_stop", "graceful_shutdown", "operator_shutdown"]
+        # graceful_shutdown alone left most of the outage surface untested.
+        # interface_full_network_interrupt was commented out rather than
+        # deleted; it is a blanket DROP restored by a host-level process, and
+        # it already picks its duration from 30/300/600 -- which is both the
+        # brief blip and the two durations long enough for the kubelet to miss
+        # its heartbeats and the scheduler to evict. storage_node_reboot is
+        # new: there was no node reboot on k8s at all.
+        self.outage_types = [
+            "graceful_shutdown",
+            "storage_node_reboot",
+            "interface_full_network_interrupt",
+        ]
+        self.outage_types2 = ["container_stop", "graceful_shutdown",
+                              "operator_shutdown", "storage_node_reboot",
+                              "interface_full_network_interrupt"]
+
+        #: A network outage at or beyond this many seconds should push the
+        #: node past the 300s unreachable toleration and get its pods moved,
+        #: so the eviction and Multi-Attach checks are worth running. Below
+        #: it, nothing is expected to move and the checks would be vacuous.
+        self.EVICTION_THRESHOLD_SEC = 300
 
 
         # ── Tracking dicts ──
@@ -2356,6 +2375,64 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
         return duration
 
+    def _k8s_reboot_node(self, node_ip: str, node: str):
+        """Really reboot the worker, or say plainly that we could not.
+
+        `oc debug node/<n> -- chroot /host` on OpenShift, `kubectl debug` on
+        vanilla, `talosctl` on Talos. Where none of those work the caller gets
+        a pod restart instead AND a warning, because a reboot that silently
+        became a pod restart is worse than no reboot at all: the result looks
+        like coverage.
+        """
+        self._ensure_k8s_utils()
+        if self.k8s_utils.reboot_node(node_ip):
+            self.k8s_utils.wait_node_condition(node_ip, ready=False, timeout=300)
+            return
+        self.logger.warning(
+            "[K8s] no real reboot available for %s; stopping the SPDK pod "
+            "instead. This iteration does NOT cover kubelet restart, volume "
+            "re-attach or CSI re-registration.", node_ip)
+        self._k8s_stop_spdk_pod(node_ip, node)
+
+    def _note_eviction_expected(self, node_ip: str, duration: int):
+        """Record that this cut should move pods, so recovery can check it.
+
+        Only for cuts past the unreachable toleration. A 30s blip moves
+        nothing, and asserting that pods were rescheduled after one would fail
+        for the right reason and the wrong cause.
+        """
+        if duration >= self.EVICTION_THRESHOLD_SEC:
+            self._eviction_expected = getattr(self, "_eviction_expected", set())
+            self._eviction_expected.add(node_ip)
+            self.logger.info(
+                "[K8s] %ds cut on %s is past the %ds toleration -- expecting "
+                "its pods to be evicted and rescheduled",
+                duration, node_ip, self.EVICTION_THRESHOLD_SEC)
+
+    def assert_no_volume_attach_errors(self, label: str = ""):
+        """Fail if a rescheduled pod could not take its volume with it.
+
+        The failure this is hunting: an RWO volume whose old attachment is not
+        released leaves the new pod in ContainerCreating behind "Multi-Attach
+        error for volume", indefinitely and silently. Called after recovery,
+        and only worth calling when something was actually expected to move.
+        """
+        expected = getattr(self, "_eviction_expected", set())
+        if not expected:
+            return
+        self._ensure_k8s_utils()
+        bad = self.k8s_utils.multi_attach_errors()
+        self._eviction_expected = set()
+        if bad:
+            raise RuntimeError(
+                f"[K8s] volume attach errors after pods were evicted from "
+                f"{sorted(expected)}{(' (' + label + ')') if label else ''} -- "
+                f"an RWO volume did not detach from the old node in time:\n    "
+                + "\n    ".join(bad[:6]))
+        self.logger.info(
+            "[K8s] pods evicted from %s were rescheduled with no Multi-Attach "
+            "errors", sorted(expected))
+
     def _operator_shutdown_node(self, node: str):
         """Shut down a storage node via a StorageNodeOps CR.
 
@@ -2512,6 +2589,9 @@ class K8sNativeFailoverTest(TestClusterBase):
                 elif outage_type == "interface_full_network_interrupt":
                     duration = random.choice([30, 300, 600])
                     node_outage_dur = self._k8s_network_outage(node_ip, duration)
+                    self._note_eviction_expected(node_ip, duration)
+                elif outage_type == "storage_node_reboot":
+                    self._k8s_reboot_node(node_ip, node)
                 elif outage_type == "operator_shutdown":
                     self._operator_shutdown_node(node)
                 self.log_outage_event(node, outage_type, "Outage started")
@@ -2686,6 +2766,28 @@ class K8sNativeFailoverTest(TestClusterBase):
             self._operator_restart_node(node)
             self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
             self.log_outage_event(node, outage_type, "Node restarted (operator)")
+
+        elif outage_type == "storage_node_reboot":
+            # Nothing to issue: the machine is coming back on its own. What
+            # has to be waited out is the whole stack behind it -- kubelet,
+            # then the CSI plugin re-registering, then SPDK -- which is the
+            # part a pod restart never exercised.
+            self._ensure_k8s_utils()
+            # Only the node UUID is in scope here; resolve its IP the same way
+            # the outage path did.
+            _nd = self.sbcli_utils.get_storage_node_details(node)
+            _ip = (_nd[0].get("mgmt_ip") if _nd else None)
+            if _ip:
+                self.k8s_utils.wait_node_condition(_ip, ready=True, timeout=900)
+            self.sbcli_utils.wait_for_storage_node_status(
+                node, "online", timeout=600)
+            self.log_outage_event(node, outage_type, "Node back after reboot")
+
+        # If this outage was long enough to evict, the pods have had the whole
+        # recovery to be rescheduled by now -- so this is the point to ask
+        # whether they took their volumes with them. No-ops unless something
+        # was actually expected to move.
+        self.assert_no_volume_attach_errors(label=outage_type)
 
         # Health check deferred to after all outage nodes are online
         self.outage_end_time = int(datetime.now().timestamp())

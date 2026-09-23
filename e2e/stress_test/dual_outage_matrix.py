@@ -571,12 +571,17 @@ class _DualOutageK8s(_DualOutageMixin, K8sNativeFailoverTest):
             self._operator_shutdown_node(node)
             return 0
         if outage_type == "storage_node_reboot":
-            threading.Thread(target=self.ssh_obj.reboot_node,
-                             args=(node_ip,), daemon=True).start()
+            # NOT ssh_obj.reboot_node in a daemon thread. k8s storage nodes
+            # are generally not ssh-reachable, so that call raised inside a
+            # thread nothing joined -- every storage_node_reboot case in this
+            # matrix was a no-op that reported success. The kubectl route to
+            # the host is real: oc debug / kubectl debug / talosctl.
+            self._k8s_reboot_node(node_ip, node)
             return 0
         if outage_type == "interface_full_network_interrupt":
             duration = random.choice([30, 300, 600])
             self._k8s_network_outage(node_ip, duration)
+            self._note_eviction_expected(node_ip, duration)
             return duration
         raise ValueError("unhandled outage type %r" % outage_type)
 
