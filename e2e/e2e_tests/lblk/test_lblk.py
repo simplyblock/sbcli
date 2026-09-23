@@ -1038,6 +1038,19 @@ class _LblkBase(TestClusterBase):
                         self.logger.info(
                             "[lblk] every pod running again after the reboot "
                             "of %s", ip)
+                    # Recovery is already done here -- this branch waited the
+                    # node down and back up itself. Falling through to the
+                    # shared "wait for offline" below cannot succeed: by now
+                    # the node is Ready and the storage node is online again,
+                    # so the wait runs its full count and then fails the run.
+                    # That is what ended the k8s run of 2026-09-23 at cycle 9,
+                    # 52 minutes after a reboot that had already recovered.
+                    self.sbcli_utils.wait_for_storage_node_status(
+                        uuid, "online", timeout=300)
+                    self.sbcli_utils.wait_for_health_status(uuid, True,
+                                                            timeout=300)
+                    self.logger.info("[lblk] %s recovered", uuid)
+                    return
                 else:
                     self.logger.warning(
                         "[lblk] could not issue a real reboot on %s; "

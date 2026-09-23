@@ -267,10 +267,23 @@ class K8sUtils:
 
         self.logger.info("[K8sUtils] rebooting node %s (%s)",
                          node_name, node_ip)
+        # systemd owns the timer, not us. `oc debug` DELETES its debug pod as
+        # soon as the command returns, and a backgrounded `sleep 3; reboot` is
+        # a child of that pod -- so it dies with the pod before the sleep ends
+        # and the node never reboots. That is exactly what happened on
+        # 2026-09-23: the command was issued cleanly, took 48s, and worker-1
+        # never went NotReady.
+        #
+        # A transient systemd unit is owned by the host's init, so the debug
+        # pod going away cannot touch it. The fallback is a synchronous reboot
+        # for hosts without systemd-run: it kills the connection carrying it,
+        # which is why check=False and why the result is not trusted either
+        # way -- the caller decides by watching for NotReady.
         self.run_on_node(
             node_ip,
-            "nohup sh -c 'sleep 3; systemctl reboot -f || reboot -f' "
-            ">/dev/null 2>&1 &",
+            "systemd-run --collect --on-active=5s "
+            "--unit=sb-e2e-reboot-$$ systemctl reboot -f "
+            "|| systemctl reboot -f || reboot -f",
             timeout=120, check=False)
         return True
 
