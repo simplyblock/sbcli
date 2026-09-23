@@ -3852,14 +3852,31 @@ def demote_lvol(lvol_id):
         return {"demoted": False}
 
     # Already pending: only check whether the snapshot being waited on has
-    # landed. Never re-fence (harmless but pointless) or re-trigger (would
-    # orphan the first snapshot's wait and never converge).
+    # landed. Never re-fence (harmless but pointless) or re-trigger against a
+    # snapshot still genuinely in flight (would orphan its wait and never
+    # converge).
     try:
         snap = db_controller.get_snapshot_by_id(lvol.replication_demote_snapshot_id)
     except KeyError as e:
         return False, str(e)
 
-    if not getattr(snap, "target_replicated_snap_uuid", ""):
+    if not snap.target_replicated_snap_uuid:
+        # A snapshot already superseded by a later one in the chain
+        # (next_snap_uuid set) will never itself be individually replicated --
+        # this happens when demote was first requested before replication was
+        # enabled on this lvol, so the tracked snapshot predates any policy
+        # attach. Once replication is enabled (do_replicate), that is proof
+        # the original snapshot is stale rather than still converging, so
+        # retrigger against a fresh one instead of waiting on it forever.
+        if lvol.do_replicate and snap.next_snap_uuid:
+            snap_id, err = snapshot_controller.add(
+                lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
+            if err:
+                return False, err
+
+            lvol.replication_demote_snapshot_id = snap_id
+            lvol.write_to_db(db_controller.kv_store)
+
         return {"demoted": False}
 
     lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE

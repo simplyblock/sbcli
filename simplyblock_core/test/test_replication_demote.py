@@ -147,6 +147,63 @@ def test_demote_is_idempotent_once_done(patched, monkeypatch):
     assert patched["snap_add_calls"] == []
 
 
+def test_demote_retriggers_when_tracked_snapshot_was_superseded_before_replicating(patched, monkeypatch):
+    """Recovers from a demote requested before replication was ever enabled.
+
+    The tracked snapshot was taken while do_replicate was False (e.g. Ramen
+    creating a Secondary VolumeReplication from scratch, with no prior S3-seeded
+    state -- confirmed live 2026-09-23), so it was never queued for cross-cluster
+    replication and superseded by later cadence snapshots (next_snap_uuid set)
+    once a policy was finally attached. Waiting on it forever (the existing
+    "never re-trigger" behavior, correct for a snapshot still genuinely in
+    flight) would never converge. do_replicate now True + the tracked snapshot
+    already superseded is proof it never will land, so retrigger against a
+    fresh one instead.
+    """
+    lvol = _lvol()
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+    lvol.replication_demote_snapshot_id = "SNAP1"
+    lvol.do_replicate = True
+    node = _node("N_src")
+    stale_snap = _snap("SNAP1", replicated="")
+    stale_snap.next_snap_uuid = "SNAP2"
+    db = _FakeDB(lvol, node, snaps={"SNAP1": stale_snap})
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+    monkeypatch.setattr(lvol_controller.snapshot_controller, "add",
+                        lambda lid, name, snap_type=SnapShot.TYPE_USER: (
+                            patched["snap_add_calls"].append((lid, name, snap_type)) or "SNAP1_NEW", False))
+
+    result = lvol_controller.demote_lvol("LV1")
+
+    assert result == {"demoted": False}, "the fresh snapshot has not replicated yet either"
+    assert patched["fenced"] == [], "already fenced by the original call; re-fencing is pointless"
+    assert len(patched["snap_add_calls"]) == 1, "must retrigger against a new snapshot"
+    assert patched["snap_add_calls"][0][2] == SnapShot.TYPE_INTERNAL
+    assert lvol.replication_demote_snapshot_id == "SNAP1_NEW", \
+        "must track the fresh snapshot, not keep waiting on the superseded one"
+    assert lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_PENDING
+
+
+def test_demote_does_not_retrigger_a_snapshot_still_genuinely_converging(patched, monkeypatch):
+    """The existing, already-tested "never re-trigger" behavior must still hold
+    for a snapshot that simply has not replicated yet, normal in-flight case
+    (do_replicate True, not yet superseded by anything newer)."""
+    lvol = _lvol()
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+    lvol.replication_demote_snapshot_id = "SNAP1"
+    lvol.do_replicate = True
+    node = _node("N_src")
+    db = _FakeDB(lvol, node, snaps={"SNAP1": _snap("SNAP1", replicated="")})
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+
+    result = lvol_controller.demote_lvol("LV1")
+
+    assert result == {"demoted": False}
+    assert patched["fenced"] == []
+    assert patched["snap_add_calls"] == [], "not superseded yet -- still the normal converging case"
+    assert lvol.replication_demote_snapshot_id == "SNAP1"
+
+
 def test_demote_surfaces_a_snapshot_creation_failure(patched, monkeypatch):
     lvol = _lvol()
     node = _node("N_src")
