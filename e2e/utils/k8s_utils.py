@@ -282,10 +282,19 @@ class K8sUtils:
         # kills the connection carrying it. The caller decides whether it
         # worked by watching for NotReady, which is the only honest evidence.
         #
-        # NOT `reboot -f` (skips the clean shutdown, a harsher fault than this
-        # outage is meant to be) and NOT `-h` (halts -- the node would never
-        # come back and the run would stall waiting for it).
-        self.run_on_node(node_ip, "reboot", timeout=60, check=False)
+        # `systemctl reboot`, not the `reboot` shim. On systemd they are the
+        # same thing, but the shim's FLAGS differ between distros and one of
+        # them is a trap: the hand-run that proved this route used `reboot -h`,
+        # and -h means --halt. worker-1 went down and did not come back.
+        # systemctl's verb cannot be read as anything but a reboot, which
+        # matters for a command whose failure mode is a node that never
+        # returns and a run that waits for it.
+        #
+        # Not `--force` either: that skips the clean shutdown, which is a
+        # harsher fault than this outage is meant to be. A storage node
+        # rebooting cleanly is the case under test; killing it outright is
+        # what container_stop already does.
+        self.run_on_node(node_ip, "systemctl reboot", timeout=60, check=False)
         return True
 
     def wait_node_condition(self, node_ip: str, ready: bool,
