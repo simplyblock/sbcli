@@ -104,13 +104,31 @@ class _LblkOutageMatrix(_LblkBase):
     #: still under IO.
     FIO_SLACK_SEC = 600
 
-    #: Ceiling on the live FIO runtime. 16 cycles x 450s + slack would ask for
-    #: 7800s, and every second FIO runs past the last outage is a second spent
-    #: waiting for it to finish. At the measured mean of 227s a 16-cycle loop
-    #: is 3632s, so 6000 still covers it with room; only a run where most
-    #: cycles are near the 401s worst case would outlast it, and
-    #: _assert_fio_alive reports that as a sizing note rather than a failure.
-    FIO_MAX_RUNTIME = 6000
+    #: What each outage type actually costs, end to end, including recovery
+    #: and the post-cycle checks. A flat average stopped working once the
+    #: types diverged by 8x: a node reboot is now cordon + drain (which
+    #: retries against pod disruption budgets) + a real RHCOS reboot measured
+    #: at 7 minutes + uncordon, while a short network blip is under two.
+    #:
+    #: Sizing FIO off the flat 450s average would have asked for 6000s against
+    #: 7470s of cycles on k8s -- the last 24 minutes of outages would have run
+    #: with no live IO at all, and the availability lane would have been blind
+    #: for them without saying so.
+    SEC_PER_OUTAGE = {
+        "graceful_shutdown": 170,
+        "container_stop": 190,
+        "storage_node_reboot": 900,
+        "short_network_interrupt": 110,
+        "interface_full_network_interrupt": 400,
+        "node_network_isolation": 700,
+    }
+
+    #: Ceiling on the live FIO runtime. A safety stop, not a working value --
+    #: the runtime comes from SEC_PER_OUTAGE summed over the planned cycles,
+    #: and this only catches a plan that has grown beyond what any single run
+    #: should be. Every second FIO runs past the last outage is a second spent
+    #: waiting for it, so the estimate wants to be close, not merely large.
+    FIO_MAX_RUNTIME = 10800
 
 
     def run(self):
@@ -219,7 +237,7 @@ class _LblkOutageMatrix(_LblkBase):
             len(cycles) * self.SEC_PER_CYCLE / 3600.0, self.SEC_PER_CYCLE)
 
         self._build_static_set(pool)
-        live = self._start_live_fio(pool, len(cycles))
+        live = self._start_live_fio(pool, cycles)
 
         for i, (node, outage) in enumerate(cycles, start=1):
             self.logger.info("[matrix] cycle %d/%d: %s on %s",
@@ -1013,6 +1031,28 @@ class _LblkOutageMatrix(_LblkBase):
 
     # ── the availability lane ─────────────────────────────────────────────
 
+    def _planned_seconds(self, cycles):
+        """How long the planned cycles should take, by outage type.
+
+        *cycles* is the (node, outage) plan, so this costs each cycle for what
+        it actually is rather than multiplying a count by an average. An
+        unknown type falls back to SEC_PER_CYCLE and says so -- a new outage
+        added without a cost entry should undersize loudly, not silently.
+        """
+        total = 0
+        for _node, outage in cycles:
+            cost = self.SEC_PER_OUTAGE.get(outage)
+            if cost is None:
+                cost = self.SEC_PER_CYCLE
+                self.logger.warning(
+                    "[matrix] no SEC_PER_OUTAGE entry for %r; sizing it at "
+                    "the %ds average, which may be wrong in either direction",
+                    outage, cost)
+            total += cost
+        self.logger.info("[matrix] %d cycles should take about %d min",
+                         len(cycles), total // 60)
+        return total
+
     def _start_live_fio(self, pool, cycles):
         """FIO that must run, uninterrupted, across every outage.
 
@@ -1023,11 +1063,11 @@ class _LblkOutageMatrix(_LblkBase):
         plain-only live lane would never touch it.
         """
         runtime = self._fio_runtime = min(
-            cycles * self.SEC_PER_CYCLE + self.FIO_SLACK_SEC,
+            self._planned_seconds(cycles) + self.FIO_SLACK_SEC,
             self.FIO_MAX_RUNTIME)
         self._fio_started_at = time.time()
         self.logger.info("[matrix] live FIO sized for %d cycles: %ds",
-                         cycles, runtime)
+                         len(cycles), runtime)
         flavours = [("plain", dict()),
                     ("crypto", dict(crypto=True)),
                     ("dhchap", dict(dhchap=True)),
