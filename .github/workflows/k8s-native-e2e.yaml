@@ -1512,18 +1512,34 @@ jobs:
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "Cluster is active!"
 
-              # Extract cluster ID and secret
-              CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
-              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
+              # Match the UUID by its shape, not by its position. Parsing
+              # `NR==4{print $2}` broke the moment sbctl prefixed the table
+              # with an index-building WARNING: every row shifted down one, so
+              # line 4 became the +---+ separator and this came out empty and
+              # the run died before the test started. A UUID cannot be confused
+              # with a separator, a warning or a column heading, and the same
+              # expression works on a table or on JSON.
+              CLUSTER_ID=$(printf '%s\n' "$OUTPUT" | tr -d '\r' \
+                | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+                | head -1)
 
-              # Fallback: try JSON format if table parsing fails
-              if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
-                echo "Table parsing failed (CLUSTER_ID=$CLUSTER_ID), trying JSON..."
-                JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                  sbctl cluster list --json 2>&1) || true
-                echo "JSON output: $JSON_OUT"
-                CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
-                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
+              # NOT from `cluster list`: it has no secret column, so the old
+              # `{print $NF}` was reading the blank Replicate field. This is
+              # the command that has one, as the docker and upgrade workflows
+              # already do. Timestamped log lines are dropped first: the
+              # warning lands here too.
+              CLUSTER_SECRET=""
+              if [ -n "$CLUSTER_ID" ]; then
+                CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                  sbctl cluster get-secret "$CLUSTER_ID" 2>/dev/null \
+                  | tr -d '\r' | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' \
+                  | tail -n 1 | xargs) || true
+              fi
+
+              if [ -z "$CLUSTER_ID" ]; then
+                echo "ERROR: no cluster UUID in sbctl output:" >&2
+                echo "$OUTPUT" >&2
+                exit 1
               fi
 
               echo "Parsed CLUSTER_ID=${CLUSTER_ID}"
@@ -1557,15 +1573,19 @@ jobs:
           extract_cluster_info() {
             local output="$1"
             local cid csecret
-            cid=$(echo "$output" | awk 'NR==4{print $2}')
-            csecret=$(echo "$output" | awk 'NR==4{print $NF}')
-            if [ -z "$cid" ] || [ "$cid" = "+" ]; then
-              echo "Table parsing failed, trying JSON..." >&2
-              local json_out
-              json_out=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                sbctl cluster list --json 2>&1) || true
-              cid=$(echo "$json_out" | jq -r '.[0].id // .[0].uuid // empty')
-              csecret=$(echo "$json_out" | jq -r '.[0].secret // empty')
+            # Match the UUID by its shape, not its position -- sbctl now
+            # prefixes its output with an index-building WARNING, which
+            # shifted every table row down one and made positional parsing
+            # return the separator line.
+            cid=$(printf '%s\n' "$output" | tr -d '\r' \
+              | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+              | head -1)
+            csecret=""
+            if [ -n "$cid" ]; then
+              csecret=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbctl cluster get-secret "$cid" 2>/dev/null \
+                | tr -d '\r' | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' \
+                | tail -n 1 | xargs) || true
             fi
             if [ -n "$cid" ] && [ "$cid" != "+" ]; then
               echo "CLUSTER_ID=${cid}" >> $GITHUB_ENV
