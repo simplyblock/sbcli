@@ -267,24 +267,25 @@ class K8sUtils:
 
         self.logger.info("[K8sUtils] rebooting node %s (%s)",
                          node_name, node_ip)
-        # systemd owns the timer, not us. `oc debug` DELETES its debug pod as
-        # soon as the command returns, and a backgrounded `sleep 3; reboot` is
-        # a child of that pod -- so it dies with the pod before the sleep ends
-        # and the node never reboots. That is exactly what happened on
-        # 2026-09-23: the command was issued cleanly, took 48s, and worker-1
-        # never went NotReady.
+        # Synchronously, and plain `reboot` -- the same thing SshUtils does on
+        # docker ("`sudo reboot` never returns an exit status: the host is
+        # gone before it can be sent").
         #
-        # A transient systemd unit is owned by the host's init, so the debug
-        # pod going away cannot touch it. The fallback is a synchronous reboot
-        # for hosts without systemd-run: it kills the connection carrying it,
-        # which is why check=False and why the result is not trusted either
-        # way -- the caller decides by watching for NotReady.
-        self.run_on_node(
-            node_ip,
-            "systemd-run --collect --on-active=5s "
-            "--unit=sb-e2e-reboot-$$ systemctl reboot -f "
-            "|| systemctl reboot -f || reboot -f",
-            timeout=120, check=False)
+        # It was backgrounded before, and that was the bug: `oc debug` DELETES
+        # its debug pod the moment the command returns, so a backgrounded
+        # `sleep 3; reboot` is a child of a pod that is already gone and never
+        # runs. On 2026-09-23 the command was issued cleanly, took 48s, and
+        # worker-1 stayed Ready. Run in the foreground it works -- confirmed by
+        # hand on this cluster, where the node went NotReady immediately.
+        #
+        # check=False because succeeding looks like failing here: the reboot
+        # kills the connection carrying it. The caller decides whether it
+        # worked by watching for NotReady, which is the only honest evidence.
+        #
+        # NOT `reboot -f` (skips the clean shutdown, a harsher fault than this
+        # outage is meant to be) and NOT `-h` (halts -- the node would never
+        # come back and the run would stall waiting for it).
+        self.run_on_node(node_ip, "reboot", timeout=60, check=False)
         return True
 
     def wait_node_condition(self, node_ip: str, ready: bool,
