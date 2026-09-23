@@ -965,6 +965,12 @@ class _LblkBase(TestClusterBase):
     #: How long to wait for a rebooted worker to come back Ready.
     NODE_REBOOT_SEC = 900
 
+    #: The default `node.kubernetes.io/unreachable` toleration. A node absent
+    #: for longer than this has had its pods rescheduled, whatever took it
+    #: away -- so any outage that crosses it inherits the volume-reattach
+    #: hazard, not just the one that sets out to cause eviction.
+    EVICTION_TOLERATION_SEC = 300
+
     #: How long to let the control plane bring a fenced node back by itself.
     #: SPDK aborts when it loses its peers, the monitor sees the node offline
     #: and queues a restart; that path is what this outage is for, so it gets
@@ -1003,14 +1009,38 @@ class _LblkBase(TestClusterBase):
                 # than reporting a reboot that did not happen.
                 k8s = self._ensure_k8s_utils()
                 if k8s.reboot_node(ip):
-                    if not k8s.wait_node_condition(ip, ready=False,
-                                                   timeout=300):
+                    down_at = None
+                    if k8s.wait_node_condition(ip, ready=False, timeout=300):
+                        down_at = time.time()
+                    else:
                         self.logger.warning(
                             "[lblk] %s never went NotReady after the reboot "
                             "was issued -- it may have come back inside the "
                             "poll, or the reboot did not take", ip)
                     k8s.wait_node_condition(ip, ready=True,
                                             timeout=self.NODE_REBOOT_SEC)
+                    # Past the unreachable toleration the scheduler will have
+                    # moved this node's pods, and their RWO volumes had to
+                    # detach from a node that was not there to detach them --
+                    # the same hazard the isolation outage hunts, reached by a
+                    # reboot instead of a cut.
+                    if down_at is not None:
+                        down = time.time() - down_at
+                        self.logger.info(
+                            "[lblk] %s was NotReady for %.0fs across the "
+                            "reboot", ip, down)
+                        if down >= self.EVICTION_TOLERATION_SEC:
+                            bad = k8s.multi_attach_errors()
+                            if bad:
+                                raise LblkPreconditionError(
+                                    f"[lblk] {ip} was down {down:.0f}s across "
+                                    f"its reboot, long enough for its pods to "
+                                    f"be rescheduled, and their volumes did "
+                                    f"not follow:\n    "
+                                    + "\n    ".join(bad[:6]))
+                            self.logger.info(
+                                "[lblk] pods moved off %s during the reboot "
+                                "and got their volumes back cleanly", ip)
                 else:
                     self.logger.warning(
                         "[lblk] could not issue a real reboot on %s; "

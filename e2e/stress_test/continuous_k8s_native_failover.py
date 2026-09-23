@@ -2386,7 +2386,13 @@ class K8sNativeFailoverTest(TestClusterBase):
         """
         self._ensure_k8s_utils()
         if self.k8s_utils.reboot_node(node_ip):
-            self.k8s_utils.wait_node_condition(node_ip, ready=False, timeout=300)
+            if self.k8s_utils.wait_node_condition(node_ip, ready=False,
+                                                  timeout=300):
+                # Clock starts at the moment it is confirmed gone, not at the
+                # moment we asked it to go: the gap between the two is the
+                # reboot command propagating, during which nothing is evicted.
+                self._node_down_since = getattr(self, "_node_down_since", {})
+                self._node_down_since[node_ip] = time.time()
             return
         self.logger.warning(
             "[K8s] no real reboot available for %s; stopping the SPDK pod "
@@ -2405,9 +2411,14 @@ class K8sNativeFailoverTest(TestClusterBase):
             self._eviction_expected = getattr(self, "_eviction_expected", set())
             self._eviction_expected.add(node_ip)
             self.logger.info(
-                "[K8s] %ds cut on %s is past the %ds toleration -- expecting "
-                "its pods to be evicted and rescheduled",
-                duration, node_ip, self.EVICTION_THRESHOLD_SEC)
+                "[K8s] %s was unreachable for %ds, past the %ds toleration -- "
+                "expecting its pods to be evicted and rescheduled",
+                node_ip, duration, self.EVICTION_THRESHOLD_SEC)
+        else:
+            self.logger.info(
+                "[K8s] %s was unreachable for %ds, inside the %ds toleration "
+                "-- nothing should have moved, so the attach check is not "
+                "armed for it", node_ip, duration, self.EVICTION_THRESHOLD_SEC)
 
     def assert_no_volume_attach_errors(self, label: str = ""):
         """Fail if a rescheduled pod could not take its volume with it.
@@ -2779,6 +2790,16 @@ class K8sNativeFailoverTest(TestClusterBase):
             _ip = (_nd[0].get("mgmt_ip") if _nd else None)
             if _ip:
                 self.k8s_utils.wait_node_condition(_ip, ready=True, timeout=900)
+                # How long it was actually gone decides whether the scheduler
+                # had time to move anything, and so whether the Multi-Attach
+                # check has something to look for.
+                _down_at = getattr(self, "_node_down_since", {}).pop(_ip, None)
+                if _down_at is not None:
+                    _down = time.time() - _down_at
+                    self.logger.info(
+                        "[K8s] %s was NotReady for %.0fs across the reboot",
+                        _ip, _down)
+                    self._note_eviction_expected(_ip, int(_down))
             self.sbcli_utils.wait_for_storage_node_status(
                 node, "online", timeout=600)
             self.log_outage_event(node, outage_type, "Node back after reboot")
