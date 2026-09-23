@@ -1009,15 +1009,26 @@ class _LblkBase(TestClusterBase):
                 k8s = self._ensure_k8s_utils()
                 if k8s.reboot_node(ip):
                     down_at = None
-                    if k8s.wait_node_condition(ip, ready=False, timeout=300):
-                        down_at = time.time()
-                    else:
-                        self.logger.warning(
-                            "[lblk] %s never went NotReady after the reboot "
-                            "was issued -- it may have come back inside the "
-                            "poll, or the reboot did not take", ip)
-                    k8s.wait_node_condition(ip, ready=True,
-                                            timeout=self.NODE_REBOOT_SEC)
+                    try:
+                        if k8s.wait_node_condition(ip, ready=False,
+                                                   timeout=300):
+                            down_at = time.time()
+                        else:
+                            self.logger.warning(
+                                "[lblk] %s never went NotReady after the "
+                                "reboot was issued -- it may have come back "
+                                "inside the poll, or the reboot did not take",
+                                ip)
+                        k8s.wait_node_condition(ip, ready=True,
+                                                timeout=self.NODE_REBOOT_SEC)
+                    finally:
+                        # Always, even if the wait above failed or raised.
+                        # reboot_node cordoned this node, and a cordon left
+                        # behind is silent and cumulative: the node takes no
+                        # new pods for the rest of the run, so later cycles
+                        # schedule onto a shrinking cluster and fail for
+                        # reasons that have nothing to do with the outage.
+                        k8s.cordon_node(ip, cordon=False)
                     # Past the unreachable toleration the scheduler will have
                     # moved this node's pods, and their RWO volumes had to
                     # detach from a node that was not there to detach them --

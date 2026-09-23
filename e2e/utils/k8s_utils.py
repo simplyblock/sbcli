@@ -236,15 +236,71 @@ class K8sUtils:
                 "as asked (check=False): %s", node_ip, str(exc)[:160])
             return "", str(exc)
 
-    def reboot_node(self, node_ip: str) -> bool:
+    def cordon_node(self, node_ip: str, cordon: bool = True) -> bool:
+        """Mark the node unschedulable (or schedulable again)."""
+        node_name = self._get_k8s_node_name(node_ip)
+        verb = "cordon" if cordon else "uncordon"
+        cli = "oc adm" if self.detect_openshift() else "kubectl"
+        out, err = self._exec_kubectl(
+            f"{cli} {verb} {node_name} 2>&1 || true", timeout=120)
+        self.logger.info("[K8sUtils] %s %s: %s", verb, node_name,
+                         (out or err or "").strip()[:160])
+        return True
+
+    def drain_node(self, node_ip: str, timeout_min: int = 10) -> bool:
+        """Evacuate the node's pods before it goes down.
+
+        `--ignore-daemonsets` is not optional: the SPDK pod is a DaemonSet
+        pod, and drain refuses to run at all if it would have to evict one.
+        It is also the honest behaviour -- DaemonSet pods are not evacuated,
+        they go down with the node and come back with it, which is what we
+        want to observe.
+
+        The Job-backed FIO pods DO get evicted and rescheduled elsewhere, and
+        their RWO volumes have to follow them. That is the part worth
+        watching, and what the attach check afterwards is for.
+
+        Never fatal. A drain that times out because something will not
+        evict is a finding to record, not a reason to abandon the cycle --
+        the reboot still tells us what we came for.
+        """
+        node_name = self._get_k8s_node_name(node_ip)
+        cli = "oc adm" if self.detect_openshift() else "kubectl"
+        self.logger.info("[K8sUtils] draining %s (up to %dm)",
+                         node_name, timeout_min)
+        out, err = self._exec_kubectl(
+            f"{cli} drain {node_name} --ignore-daemonsets "
+            f"--delete-emptydir-data --force --timeout={timeout_min}m 2>&1 "
+            f"|| true",
+            timeout=timeout_min * 60 + 120)
+        text = (out or "") + (err or "")
+        if "error" in text.lower() or "timed out" in text.lower():
+            self.logger.warning(
+                "[K8sUtils] drain of %s did not complete cleanly: %s",
+                node_name, text.strip()[-400:])
+            return False
+        self.logger.info("[K8sUtils] drained %s", node_name)
+        return True
+
+    def reboot_node(self, node_ip: str, drain: bool = True) -> bool:
         """Actually reboot the worker. Returns True if a real reboot was issued.
 
-        Detached deliberately. `reboot` kills the very connection carrying it,
-        so a synchronous call always reports failure even on success; the
-        command is backgrounded behind a short sleep so the debug pod can exit
-        cleanly first, and the result is not trusted either way -- the caller
-        decides the node went down by watching it go NotReady, which is the
-        only honest evidence.
+        With *drain* (the default) this is the documented OpenShift node
+        maintenance sequence -- cordon, drain, reboot -- and the caller
+        uncordons once the node is Ready again. That is a PLANNED maintenance
+        reboot: pods are evacuated before the node goes, which is what an
+        operator does to patch a node, and it is a different thing from a node
+        vanishing. The unplanned case is already covered elsewhere, by
+        container_stop and node_network_isolation, so this does not duplicate
+        it.
+
+        Pass drain=False for an undrained reboot, where the node goes with its
+        pods still on it.
+
+        Synchronous, and the result is not trusted either way: the reboot
+        kills the connection carrying it, so succeeding looks like failing.
+        The caller decides the node went down by watching it go NotReady,
+        which is the only honest evidence.
 
         Talos: `talosctl reboot` if the binary is on the runner, otherwise
         False so the caller can fall back and SAY it fell back.
@@ -252,18 +308,43 @@ class K8sUtils:
         node_name = self._get_k8s_node_name(node_ip)
 
         if self.detect_talos():
-            out, err = self._exec_kubectl(
-                f"command -v talosctl >/dev/null 2>&1 && "
-                f"talosctl -n {node_ip} reboot 2>&1 || echo NO_TALOSCTL",
-                timeout=120)
-            if "NO_TALOSCTL" in (out or ""):
+            # Talos gets the SAME sequence -- cordon, drain, reboot -- because
+            # it is a property of Kubernetes, not of the host OS. Only the
+            # reboot verb differs, and only because Talos has no host shell to
+            # send one to: it is API-managed, so the reboot goes through
+            # talosctl instead of a debug pod. cordon_node and drain_node are
+            # already platform-aware and fall to plain kubectl here, since
+            # detect_openshift() is False.
+            #
+            # Cordon before checking for talosctl would leave the node
+            # unschedulable on a runner that cannot reboot it, so the
+            # capability check comes first.
+            probe, _ = self._exec_kubectl(
+                "command -v talosctl >/dev/null 2>&1 && echo HAVE_TALOSCTL "
+                "|| echo NO_TALOSCTL", supress_logs=True, timeout=60)
+            if "HAVE_TALOSCTL" not in (probe or ""):
                 self.logger.warning(
                     "[K8sUtils] Talos node %s: talosctl not available on the "
                     "runner, cannot issue a real reboot", node_ip)
                 return False
-            self.logger.info("[K8sUtils] talosctl reboot issued for %s",
-                             node_ip)
+
+            if drain:
+                self.cordon_node(node_ip, cordon=True)
+                self.drain_node(node_ip)
+
+            out, err = self._exec_kubectl(
+                f"talosctl -n {node_ip} reboot 2>&1 || true", timeout=180)
+            self.logger.info("[K8sUtils] talosctl reboot issued for %s: %s",
+                             node_ip, (out or err or "").strip()[:160])
             return True
+
+        if drain:
+            # cordon -> drain -> reboot, the documented OpenShift node
+            # maintenance sequence. Cordon first so nothing is scheduled onto
+            # a node that is about to go; drain so the workload leaves under
+            # its own eviction rules rather than being cut off.
+            self.cordon_node(node_ip, cordon=True)
+            self.drain_node(node_ip)
 
         self.logger.info("[K8sUtils] rebooting node %s (%s)",
                          node_name, node_ip)

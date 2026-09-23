@@ -2806,17 +2806,28 @@ class K8sNativeFailoverTest(TestClusterBase):
             _nd = self.sbcli_utils.get_storage_node_details(node)
             _ip = (_nd[0].get("mgmt_ip") if _nd else None)
             if _ip:
-                self.k8s_utils.wait_node_condition(_ip, ready=True, timeout=900)
-                # How long it was actually gone decides whether the scheduler
-                # had time to move anything, and so whether the Multi-Attach
-                # check has something to look for.
-                _down_at = getattr(self, "_node_down_since", {}).pop(_ip, None)
-                if _down_at is not None:
-                    _down = time.time() - _down_at
-                    self.logger.info(
-                        "[K8s] %s was NotReady for %.0fs across the reboot",
-                        _ip, _down)
-                    self._note_eviction_expected(_ip, int(_down))
+                try:
+                    self.k8s_utils.wait_node_condition(_ip, ready=True,
+                                                       timeout=900)
+                    # How long it was actually gone decides whether the
+                    # scheduler had time to move anything, and so whether the
+                    # Multi-Attach check has something to look for.
+                    _down_at = getattr(self, "_node_down_since", {}).pop(
+                        _ip, None)
+                    if _down_at is not None:
+                        _down = time.time() - _down_at
+                        self.logger.info(
+                            "[K8s] %s was NotReady for %.0fs across the reboot",
+                            _ip, _down)
+                        self._note_eviction_expected(_ip, int(_down))
+                finally:
+                    # reboot_node cordoned this node before draining it, and a
+                    # cordon left behind is silent and cumulative: the node
+                    # accepts no new pods for the rest of the run, so later
+                    # iterations schedule onto a shrinking cluster and fail for
+                    # reasons unrelated to any outage. Always, even if the wait
+                    # above failed.
+                    self.k8s_utils.cordon_node(_ip, cordon=False)
             self.sbcli_utils.wait_for_storage_node_status(
                 node, "online", timeout=600)
             self.log_outage_event(node, outage_type, "Node back after reboot")
