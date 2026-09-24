@@ -53,22 +53,26 @@ INDEX_RACE_ATTEMPTS = 5
 #: against.
 _NOT_COMMITTED = 1020
 
-#: Seconds between two identical "this query fell back to a scan" warnings.
+#: Seconds between two identical "this query fell back to a scan" messages.
 #: The message names a systemic condition, not an event, so one line per class
 #: per interval is the useful rate.
-FALLBACK_WARN_INTERVAL_SEC = 300
-_last_fallback_warning: dict[tuple[str, str], float] = {}
+FALLBACK_LOG_INTERVAL_SEC = 300
+_last_fallback_log: dict[tuple[str, str], float] = {}
 
 
-def warn_fallback(model_cls, index, state) -> None:
-    """Log — rate-limited per index — that a read did not use the index."""
+def log_fallback(model_cls, index, state) -> None:
+    """Log — rate-limited per index — that a read did not use the index.
+
+    Informational: the scan answers exactly what the index would, so an index
+    that is still building is a slower cluster, not a broken one.
+    """
     key = (model_cls.__name__, index.name)
     now = time.monotonic()
-    last = _last_fallback_warning.get(key)
-    if last is not None and (now - last) < FALLBACK_WARN_INTERVAL_SEC:
+    last = _last_fallback_log.get(key)
+    if last is not None and (now - last) < FALLBACK_LOG_INTERVAL_SEC:
         return
-    _last_fallback_warning[key] = now
-    logger.warning(
+    _last_fallback_log[key] = now
+    logger.info(
         "Index %s.%s is %s: falling back to a full scan of %s. Run "
         "`sbctl cluster build-indices` to complete it.",
         model_cls.__name__, index.name, state, model_cls.__name__)
