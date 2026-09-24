@@ -88,6 +88,22 @@ class RawDeviceVerifier:
 
     def _assert_device(self, node, device):
         if not self.ssh_obj.is_block_device(node, device):
+            # Distinguish "the device is wrong" from "the check never ran".
+            # On k8s *node* is a pod, and a `test -b` in a pod that no longer
+            # exists returns nothing -- which is not "yes", so this fired and
+            # reported that /dev/rawlblk was not a block device when the
+            # device was fine and the POD had been evicted. A check that could
+            # not run must say so; reporting the answer it would have given
+            # sends the reader to the storage layer for a scheduling problem.
+            probe, _err = self.ssh_obj.exec_command(
+                node, "echo alive", timeout=60, max_retries=1)
+            if "alive" not in (probe or ""):
+                raise RuntimeError(
+                    f"[raw-verify] cannot reach {node} to check {device}, so "
+                    f"the raw lane could not run. This is NOT a statement "
+                    f"about the device -- on k8s {node} is a pod, and an "
+                    f"evicted pod fails this check exactly like a bad device "
+                    f"would.")
             raise RuntimeError(
                 f"[raw-verify] {device} is not a block device on {node}; "
                 "refusing to run -- writing to a regular file here would "

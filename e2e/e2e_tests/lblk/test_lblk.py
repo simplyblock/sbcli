@@ -397,10 +397,49 @@ class _LblkBase(TestClusterBase):
         self.logger.info("[lblk] %s -> raw %s in pod %s", name, device, pod)
         return pod, device
 
+    def _ensure_raw_pod(self, name, pod):
+        """Return *pod*, recreating it first if it is no longer running.
+
+        These are bare Pods with no controller, created once when the volume
+        is provisioned and kept for the whole run. Nothing recreates them, so
+        anything that evicts one ends the raw lane for that volume -- and the
+        cordon+drain now run before every node reboot does exactly that:
+
+          evicting pod simplyblock/rawfio-mxraw942
+          pod/rawfio-mxraw942 evicted
+
+        The name is derived from the PVC, so a recreated pod has the same name
+        and the RawDeviceVerifier bound to it stays valid.
+
+        A drain is only the most visible way to lose one. Eviction under
+        pressure, or a node that does not come back, would do the same, so
+        this is checked before every use rather than repaired after the drain.
+        """
+        if not self.k8s_test:
+            return pod
+        k8s = self._ensure_k8s_utils()
+        phase = (k8s.get_pod_status_detail(pod) or {}).get("phase")
+        if phase == "Running":
+            return pod
+        self.logger.warning(
+            "[lblk] raw pod %s is %s, not Running -- recreating it before "
+            "touching %s. The volume is fine; the pod that reads it is not.",
+            pod, phase or "gone", name)
+        try:
+            k8s.delete_pod(pod)
+        except Exception:                             # noqa: BLE001
+            pass
+        pvc = self._k8s_normalize_name(name)
+        k8s.create_raw_device_pod(pod, pvc)
+        if pod not in self._k8s_raw_pods:
+            self._k8s_raw_pods.append(pod)
+        return pod
+
     def _stamp_all(self):
         if not self.RAW_VERIFY:
             return
         for _name, (client, dev) in self._lblk_devices.items():
+            client = self._ensure_raw_pod(_name, client)
             self._verifier.stamp(client, dev, region_size=self.VERIFY_REGION)
 
     def _verify_all(self, context):
@@ -419,6 +458,7 @@ class _LblkBase(TestClusterBase):
         """
         if self.RAW_VERIFY:
             for name, (client, dev) in self._lblk_devices.items():
+                client = self._ensure_raw_pod(name, client)
                 self._verifier.verify(client, dev,
                                       region_size=self.VERIFY_REGION,
                                       context=f"{context} [{name}]")
