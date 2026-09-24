@@ -286,7 +286,7 @@ class DBController(metaclass=Singleton):
             ids = self._indexed_ids(model_cls, idx, values, limit, reverse)
             return self.multi_get(model_cls, ids)
 
-        index_ops.warn_fallback(model_cls, idx, self.index_state(model_cls, idx))
+        index_ops.log_fallback(model_cls, idx, self.index_state(model_cls, idx))
         rows = []
         # id=" " is this codebase's spelling for "the whole class keyspace";
         # the default renders a composite-keyed class as `object/Class//`.
@@ -458,7 +458,7 @@ class DBController(metaclass=Singleton):
             return self._live_lvols(itertools.chain.from_iterable(
                 self.query(LVol, 'pool_uuid', pool_id) for pool_id in pool_ids))
 
-        index_ops.warn_fallback(LVol, indices.get_index(LVol, 'pool_uuid'), state)
+        index_ops.log_fallback(LVol, indices.get_index(LVol, 'pool_uuid'), state)
         return self._live_lvols(
             lvol for lvol in self.get_all_lvols() if lvol.pool_uuid in pool_ids)
 

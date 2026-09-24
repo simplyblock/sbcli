@@ -116,7 +116,7 @@ cluster. `--repair` writes back every entry it can *derive* — and refuses the 
 cannot, a unique value two live records both carry, which is a defect in the data. It
 fails (non-zero) while anything is left unresolved, so a repair run that exits 0 means the
 indices are clean, not merely that something was repaired. `index_ops.py` holds the backfill and the verifier. A read that falls back to a
-scan logs a warning (rate-limited per index) — one that survives a `ready` flip is a bug.
+scan logs an info line (rate-limited per index) — one that survives a `ready` flip is a bug.
 
 **The backfill walks keys, not records.** It reads each record inside the transaction that
 writes what that record derives (`_index_record`, over the same `_apply_index_diff` live
