@@ -150,11 +150,12 @@ def _pool(uuid, cluster_id="CL_TGT", status=Pool.STATUS_ACTIVE):
     return p
 
 
-def _lvol(uuid, policy_id="", status=LVol.STATUS_ONLINE):
+def _lvol(uuid, policy_id="", status=LVol.STATUS_ONLINE, demote_snapshot_id=""):
     lv = LVol()
     lv.uuid = uuid
     lv.status = status
     lv.replication_policy_id = policy_id
+    lv.replication_demote_snapshot_id = demote_snapshot_id
     return lv
 
 
@@ -397,6 +398,39 @@ def test_purge_never_touches_user_snapshots(monkeypatch):
     monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
     rpc._purge_internal_replication_snapshots("LV1")
     assert deleted == []
+
+
+def test_purge_keeps_the_demoted_volumes_fail_over_point(monkeypatch):
+    """The target copy of the snapshot a demoted volume is fenced on is the
+    current fail-over point a pending PromoteVolume may still need --
+    confirmed live 2026-09-24 (Ramen relocate M-02): detach_policy runs the
+    instant a source demotes to Secondary, well before any fail-over gets a
+    chance to promote the target, and deleting this copy just because
+    nothing has cloned from it YET stranded every subsequent PromoteVolume
+    attempt with "No replicated snapshot on target yet" -- even though the
+    source volume was still fully healthy at the time. An older,
+    already-superseded internal snapshot's target copy has no such role (a
+    newer one already carries the current state forward) and stays
+    purge-eligible. A volume that is NOT currently demoted (a plain "turn
+    off replication policy") has no pending fail-over to protect, and this
+    guard must not fire for it -- see
+    test_purge_deletes_internal_snapshots_on_both_sides.
+    """
+    lv = _lvol("LV1", demote_snapshot_id="S_SRC_NEW")
+    remote = _lvol("REP_LV1")
+    older_src = _snap("S_SRC_OLD", lv, target="S_TGT_OLD")
+    older_src.next_snap_uuid = "S_SRC_NEW"  # superseded
+    older_tgt = _snap("S_TGT_OLD", remote)
+    newest_src = _snap("S_SRC_NEW", lv, target="S_TGT_NEW")
+    newest_tgt = _snap("S_TGT_NEW", remote)
+    db = _FakeDB(lvols=[lv, remote],
+                 snapshots=[older_src, older_tgt, newest_src, newest_tgt])
+    _install(monkeypatch, db)
+    deleted: list[str] = []
+    monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
+    rpc._purge_internal_replication_snapshots("LV1")
+    assert "S_TGT_NEW" not in deleted, "the newest target copy is a live fail-over point"
+    assert "S_TGT_OLD" in deleted, "a superseded target copy is still purge-eligible"
 
 
 def test_purge_keeps_a_snapshot_a_live_clone_depends_on(monkeypatch):

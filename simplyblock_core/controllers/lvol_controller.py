@@ -3884,6 +3884,48 @@ def demote_lvol(lvol_id):
     return {"demoted": True}
 
 
+def is_lvol_removal_deferred_for_pending_failover(db_controller, lvol):
+    """True while *lvol* is demoted and awaiting a fail-over addressed by
+    this same id.
+
+    lvol_monitor's process_lvol_delete_finish reaps a deleted lvol's FDB
+    record right after its physical data is destroyed. replicate_lvol_on_
+    target_cluster (the failover REST handler's implementation) still needs
+    that record's fields -- replication_node_id, nqn/ns_id, cluster ids -- to
+    complete a PromoteVolume call addressed by this SAME source id, since
+    this backend's DR flow has no independent identity for the destination
+    side to be addressed by instead. Reaping the record the instant the data
+    is gone strands every such promote with "LVol not found" (confirmed live
+    2026-09-24, Ramen relocate M-02), even though nothing but a few
+    bookkeeping fields is actually at stake by that point.
+
+    Gives up (returns False) once a fail-over has actually completed for
+    this lvol elsewhere, once its own fail-over point (the snapshot demote
+    fenced it on) is itself already gone, or once the hold has run past
+    LVOL_DEMOTE_FAILOVER_HOLD_SEC with neither -- a promote that was truly
+    coming would have landed well before then.
+    """
+    if not lvol.replication_demote_snapshot_id:
+        return False
+
+    rep = _replication_for_lvol(db_controller, lvol.get_id())
+    if rep is not None and rep.state in (LVolReplication.STATE_FAILED_OVER,
+                                         LVolReplication.STATE_CUTOVER_DONE):
+        return False
+
+    try:
+        snap = db_controller.get_snapshot_by_id(lvol.replication_demote_snapshot_id)
+    except KeyError:
+        return False
+
+    try:
+        age = (datetime.now() - datetime.fromisoformat(snap.create_dt)).total_seconds()
+    except (ValueError, TypeError):
+        return False
+
+    return age <= constants.LVOL_DEMOTE_FAILOVER_HOLD_SEC
+
+
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
                       from_policy=False):
     """Enable replication for a volume and pick its destination node.

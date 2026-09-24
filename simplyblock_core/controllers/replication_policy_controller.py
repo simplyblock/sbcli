@@ -312,6 +312,7 @@ def _purge_internal_replication_snapshots(lvol_id):
     """Delete the volume's internal replication snapshots, target copy first."""
     removed = 0
     handled = set()                               # never issue a delete twice
+    demote_snapshot_id = db.get_lvol_by_id(lvol_id).replication_demote_snapshot_id
     for snap in db.get_snapshots():
         if snap.deleted or not snap.lvol or snap.lvol.get_id() != lvol_id:
             continue
@@ -325,6 +326,20 @@ def _purge_internal_replication_snapshots(lvol_id):
             if _has_dependent_clone(target_uuid):
                 logger.info("Keeping replicated snapshot %s: a volume is cloned from it",
                             target_uuid)
+            elif snap.get_id() == demote_snapshot_id:
+                # This is the exact snapshot demote_lvol fenced the volume on
+                # -- the volume is currently demoted and awaiting a pending
+                # fail-over, and this target copy is the fail-over point a
+                # PromoteVolume call may still need, even with no clone from
+                # it yet. Deleting it strands every subsequent fail-over
+                # attempt with "No replicated snapshot on target yet" for an
+                # otherwise perfectly healthy, still-demoted volume (confirmed
+                # live 2026-09-24, Ramen relocate M-02). A volume that is NOT
+                # currently demoted (a plain "turn off replication policy")
+                # has no pending fail-over to protect, so this never fires
+                # and the snapshot purges normally below.
+                logger.info("Keeping replicated snapshot %s: volume is demoted, "
+                            "awaiting a pending fail-over", target_uuid)
             else:
                 try:
                     db.get_snapshot_by_id(target_uuid)

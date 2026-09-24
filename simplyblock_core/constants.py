@@ -329,6 +329,14 @@ API_OPERATION_TIMEOUT_SEC = 300
 # create (HA multi-node registration) so an in-progress create is never killed.
 LVOL_IN_CREATION_STALE_SEC = 600
 
+# A demoted LVol pending deletion (source torn down mid fail-over, e.g. by
+# Ramen's PVC cascade) keeps its FDB record past the point its physical data
+# is gone, since replicate_lvol_on_target_cluster still needs its fields
+# (replication_node_id, nqn/ns_id, cluster ids) to complete a pending
+# PromoteVolume addressed by this same id. lvol_monitor gives up and reaps
+# the record once a demote is older than this with no fail-over completed.
+LVOL_DEMOTE_FAILOVER_HOLD_SEC = 3600
+
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
         "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")

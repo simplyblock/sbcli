@@ -345,6 +345,21 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
     # runner clears it. Reset keeps it only while sync-del tasks are pending.
     primary_node.lvol_del_sync_lock_reset()
 
+    if lvol_controller.is_lvol_removal_deferred_for_pending_failover(db, lvol):
+        logger.info(
+            "LVol %s: keeping its record -- demoted and awaiting a pending "
+            "fail-over that has not completed yet (held up to %ds since "
+            "demote, see is_lvol_removal_deferred_for_pending_failover)",
+            lvol.get_id(), constants.LVOL_DEMOTE_FAILOVER_HOLD_SEC)
+        if lvol.bdev_stack:
+            # Nothing on any node belongs to this record any more -- mark it
+            # the same way an already-retired landing volume is (see the
+            # RECORD-ONLY branch above), so a later pass re-enters straight
+            # here instead of re-running the now-pointless node deletes.
+            lvol.bdev_stack = []
+            lvol.write_to_db(db.kv_store)
+        return
+
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
 
