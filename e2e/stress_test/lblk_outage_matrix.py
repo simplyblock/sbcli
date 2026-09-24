@@ -984,20 +984,50 @@ class _LblkOutageMatrix(_LblkBase):
         lifecycles -- on a six-node cluster, well over a hundred -- which would
         cost more wall-clock than the outages themselves. Registered in
         _k8s_utility_pods so the standard teardown removes it.
+
+        Kept alive, but not assumed to still be there. These are bare Pods
+        with no controller, so nothing recreates them, and an outage can take
+        one away: the drain that now precedes a node reboot reported
+
+          evicting pod simplyblock/md5-mxdhchap637
+          pod/md5-mxdhchap637 evicted
+
+        and six minutes later the next md5 read failed with "pods
+        md5-mxdhchap637 not found". The name stayed in this cache forever
+        because nothing checked. A drain is only the loudest way to lose one --
+        eviction under pressure or a node that never comes back would do the
+        same -- so the cache is verified rather than trusted.
         """
         pods = getattr(self, "_static_pods", None)
         if pods is None:
             pods = self._static_pods = {}
-        if lvol_name not in pods:
-            k8s = self._ensure_k8s_utils()
-            pvc = self._volume_registry[lvol_name]["pvc_name"]
-            pod = f"md5-{pvc}"[:63]
-            k8s.create_utility_pod(pod, pvc,
-                                   node_selector=self._pin_for(lvol_name))
-            k8s.wait_pod_running(pod)
+
+        k8s = self._ensure_k8s_utils()
+        pod = pods.get(lvol_name)
+        if pod:
+            phase = (k8s.get_pod_status_detail(pod) or {}).get("phase")
+            if phase == "Running":
+                return pod
+            self.logger.warning(
+                "[matrix] utility pod %s for %s is %s, not Running -- "
+                "recreating it. Losing one does not invalidate the volume; "
+                "failing to notice would, because the read that follows "
+                "cannot tell a missing pod from an unchanged file.",
+                pod, lvol_name, phase or "gone")
+            try:
+                k8s.delete_pod(pod)
+            except Exception:                         # noqa: BLE001
+                pass
+
+        pvc = self._volume_registry[lvol_name]["pvc_name"]
+        pod = f"md5-{pvc}"[:63]
+        k8s.create_utility_pod(pod, pvc,
+                               node_selector=self._pin_for(lvol_name))
+        k8s.wait_pod_running(pod)
+        if pod not in self._k8s_utility_pods:
             self._k8s_utility_pods.append(pod)
-            pods[lvol_name] = pod
-        return pods[lvol_name]
+        pods[lvol_name] = pod
+        return pod
 
     def _static_md5(self, lvol_name, mount):
         """md5 of the one file on a static volume.
