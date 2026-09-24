@@ -332,6 +332,39 @@ class TestCutover:
         assert response.status_code == 500
         assert response.json()['detail'] == 'node is not online'
 
+    def test_failover_while_the_first_replicated_snapshot_is_in_flight_is_409(
+            self, client, db, volume, lvol_controller):
+        """Regression: 2026-09-24-failover-converging-500 — during a Ramen
+        relocate-back, promote is (correctly) retried while the fail-back's
+        first reverse-replicated snapshot is still transferring, and the volume
+        being failed over actively replicates toward the target
+        (do_replicate=True). Answering 500 made the csi driver map it to a
+        generic UNAVAILABLE and the csi-addons controller log a full stack
+        trace every few seconds for what is a normal, bounded wait; 409 is the
+        route's own established code for "converging, retry" (see the planned
+        demote gate above), which the driver maps to a clean retryable
+        ABORTED."""
+        volume.do_replicate = True
+        lvol_controller.replicate_lvol_on_target_cluster.return_value = (
+            False, 'No replicated snapshot on target yet')
+
+        response = client.post(REPLICATION_URL + 'failover')
+
+        assert response.status_code == 409
+
+    def test_failover_with_no_snapshot_and_no_replication_configured_stays_500(
+            self, client, db, volume, lvol_controller):
+        """The twin of the 409 case: the same backend message on a volume that
+        does NOT replicate toward anything is a genuine error — nothing is in
+        flight, no retry will ever succeed — and must keep failing loudly."""
+        volume.do_replicate = False
+        lvol_controller.replicate_lvol_on_target_cluster.return_value = (
+            False, 'No replicated snapshot on target yet')
+
+        response = client.post(REPLICATION_URL + 'failover')
+
+        assert response.status_code == 500
+
     def test_unplanned_failover_ignores_demote_state(self, client, db, volume, lvol_controller):
         """The default (unplanned) path is unconditional -- matches today's
         behavior, since an unplanned failover's whole premise is that the

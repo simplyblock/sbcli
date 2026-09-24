@@ -161,6 +161,19 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
     result = lvol_controller.replicate_lvol_on_target_cluster(
         volume.get_id(), generation=generation)
     if isinstance(result, tuple):  # (False, error)
+        # "No replicated snapshot on target yet" on a volume that actively
+        # replicates toward the target is not a failure, it is the bounded
+        # window between configuring a fail-back and its first snapshot
+        # landing (a Ramen relocate-back retries promote right through it,
+        # confirmed live 2026-09-24). 409 is this route's established
+        # "converging, retry" answer -- same as the planned demote gate above
+        # -- and what the csi driver maps to a clean retryable ABORTED
+        # instead of a stack-traced UNAVAILABLE. The same message on a
+        # volume that does NOT replicate stays a 500: nothing is in flight,
+        # so no retry will ever succeed.
+        if str(result[1]) == 'No replicated snapshot on target yet' and volume.do_replicate:
+            raise HTTPException(
+                409, 'The first replicated snapshot is still in flight; retry the fail-over')
         raise HTTPException(500, str(result[1]))
     if not result:
         raise HTTPException(500, 'Failed to fail the volume over to the target cluster')
