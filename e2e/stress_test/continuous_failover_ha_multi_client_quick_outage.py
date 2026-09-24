@@ -955,6 +955,18 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 self.current_outage_node, ["offline", "unreachable"], timeout=900
             )
 
+        elif outage_type == "storage_node_reboot":
+            # Not in the default outage_types: this branch exists so a
+            # subclass CAN opt in. Without it, appending the type to
+            # outage_types would select it, fall through the if/elif chain
+            # below, and count an outage that never happened.
+            self.ssh_obj.notify_outage_started([node_ip])
+            self.ssh_obj.reboot_node(node_ip)
+            self.sbcli_utils.wait_for_storage_node_status(
+                self.current_outage_node, ["offline", "unreachable"],
+                timeout=900
+            )
+
         elif outage_type == "interface_full_network_interrupt":
             if not self.k8s_test and node_ip in self.container_nodes:
                 ts = int(datetime.now().timestamp())
@@ -1043,6 +1055,14 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         elif outage_type == "container_stop":
             self.sbcli_utils.wait_for_storage_node_status(
                 self.current_outage_node, "online", timeout=900
+            )
+
+        elif outage_type == "storage_node_reboot":
+            # The machine is coming back on its own; what has to be waited out
+            # is the whole stack behind it. Longer than the others because a
+            # reboot is: kernel, then the node agent, then SPDK.
+            self.sbcli_utils.wait_for_storage_node_status(
+                self.current_outage_node, "online", timeout=1200
             )
 
         elif "network_interrupt" in outage_type:

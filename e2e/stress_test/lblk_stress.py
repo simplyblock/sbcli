@@ -20,10 +20,12 @@ from stress_test.continuous_failover_ha_multi_outage import (
 )
 from stress_test.continuous_k8s_native_failover import (
     K8sNativeFailoverTest,
+    K8sNativeRapidFailoverNoGapTest,
     K8sNativeResilientFailoverTest,
 )
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGapV2NoMigration,
+    RandomRapidFailoverNoGapV2WithMigration,
 )
 from utils.md_journal import (MdJournalAbsent, assert_journal_enabled,
                               scan_log_for_corruption)
@@ -345,3 +347,42 @@ class LblkQuickOutageStressDocker(_LblkQuickHooks, _LblkStressMixin,
         # Otherwise the logs land under the parent's name and an lblk run is
         # indistinguishable from an nvme one after the fact.
         self.test_name = "lblk_quick_outage_docker"
+
+
+class LblkRapidOutageStressDocker(_LblkQuickHooks, _LblkStressMixin,
+                                  _LblkDockerPlatform,
+                                  RandomRapidFailoverNoGapV2WithMigration):
+    """lblk soak on docker: rapid outages, migration left running.
+
+    The pair to LblkQuickOutageStressDocker -- same rapid loop, volumes built
+    once and the next outage as soon as the node is back, but with the
+    migration task runner untouched so each round also exercises whatever
+    migration the outage triggers. Between the two, an lblk failure that only
+    appears under migration is attributable to it.
+
+    Opts in to storage_node_reboot on top of the base's three. That type has a
+    branch in the base but is deliberately absent from its default list, so
+    adding it here changes this test and nothing else.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lblk_rapid_outage_docker"
+        if "storage_node_reboot" not in self.outage_types:
+            self.outage_types.append("storage_node_reboot")
+
+
+class LblkRapidOutageStressK8s(_LblkStressMixin, _LblkK8sPlatform,
+                               K8sNativeRapidFailoverNoGapTest):
+    """lblk soak on k8s-native: rapid outages, no gap between them.
+
+    Nothing to re-point: this lineage descends from K8sNativeFailoverTest, so
+    perform_n_plus_k_outages exists and the ordinary lblk bracket attaches to
+    it. It also inherits that class's outage list, so the cordon+drain reboot
+    and the network cut come with it, each followed by the volume-attach
+    check.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lblk_rapid_outage_k8s"

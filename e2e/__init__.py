@@ -125,6 +125,8 @@ from stress_test.lblk_stress import (
     LblkStressK8s,
     LblkMultiOutageStressDocker,
     LblkQuickOutageStressDocker,
+    LblkRapidOutageStressDocker,
+    LblkRapidOutageStressK8s,
     LblkResilientStressK8s,
 )
 from stress_test.product_limits_stress import (
@@ -499,6 +501,8 @@ ALL_TESTS = [
     LblkStressK8s,
     LblkMultiOutageStressDocker,
     LblkQuickOutageStressDocker,
+    LblkRapidOutageStressDocker,
+    LblkRapidOutageStressK8s,
     LblkResilientStressK8s,
     ProductLimits_Docker,
     ProductLimits_K8s,
@@ -797,6 +801,8 @@ def get_stress_tests():
         LblkStressK8s,
         LblkMultiOutageStressDocker,
         LblkQuickOutageStressDocker,
+        LblkRapidOutageStressDocker,
+        LblkRapidOutageStressK8s,
         LblkResilientStressK8s,
         LblkOutageMatrixDocker,
         LblkOutageMatrixK8s,
