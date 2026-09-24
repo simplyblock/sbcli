@@ -1083,7 +1083,7 @@ jobs:
             ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
               -l app=simplyblock-admin-control \
               -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1) || true
+            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list) || true
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "C1 cluster is active!"
               # Match the UUID by its shape, not by its position: sbctl
@@ -1146,7 +1146,7 @@ jobs:
             ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
               -l app=simplyblock-admin-control \
               -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1) || true
+            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list) || true
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "C2 cluster is active!"
               # Same as the C1 block above.

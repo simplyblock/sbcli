@@ -1109,7 +1109,7 @@ jobs:
             NEW_PHASE=$(kubectl -n $NAMESPACE get pod "$NEW_POD" -o jsonpath='{.status.phase}' 2>/dev/null) || true
             [ -n "$NEW_POD" ] && [ "$NEW_PHASE" = "Running" ] && [ "$NEW_POD" != "$ADMIN_POD" ] && ADMIN_POD="$NEW_POD"
 
-            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1) || true
+            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list) || true
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "Cluster is active!"
               # Match the UUID by its shape, not by its position: sbctl
@@ -1184,7 +1184,7 @@ jobs:
 
           echo "=== Verifying cluster activation ==="
           OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-            sbctl cluster list 2>&1) || true
+            sbctl cluster list) || true
           echo "$OUTPUT"
 
           if echo "$OUTPUT" | grep -qi "active"; then
@@ -1208,7 +1208,7 @@ jobs:
           sleep 60
 
           OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-            sbctl cluster list 2>&1) || true
+            sbctl cluster list) || true
           echo "$OUTPUT"
 
           if echo "$OUTPUT" | grep -qi "active"; then

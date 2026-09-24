@@ -325,7 +325,7 @@ jobs:
           # lands on stdout and jq refuses the whole string.
           if [ -z "${cid}" ] || [ "${cid}" = "null" ]; then
             table_out=$(kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- \
-              sbctl cluster list 2>&1) || true
+              sbctl cluster list) || true
             cid=$(printf '%s\n' "${table_out}" | tr -d '\r' \
               | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
               | head -1) || true

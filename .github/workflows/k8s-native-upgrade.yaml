@@ -974,7 +974,7 @@ jobs:
           echo "=== Waiting for FDB to be ready ==="
           for i in $(seq 1 30); do
             FDB_STATUS=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbcli-dev cluster list 2>&1) || true
+              sbcli-dev cluster list) || true
             if echo "$FDB_STATUS" | grep -qiE 'Connection.*invalid|Error.*reading.*FDB|not found'; then
               echo "FDB not ready yet ($i/30): $(echo "$FDB_STATUS" | head -1)"
               sleep 10
@@ -1009,7 +1009,7 @@ jobs:
           if [ -z "$CLUSTER_ID" ]; then
             # Try table format
             LIST_OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbcli-dev cluster list 2>&1) || true
+              sbcli-dev cluster list) || true
             echo "Cluster list output: $LIST_OUTPUT"
             # By shape, not position: sbctl prefixes its output with an
             # index-building WARNING, which shifts the table down a row and
@@ -1230,7 +1230,7 @@ jobs:
           echo "=== Polling cluster status (admin pod: $ADMIN_POD) ==="
           for i in $(seq 1 $MAX_POLL); do
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbcli-dev cluster list 2>&1) || true
+              sbcli-dev cluster list) || true
             echo "[poll $i/$MAX_POLL] $OUTPUT"
 
             if echo "$OUTPUT" | grep -qi "active"; then
@@ -1244,7 +1244,7 @@ jobs:
                 | head -1)
               if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
                 JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                  sbcli-dev cluster list --json 2>&1) || true
+                  sbcli-dev cluster list --json) || true
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
               fi
               # Get cluster secret using dedicated command (disable tracing to avoid leaking secret)
@@ -1370,7 +1370,7 @@ jobs:
             fi
 
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbctl cluster list 2>&1) || true
+              sbctl cluster list) || true
             echo "[poll $i/$MAX_POLL] $OUTPUT"
 
             if echo "$OUTPUT" | grep -qi "active"; then
@@ -1383,7 +1383,7 @@ jobs:
                 | head -1)
               if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
                 JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                  sbctl cluster list --json 2>&1) || true
+                  sbctl cluster list --json) || true
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
               fi
               # Get cluster secret using dedicated command

@@ -1366,7 +1366,7 @@ jobs:
 
             echo "[poll $i/$MAX_POLL] Using admin pod: $ADMIN_POD"
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbctl cluster list 2>&1) || true
+              sbctl cluster list) || true
             echo "[poll $i/$MAX_POLL] sbctl cluster list output:"
             echo "$OUTPUT"
 
@@ -1474,7 +1474,7 @@ jobs:
 
           echo "=== Verifying cluster activation ==="
           OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-            sbctl cluster list 2>&1) || true
+            sbctl cluster list) || true
           echo "$OUTPUT"
 
           if echo "$OUTPUT" | grep -qi "active"; then
@@ -1498,7 +1498,7 @@ jobs:
           sleep 60
 
           OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-            sbctl cluster list 2>&1) || true
+            sbctl cluster list) || true
           echo "$OUTPUT"
 
           if echo "$OUTPUT" | grep -qi "active"; then
