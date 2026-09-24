@@ -22,6 +22,9 @@ from stress_test.continuous_k8s_native_failover import (
     K8sNativeFailoverTest,
     K8sNativeResilientFailoverTest,
 )
+from stress_test.continuous_failover_ha_multi_client_quick_outage import (
+    RandomRapidFailoverNoGapV2NoMigration,
+)
 from utils.md_journal import (MdJournalAbsent, assert_journal_enabled,
                               scan_log_for_corruption)
 from utils.raw_device_verify import RawDeviceVerifier
@@ -210,6 +213,37 @@ class LblkStressDocker(_LblkStressMixin, _LblkDockerPlatform,
         self.test_name = "lblk_stress_all_nodes_docker"
 
 
+class _LblkQuickHooks:
+    """Bracket the rapid lineage's outage, which has different entry points.
+
+    _LblkStressMixin brackets perform_n_plus_k_outages. The rapid tests have
+    no such method -- they call _perform_outage -- so inheriting the mixin
+    alone would leave the pre-outage half of the bracket unreachable. That
+    failure is silent and looks like a pass: with _adopt_raw_targets never
+    called, _raw_targets stays empty and the post-outage _verify_raw walks an
+    empty list and logs success, on a cluster nobody ever checked was lblk.
+
+    Same work, same order, attached where this lineage actually passes
+    through. restart_nodes_after_failover exists in both, so the mixin's
+    post-outage half needs no change.
+    """
+
+    def _perform_outage(self):
+        if not self._lblk_checked:
+            self._init_lblk_stress()
+            self.assert_lblk_cluster()
+            self._lblk_checked = True
+
+        if self._raw_targets:
+            self._verify_raw("before outage")
+        else:
+            self._adopt_raw_targets()
+
+        out = super()._perform_outage()
+        self._scan_spdk_logs("during outage")
+        return out
+
+
 class _LblkK8sPlatform:
     """SPDK access for the k8s-native soaks."""
 
@@ -280,3 +314,34 @@ class LblkResilientStressK8s(_LblkStressMixin, _LblkK8sPlatform,
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "lblk_stress_resilient_k8s"
+
+
+class LblkQuickOutageStressDocker(_LblkQuickHooks, _LblkStressMixin,
+                                  _LblkDockerPlatform,
+                                  RandomRapidFailoverNoGapV2NoMigration):
+    """lblk soak on docker: outages as fast as the node returns, no migration.
+
+    The other two docker soaks spend most of each round on churn -- delete
+    five lvols, create five more, snapshot, clone -- and then wait out a
+    migration window. Useful, and slow. This one builds its volumes once,
+    starts long FIO, and then hits the cluster again as soon as the last node
+    is back online, with the migration task runner scaled to zero replicas so
+    nothing blocks on it.
+
+    What that buys for lblk specifically: outages per hour. The raw crc32c
+    bracket is the same one the other soaks use, so each outage still gets a
+    before-and-after on the block device with no filesystem in the way -- there
+    are simply far more of them in the same wall-clock time, which is what
+    finding a rare torn write needs.
+
+    Docker only. Scaling the migration service to zero is a Docker Swarm
+    operation; the parent says plainly that on k8s it is a no-op, so an lblk
+    k8s leaf here would silently be the WithMigration variant under a name
+    that claims otherwise.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Otherwise the logs land under the parent's name and an lblk run is
+        # indistinguishable from an nvme one after the fact.
+        self.test_name = "lblk_quick_outage_docker"
