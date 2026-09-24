@@ -3719,21 +3719,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         fdb_connection = cluster.db_connection
 
-        if cluster.mode == "docker":
-            logger.info("Joining docker swarm...")
-            cluster_docker = utils.get_docker_client(cluster_id)
-            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-            results, err = snode_api.join_swarm(
-                cluster_ip=cluster_ip,
-                join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
-                db_connection=cluster.db_connection,
-                cluster_id=cluster_id)
-
-            if not results:
-                logger.error(f"Failed to Join docker swarm: {err}")
-                return False
+        if cluster.cluster_vip:
+            cluster_ip = cluster.cluster_vip
         else:
-            cluster_ip = utils.get_k8s_node_ip()
+            if cluster.mode == "docker":
+                cluster_docker = utils.get_docker_client(cluster_id)
+                cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+            else:
+                cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_info = utils.get_mgmt_ip(node_info, iface_name)
@@ -7206,12 +7199,14 @@ def _restart_storage_node_impl(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
-    if cluster.mode == "docker":
-        cluster_docker = utils.get_docker_client(snode.cluster_id)
-        cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-
+    if cluster.cluster_vip:
+        cluster_ip = cluster.cluster_vip
     else:
-        cluster_ip = utils.get_k8s_node_ip()
+        if cluster.mode == "docker":
+            cluster_docker = utils.get_docker_client(snode.cluster_id)
+            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+        else:
+            cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):

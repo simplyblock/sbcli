@@ -1137,6 +1137,10 @@ commands:
               is ignored.
             dest: alerting_config_path
             type: str
+          - name: "--cluster-vip"
+            help: "Cluster Virtual IP, this is the load balancer IP or domain, would be used for the cluster logging ingress."
+            dest: cluster_vip
+            type: str
       - name: add
         help: "Adds a new cluster."
         arguments:
