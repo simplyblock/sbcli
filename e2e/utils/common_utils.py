@@ -274,7 +274,18 @@ class CommonUtils:
             process_fio = [element for element in process_list_after if "grep" not in element and not element.startswith("kworker")]
             fio_count += len(process_fio)
 
-        assert fio_count == 0, f"FIO process list not empty: {process_list_after}"
+        # process_fio, not process_list_after. The count is taken from the
+        # FILTERED list -- the raw one also holds this check's own
+        # `bash -c ps -ef | grep -i 'fio --name'` and its grep child, which are
+        # dropped before counting. Printing the raw list put those two in every
+        # failure message and sent at least one reader hunting a self-match
+        # that the filter had already handled.
+        assert fio_count == 0, (
+            f"FIO process list not empty after waiting {timeout}s: "
+            f"{fio_count} process(es) still running. If the runtime was still "
+            f"ticking, the wait was too short rather than FIO being stuck -- "
+            f"compare the job's own runtime against this budget.\n    "
+            + "\n    ".join(p[:160] for p in process_fio))
         self.logger.info(f"FIO Running: {process_fio}")
 
         return end_time

@@ -729,7 +729,25 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         # on FIO that is still legitimately running.
         self.FIO_WAVE_RUNTIME_SEC = 4000
         self._per_wave_fio_runtime = self.FIO_WAVE_RUNTIME_SEC
-        self._fio_wait_timeout = 5000
+
+        # Runtime is not the whole wall clock. `--time_based --runtime` starts
+        # counting only once FIO has laid out its files, and with
+        # --size=19G --nrfiles=8 that comes first and is not free. Measured on
+        # lblk_rapid_outage_docker-20260924-171741: launched 17:38, job
+        # processes forked 18:16 -- 38 minutes of layout -- then 4000s of
+        # runtime, due to finish 19:22:40.
+        #
+        # The budget was a flat 5000, which expired at 19:22:12: twenty-eight
+        # seconds before the job it was waiting for would have exited. The run
+        # failed with "FIO process list not empty" naming a job that went on to
+        # write a clean summary (run=4000001msec) a minute later.
+        #
+        # So it is sized as layout allowance plus runtime. Erring long costs
+        # only the time to notice a genuine hang; erring short fails runs that
+        # were working, which is the worse of the two and is what happened.
+        self.FIO_LAYOUT_ALLOWANCE_SEC = 3600
+        self._fio_wait_timeout = (self.FIO_WAVE_RUNTIME_SEC
+                                  + self.FIO_LAYOUT_ALLOWANCE_SEC)
 
     # ── helper: ft-aware single-node selection ───────────────────────────────
 
