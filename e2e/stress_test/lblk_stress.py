@@ -39,6 +39,22 @@ class _LblkStressMixin:
     #: so the soak is dominated by outages rather than by IO.
     VERIFY_REGION = "4G"
 
+    # Class-level defaults, because the guard that decides whether to run
+    # _init_lblk_stress() has to READ _lblk_checked before that method has
+    # ever run. Without these the first outage of every soak raises
+    #
+    #   'LblkRapidOutageStressDocker' object has no attribute '_lblk_checked'
+    #
+    # and it is not specific to that leaf -- the mixin has no __init__, so the
+    # same first-read applies to every class that uses it. Immutable values
+    # only: a class-level list would be shared by every instance, and
+    # _init_lblk_stress replaces all three with per-instance objects the
+    # moment it runs.
+    _lblk_checked = False
+    _raw_targets = ()
+    _verifier = None
+    journal_absent = False
+
     def _init_lblk_stress(self):
         self._verifier = RawDeviceVerifier(self.ssh_obj, self.logger)
         self._raw_targets = []       # (client, device)
