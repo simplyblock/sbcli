@@ -211,8 +211,7 @@ def get_docker_client(cluster_id=None):
             except Exception as e:
                 logger.error(e)
                 continue
-    else:
-        raise RuntimeError("No docker client found for this cluster")
+    raise RuntimeError("No docker client found for this cluster")
 
 
 def get_k8s_node_ip():
@@ -227,9 +226,10 @@ def get_k8s_node_ip():
     for node in nodes:
         if node.status == MgmtNode.STATUS_ONLINE:
             return node.mgmt_ip
-    else:
-        logger.error("No online mgmt nodes was found in the cluster!")
-        return False
+
+    logger.error("No online mgmt nodes was found in the cluster!")
+    return False
+
 
 def dict_agg(data, mean=False, keys=None):
     out: dict = {}
