@@ -727,7 +727,15 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
         # loses IO only on the tail of the last outage if they run to 900s.
         # The wait has to stay above the runtime or the checkpoint join gives up
         # on FIO that is still legitimately running.
-        self.FIO_WAVE_RUNTIME_SEC = 4000
+        # 8000, up from 4000. On lblk_rapid_outage_docker-20260924-171741 the
+        # five outages of a wave took fifteen minutes end to end (17:39-17:54)
+        # while the wave itself ran 4000s, so IO outlasted the outages it was
+        # there to cover by a wide margin and the run was dominated by waiting
+        # for it. Doubling the runtime keeps IO under every outage of a longer
+        # or slower wave; it does not make the run faster, and if the aim is
+        # more outages per hour the lever is the number of outages per
+        # checkpoint, not this.
+        self.FIO_WAVE_RUNTIME_SEC = 8000
         self._per_wave_fio_runtime = self.FIO_WAVE_RUNTIME_SEC
 
         # Runtime is not the whole wall clock. `--time_based --runtime` starts
