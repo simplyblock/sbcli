@@ -77,6 +77,14 @@ class _LblkOutageMatrix(_LblkBase):
     #: helper happened to return as "mount".
     K8S_MOUNT = "/spdkvol"
 
+    #: Outages that ask Kubernetes to move the workload, rather than taking
+    #: it away. storage_node_reboot cordons and drains first -- the documented
+    #: maintenance procedure -- so every pod on that node is evicted by
+    #: design, live FIO included. For these, a FIO job that was rescheduled
+    #: has behaved correctly and the continuity claim does not apply; for
+    #: every other outage it still does.
+    DRAINING_OUTAGES = ("storage_node_reboot",)
+
     #: How far back _assert_attached looks for volume-attach events. One
     #: cycle's worth: the outage, its recovery, and the checks since. Long
     #: enough to catch this cycle's failure, short enough that the previous
@@ -250,7 +258,7 @@ class _LblkOutageMatrix(_LblkBase):
             self._verify_raw(where)
             self._scan_spdk_logs(where)
             self._assert_attached(where)
-            self._assert_fio_alive(live, where)
+            self._assert_fio_alive(live, where, outage_type=outage)
 
         self._finish_live_fio(live)
         self._assert_static_unchanged("after all outages")
@@ -1130,7 +1138,7 @@ class _LblkOutageMatrix(_LblkBase):
                              label, name)
         return handles
 
-    def _assert_fio_alive(self, handles, outage):
+    def _assert_fio_alive(self, handles, outage, outage_type=None):
         """FIO must still be running. A job that died is an interruption.
 
         On k8s the handle is the Job NAME -- a non-empty string -- so the old
@@ -1152,6 +1160,29 @@ class _LblkOutageMatrix(_LblkBase):
                 # healthy -- a false failure on the availability gate, which
                 # is worse than having no gate. Ask the client instead.
                 alive = self._docker_fio_running(job)
+            if not alive and outage_type in self.DRAINING_OUTAGES:
+                # The drain asked for this. Give the Job controller a moment
+                # to place the replacement, then judge it on whether IO
+                # resumed -- not on whether it never stopped.
+                self.logger.info(
+                    "[matrix] live FIO on %s was moved by the drain; waiting "
+                    "for the Job to place it again", name)
+                sleep_n_sec(60)
+                alive = (self._k8s_fio_running(handle)
+                         if isinstance(handle, str)
+                         else self._docker_fio_running(job))
+                if alive:
+                    self.logger.info(
+                        "[matrix] live FIO on %s resumed after the drain. "
+                        "Continuity is NOT claimed for this cycle -- the "
+                        "outage evicted it on purpose -- but IO is flowing "
+                        "again and the data checks still gate the run.", name)
+                    continue
+                raise LblkPreconditionError(
+                    f"[matrix] live FIO on {name} was evicted by the drain "
+                    f"during {outage} and did not come back. Being moved is "
+                    f"expected here; staying down is not -- the Job should "
+                    f"have been rescheduled onto a surviving node.")
             if not alive:
                 ran = time.time() - getattr(self, "_fio_started_at", 0)
                 if ran >= self._fio_runtime:
@@ -1169,7 +1200,48 @@ class _LblkOutageMatrix(_LblkBase):
                     f"With ndcs/npcs {self.ndcs}/{self.npcs} one node down is "
                     f"meant to be survivable, so IO ending here is a loss of "
                     f"availability, not an expected blip.")
+        self._collect_fio_findings(handles, outage)
         self.logger.info("[matrix] live FIO still running after %s", outage)
+
+    def _collect_fio_findings(self, handles, outage):
+        """Bank what the FIO logs say now, before a pod can take them away.
+
+        _finish_live_fio reads the logs of the pods a Job has at the END. A
+        pod evicted by a drain takes its log with it, so an io_u error it
+        recorded is gone by then and the final verdict silently covers only
+        the FIO that ran since the last eviction. Scanning every cycle and
+        keeping the findings closes that hole; the final read stays, and the
+        two are reported together.
+
+        k8s only -- on docker FIO writes to a file on the client that no
+        outage removes.
+        """
+        if not self.k8s_test:
+            return
+        kept = getattr(self, "_fio_findings", None)
+        if kept is None:
+            kept = self._fio_findings = []
+        k8s = self._ensure_k8s_utils()
+        for name, _log, _job, handle in handles:
+            if not isinstance(handle, str):
+                continue
+            try:
+                for pod in (k8s.get_job_pod_names(handle) or []):
+                    logs = k8s.get_pod_logs(pod, tail=2000) or ""
+                    for line in logs.splitlines():
+                        low = line.strip().lower()
+                        if "max latency exceeded" in low or re.search(
+                                r"\berr=\s*110\b", low):
+                            continue          # latency, judged separately
+                        if (any(m in low for m in self.FIO_ERROR_MARKERS)
+                                or re.search(r"\berr=\s*[1-9]", low)):
+                            entry = f"[{outage}] {pod}: {line.strip()[:160]}"
+                            if entry not in kept:
+                                kept.append(entry)
+            except Exception as exc:          # noqa: BLE001
+                self.logger.warning(
+                    "[matrix] could not scan FIO logs for %s after %s: %s",
+                    name, outage, str(exc)[:120])
 
     def _await_fio_done(self, handles):
         """Wait for every live FIO job to finish, then leave it to be judged.
@@ -1361,6 +1433,12 @@ class _LblkOutageMatrix(_LblkBase):
             else:
                 self.logger.info("[matrix] live FIO on %s completed clean",
                                  name)
+        banked = getattr(self, "_fio_findings", [])
+        if banked:
+            failures.append(
+                f"IO errors recorded DURING the run, on pods that a later "
+                f"drain evicted and whose logs are gone from the final read "
+                f"({len(banked)}):\n        " + "\n        ".join(banked[:8]))
         if failures:
             raise LblkPreconditionError(
                 f"[matrix] {len(failures)} of {len(handles)} live FIO "
