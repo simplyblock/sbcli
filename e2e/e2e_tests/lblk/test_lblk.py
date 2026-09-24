@@ -1304,6 +1304,38 @@ class _LblkBase(TestClusterBase):
                 str(exc)[:150])
             self.sbcli_utils.restart_node(node_uuid=uuid)
 
+    def _await_node_online(self, uuid, seconds):
+        """Wait up to *seconds* of WALL CLOCK for the node to read online.
+
+        Not sbcli_utils.wait_for_storage_node_status, whose `timeout` counts
+        ITERATIONS: it does an API call and sleeps 1s per pass, and on k8s a
+        call costs about five seconds, so `timeout=600` runs for roughly
+        sixty-two minutes rather than ten. On 2026-09-24 three of those turned
+        a failure established in minutes into a 3h26m run, and the log line
+        reporting it said "600s" while describing 3,720.
+
+        The shared helper is not changed here. Both platform copies behave the
+        same way and every caller in the suite is written against it, so
+        correcting it globally would shorten every wait in the suite by about
+        six at once -- a change to make deliberately, not as a side effect of
+        this. This bounds the path that actually hurt.
+        """
+        deadline = time.time() + seconds
+        last = None
+        while time.time() < deadline:
+            try:
+                details = self.sbcli_utils.get_storage_node_details(uuid)
+                status = (details[0] or {}).get("status") if details else None
+                if status == "online":
+                    return
+                last = f"status={status!r}"
+            except Exception as exc:                  # noqa: BLE001
+                last = str(exc)[:120]
+            sleep_n_sec(10)
+        raise LblkPreconditionError(
+            f"[lblk] {uuid} was not online within {seconds}s of wall clock "
+            f"(last: {last})")
+
     def _restart_until_online(self, uuid, ip, per_attempt=600):
         """Restart the node, and try again if the control plane gave up.
 
@@ -1329,19 +1361,19 @@ class _LblkBase(TestClusterBase):
         last = None
         for attempt in range(1, self.RESTART_ATTEMPTS + 1):
             self._issue_restart(uuid)
+            started = time.time()
             try:
-                self.sbcli_utils.wait_for_storage_node_status(
-                    uuid, "online", timeout=per_attempt)
+                self._await_node_online(uuid, per_attempt)
                 if attempt > 1:
                     self.logger.info(
-                        "[lblk] %s came online on restart attempt %d", uuid,
-                        attempt)
+                        "[lblk] %s came online on restart attempt %d after "
+                        "%.0fs", uuid, attempt, time.time() - started)
                 return
             except Exception as exc:                  # noqa: BLE001
                 last = exc
                 self.logger.warning(
-                    "[lblk] %s (%s) still offline %ds after restart attempt "
-                    "%d/%d: %s", uuid, ip, per_attempt, attempt,
+                    "[lblk] %s (%s) still offline %.0fs after restart attempt "
+                    "%d/%d: %s", uuid, ip, time.time() - started, attempt,
                     self.RESTART_ATTEMPTS, str(exc)[:160])
                 sleep_n_sec(30)
         raise LblkPreconditionError(
