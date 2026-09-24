@@ -401,20 +401,29 @@ def test_purge_never_touches_user_snapshots(monkeypatch):
 
 
 def test_purge_keeps_the_demoted_volumes_fail_over_point(monkeypatch):
-    """The target copy of the snapshot a demoted volume is fenced on is the
-    current fail-over point a pending PromoteVolume may still need --
-    confirmed live 2026-09-24 (Ramen relocate M-02): detach_policy runs the
-    instant a source demotes to Secondary, well before any fail-over gets a
-    chance to promote the target, and deleting this copy just because
-    nothing has cloned from it YET stranded every subsequent PromoteVolume
-    attempt with "No replicated snapshot on target yet" -- even though the
-    source volume was still fully healthy at the time. An older,
-    already-superseded internal snapshot's target copy has no such role (a
-    newer one already carries the current state forward) and stays
-    purge-eligible. A volume that is NOT currently demoted (a plain "turn
-    off replication policy") has no pending fail-over to protect, and this
-    guard must not fire for it -- see
-    test_purge_deletes_internal_snapshots_on_both_sides.
+    """The snapshot a demoted volume is fenced on -- SOURCE copy and TARGET
+    copy alike -- is the current fail-over point a pending PromoteVolume may
+    still need, confirmed live 2026-09-24 (Ramen relocate M-02): detach_policy
+    runs the instant a source demotes to Secondary, well before any fail-over
+    gets a chance to promote the target, and deleting either copy just
+    because nothing has cloned from it YET stranded every subsequent
+    PromoteVolume attempt -- even though the source volume was still fully
+    healthy at the time.
+
+    Both copies matter for different reasons: the target copy is what a clone
+    is actually built from, but last_replicated_target_snapshot resolves its
+    fail-over candidates by first looking up each completed replication
+    task's SOURCE snapshot id (task.function_params["snapshot_id"]) and only
+    THEN reading that record's target_replicated_snap_uuid -- so a deleted
+    source copy makes the whole candidate vanish before the target copy is
+    ever even consulted, regardless of whether the target copy itself
+    survived.
+
+    An older, already-superseded internal snapshot's copies have no such role
+    (a newer one already carries the current state forward) and stay
+    purge-eligible. A volume that is NOT currently demoted (a plain "turn off
+    replication policy") has no pending fail-over to protect, and this guard
+    must not fire for it -- see test_purge_deletes_internal_snapshots_on_both_sides.
     """
     lv = _lvol("LV1", demote_snapshot_id="S_SRC_NEW")
     remote = _lvol("REP_LV1")
@@ -430,7 +439,10 @@ def test_purge_keeps_the_demoted_volumes_fail_over_point(monkeypatch):
     monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
     rpc._purge_internal_replication_snapshots("LV1")
     assert "S_TGT_NEW" not in deleted, "the newest target copy is a live fail-over point"
+    assert "S_SRC_NEW" not in deleted, \
+        "the newest SOURCE copy is what the job-task lookup resolves by id first"
     assert "S_TGT_OLD" in deleted, "a superseded target copy is still purge-eligible"
+    assert "S_SRC_OLD" in deleted, "a superseded source copy is still purge-eligible"
 
 
 def test_purge_keeps_a_snapshot_a_live_clone_depends_on(monkeypatch):

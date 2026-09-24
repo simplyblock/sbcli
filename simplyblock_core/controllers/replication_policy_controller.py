@@ -354,6 +354,19 @@ def _purge_internal_replication_snapshots(lvol_id):
         if _has_dependent_clone(snap.get_id()):
             logger.info("Keeping source snapshot %s: a volume is cloned from it", snap.get_id())
             continue
+        if snap.get_id() == demote_snapshot_id:
+            # last_replicated_target_snapshot resolves its candidates by
+            # SOURCE snapshot id first (each completed replication task names
+            # one in task.function_params["snapshot_id"]) and only then reads
+            # target_replicated_snap_uuid off that record. Deleting this
+            # source copy makes the whole candidate disappear before its
+            # (already-preserved, see above) target copy is ever consulted --
+            # the exact same "No replicated snapshot on target yet" stranding
+            # this function exists to prevent, just reached from the other
+            # side of the pair.
+            logger.info("Keeping source snapshot %s: volume is demoted, "
+                        "awaiting a pending fail-over", snap.get_id())
+            continue
         if snapshot_controller.delete(snap.get_id()):
             removed += 1
         else:
