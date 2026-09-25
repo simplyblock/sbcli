@@ -39,6 +39,7 @@ from simplyblock_web import node_utils
 
 from . import pci as pci_utils
 from .helpers import parse_thread_siblings_list
+from ..models.mgmt_node import MgmtNode
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -199,20 +200,18 @@ def generate_string(length):
 def get_docker_client(cluster_id=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes()
+    nodes = db_controller.get_mgmt_nodes(cluster_id)
     if not nodes:
         raise RuntimeError("No mgmt nodes was found in the cluster!")
 
-    docker_ips = [node.docker_ip_port for node in nodes]
-
-    for ip in docker_ips:
-        try:
-            return docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
-        except Exception as e:
-            print(e)
-            raise e
-
-    raise RuntimeError("No docker client found for this IP")
+    for node in nodes:
+        if node.status == MgmtNode.STATUS_ONLINE:
+            try:
+                return docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto")
+            except Exception as e:
+                logger.error(e)
+                continue
+    raise RuntimeError("No docker client found for this cluster")
 
 
 def get_k8s_node_ip():
@@ -225,7 +224,11 @@ def get_k8s_node_ip():
         return False
 
     for node in nodes:
-        return node.mgmt_ip
+        if node.status == MgmtNode.STATUS_ONLINE:
+            return node.mgmt_ip
+
+    logger.error("No online mgmt nodes was found in the cluster!")
+    return False
 
 
 def dict_agg(data, mean=False, keys=None):
