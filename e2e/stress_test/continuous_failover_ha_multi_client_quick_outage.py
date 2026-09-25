@@ -528,11 +528,20 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
         self.rapid_fio_init(runtime)
         # small stagger to avoid SSH bursts
         def _launch(name, det):
+            # Jitter this job's runtime the same way a relaunch does. Without
+            # it the whole first wave is started with one flat runtime and
+            # therefore ends within seconds of itself -- which is the bunching
+            # the jitter was added to prevent, left in place for the largest
+            # cohort of the run. The relaunches that follow were already
+            # spread; the cohort they replace was not.
+            job_runtime = (self.rapid_runtime_for(name)
+                           if getattr(self, "_rapid_lifecycle_ready", False)
+                           else runtime)
             self.ssh_obj.run_fio_test(
                 det["Client"], None, det["Mount"], det["Log"],
                 size=self.fio_size, name=f"{name}_fio", rw="randrw",
                 bs=self._short_bs(), nrfiles=8, iodepth=1, numjobs=2,
-                time_based=True, runtime=runtime, log_avg_msec=1000,
+                time_based=True, runtime=job_runtime, log_avg_msec=1000,
                 iolog_file=det["iolog_base_path"],
                 verify="md5", verify_dump=1, verify_fatal=1, retries=6,
                 use_latency=False
