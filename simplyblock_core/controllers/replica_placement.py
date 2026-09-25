@@ -56,7 +56,7 @@ not -- instead of a warning buried in a log.
 """
 
 import logging
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 from collections.abc import Mapping, Sequence
 
 logger = logging.getLogger()
@@ -318,7 +318,7 @@ def _assignment_from_matching(
     primaries: Sequence[str],
     hosts: Sequence[str],
     cost: Sequence[Sequence[int]],
-) -> dict[str, str] | None:
+) -> Optional[dict[str, str]]:
     """Run the matcher and reject the result if it had to use a forbidden
     edge. ``None`` means no assignment satisfying the hard constraints
     exists."""
@@ -341,8 +341,8 @@ def plan_diverse_layout(
     current_layout: Mapping[str, Placement],
     ftt: int,
     *,
-    host_by_node: Mapping[str, str] | None = None,
-    label_by_node: Mapping[str, int] | None = None,
+    host_by_node: Optional[Mapping[str, str]] = None,
+    label_by_node: Optional[Mapping[str, int]] = None,
 ) -> DiversityPlan:
     """Compute the cheapest fully domain-diverse layout over ``node_ids``.
 
@@ -441,7 +441,7 @@ def plan_diverse_layout(
 
     enforce_fd = fd_enabled and not overloaded
     penalties: dict[tuple[int, int], int] = {}
-    secondary: dict[str, str] | None = None
+    secondary: Optional[dict[str, str]] = None
     for attempt in range(MAX_PAIR_RETRIES + 1):
         secondary = _assignment_from_matching(
             nodes, nodes, _secondary_cost(enforce_fd, penalties))
@@ -674,7 +674,7 @@ def _break_cycles(pending, free, role, emit) -> None:
             continue
         path: list[str] = []
         position: dict[str, int] = {}
-        cursor: str | None = start
+        cursor: Optional[str] = start
         while cursor is not None and cursor not in visited:
             position[cursor] = len(path)
             path.append(cursor)

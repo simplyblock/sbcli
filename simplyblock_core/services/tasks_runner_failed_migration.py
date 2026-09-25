@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import tasks_controller, device_controller
@@ -62,7 +62,7 @@ def task_runner(task):
                         # occurrences of "can't subtract offset-naive and
                         # offset-aware datetimes" across two node removals on
                         # 2026-09-11.
-                        diff = datetime.now(UTC) - datetime.fromisoformat(node.online_since)
+                        diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
                         if diff.total_seconds() < 60:
                             task.function_result = "node is online < 1 min, retrying"
                             task.status = JobSchedule.STATUS_SUSPENDED
