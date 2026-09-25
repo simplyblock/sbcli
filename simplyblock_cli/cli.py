@@ -455,6 +455,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
         subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+        subcommand.add_argument('--cluster-vip', help='Cluster Virtual IP, this is the load balancer IP or domain, would be used for the cluster logging ingress.', type=str, dest='cluster_vip')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster.')

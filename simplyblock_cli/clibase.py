@@ -1488,6 +1488,7 @@ class CLIWrapperBase:
         enable_hang_device = getattr(args, "enable_hang_device", False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
+        cluster_vip = getattr(args, 'cluster_vip', '')
 
         backup_config = None
         if args.use_backup:
@@ -1510,6 +1511,7 @@ class CLIWrapperBase:
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,
+            cluster_vip=cluster_vip,
         )
 
     def query_yes_no(self, question, default="yes"):
