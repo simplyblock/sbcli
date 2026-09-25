@@ -23,13 +23,18 @@ def _device(status):
     return dev
 
 
-def _node(node_id="n1", devices=(), secondary="", tertiary="", cluster_id="c1"):
+def _node(node_id="n1", devices=(), secondary="", tertiary="", cluster_id="c1",
+          status=StorageNode.STATUS_ONLINE):
     node = MagicMock(spec=StorageNode)
     node.get_id = MagicMock(return_value=node_id)
     node.nvme_devices = list(devices)
     node.secondary_node_id = secondary
     node.tertiary_node_id = tertiary
     node.cluster_id = cluster_id
+    # Explicit, because start_device_decommission reads it to decide whether the
+    # node still needs stamping as departing; left as a child mock it is truthy
+    # and compares equal to nothing, so the stamp would always fire.
+    node.status = status
     return node
 
 
@@ -44,6 +49,11 @@ class DeviceDecommissionTests(unittest.TestCase):
         db.get_storage_nodes_by_cluster_id = MagicMock(return_value=cluster_nodes or [node])
         return patch.object(node_drain_steps, 'DBController', MagicMock(return_value=db))
 
+    def _stamping_suppressed(self):
+        """The departing stamp writes through the real control plane; these
+        tests are about the poll loop, not the write."""
+        return patch('simplyblock_core.storage_node_ops.set_node_status', MagicMock())
+
     def test_a_rebuild_already_running_is_not_started_again(self):
         """Re-POSTing must not restart the work the caller is waiting for."""
         release = threading.Event()
@@ -55,7 +65,7 @@ class DeviceDecommissionTests(unittest.TestCase):
             return True
 
         node = _node(devices=[_device(NVMeDevice.STATUS_ONLINE)])
-        with self._with_db(node), \
+        with self._with_db(node), self._stamping_suppressed(), \
                 patch('simplyblock_core.storage_node_ops._decommission_node_devices', slow):
             self.assertTrue(node_drain_steps.start_device_decommission("n1"),
                             "the first call should have started the rebuild")
@@ -104,7 +114,7 @@ class DeviceDecommissionTests(unittest.TestCase):
         def boom(_node):
             raise RuntimeError("rebuild exploded")
 
-        with self._with_db(node), \
+        with self._with_db(node), self._stamping_suppressed(), \
                 patch('simplyblock_core.storage_node_ops._decommission_node_devices', boom):
             node_drain_steps.start_device_decommission("n1")
             for _ in range(50):

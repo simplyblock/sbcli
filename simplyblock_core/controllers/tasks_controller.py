@@ -707,11 +707,22 @@ def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
 def add_device_failed_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        # IN_REMOVAL nodes have a dead SPDK (shut down by the removal flow);
-        # a migration task targeting their distribs can never run and would
-        # stall the node-removal completion check forever. Skip them like
-        # already-REMOVED nodes.
-        if node.status == StorageNode.STATUS_REMOVED:
+        # A departing node cannot run a migration task: its SPDK is stopped, or
+        # about to be, and the runner refuses any task whose node is not ONLINE.
+        # Queued anyway, such a task retries forever and the removal's own
+        # completion check waits on it -- the device never reaches
+        # failed_and_migrated, so the drain sits in its device phase for good.
+        #
+        # This used to name only STATUS_REMOVED while the comment claimed it
+        # covered IN_REMOVAL too, which held while removal failed devices last:
+        # by then the node's lvstore was already torn down, so it had no distrib
+        # left to queue against. A drain that fails devices FIRST still has one,
+        # and deadlocked on exactly this (7-node cluster, 2026-09-25: six tasks
+        # stuck on the suspended node, "node is not online, retrying").
+        #
+        # The departing node's distribs still have to be migrated; the block
+        # below queues them onto its secondary or tertiary, which can run them.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
@@ -740,7 +751,9 @@ def add_device_failed_mig_task(device_id):
 def add_new_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        # Same reason as add_device_failed_mig_task: a departing node cannot
+        # run the task, so queueing it strands work nothing will ever do.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":

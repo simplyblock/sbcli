@@ -100,8 +100,28 @@ def _is_running(node_id: str, step: str) -> bool:
 
 
 def start_device_decommission(node_id: str) -> bool:
-    """Fail this node's data devices and rebuild them onto its peers."""
+    """Fail this node's data devices and rebuild them onto its peers.
+
+    The node is stamped PENDING_REMOVAL first. Failing a device queues a
+    rebuild task against every node whose distribs reference it, and the task
+    runner will not run one on a node that is not ONLINE -- so a task queued
+    against this node, which is suspended for the drain, retries forever while
+    the device it belongs to never reaches failed_and_migrated. The status is
+    what tells the queuing side to skip this node and put its distribs' work on
+    a replica peer instead.
+
+    The monolithic removal never needed this: it failed devices last, by which
+    point the node's lvstore was torn down and it had no distrib to queue
+    against. A drain that fails devices first still has one.
+    """
     from simplyblock_core import storage_node_ops
+    from simplyblock_core.models.storage_node import StorageNode
+
+    node = DBController().get_storage_node_by_id(node_id)
+    if node.status not in StorageNode.DEPARTING_STATUSES:
+        storage_node_ops.set_node_status(
+            node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="drain")
+        logger.info(f"[DRAIN] {node_id}: marked pending_removal before failing devices")
 
     def drive():
         node = DBController().get_storage_node_by_id(node_id)
