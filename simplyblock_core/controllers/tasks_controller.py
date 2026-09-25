@@ -326,7 +326,14 @@ def add_device_mig_task_for_node(node_id):
                 break
 
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status == StorageNode.STATUS_REMOVED:
+        # Every departing status, not just REMOVED. A device-migration task runs
+        # ON the node it is queued for, and the runner will not run one whose
+        # node is not ONLINE -- so a task queued against a node that is on its
+        # way out waits for a recovery that is never coming. Testing only
+        # REMOVED left the whole of a removal's drain, where the node is still
+        # present but no longer returning, inside the gap. The sibling queuing
+        # functions above read the same set for the same reason.
+        if node.status in StorageNode.DEPARTING_STATUSES:
             continue
 
         for bdev in node.lvstore_stack:

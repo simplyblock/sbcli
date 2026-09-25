@@ -87,6 +87,35 @@ class TestDepartingNodesAreSkipped(unittest.TestCase):
             tasks_controller.add_device_failed_mig_task)
         self.assertEqual(added, ["n0"])
 
+    def test_the_whole_node_sweep_skips_departing_nodes_too(self):
+        """add_device_mig_task_for_node walks every node in the cluster and
+        queues one task per distrib, so it reaches a departing node the same way
+        the two above do. It was missed when they were fixed because its name
+        does not match theirs, and it tested only STATUS_REMOVED -- which left
+        the whole of a drain inside the gap. Found live on 2026-09-25: two
+        device_migration tasks sitting on a node in pending_removal, each
+        "waiting for unavailable nodes/devices to recover".
+        """
+        nodes = [_node("n0", StorageNode.STATUS_ONLINE)]
+        nodes += [_node(f"n{i + 1}", s)
+                  for i, s in enumerate(StorageNode.DEPARTING_STATUSES)]
+        for node in nodes:
+            node.cluster_id = "c1"
+        db = MagicMock()
+        db.get_storage_node_by_id.return_value = nodes[0]
+        db.get_storage_nodes_by_cluster_id.return_value = nodes
+        db.get_job_tasks.return_value = []
+        added = []
+        with patch.object(tasks_controller, "db", db), \
+             patch.object(tasks_controller, "_add_task",
+                          side_effect=lambda *a, **k: added.append(a[2])):
+            tasks_controller.add_device_mig_task_for_node("n0")
+
+        self.assertEqual(
+            added, ["n0"],
+            "a departing node was given a device-migration task; it runs ON "
+            "that node, so it waits for a recovery that is never coming")
+
     def test_healthy_nodes_still_get_their_tasks(self):
         added = self._queued_for(
             [StorageNode.STATUS_ONLINE, StorageNode.STATUS_ONLINE],
