@@ -38,7 +38,18 @@ BDTS="/root/spdk/ultra/build_bdts/bdts"
 WORKDIR="/root/core_analysis"
 
 HOST="$(hostname -s 2>/dev/null || echo unknown)"
-log() { echo "[core-bt][${HOST}] $*"; }
+# Logs go to stderr. pick_container returns the container name by echoing it,
+# and the caller reads that with $(...) -- which captures stdout. With log on
+# stdout, a candidate that failed its mkdir probe had its own complaint read
+# back as the name of the container to use:
+#
+#   using container [core-bt][vm202]   spdk_4422: mkdir /root/core_analysis failed
+#
+# That string is not empty, so the -z guard below let it through, and every
+# docker cp against it failed. The run reported "0 MB copied" and two SPDK
+# cores were lost -- on a run that had found data corruption and most needed
+# them.
+log() { echo "[core-bt][${HOST}] $*" >&2; }
 
 if [ -z "${RUN_DIR}" ]; then
     log "ERROR: no RUN_DIR given; nothing to do"
@@ -113,6 +124,18 @@ pick_container() {
 }
 
 CONTAINER="$(pick_container)"
+
+# Belt and braces: the name has to be one we offered. Redirecting the logs
+# fixes the cause, but anything at all on this function's stdout would
+# otherwise be taken for a container again, and the failure mode is silent --
+# cores are skipped one by one and the run still exits 0.
+if [ -n "${CONTAINER}" ] && ! echo "${CANDIDATES}" | tr ' ' '\n' | grep -qxF "${CONTAINER}"; then
+    log "ERROR: pick_container returned something that is not a candidate:"
+    log "       '${CONTAINER}'"
+    log "       cores left in place: ${CORES}"
+    exit 0
+fi
+
 if [ -z "${CONTAINER}" ]; then
     log "ERROR: none of the spdk containers on this host accept exec+cp; cannot symbolicate"
     log "       candidates tried: $(echo ${CANDIDATES} | tr '

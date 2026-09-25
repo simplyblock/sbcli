@@ -456,7 +456,26 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
             return True
 
     def fio_relaunch(self, name, record, runtime):
-        """Start one job again, in place, without touching the others."""
+        """Start one job again, in place, without touching the others.
+
+        Any straggler is killed first. Liveness here is "does this job's tmux
+        session exist", and a session can be gone while a process it started is
+        not, so the check can say finished a moment too early. Two fio jobs
+        writing the same files report corruption that is ours -- and a verify
+        failure is the one result this suite exists to produce, so it must
+        never be one we caused. The kill costs a second and removes the whole
+        question.
+        """
+        client = record["Client"]
+        try:
+            pids = self.ssh_obj.find_process_name(
+                client, f"{name}_fio", return_pid=True)
+            for pid in [p for p in pids if str(p).strip().isdigit()]:
+                self.ssh_obj.kill_processes(client, pid=pid)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[rapid-fio] could not sweep stragglers for %s on %s: %s",
+                name, client, str(exc)[:120])
         self.ssh_obj.run_fio_test(
             record["Client"], None, record["Mount"], record["Log"],
             size=self.fio_size, name=f"{name}_fio", rw="randrw",

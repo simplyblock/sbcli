@@ -211,6 +211,28 @@ class RapidFioLifecycle(_RapidFioHooks):
 
         errors = self.rapid_scan_fio_logs()
         if errors:
+            # Take fio's own dumps of the bytes it actually read, before the
+            # run ends and the clients are reused. They are the only artefact
+            # that separates real corruption from a stale read, a second
+            # writer, or misdirected IO -- and fio writes them to /root on the
+            # client, where nothing else in the run preserves them.
+            #
+            # Wrapped because this must not replace a corruption report with a
+            # collection error: the finding is what matters, the dumps only
+            # explain it.
+            if hasattr(self, "collect_fio_hdr_dumps"):
+                try:
+                    self.collect_fio_hdr_dumps("rapid_fio_failure")
+                except Exception as exc:          # noqa: BLE001
+                    self.logger.warning(
+                        "[rapid-fio] could not collect hdr_fail dumps: %s",
+                        str(exc)[:160])
+            else:
+                self.logger.warning(
+                    "[rapid-fio] this platform has no collect_fio_hdr_dumps; "
+                    "the bytes fio actually read are NOT being preserved, and "
+                    "without them a corruption report cannot be told apart "
+                    "from a stale read or a second writer.")
             raise RapidFioFailure(
                 f"[rapid-fio] FIO reported {len(errors)} IO error(s) "
                 f"{context}. Detected within one outage of happening, so this "
