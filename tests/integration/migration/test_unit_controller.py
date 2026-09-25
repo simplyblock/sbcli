@@ -680,7 +680,7 @@ class TestStartMigrationPreconditions(unittest.TestCase):
         src = _node("node-src", status=StorageNode.STATUS_OFFLINE)
         tgt = _node("node-tgt")
         with patch.object(ctl, 'db', self._base_db(mig, lvol, src, tgt)):
-            with pytest.raises(ValueError, match="Source node is not online"):
+            with pytest.raises(ValueError, match="Source node cannot serve a migration"):
                 ctl.start_migration("mig-uuid")
 
     def test_reject_target_node_offline(self):

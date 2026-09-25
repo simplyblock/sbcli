@@ -340,7 +340,7 @@ class TestPreconditions:
         mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), ctx.node_uuid("tgt"))
         assert mig_id is False
-        assert "Source node is not online" in err
+        assert "Source node cannot serve a migration" in err
         set_node_status(src_uuid, StorageNode.STATUS_ONLINE)
 
     def test_reject_same_source_and_target(self, topology_two_node):
