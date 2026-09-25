@@ -2597,17 +2597,23 @@ class K8sUtils:
             )
             status = res.get("status", {})
             phase = (status.get("phase") or "").strip()
-            sub_phase = (status.get("subPhase") or "").strip()
+            # subPhase was removed in v1alpha2 and replaced by step.state;
+            # read both so the log says something on either version.
+            sub_phase = ((status.get("subPhase") or "")
+                         or (status.get("step") or {}).get("state", "")).strip()
 
             if phase == "Succeeded":
                 self.logger.info(
                     f"[K8sUtils] StorageNodeOps '{name}' Succeeded"
                 )
                 return res
-            if phase == "Failed":
+            # Aborted is a v1alpha2 addition. Left out, an aborted operation
+            # was indistinguishable from a slow one and the wait spun to its
+            # full timeout instead of failing where the cause was still legible.
+            if phase in ("Failed", "Aborted"):
                 self._dump_storage_node_ops_diagnostics(name, ns)
                 raise AssertionError(
-                    f"StorageNodeOps '{name}' failed: "
+                    f"StorageNodeOps '{name}' {phase.lower()}: "
                     f"{status.get('message', 'no message')}"
                 )
             self.logger.info(
@@ -2677,73 +2683,150 @@ class K8sUtils:
 
     def patch_storage_node_add_workers(self, new_workers: list,
                                         storage_node_set_ref: str = "simplyblock-node",
-                                        namespace: str = None):
-        """Add worker nodes by creating StorageNode CRs directly.
+                                        namespace: str = None,
+                                        cluster_ref: str = "simplyblock-cluster",
+                                        timeout: int = 3600):
+        """Add worker nodes by growing the cluster through a discovery run.
 
-        For each worker, a ``StorageNode`` CR is created with
-        ``spec.overrides.expand: true``.  The operator detects the
-        new CR and handles provisioning automatically — no separate
-        ``StorageCluster`` expand patch is needed.
+        This used to create a StorageNode CR per worker with
+        ``spec.overrides.expand: true``, reading driveSizeRange and pcieModel
+        off the parent StorageNodeSet. Neither half of that still works:
 
-        Device configuration (``driveSizeRange``, ``pcieModel``) is
-        read from the parent StorageNodeSet and included in the
-        ``overrides`` block so the init container can find the correct
-        SSD devices on the new worker.
+        * The StorageNodeSet is gone. Nothing reconciles one any more, so the
+          bring-up no longer creates it and the read came back empty -- the new
+          nodes would have been created with no device selection at all.
+        * A hand-written StorageNode has no cluster. v1alpha1 has no clusterRef
+          field, and the conversion webhook derives it from a controller owner
+          reference of kind StorageCluster (controllingClusterName in
+          storagenode_conversion.go). A bare CR has no owner, so it converted
+          to a node with an empty ClusterRef, belonging to nothing.
+
+        Growing a cluster is now a second discovery naming the existing one:
+        the draft it writes carries the same clusterRef, and approving it
+        creates the nodes already marked as an expansion, which the control
+        plane reads as a request to rebalance onto them.
 
         Parameters
         ----------
         new_workers : list[str]
             Kubernetes node names to add (e.g. ``["worker-4", "worker-5"]``).
         storage_node_set_ref : str
-            Name of the parent StorageNodeSet
-            (default ``simplyblock-node``).
+            Retained for call compatibility; used only to name the objects.
         namespace : str | None
             Override namespace (default ``self.namespace``).
+        cluster_ref : str
+            The StorageCluster to grow.
+        timeout : int
+            Seconds to wait for the expansion to finish.
         """
         ns = namespace or self.namespace
+        if not new_workers:
+            self.logger.info("[K8sUtils] no workers to add")
+            return None
 
-        # Read device config from parent StorageNodeSet
-        sns_json = self.get_resource_json(
-            "storagenodeset.storage.simplyblock.io",
-            storage_node_set_ref,
-            namespace=ns,
+        suffix = "-".join(w.split(".")[0] for w in new_workers)[:30]
+        config_name = f"grow-{suffix}"
+        ops_name = f"discover-{config_name}"[:63]
+
+        worker_yaml = "".join(f"      - {w}\n" for w in new_workers)
+        yaml_content = (
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
+            "kind: OperatorOps\n"
+            "metadata:\n"
+            f"  name: {ops_name}\n"
+            f"  namespace: {ns}\n"
+            "spec:\n"
+            "  action: Discover\n"
+            "  discover:\n"
+            f"    configName: {config_name}\n"
+            f"    clusterRef: {cluster_ref}\n"
+            "    enableControlPlaneNodes: false\n"
+            "    workers:\n"
+            f"{worker_yaml}"
         )
-        sns_spec = sns_json.get("spec", {})
-        drive_size_range = sns_spec.get("driveSizeRange", "")
-        pcie_model = sns_spec.get("pcieModel", "")
-        if drive_size_range or pcie_model:
-            self.logger.info(
-                f"[K8sUtils] Read device config from StorageNodeSet "
-                f"'{storage_node_set_ref}': driveSizeRange={drive_size_range!r}, "
-                f"pcieModel={pcie_model!r}"
-            )
+        self.logger.info(
+            f"[K8sUtils] growing {cluster_ref} with {new_workers} "
+            f"via discovery '{ops_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
 
-        for worker in new_workers:
-            cr_name = f"{storage_node_set_ref}-expand-{worker}"
-            overrides = "    expand: true\n"
-            if drive_size_range:
-                overrides += f'    driveSizeRange: "{drive_size_range}"\n'
-            if pcie_model:
-                overrides += f'    pcieModel: "{pcie_model}"\n'
+        config = self._await_discovery_config(ops_name, ns, timeout=900)
+        self.approve_deployment_config(config, namespace=ns, timeout=timeout)
+        return config
 
-            yaml_content = (
-                "apiVersion: storage.simplyblock.io/v1alpha1\n"
-                "kind: StorageNode\n"
-                "metadata:\n"
-                f"  name: {cr_name}\n"
-                f"  namespace: {ns}\n"
-                "spec:\n"
-                f"  storageNodeSetRef: {storage_node_set_ref}\n"
-                f"  workerNode: {worker}\n"
-                "  socketIndex: 0\n"
-                "  overrides:\n"
-                f"{overrides}"
+    def _await_discovery_config(self, ops_name: str, namespace: str,
+                                timeout: int = 900) -> str:
+        """Wait for a Discover run to write its draft, and name it."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            res = self.get_resource_json(
+                "operatorops.storage.simplyblock.io", ops_name,
+                namespace=namespace,
             )
+            status = res.get("status", {}) if res else {}
+            ref = status.get("configRef")
+            if ref:
+                self.logger.info(
+                    f"[K8sUtils] discovery '{ops_name}' wrote "
+                    f"ClusterDeploymentConfig '{ref}'"
+                )
+                return ref
+            if status.get("phase") == "Failed":
+                raise AssertionError(
+                    f"discovery '{ops_name}' failed: "
+                    f"{status.get('message', 'no message')}"
+                )
             self.logger.info(
-                f"[K8sUtils] Creating StorageNode CR '{cr_name}' "
-                f"for worker '{worker}' (expand=true)"
+                f"[K8sUtils] waiting for discovery '{ops_name}' "
+                f"(phase={status.get('phase', '-')})"
             )
-            self.apply_yaml(yaml_content, namespace=ns)
+            time.sleep(10)
+        raise TimeoutError(
+            f"discovery '{ops_name}' wrote no config within {timeout}s")
+
+    def approve_deployment_config(self, name: str, namespace: str = None,
+                                  timeout: int = 3600) -> dict:
+        """Approve a draft and wait for the expansion to finish.
+
+        Approval is one way -- "approval cannot be withdrawn", and an approved
+        document is immutable -- so anything that needs editing must already
+        have been written.
+        """
+        ns = namespace or self.namespace
+        self._exec_kubectl(
+            f"kubectl patch clusterdeploymentconfigs.storage.simplyblock.io "
+            f"{name} -n {ns} --type=merge "
+            f"-p '{{\"spec\":{{\"approved\":true}}}}'"
+        )
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            res = self.get_resource_json(
+                "clusterdeploymentconfigs.storage.simplyblock.io", name,
+                namespace=ns,
+            )
+            status = res.get("status", {}) if res else {}
+            phase = status.get("phase", "")
+            step = (status.get("step") or {}).get("state", "")
+            cur = f"{phase}/{step}: {status.get('message', '')}"
+            if cur != last:
+                self.logger.info(f"[K8sUtils] {name}: {cur}")
+                last = cur
+            if phase == "Expanded":
+                self.logger.info(
+                    f"[K8sUtils] {name} expanded; "
+                    f"{len(status.get('nodeRefs') or [])} storage node(s)"
+                )
+                return res
+            if phase == "Failed":
+                raise AssertionError(
+                    f"deployment config '{name}' failed: "
+                    f"{status.get('message', 'no message')}"
+                )
+            time.sleep(15)
+        raise TimeoutError(
+            f"deployment config '{name}' did not finish within {timeout}s "
+            f"(last {last})")
 
     def patch_storage_cluster_expand(self, name: str = "simplyblock-cluster",
                                       namespace: str = None):

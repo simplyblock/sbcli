@@ -190,6 +190,15 @@ def build_discovery(name: str) -> dict:
         # so two hostnames in one selector match nothing at all.
         discover["workers"] = workers
 
+    # Naming an existing cluster turns the run from "create a cluster" into
+    # "grow this one". It is how a node is added now: the draft it writes
+    # carries the same clusterRef, and the nodes it creates are marked as an
+    # expansion, which the control plane reads as a request to rebalance onto
+    # them rather than to treat them as part of an initial layout.
+    cluster_ref = (os.environ.get("CLUSTER_REF", "") or "").strip()
+    if cluster_ref:
+        discover["clusterRef"] = cluster_ref
+
     return {
         "apiVersion": API,
         "kind": "OperatorOps",
@@ -241,8 +250,14 @@ def run_discovery(config_name: str, timeout: int) -> str:
 def shape_draft(cfg: dict) -> dict:
     """Write our parameters into the draft, before anyone approves it."""
     spec = cfg.setdefault("spec", {})
-    cluster = spec.setdefault("cluster", {})
 
+    # A growth document names the cluster it grows and describes no new one.
+    # Writing a cluster template into it as well is how a draft ends up both
+    # creating and joining, which the expansion refuses.
+    if spec.get("clusterRef"):
+        return shape_growth(spec, cfg)
+
+    cluster = spec.setdefault("cluster", {})
     cluster["name"] = os.environ.get("CLUSTER_NAME", "simplyblock-cluster")
 
     for key, var in (("vcpuCount", "VCPU_COUNT"),
@@ -281,6 +296,17 @@ def shape_draft(cfg: dict) -> dict:
         # guessed a distribution we know better than.
         spec["environment"] = env_name
 
+    shape_groups(spec)
+
+    return cfg
+
+
+def shape_groups(spec: dict) -> None:
+    """Write the interfaces and journal layout into every group.
+
+    Shared by both paths: a growth document has groups too, and its nodes need
+    the same interfaces as the ones already in the cluster.
+    """
     # Interfaces are stated per group, and buildWorkload carries the first
     # group's onto the cluster -- a DaemonSet is one object and cannot differ
     # per group. Writing them into every group is how discovery writes a draft,
@@ -310,6 +336,12 @@ def shape_draft(cfg: dict) -> dict:
             "device. Check the device filter -- a driveSizeRange or pcieModel "
             "that matches nothing produces exactly this.")
 
+
+
+def shape_growth(spec: dict, cfg: dict) -> dict:
+    """Edit a growth document: only the groups are ours to set."""
+    log(f"growth document for existing cluster {spec['clusterRef']}")
+    shape_groups(spec)
     return cfg
 
 

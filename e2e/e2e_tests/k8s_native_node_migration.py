@@ -414,8 +414,13 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         )
 
         # Verify the StorageNodeOps CR was created
+        # Read back through v1alpha1, the version the CR was written as.
+        # Unqualified, kubectl serves the storage version, and v1alpha2
+        # capitalizes the action enum and renames storageNodeRef to nodeRef --
+        # so the assertion below saw "Migrate" and failed on a migration that
+        # had in fact been requested correctly.
         ops_json = self.k8s_utils.get_resource_json(
-            "storagenodeops.storage.simplyblock.io", ops_name,
+            "storagenodeops.v1alpha1.storage.simplyblock.io", ops_name,
             namespace=self.k8s_utils.namespace,
         )
         ops_spec = ops_json.get("spec", {})

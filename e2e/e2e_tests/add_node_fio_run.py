@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime
 import threading
@@ -1098,14 +1099,26 @@ class TestAddK8sNodesDualNodePerHost(TestAddK8sNodesDuringFioRun):
         self.nodes_per_socket = 2
 
     def _patch_nodes_per_socket(self):
-        """Patch the StorageNodeSet to set nodesPerSocket."""
+        """Set nodesPerSocket on the cluster's storage-node workload.
+
+        This patched the StorageNodeSet, which nothing reconciles any more --
+        the patch succeeded and changed nothing, so the test ran single-node
+        while reporting that it had asked for two. The socket layout now lives
+        on the cluster, at spec.storageNodes.nodesPerSocket.
+        """
+        # Built rather than formatted: the literal needs three closing braces
+        # and an f-string spells each one twice, which is how this first went
+        # out with two and a patch kubectl rejected.
+        patch = json.dumps(
+            {"spec": {"storageNodes": {
+                "nodesPerSocket": self.nodes_per_socket}}})
         patch_cmd = (
-            "kubectl patch storagenodesets.storage.simplyblock.io "
-            f"simplyblock-node -n {self.namespace} --type=merge "
-            f"-p '{{\"spec\":{{\"nodesPerSocket\":{self.nodes_per_socket}}}}}'"
+            "kubectl patch storageclusters.storage.simplyblock.io "
+            f"simplyblock-cluster -n {self.namespace} --type=merge "
+            f"-p '{patch}'"
         )
         self.logger.info(
-            f"Patching StorageNodeSet with nodesPerSocket="
+            f"Patching StorageCluster with storageNodes.nodesPerSocket="
             f"{self.nodes_per_socket}"
         )
         self.ssh_obj.exec_command(self.k3s_mnode, patch_cmd)
