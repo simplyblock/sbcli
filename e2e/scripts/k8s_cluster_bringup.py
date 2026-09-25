@@ -78,6 +78,35 @@ DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "yes")
 
 API = "storage.simplyblock.io/v1alpha2"
 
+#: How many times one kubectl call is tried before giving up.
+KUBECTL_ATTEMPTS = int(os.environ.get("KUBECTL_ATTEMPTS", "4"))
+
+#: How many times discovery is raised before giving up. Each attempt writes a
+#: fresh document, because a failed run's own document is its record.
+DISCOVERY_ATTEMPTS = int(os.environ.get("DISCOVERY_ATTEMPTS", "3"))
+
+#: Errors worth trying again. Everything else is the answer, not a hiccup.
+_TRANSIENT = (
+    "connection refused",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "too many requests",
+    "etcdserver",
+    "the server is currently unable",
+    "unable to connect to the server",
+    "no route to host",
+    "eof",
+    "tls handshake",
+    "webhook",            # the conversion webhook may not be serving yet
+)
+
+
+def _transient(stderr: str) -> bool:
+    low = (stderr or "").lower()
+    return any(m in low for m in _TRANSIENT)
+
+
 
 def log(msg: str) -> None:
     print(f"[bringup] {msg}", flush=True)
@@ -94,20 +123,39 @@ def kubectl(*args: str, check: bool = True, stdin: str | None = None) -> str:
         if stdin:
             print(stdin)
         return ""
-    try:
-        proc = subprocess.run(
-            cmd, input=stdin, capture_output=True, text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "kubectl is not on PATH; this script drives the cluster through "
-            "it and cannot run without one") from None
-    if check and proc.returncode != 0:
-        raise RuntimeError(
-            f"{' '.join(cmd)} failed ({proc.returncode})\n"
-            f"stdout: {proc.stdout.strip()}\nstderr: {proc.stderr.strip()}"
-        )
-    return proc.stdout
+    last = None
+    for attempt in range(1, KUBECTL_ATTEMPTS + 1):
+        try:
+            proc = subprocess.run(
+                cmd, input=stdin, capture_output=True, text=True,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "kubectl is not on PATH; this script drives the cluster "
+                "through it and cannot run without one") from None
+
+        if proc.returncode == 0:
+            return proc.stdout
+
+        last = (f"{' '.join(cmd)} failed ({proc.returncode})\n"
+                f"stdout: {proc.stdout.strip()}\n"
+                f"stderr: {proc.stderr.strip()}")
+
+        # Retry only what a retry can fix. A rejected document is rejected on
+        # every attempt, and repeating it buries the reason under identical
+        # noise; an apiserver that is rolling, throttling or briefly
+        # unreachable is the case this exists for.
+        if not _transient(proc.stderr) or attempt == KUBECTL_ATTEMPTS:
+            break
+        wait = 5 * attempt
+        log(f"transient kubectl failure (attempt {attempt}/"
+            f"{KUBECTL_ATTEMPTS}), retrying in {wait}s: "
+            f"{proc.stderr.strip()[:120]}")
+        time.sleep(wait)
+
+    if check:
+        raise RuntimeError(last)
+    return ""
 
 
 def env_list(name: str) -> list[str]:
@@ -213,7 +261,21 @@ def run_discovery(config_name: str, timeout: int) -> str:
 
     existing = kubectl("get", "operatorops", op_name, "-o", "json", check=False)
     if existing.strip():
-        log(f"discovery {op_name} already exists; reusing it")
+        prior = json.loads(existing).get("status", {}) or {}
+        if prior.get("configRef"):
+            log(f"discovery {op_name} already produced "
+                f"{prior['configRef']}; reusing it")
+        elif prior.get("phase") == "Failed":
+            # Reusing a failed run just waits out the timeout on a result that
+            # is already in. Clear it so this attempt is a real one.
+            log(f"discovery {op_name} previously failed "
+                f"({prior.get('message', 'no message')}); deleting and "
+                f"raising it again")
+            kubectl("delete", "operatorops", op_name, "--ignore-not-found",
+                    check=False)
+            kubectl("apply", "-f", "-", stdin=json.dumps(op))
+        else:
+            log(f"discovery {op_name} is still running; waiting on it")
     else:
         log(f"raising discovery {op_name}")
         log(json.dumps(op["spec"], indent=2))
@@ -282,6 +344,12 @@ def shape_draft(cfg: dict) -> dict:
     jd = env_bool("ENABLE_JOURNAL_DEVICE")
     if jd is not None:
         cluster["enableJournalDevice"] = jd
+
+    # No default in the CRD and immutable on the cluster, so an unset fabric is
+    # not a value the cluster can be corrected to later -- it is a cluster that
+    # serves volumes over nothing, permanently. Discovery does not fill it in.
+    cluster["fabricType"] = (
+        os.environ.get("FABRIC_TYPE", "") or "tcp").strip()
 
     # One field, two operations. buildWorkload resolves it to enableFormat4K on
     # an NVMe cluster and enableBlockFormat on a block one, because reformatting
@@ -403,7 +471,13 @@ def approve_and_wait(name: str, timeout: int) -> None:
             if phase == "Failed":
                 raise RuntimeError(f"deployment failed: {msg}")
         time.sleep(15)
-    raise RuntimeError(f"deployment did not finish within {timeout}s ({last})")
+    raise RuntimeError(
+        f"deployment did not finish within {timeout}s ({last}).\n"
+        f"This one is not retryable in place: an approved document is "
+        f"immutable and approval cannot be withdrawn, so there is nothing to "
+        f"edit and re-approve. To start over, delete the "
+        f"ClusterDeploymentConfig and the StorageCluster it created, then run "
+        f"the bring-up again -- cleanup_k8s.sh does both.")
 
 
 def verify_spdk_image(wanted: str) -> None:
@@ -447,12 +521,43 @@ def verify_spdk_image(wanted: str) -> None:
     log(f"every storage node is running the requested SPDK image {wanted}")
 
 
+def discover_with_retries(base_name: str, timeout: int) -> str:
+    """Raise discovery until it produces a draft, or give up saying why.
+
+    Retried at this level rather than inside the wait because a discovery that
+    failed has already written its own record: the OperatorOps holds the
+    reason, and a second run under the same name would be refused as existing.
+    Each attempt therefore gets its own name, and the failed ones are left
+    behind on purpose -- they are the evidence for why the first two did not
+    work.
+
+    Only the draft is produced here. Nothing has been approved yet, so every
+    attempt is free: discovery is read-only against the control plane and the
+    document it writes is inert until somebody approves it.
+    """
+    last = None
+    for attempt in range(1, DISCOVERY_ATTEMPTS + 1):
+        name = base_name if attempt == 1 else f"{base_name}-try{attempt}"
+        try:
+            return run_discovery(name, timeout)
+        except Exception as exc:                        # noqa: BLE001
+            last = exc
+            log(f"discovery attempt {attempt}/{DISCOVERY_ATTEMPTS} failed: "
+                f"{str(exc)[:200]}")
+            if attempt < DISCOVERY_ATTEMPTS:
+                log("retrying with a fresh document")
+                time.sleep(20)
+    raise RuntimeError(
+        f"discovery did not produce a usable draft in {DISCOVERY_ATTEMPTS} "
+        f"attempts. Last failure: {last}")
+
+
 def main() -> int:
     config_name = os.environ.get(
         "CDC_NAME", f"e2e-{os.environ.get('CLUSTER_NAME', 'simplyblock-cluster')}")
 
-    ref = run_discovery(config_name,
-                        int(os.environ.get("TIMEOUT_DISCOVERY", "900")))
+    ref = discover_with_retries(
+        config_name, int(os.environ.get("TIMEOUT_DISCOVERY", "900")))
 
     if DRY_RUN:
         log("DRY_RUN: no draft to read back")

@@ -1289,6 +1289,9 @@ jobs:
           export ENABLE_JOURNAL_DEVICE
           export ENVIRONMENT
           export DRIVE_SIZE_RANGE PCIE_MODEL
+          # No default in the CRD and immutable on the cluster once set,
+          # so an unstated fabric is not a thing that can be fixed later.
+          export FABRIC_TYPE="tcp"
           # One field, two operations: the operator resolves it to a 4K reformat
           # on an NVMe cluster and a wipefs on a block one.
           export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
