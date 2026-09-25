@@ -44,7 +44,10 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
         size_used = 0
         lvol_dict = capacity_dict
         size_total = int(lvol_dict['num_blocks']*lvol_dict['block_size'])
-        cluster_size = cluster.page_size_in_blocks*constants.LVOL_CLUSTER_RATIO
+        # Must match what create_lvstore sized the lvstore with, or every
+        # allocated cluster is converted back into the wrong number of bytes
+        # and reported usage is off by the data-chunk count.
+        cluster_size = cluster.page_size_in_blocks * cluster.distr_ndcs
         if "driver_specific" in lvol_dict and "lvol" in lvol_dict["driver_specific"]:
             num_allocated_clusters = lvol_dict["driver_specific"]["lvol"]["num_allocated_clusters"]
             size_used = int(num_allocated_clusters*cluster_size)

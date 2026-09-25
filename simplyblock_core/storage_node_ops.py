@@ -14317,15 +14317,14 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     size = constants.DISTRIB_SIZE_BYTES
     distr_page_size = page_size_in_blocks
     # distr_page_size = (ndcs + npcs) * page_size_in_blocks
-    # cluster_sz = ndcs * page_size_in_blocks
-    # TEST ONLY -- lvstore cluster_sz forced to 4 MiB (2 x page_size_in_blocks).
-    # Deliberately NOT done via constants.LVOL_CLUSTER_RATIO: that constant is
-    # also read by services/lvol_stat_collector.py to convert
-    # num_allocated_clusters into bytes, and raising it there would re-scale
-    # reported used-capacity for lvstores already formatted with the old
-    # cluster size. Scoped here so only newly created lvstores are affected.
-    # Revert before merging.
-    cluster_sz = page_size_in_blocks * 2
+    # The lvstore cluster is one full stripe of user data: a page per data
+    # chunk. Sizing it to a single page instead made every cluster a fraction
+    # of a stripe, so a one-cluster allocation wrote a partial stripe and the
+    # distribution layer had to read the rest back to compute parity.
+    #
+    # ndcs is the cluster's data-chunk count, so 2+2 gives 4 MiB, 1+x gives
+    # 2 MiB and 4+x gives 8 MiB, off the same 2 MiB page.
+    cluster_sz = page_size_in_blocks * ndcs
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 1
