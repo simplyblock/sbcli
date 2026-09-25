@@ -467,15 +467,13 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
         question.
         """
         client = record["Client"]
-        try:
-            pids = self.ssh_obj.find_process_name(
-                client, f"{name}_fio", return_pid=True)
-            for pid in [p for p in pids if str(p).strip().isdigit()]:
-                self.ssh_obj.kill_processes(client, pid=pid)
-        except Exception as exc:                      # noqa: BLE001
-            self.logger.warning(
-                "[rapid-fio] could not sweep stragglers for %s on %s: %s",
-                name, client, str(exc)[:120])
+        # Wait for it to be gone, not merely signalled. A kill that has not
+        # landed yet leaves the old fio writing while the new one starts.
+        if not self._stop_fio_for(name, client):
+            raise RuntimeError(
+                f"[rapid-fio] refusing to relaunch {name}: its previous fio "
+                f"is still running on {client}, and two writers on one volume "
+                f"produce verify failures that read as storage corruption")
         self.ssh_obj.run_fio_test(
             record["Client"], None, record["Mount"], record["Log"],
             size=self.fio_size, name=f"{name}_fio", rw="randrw",
@@ -485,6 +483,56 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
             verify="md5", verify_dump=1, verify_fatal=1, retries=6,
             use_latency=False,
         )
+
+    def _stop_fio_for(self, name, client, attempts=30):
+        """Kill this volume's fio and wait for the processes to actually go.
+
+        Deleting a volume's files or starting a second fio on it while the
+        first is still running is what produced the verify failures on
+        lblk_rapid_outage_docker-20260925-061314. tmux kill-session is not
+        enough on its own: the relaunch there killed the session and pgrep
+        still found the old fio a moment later, writing into a directory the
+        harness had just emptied and a new fio was refilling under the same
+        names with a different randseed.
+
+        Returns True when nothing is left, False if it gave up -- the caller
+        decides, because relaunching anyway is worse than skipping.
+        """
+        found_any = False
+        for attempt in range(attempts):
+            try:
+                pids = [p.strip() for p in self.ssh_obj.find_process_name(
+                    client, f"{name}_fio", return_pid=True) or []]
+                pids = [p for p in pids if p.isdigit()]
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[fio-stop] cannot list fio for %s on %s: %s",
+                    name, client, str(exc)[:120])
+                return False
+
+            # find_process_name greps ps, so its own pipeline shows up. Two or
+            # fewer is that noise rather than a live job -- the same threshold
+            # _kill_fio_on_client uses.
+            if len(pids) <= 2:
+                if found_any:
+                    self.logger.info(
+                        "[fio-stop] %s on %s is stopped", name, client)
+                return True
+
+            found_any = True
+            for pid in pids:
+                try:
+                    self.ssh_obj.kill_processes(client, pid=pid)
+                except Exception:                     # noqa: BLE001
+                    pass
+            sleep_n_sec(2)
+
+        self.logger.error(
+            "[fio-stop] %s on %s still has fio running after %d attempts; "
+            "NOT touching its files -- a second writer here is what corrupts "
+            "the volume and then looks like a product bug",
+            name, client, attempts)
+        return False
 
     def _kick_fio_for_all(self, runtime=None):
         """Start verified fio (PID-checked; auto-rerun) for all lvols + clones."""
@@ -503,16 +551,23 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
                 use_latency=False
             )
 
-        for lvol, det in self.lvol_mount_details.items():
-            self.ssh_obj.delete_files(det["Client"], [f"/mnt/{lvol}/*"])
-            t = threading.Thread(target=_launch, args=(lvol, det))
-            t.start()
-            self.fio_threads.append(t)
-            sleep_n_sec(0.2)
-
-        for cname, det in self.clone_mount_details.items():
-            self.ssh_obj.delete_files(det["Client"], [f"/mnt/{cname}/*"])
-            t = threading.Thread(target=_launch, args=(cname, det))
+        # Stop the old fio before emptying the directory it is writing to.
+        # Without this the harness deletes the files under a running fio,
+        # space_check then reads the shrunken free space (the deleted bytes
+        # are still held open) and cuts --size, and a second fio starts on the
+        # same names with a different randseed. Both then write and verify the
+        # same paths, and the verify failures that follow look exactly like
+        # storage returning the wrong block.
+        for name, det in (list(self.lvol_mount_details.items())
+                          + list(self.clone_mount_details.items())):
+            if not self._stop_fio_for(name, det["Client"]):
+                self.logger.error(
+                    "[fio-launch] skipping %s: its previous fio would not "
+                    "stop, so deleting its files and relaunching would put "
+                    "two writers on it", name)
+                continue
+            self.ssh_obj.delete_files(det["Client"], [f"/mnt/{name}/*"])
+            t = threading.Thread(target=_launch, args=(name, det))
             t.start()
             self.fio_threads.append(t)
             sleep_n_sec(0.2)
