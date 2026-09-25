@@ -914,7 +914,8 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── FIO config builder ───────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str) -> tuple[str, str]:
+    def _build_fio_config(self, name: str,
+                          runtime: int = None) -> tuple[str, str]:
         """Build FIO main and warmup configs for a benchmark run.
 
         Returns:
@@ -942,7 +943,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"size={self.fio_size}\n"
             f"numjobs={self.fio_num_jobs}\n"
             f"time_based\n"
-            f"runtime={self.FIO_RUNTIME}\n"
+            f"runtime={runtime or self.FIO_RUNTIME}\n"
             f"group_reporting\n"
             f"verify=md5\n"
             f"verify_dump=1\n"
@@ -1149,8 +1150,14 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info(f"[warmup] FIO warmup complete on {client}: {name}")
 
     def _start_client_fio(self, name: str, client: str, mount_point: str,
-                          log_file: str, bs: str = None, randseed: int = None):
-        """Launch FIO in a background thread on *client* via SSH/tmux."""
+                          log_file: str, bs: str = None, randseed: int = None,
+                          runtime: int = None):
+        """Launch FIO in a background thread on *client* via SSH/tmux.
+
+        *runtime* defaults to FIO_RUNTIME, which is what every existing caller
+        gets. The rapid lineage passes its own jittered value so relaunched
+        jobs do not all end at the same moment.
+        """
         if bs is None:
             bs = f"{2 ** random.randint(2, 7)}K"
         if randseed is None:
@@ -1172,7 +1179,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 "iodepth": 1,
                 "numjobs": self.fio_num_jobs,
                 "time_based": True,
-                "runtime": self.FIO_RUNTIME,
+                "runtime": runtime or self.FIO_RUNTIME,
                 "randseed": randseed,
                 "iolog_file": iolog_file,
                 "fio_log_file": fio_log_file,
@@ -5996,14 +6003,10 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
         same launch, and it deliberately reuses the same helpers so the FIO
         parameters cannot drift apart from the per-iteration path.
 
-        *runtime* is accepted and, on this platform, not applied: both
-        _start_client_fio and _build_fio_config read self.FIO_RUNTIME rather
-        than taking a runtime argument. Threading a per-job runtime through
-        them changes shared signatures used by the non-rapid k8s tests, so it
-        is left for its own pass -- k8s relaunches at the class runtime, and
-        the jitter that staggers job endings is docker-only for now. Stated
-        here rather than silently dropped, because an argument that does
-        nothing is exactly what later reads as a bug.
+        *runtime* is applied. Both _start_client_fio and _build_fio_config now
+        take it as an optional argument defaulting to FIO_RUNTIME, so every
+        existing caller is unaffected and the rapid lineage can stagger its
+        relaunches the way the docker one does.
         """
         self._ensure_k8s_utils()
         record = record if record is not None else {}
@@ -6032,7 +6035,8 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
                     "a missed warmup can only cause a stale-header warning, "
                     "not a missed defect", name, str(exc)[:120])
             record["log_file"] = log_file
-            self._start_client_fio(name, client, mount_point, log_file, bs=bs)
+            self._start_client_fio(name, client, mount_point, log_file, bs=bs,
+                                   runtime=runtime)
             self.logger.info("[rapid-fio] relaunched %s on %s -> %s",
                              name, client, log_file)
             return
@@ -6056,7 +6060,7 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
                 self.k8s_utils.delete_configmap(old_cm)
             except Exception:                         # noqa: BLE001
                 pass
-        fio_config, warmup_config = self._build_fio_config(name)
+        fio_config, warmup_config = self._build_fio_config(name, runtime=runtime)
         nid = record.get("node_id")
         avoid = self._get_k8s_node_for_storage_node(nid) if nid else None
         self.k8s_utils.create_fio_job(
@@ -6452,7 +6456,8 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
 
     # ── FIO config ────────────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str) -> tuple[str, str | None]:
+    def _build_fio_config(self, name: str,
+                          runtime: int = None) -> tuple[str, str | None]:
         """Build FIO config for scale-break test.
 
         Key differences from parent:
@@ -6477,7 +6482,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             f"size={self.fio_size}\n"
             f"numjobs={self.fio_num_jobs}\n"
             f"time_based\n"
-            f"runtime={self.FIO_RUNTIME}\n"
+            f"runtime={runtime or self.FIO_RUNTIME}\n"
             f"group_reporting\n"
             f"max_latency={FIO_MAX_LATENCY}\n"
             f"write_iolog=/spdkvol/{name}-iolog.log\n"

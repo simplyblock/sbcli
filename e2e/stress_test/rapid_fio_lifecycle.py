@@ -140,6 +140,18 @@ class RapidFioLifecycle(_RapidFioHooks):
             return
         self._rapid_base_runtime = runtime
         self._rapid_lifecycle_ready = True
+
+        # Seed the launch record for everything already running, at the base
+        # runtime. rapid_runtime_for refines each entry with the real jittered
+        # value as jobs are launched or relaunched through it -- but a platform
+        # whose first launch does not go through it (k8s reads FIO_RUNTIME
+        # directly) would otherwise have no record at all for its initial
+        # cohort, and the overdue check would silently never fire for exactly
+        # the jobs most likely to hang.
+        now = time.time()
+        self._rapid_launched = {
+            name: (now, runtime) for name, _rec in self.fio_jobs()
+        }
         self.logger.info(
             "[rapid-fio] armed over %d job(s); base runtime %ss, jittered %s "
             "per relaunch so revived jobs do not all end together. Object "
