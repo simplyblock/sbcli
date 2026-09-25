@@ -13580,8 +13580,14 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     size = constants.DISTRIB_SIZE_BYTES
     distr_page_size = page_size_in_blocks
     # distr_page_size = (ndcs + npcs) * page_size_in_blocks
-    # cluster_sz = ndcs * page_size_in_blocks
-    cluster_sz = page_size_in_blocks * constants.LVOL_CLUSTER_RATIO
+    # The lvstore cluster is one full stripe of user data: a page per data
+    # chunk. Sizing it to a single page instead made every cluster a fraction
+    # of a stripe, so a one-cluster allocation wrote a partial stripe and the
+    # distribution layer had to read the rest back to compute parity.
+    #
+    # ndcs is the cluster's data-chunk count, so 2+2 gives 4 MiB, 1+x gives
+    # 2 MiB and 4+x gives 8 MiB, off the same 2 MiB page.
+    cluster_sz = page_size_in_blocks * ndcs
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 1
