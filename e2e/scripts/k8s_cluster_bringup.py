@@ -66,7 +66,7 @@ Environment variables, all optional unless marked:
     ENABLE_PARTITIONED   true|false; report devices carrying a partition table
     NODES_PER_SOCKET / SOCKETS_TO_USE
     TIMEOUT_DISCOVERY    seconds, default 900
-    TIMEOUT_EXPAND       seconds, default 3600
+    TIMEOUT_EXPAND       seconds, default 1800 (30 min)
     DRY_RUN              1 prints what it would do and touches nothing
     DRAFT_ONLY           1 discovers and writes the draft, but does not
                          approve it, so it can be reviewed or hand-edited
@@ -511,6 +511,43 @@ def describe(cfg: dict) -> None:
 # ── step 3: approve and wait ─────────────────────────────────────────────
 
 
+def failed_storage_nodes():
+    """StorageNodes the operator has given up on, with the reason.
+
+    A node that reaches Failed is not retried -- on 2026-09-25 one sat there
+    for three hours while the deployment config waited out its full deadline
+    and then reported that the step had timed out, which says nothing about
+    which node or why. Its events did: the worker was cordoned and NotReady
+    because OpenShift's machine-config operator was rebooting it to apply the
+    KubeletConfig the cluster's own creation had just triggered.
+
+    So the wait ends here instead, naming the node. Waiting longer cannot help
+    once the operator has stopped trying.
+    """
+    out = kubectl("get", "storagenode", "-o",
+                  "jsonpath={range .items[*]}{.metadata.name}\t"
+                  "{.spec.workerNode}\t{.status.phase}\t"
+                  "{.status.message}{\"\\n\"}{end}", check=False)
+    bad = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[2].strip() == "Failed":
+            bad.append((parts[0], parts[1], (parts[3] if len(parts) > 3
+                                             else "").strip()))
+    return bad
+
+
+def worker_state(worker):
+    """Ready/schedulable summary for a worker, for the failure message."""
+    out = kubectl("get", "node", worker, "-o",
+                  "jsonpath={.spec.unschedulable}|"
+                  "{range .status.conditions[?(@.type=='Ready')]}{.status}{end}",
+                  check=False)
+    cordoned, _, ready = (out or "").partition("|")
+    return (f"Ready={ready.strip() or '?'}"
+            f"{' CORDONED' if cordoned.strip() == 'true' else ''}")
+
+
 def approve_and_wait(name: str, timeout: int) -> None:
     log(f"approving {name}")
     kubectl("patch", "clusterdeploymentconfig", name, "--type=merge",
@@ -538,6 +575,18 @@ def approve_and_wait(name: str, timeout: int) -> None:
                 return
             if phase == "Failed":
                 raise RuntimeError(f"deployment failed: {msg}")
+
+        # The document stays Expanding while a node underneath it has already
+        # failed, so watch the nodes rather than only the document.
+        for node, worker, why in failed_storage_nodes():
+            raise RuntimeError(
+                f"storage node {node} on worker {worker} has Failed and the "
+                f"operator does not retry it: {why or 'no message'}. "
+                f"Worker state now: {worker_state(worker)}. "
+                f"Waiting out the remaining {int(deadline - time.time())}s "
+                f"would only repeat the document's own timeout.\n"
+                f"Check: kubectl -n {NS} get events "
+                f"--field-selector involvedObject.name={node}")
         time.sleep(15)
     raise RuntimeError(
         f"deployment did not finish within {timeout}s ({last}).\n"
@@ -710,7 +759,7 @@ def main() -> int:
     if approve_only:
         log(f"approving the existing draft {approve_only} as it stands")
         approve_and_wait(approve_only,
-                         int(os.environ.get("TIMEOUT_EXPAND", "3600")))
+                         int(os.environ.get("TIMEOUT_EXPAND", "1800")))
         wanted = (os.environ.get("SPDK_IMAGE", "") or "").strip()
         if wanted:
             verify_spdk_image(wanted)
@@ -735,7 +784,7 @@ def main() -> int:
     if (cfg.get("spec") or {}).get("approved"):
         log(f"{ref} is already approved; waiting on it rather than editing "
             f"(an approved document is immutable)")
-        approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "3600")))
+        approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "1800")))
         return 0
 
     cfg = shape_draft(cfg)
@@ -757,7 +806,7 @@ def main() -> int:
             "document cannot be changed.")
         return 0
 
-    approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "3600")))
+    approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "1800")))
 
     wanted = (os.environ.get("SPDK_IMAGE", "") or "").strip()
     if wanted:
