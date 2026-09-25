@@ -118,16 +118,20 @@ def device_decommission_progress(node_id: str) -> dict:
     is the thing the caller is waiting for, and it stays that way across a
     control-plane restart that would lose any in-memory count.
     """
+    from simplyblock_core import storage_node_ops
+
     node = DBController().get_storage_node_by_id(node_id)
     data_devices = [
         dev for dev in (node.nvme_devices or [])
         if dev.status != NVMeDevice.STATUS_JM
     ]
     total = len(data_devices)
-    completed = sum(
-        1 for dev in data_devices
-        if dev.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED
-    )
+    # Counted as "not pending" rather than "== failed_and_migrated" so this and
+    # the removal's phase-5 skip agree by construction: they are the same
+    # predicate, and a device state that one treats as done must not be one the
+    # other still waits for.
+    pending = storage_node_ops.data_devices_pending_migration(node)
+    completed = total - len(pending)
 
     error = _last_error.get((node_id, 'devices'))
     running = _is_running(node_id, 'devices')
@@ -152,8 +156,20 @@ def start_replica_reshuffle(node_id: str) -> bool:
     from simplyblock_core import storage_node_ops
 
     def drive():
-        node = DBController().get_storage_node_by_id(node_id)
-        return storage_node_ops._relocate_replicas_hosted_on(node)
+        db = DBController()
+        node = db.get_storage_node_by_id(node_id)
+        if not storage_node_ops._relocate_replicas_hosted_on(node):
+            return False
+
+        # Record that this step ran, so the removal that follows can skip its
+        # phase 3b. Written only on success, and only here: the removal reads it
+        # as "the reallocation was performed", which is a different claim from
+        # "there is nothing hosted here" and the only one it is safe to skip a
+        # global re-solve on.
+        node = db.get_storage_node_by_id(node_id)
+        node.replica_reshuffle_completed = True
+        node.write_to_db(db.kv_store)
+        return True
 
     return _spawn(node_id, 'reshuffle', drive)
 
@@ -166,15 +182,11 @@ def replica_reshuffle_progress(node_id: str) -> dict:
     has before it deletes the node -- and it is the same answer whether a role
     was moved, was never there, or was cleaned up by something else.
     """
-    db = DBController()
-    node = db.get_storage_node_by_id(node_id)
-    cluster_id = node.cluster_id
+    from simplyblock_core import storage_node_ops
 
-    holders = [
-        peer for peer in db.get_storage_nodes_by_cluster_id(cluster_id)
-        if peer.get_id() != node_id
-        and node_id in (peer.secondary_node_id, peer.tertiary_node_id)
-    ]
+    # The same predicate the removal's phase-3b skip reads, so "the drain says
+    # it is done" and "the delete skips it" cannot disagree.
+    holders = storage_node_ops.replica_role_holders(node_id, DBController())
 
     error = _last_error.get((node_id, 'reshuffle'))
     running = _is_running(node_id, 'reshuffle')

@@ -130,6 +130,14 @@ class StorageNode(BaseNodeObject):
     rpc_username: str = ""
     secondary_node_id: str = ""
     tertiary_node_id: str = ""
+    # Set when a Kubernetes drain has run the replica reallocation as its own
+    # step, so the removal that follows can skip phase 3b instead of re-solving
+    # a layout that is already solved. It records that the work was DONE, not
+    # that there is nothing to do -- those are different, and only the first is
+    # safe to skip on: phase 3b also re-solves the whole post-removal placement,
+    # which repairs diversity violations unrelated to this node, and a removal
+    # that was never drained must still get that pass.
+    replica_reshuffle_completed: bool = False
     sequential_number: int = 0  # Unused
     jm_ids: List[str] = default_factory(list)
     spdk_cpu_mask: str = ""

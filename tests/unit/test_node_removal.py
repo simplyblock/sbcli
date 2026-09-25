@@ -58,6 +58,10 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     # dedicated-secondary-node / physical-label branches.
     n.is_secondary_node = is_secondary_node
     n.physical_label = physical_label
+    # Same hazard: left as a child mock this reads truthy, and the removal
+    # would skip phase 3b believing a drain had already reallocated the
+    # replicas. A node that no drain has touched has it False.
+    n.replica_reshuffle_completed = False
     n.get_id = MagicMock(return_value=node_id)
     n.status = status
     n.cluster_id = "cluster-1"
@@ -2517,6 +2521,42 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["_finalize_node_removal"].assert_not_called()
         mocks["set_node_status"].assert_not_called()
         mocks["_decommission_node_devices"].assert_called_once_with(node)
+
+    def test_phase3b_is_skipped_when_a_drain_already_reallocated(self):
+        """A Kubernetes drain runs the reallocation as its own step and records
+        it. The removal that follows then has nothing to re-solve."""
+        cl = _cluster()
+        node = _node("n1")
+        node.replica_reshuffle_completed = True
+        db = FakeDB(cl, [node])
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["_decommission_node_devices"].return_value = True
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertTrue(ret)
+        mocks["_relocate_replicas_hosted_on"].assert_not_called()
+
+    def test_phase3b_still_runs_when_nothing_is_hosted_but_no_drain_ran(self):
+        """The skip is driven by the drain having run, not by the node
+        happening to host nothing.
+
+        Phase 3b also re-solves the whole post-removal placement, which repairs
+        diversity violations elsewhere in the cluster. An ordinary
+        `sbctl sn remove` of a node that hosts no replica must still get that
+        pass -- skipping on "nothing hosted here" would quietly drop it.
+        """
+        cl = _cluster()
+        node = _node("n1")  # hosts nothing, and no drain has touched it
+        db = FakeDB(cl, [node])
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["_decommission_node_devices"].return_value = True
+            mocks["_relocate_replicas_hosted_on"].return_value = True
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertTrue(ret)
+        mocks["_relocate_replicas_hosted_on"].assert_called_once()
 
     def test_already_removed_reports_incomplete_if_phase5_fails_again(self):
         # The regression this guards: a prior attempt raised mid phase 5

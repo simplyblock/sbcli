@@ -4848,9 +4848,24 @@ def node_removal_orchestrate(node_id, force_remove=False):
             snode = db_controller.get_storage_node_by_id(node_id)
 
             # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
-            logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
-            if not _relocate_replicas_hosted_on(snode):
-                return False
+            #
+            # Skipped only when a drain already ran this exact step and said so
+            # (replica_reshuffle_completed), and nothing has come to depend on
+            # the node since. The flag is the whole condition: "no role is
+            # hosted here" is NOT sufficient on its own, because phase 3b also
+            # re-solves the whole post-removal placement and repairs diversity
+            # violations that have nothing to do with this node -- a removal
+            # that was never drained must still get that pass, and a node that
+            # simply happens to host nothing is exactly such a removal.
+            if (snode.replica_reshuffle_completed
+                    and not replica_role_holders(node_id, db_controller)):
+                logger.info(
+                    f"[REMOVAL] {node_id}: phase 3b — skipped, the drain already "
+                    f"reallocated the replica roles and none came back")
+            else:
+                logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
+                if not _relocate_replicas_hosted_on(snode):
+                    return False
 
             # Phase 3c — prove the relocations actually landed. Every pointer
             # phase 3b writes is bookkeeping; this is the only step that asks
@@ -4873,6 +4888,12 @@ def node_removal_orchestrate(node_id, force_remove=False):
         # Phase 5 — remove + fail devices, then wait for failure-migration to
         # finish. Always attempted, even on resume after status already
         # flipped to REMOVED -- see the already_removed comment above.
+        #
+        # Not skipped when a drain already rebuilt the devices: the device loops
+        # inside skip whatever reached failed_and_migrated, so the repeat costs
+        # a walk, and the call also re-runs _decommission_node_jm -- which on
+        # the already_removed resume path is the only JM decommission this
+        # attempt makes, phase 2 having been skipped with the rest of 1-4.
         logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
         if not _decommission_node_devices(snode):
             return False
@@ -5147,6 +5168,39 @@ def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db
         if old_host_id in nodes:
             lvol.nodes = [new_host_id if n == old_host_id else n for n in nodes]
             lvol.write_to_db()
+
+
+def replica_role_holders(node_id, db_controller):
+    """The surviving nodes that still name ``node_id`` as their secondary or
+    tertiary.
+
+    This is the question "does anything still depend on this node" in the only
+    form that answers it the same way however the dependency went away -- moved
+    by the planner, never there, or cleaned up by something else. Both the
+    removal's phase 3b and the Kubernetes drain's reshuffle step read it, so it
+    lives here rather than being counted once per caller: they decide the same
+    thing (may this node go?) and must not be able to disagree about it.
+    """
+    snode = db_controller.get_storage_node_by_id(node_id)
+    return [
+        peer
+        for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        if peer.get_id() != node_id
+        and node_id in (peer.secondary_node_id, peer.tertiary_node_id)
+    ]
+
+
+def data_devices_pending_migration(snode: StorageNode):
+    """This node's data devices that have not yet been rebuilt onto peers.
+
+    A device is done when it reaches ``failed_and_migrated``; the journal device
+    is not data and is never counted. Empty means phase 5 has nothing left to
+    do, whoever drove it.
+    """
+    return [
+        dev for dev in (snode.nvme_devices or [])
+        if dev.status not in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
+    ]
 
 
 def _relocate_replicas_hosted_on(removed_node: StorageNode):
