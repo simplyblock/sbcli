@@ -46,6 +46,7 @@ from e2e_tests.cluster_test_base import TestClusterBase
 from exceptions.custom_exception import LvolNotConnectException
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
+from stress_test.rapid_fio_lifecycle import RapidFioLifecycle
 from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
@@ -5650,7 +5651,8 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 self._cleanup_all_k8s_resources()
 
 
-class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
+class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
+                                      K8sNativeResilientFailoverTest):
     """K8s-native twin of the docker RandomRapidFailoverNoGapV2WithMigration.
 
     Fires outages back-to-back so the next one lands while migration from the
@@ -5805,6 +5807,11 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
             target=self.validate_iostats_continuously, daemon=True
         ).start()
 
+        # Split the standing set into a permanent half and a churnable half,
+        # and record the base runtime. Idempotent, and placed after any resume
+        # adoption so a resumed run sees the objects it actually has.
+        self.rapid_fio_init(self.FIO_RUNTIME)
+
         try:
             while True:
                 self.checkpoint(iteration)
@@ -5860,6 +5867,14 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
                     self.retry_failed_secondary_connects()
 
                 self._mark_nodes_online()
+
+                # Read the FIO logs now, while the outage that caused any
+                # error is still the last thing that happened. Previously
+                # nothing looked at a log until the checkpoint, so a failure
+                # could not be attributed to an outage at all. Anything real
+                # raises RapidFioFailure out of the loop and into the failure
+                # diagnostics below.
+                self.rapid_after_outage(f"after outage {self._iter + 1}")
 
                 # Nodes are online here and the next cycle opens with
                 # _pace_next_outage()'s 50-90s sleep, so this runs inside time
@@ -5954,6 +5969,193 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
             else:
                 self._cleanup_all_k8s_resources()
 
+
+
+    def rapid_allow_relaunch(self):
+        """No relaunching on the outage immediately before a checkpoint.
+
+        This test's checkpoint still ends in wait_for_fio_complete(), which
+        blocks until every job has finished. A job relaunched on the outage
+        just before it would hold that barrier for a full FIO_RUNTIME, so the
+        checkpoint would be slower than it was before the lifecycle existed.
+        Errors are still scanned for on that outage -- only the relaunch waits.
+        """
+        every = getattr(self, "validate_every", 0) or 0
+        if every <= 0:
+            return True
+        # self._iter has already been advanced for this outage by the time
+        # the checkpoint test runs, so the outage whose NEXT increment lands
+        # on the boundary is the one to hold back.
+        return (self._iter + 1) % every != 0
+
+    def restart_fio_for(self, name, record, runtime=None):
+        """Relaunch a single job's FIO. Every other job keeps running.
+
+        restart_fio(iteration) restarts them all at once, which is the barrier
+        this lifecycle exists to remove. This is the one-job version of the
+        same launch, and it deliberately reuses the same helpers so the FIO
+        parameters cannot drift apart from the per-iteration path.
+
+        *runtime* is accepted and, on this platform, not applied: both
+        _start_client_fio and _build_fio_config read self.FIO_RUNTIME rather
+        than taking a runtime argument. Threading a per-job runtime through
+        them changes shared signatures used by the non-rapid k8s tests, so it
+        is left for its own pass -- k8s relaunches at the class runtime, and
+        the jitter that staggers job endings is docker-only for now. Stated
+        here rather than silently dropped, because an argument that does
+        nothing is exactly what later reads as a bug.
+        """
+        self._ensure_k8s_utils()
+        record = record if record is not None else {}
+        seq = getattr(self, "_rapid_relaunch_seq", 0) + 1
+        self._rapid_relaunch_seq = seq
+
+        if getattr(self, "use_client_fio", False):
+            client = record.get("client")
+            mount_point = record.get("mount_path")
+            if not client or not mount_point:
+                raise RuntimeError(
+                    f"[rapid-fio] cannot relaunch {name}: client={client!r} "
+                    f"mount_path={mount_point!r}")
+            log_file = f"{self.log_path}/{name}-r{seq}.log"
+            # Kill first even though the job is believed finished: a job that
+            # ended cleanly can still have a straggler, and two fio processes
+            # on one mount would report corruption that is ours, not the
+            # product's.
+            self._kill_fio_on_client(name, client)
+            bs = f"{2 ** random.randint(2, 7)}K"
+            try:
+                self._run_fio_warmup_ssh(name, client, mount_point, bs)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[rapid-fio] warmup failed for %s: %s -- launching anyway; "
+                    "a missed warmup can only cause a stale-header warning, "
+                    "not a missed defect", name, str(exc)[:120])
+            record["log_file"] = log_file
+            self._start_client_fio(name, client, mount_point, log_file, bs=bs)
+            self.logger.info("[rapid-fio] relaunched %s on %s -> %s",
+                             name, client, log_file)
+            return
+
+        # Job mode: replace the Job and its ConfigMap under fresh names, since
+        # a Job's pod template is immutable and a completed Job cannot be
+        # restarted in place.
+        old_job = record.get("job_name")
+        old_cm = record.get("configmap_name")
+        new_job = f"fio-{name}-r{seq}"[:60]
+        new_cm = f"fiocfg-{name}-r{seq}"[:60]
+        if old_job:
+            try:
+                self.k8s_utils.delete_job(old_job)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[rapid-fio] could not delete old job %s: %s", old_job,
+                    str(exc)[:120])
+        if old_cm:
+            try:
+                self.k8s_utils.delete_configmap(old_cm)
+            except Exception:                         # noqa: BLE001
+                pass
+        fio_config, warmup_config = self._build_fio_config(name)
+        nid = record.get("node_id")
+        avoid = self._get_k8s_node_for_storage_node(nid) if nid else None
+        self.k8s_utils.create_fio_job(
+            new_job, name, new_cm, fio_config,
+            image=self.FIO_IMAGE,
+            cleanup_before_fio=True,
+            avoid_node=avoid,
+            warmup_config=warmup_config,
+        )
+        record["job_name"] = new_job
+        record["configmap_name"] = new_cm
+        self.logger.info("[rapid-fio] relaunched %s as job %s", name, new_job)
+
+    # ── RapidFioLifecycle hooks ──────────────────────────────────────────
+    # Two FIO modes live here. With CLIENT_IP set the suite drives fio over
+    # ssh on client hosts, exactly as docker does, and the log is a file on
+    # the shared mount. Without it fio runs as a k8s Job and the log is inside
+    # a pod. fio_log_text is the seam that hides the difference; everything
+    # above it is identical.
+
+    def fio_jobs(self):
+        """Every PVC and clone currently under FIO."""
+        jobs = []
+        for name, det in (getattr(self, "pvc_details", None) or {}).items():
+            jobs.append((name, det))
+        for name, det in (getattr(self, "clone_details", None) or {}).items():
+            jobs.append((name, det))
+        return jobs
+
+    def fio_log_path(self, name, record):
+        """Only meaningful in client mode; Job mode reads pod logs instead."""
+        if not getattr(self, "use_client_fio", False):
+            return None
+        return (record or {}).get("log_file")
+
+    def fio_log_text(self, name, record):
+        if getattr(self, "use_client_fio", False):
+            return super().fio_log_text(name, record)
+        job = (record or {}).get("job_name")
+        if not job:
+            return ""
+        try:
+            self._ensure_k8s_utils()
+            out = []
+            for pod in (self.k8s_utils.get_job_pod_names(job) or []):
+                out.append(self.k8s_utils.get_pod_logs(pod, tail=2000) or "")
+            return "\n".join(out)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[rapid-fio] could not read logs for %s: %s",
+                                name, str(exc)[:120])
+            return ""
+
+    def fio_job_alive(self, name, record):
+        """Is this job still doing IO?
+
+        Unknown counts as alive in both modes. A job reported dead because one
+        ssh or kubectl call failed would be relaunched on top of one that is
+        still writing, which is worse than checking again next cycle.
+        """
+        if getattr(self, "use_client_fio", False):
+            client = (record or {}).get("client")
+            if not client:
+                return False
+            try:
+                out, _err = self.ssh_obj.exec_command(
+                    node=client,
+                    command=(f"sudo tmux list-sessions -F '#S' 2>/dev/null "
+                             f"| grep -qx '[f]io_{name}_fio' && echo ALIVE "
+                             f"|| echo GONE"),
+                    timeout=60, max_retries=1)
+                return "ALIVE" in (out or "")
+            except Exception:                         # noqa: BLE001
+                return True
+        job = (record or {}).get("job_name")
+        if not job:
+            return False
+        try:
+            self._ensure_k8s_utils()
+            # .status.active, not "does it have pods": a Job that finished
+            # keeps its pod in Completed state forever, so pod existence
+            # would report every finished job as still running and nothing
+            # would ever be relaunched.
+            return self.k8s_utils.job_active(job)
+        except Exception:                             # noqa: BLE001
+            return True
+
+    def fio_relaunch(self, name, record, runtime):
+        """Start this one job again.
+
+        Deliberately delegates to restart_fio_for rather than reimplementing
+        the launch: the FIO parameters live in one place and a lifecycle that
+        drifted from them would be measuring something else.
+        """
+        if hasattr(self, "restart_fio_for"):
+            return self.restart_fio_for(name, record, runtime)
+        raise NotImplementedError(
+            "[rapid-fio] k8s needs restart_fio_for(name, record, runtime) to "
+            "relaunch a single job; restart_fio(iteration) restarts them all "
+            "and would defeat the point of a per-job lifecycle.")
 
 class K8sNativeQuickFailoverTest(K8sNativeBasicFailoverTest):
     """Quick K8s-native failover test for Talos environments.

@@ -2273,6 +2273,37 @@ class K8sUtils:
         self.logger.warning(f"[K8sUtils] Job '{job_name}' timed out after {timeout}s")
         return "timeout"
 
+    def job_active(self, job_name: str, namespace: str = None) -> bool:
+        """True while a Job still has a pod running.
+
+        Deliberately reads .status.active rather than asking whether the Job
+        has pods: a Job that has completed keeps its pod around in Completed
+        state, so pod existence stays true forever and anything using it as a
+        liveness signal never notices the work stopped.
+
+        An unreadable status returns True. Callers use this to decide whether
+        to relaunch, and relaunching on top of a job that is still writing is
+        worse than waiting one more cycle to find out.
+        """
+        ns = namespace or self.namespace
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl get job {job_name} -n {ns} "
+                f"-o jsonpath='{{.status.active}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+        except Exception:                                 # noqa: BLE001
+            return True
+        raw = (out or "").strip().strip("'")
+        if not raw:
+            # No active count at all: either the Job is gone or it has
+            # finished. Both mean nothing is running.
+            return False
+        try:
+            return int(raw) >= 1
+        except ValueError:
+            return True
+
     def get_job_pod_names(self, job_name: str, namespace: str = None) -> list:
         """Get all pod names created by a Job."""
         ns = namespace or self.namespace
