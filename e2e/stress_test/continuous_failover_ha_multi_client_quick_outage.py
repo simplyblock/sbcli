@@ -477,6 +477,21 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
                 f"running on {client} despite the job reporting finished. "
                 f"Two writers on one volume produce verify failures that read "
                 f"as storage corruption.")
+
+        # Clear the previous run's files before starting, the same as the mass
+        # path does. Two reasons. Space: a finished run leaves its files at the
+        # size it used, and self.fio_size shrinks as churn adds objects, so
+        # stale larger files sit there consuming the volume -- which is how a
+        # 19G volume came to report 6G free and have its --size cut to 2G.
+        # And provenance: a fresh run writing into a previous run's files under
+        # a different randseed is the same two-layouts-one-file confusion that
+        # made the last set of verify failures look like storage corruption,
+        # just separated in time rather than concurrent.
+        #
+        # Safe here only because nothing is running -- the check above has
+        # already established that, which is why the delete follows it rather
+        # than leading.
+        self.ssh_obj.delete_files(client, [f"{record['Mount']}/*"])
         self.ssh_obj.run_fio_test(
             record["Client"], None, record["Mount"], record["Log"],
             size=self.fio_size, name=f"{name}_fio", rw="randrw",
