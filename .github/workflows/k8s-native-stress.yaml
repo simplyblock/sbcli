@@ -1136,9 +1136,10 @@ jobs:
           # patch and hope, the run says the pin did not happen, because an
           # lblk run silently testing the default SPDK build instead of the one
           # it named is a wrong green.
-          if [ -n "${SPDK_IMAGE}" ]; then
-            echo "::warning title=spdk_image not applied::spdk_image=${SPDK_IMAGE} was requested, but a ClusterDeploymentConfig cannot set the SPDK image; the cluster will run the control plane's default. Pinning it needs an operator-side field."
-          fi
+          # Exported so the bring-up checks it rather than assumes it: the
+          # document cannot set spdkImage, so the run verifies what the nodes
+          # actually came up on and fails if it is not what was asked for.
+          export SPDK_IMAGE
           PARTITIONS="${PARTITIONS:-0}"
           JM_COUNT="${JM_COUNT:-3}"
           # 0 (the default) means derive vcpuCount from the node's CPU count below;

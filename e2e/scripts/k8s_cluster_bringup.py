@@ -406,6 +406,47 @@ def approve_and_wait(name: str, timeout: int) -> None:
     raise RuntimeError(f"deployment did not finish within {timeout}s ({last})")
 
 
+def verify_spdk_image(wanted: str) -> None:
+    """Fail if the nodes are not running the SPDK image that was asked for.
+
+    spdkImage lives on the StorageNode (spec.config.spdkImage in v1alpha2,
+    spec.overrides.spdkImage in v1alpha1) and not on the deployment config, so
+    the document cannot carry it. It is read once, in addParams, at the moment
+    postNode adds the node to the control plane -- not re-read on restart. The
+    config creates the node objects and an independent reconciler posts them,
+    with no pause hook and a provisioning budget whose floor is 1, so there is
+    no point after approval at which a patch reliably lands first.
+
+    What is left is to check. A run that asked for a particular SPDK build and
+    silently got the default is a wrong green -- the whole point of pinning it
+    is that the build under test is the variable -- so this is an error rather
+    than a warning.
+    """
+    out = kubectl(
+        "get", "pods", "-l", "app=storage-node", "-o",
+        "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}"
+        "{range .spec.containers[*]}{.image}{\" \"}{end}{\"\\n\"}{end}",
+        check=False)
+    if not out.strip():
+        log(f"WARNING: no storage-node pods found, so the requested SPDK "
+            f"image {wanted} could not be checked")
+        return
+
+    wrong = []
+    for line in out.strip().splitlines():
+        name, _, images = line.partition("\t")
+        if wanted not in images:
+            wrong.append(f"{name}: {images.strip()}")
+
+    if wrong:
+        raise RuntimeError(
+            f"{len(wrong)} storage node(s) are not running the requested SPDK "
+            f"image {wanted}. The deployment config cannot set spdkImage, and "
+            f"it is consumed at node-add, so the pin did not take:\n    "
+            + "\n    ".join(wrong[:8]))
+    log(f"every storage node is running the requested SPDK image {wanted}")
+
+
 def main() -> int:
     config_name = os.environ.get(
         "CDC_NAME", f"e2e-{os.environ.get('CLUSTER_NAME', 'simplyblock-cluster')}")
@@ -440,6 +481,10 @@ def main() -> int:
     kubectl("replace", "-f", "-", stdin=json.dumps(cfg))
 
     approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "3600")))
+
+    wanted = (os.environ.get("SPDK_IMAGE", "") or "").strip()
+    if wanted:
+        verify_spdk_image(wanted)
     return 0
 
 
