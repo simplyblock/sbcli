@@ -439,6 +439,15 @@ class BaseNodeObject(BaseModel):
     STATUS_DOWN = 'down'
     STATUS_IN_REMOVAL = 'in_removal'
     STATUS_PENDING_REMOVAL = 'pending_removal'
+    #: A removal is draining the node: its devices' data is being rebuilt
+    #: elsewhere and its volumes migrated to other nodes. Between
+    #: PENDING_REMOVAL and IN_REMOVAL -- nothing has been torn down yet, so a
+    #: removal that gives up here leaves the node intact.
+    STATUS_MIGRATING_LVOLS = 'migrating_lvols'
+    #: Terminal state for a removal that gave up. The node is shut down and
+    #: may still own data that could not be migrated off it, so it is neither
+    #: ONLINE nor REMOVED. An operator re-drives the removal from the start.
+    STATUS_REMOVED_FAILED = 'removed_failed'
 
     #: Removal statuses in which the node's SPDK has already been stopped.
     #: Anything deciding "skip it, it cannot answer" -- peer routing, JM
@@ -461,11 +470,32 @@ class BaseNodeObject(BaseModel):
     #: Hand-written copies of this list are how a removal ended up RPC-ing a
     #: node whose pod was already gone.
     #:
-    #: Narrower here than on main by design: this branch has neither
-    #: MIGRATING_LVOLS nor REMOVED_FAILED, and naming statuses the branch never
-    #: stamps would describe a state machine it does not have.
     DEPARTING_STATUSES: ClassVar[tuple] = (
-        STATUS_PENDING_REMOVAL,) + REMOVAL_SHUT_DOWN_STATUSES
+        STATUS_PENDING_REMOVAL,
+        STATUS_MIGRATING_LVOLS,
+    ) + REMOVAL_SHUT_DOWN_STATUSES + (
+        STATUS_REMOVED_FAILED,
+    )
+
+    #: A node that is on its way out but whose SPDK is still up and serving.
+    #:
+    #: The removal flow leaves a node serving for its whole drain -- the device
+    #: rebuild and the volume migration both read through it -- and several
+    #: checks have to let that work proceed rather than treat the node as gone.
+    #: Those checks predate this set and each spelled the condition out as
+    #: ``== STATUS_SUSPENDED``, which was the only draining status when they
+    #: were written. Every status added since (PENDING_REMOVAL, stamped by the
+    #: Kubernetes drain; MIGRATING_LVOLS, by the removal itself) silently failed
+    #: them, and each one stalled a drain until it was found.
+    #:
+    #: Not the inverse of DEPARTING_STATUSES: IN_REMOVAL, REMOVED and
+    #: REMOVED_FAILED are departing too, but their SPDK is stopped, so they
+    #: belong to REMOVAL_SHUT_DOWN_STATUSES and must never appear here.
+    DRAINING_STATUSES: ClassVar[tuple] = (
+        STATUS_SUSPENDED,
+        STATUS_PENDING_REMOVAL,
+        STATUS_MIGRATING_LVOLS,
+    )
 
     #: Statuses in which a node can still act as the *source* of a live volume
     #: migration -- i.e. its SPDK is up and can be read from.
@@ -482,11 +512,10 @@ class BaseNodeObject(BaseModel):
     #: tasks_runner_lvol_migration -- and they were previously two hand-written
     #: copies of the same tuple. Fixing one and not the other cost a live drain:
     #: the API accepted the migration and the runner then suspended it.
-    MIGRATION_SOURCE_STATUSES: ClassVar[tuple] = (
-        STATUS_ONLINE,
-        STATUS_SUSPENDED,
-        STATUS_PENDING_REMOVAL,
-    )
+    #: Derived from DRAINING_STATUSES rather than listed, so a draining status
+    #: added later cannot be a valid drain state and an invalid migration
+    #: source at the same time.
+    MIGRATION_SOURCE_STATUSES: ClassVar[tuple] = (STATUS_ONLINE,) + DRAINING_STATUSES
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,
@@ -501,4 +530,6 @@ class BaseNodeObject(BaseModel):
         STATUS_DOWN: 40,
         STATUS_IN_REMOVAL: 41,
         STATUS_PENDING_REMOVAL: 42,
+        STATUS_MIGRATING_LVOLS: 43,
+        STATUS_REMOVED_FAILED: 44,
     }

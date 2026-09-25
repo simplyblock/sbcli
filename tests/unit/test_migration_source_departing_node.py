@@ -110,6 +110,41 @@ class SourceStatusTests(unittest.TestCase):
                 self.assertIsNotNone(self._rejected_source(status))
 
 
+class DrainingStatusSourceTests(SourceStatusTests):
+    """Reuses SourceStatusTests' harness: these drive start_migration too, they
+    just assert over the status sets rather than one named status."""
+
+    def test_every_draining_status_can_be_a_migration_source(self):
+        """A drain reads through the node it is draining, so a status meaning
+        "draining" and one meaning "cannot be a source" would describe a
+        removal that can never move its own volumes."""
+        for status in StorageNode.DRAINING_STATUSES:
+            with self.subTest(status=status):
+                self.assertIn(status, StorageNode.MIGRATION_SOURCE_STATUSES)
+                self.assertIsNone(
+                    self._rejected_source(status),
+                    f"{status} means the node is draining but it was refused as "
+                    "a migration source, so its own drain could never finish")
+
+    def test_migrating_lvols_is_covered(self):
+        """Ported from the node-removal work, where the removal stamps it for
+        the whole drain. It reached this branch after PENDING_REMOVAL had
+        already stalled three checks that only knew SUSPENDED; it must not
+        stall the same ones again."""
+        self.assertIn(StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.DRAINING_STATUSES)
+        self.assertIn(StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.DEPARTING_STATUSES)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_LVOLS,
+                         StorageNode.REMOVAL_SHUT_DOWN_STATUSES)
+        self.assertIsNone(self._rejected_source(StorageNode.STATUS_MIGRATING_LVOLS))
+
+    def test_removed_failed_is_departing_and_not_a_source(self):
+        """A removal that gave up leaves the node shut down: it is leaving, and
+        it has nothing left to read from."""
+        self.assertIn(StorageNode.STATUS_REMOVED_FAILED, StorageNode.DEPARTING_STATUSES)
+        self.assertNotIn(StorageNode.STATUS_REMOVED_FAILED, StorageNode.DRAINING_STATUSES)
+        self.assertIsNotNone(self._rejected_source(StorageNode.STATUS_REMOVED_FAILED))
+
+
 class SourceStatusSetTests(unittest.TestCase):
 
     def test_the_allow_list_and_the_shut_down_set_cannot_overlap(self):
@@ -143,6 +178,14 @@ class SourceStatusSetTests(unittest.TestCase):
             self.assertIn(
                 "StorageNode.MIGRATION_SOURCE_STATUSES", guard,
                 f"the runner guards its source with a local list: {guard}")
+
+    def test_a_draining_node_is_never_one_whose_spdk_has_stopped(self):
+        """The two sets answer different questions -- "still serving?" and
+        "already gone?" -- and a status in both would be read as serving by one
+        caller and as gone by the next."""
+        self.assertEqual(
+            set(StorageNode.DRAINING_STATUSES) & set(StorageNode.REMOVAL_SHUT_DOWN_STATUSES),
+            set())
 
     def test_pending_removal_is_departing_but_still_serving(self):
         """The two facts that together make this bug possible, pinned so the

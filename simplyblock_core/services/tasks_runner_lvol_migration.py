@@ -481,7 +481,8 @@ def _get_target_secondary_node(tgt_node, src_node_id):
       - No secondary configured   → (None, None)   skip silently
       - Secondary STATUS_ONLINE   → (sec_node, None) register on secondary
       - Secondary STATUS_OFFLINE  → (None, None)   administratively down, skip
-      - Secondary STATUS_SUSPENDED and node == src_node → (sec_node, None)
+      - Secondary draining (see DRAINING_STATUSES) and node == src_node
+        → (sec_node, None)
         overlap drain: source is being drained but is still the target's
         secondary; migration must continue through it
       - Any other status          → (None, err)    block creation on primary
@@ -500,7 +501,9 @@ def _get_target_secondary_node(tgt_node, src_node_id):
         return sec, None
     if sec.status == StorageNode.STATUS_OFFLINE:
         return None, None
-    if sec.status == StorageNode.STATUS_SUSPENDED and src_node_id and sec.get_id() == src_node_id:
+    # Any draining status, not just SUSPENDED: the overlap-drain case below is
+    # about the source being on its way out, and it has three spellings now.
+    if sec.status in StorageNode.DRAINING_STATUSES and src_node_id and sec.get_id() == src_node_id:
         return sec, None
     return None, (
         f"Target secondary node {tgt_node.secondary_node_id} is in state "
@@ -517,7 +520,8 @@ def _get_target_tertiary_node(tgt_node, src_node_id):
       - No tertiary configured    → (None, None)   skip silently
       - Tertiary STATUS_ONLINE    → (ter_node, None) register on tertiary
       - Tertiary STATUS_OFFLINE   → (None, None)   administratively down, skip
-      - Tertiary STATUS_SUSPENDED and node == src_node → (ter_node, None)
+      - Tertiary draining (see DRAINING_STATUSES) and node == src_node
+        → (ter_node, None)
         overlap drain: source is being drained but is still the target's
         tertiary; migration must continue through it
       - Any other status          → (None, err)    block creation on primary
@@ -535,7 +539,7 @@ def _get_target_tertiary_node(tgt_node, src_node_id):
         return ter, None
     if ter.status == StorageNode.STATUS_OFFLINE:
         return None, None
-    if ter.status == StorageNode.STATUS_SUSPENDED and src_node_id and ter.get_id() == src_node_id:
+    if ter.status in StorageNode.DRAINING_STATUSES and src_node_id and ter.get_id() == src_node_id:
         return ter, None
     return None, (
         f"Target tertiary node {tgt_node.tertiary_node_id} is in state "
@@ -557,7 +561,7 @@ def _get_source_secondary_node(src_node):
         sec = db.get_storage_node_by_id(src_node.secondary_node_id)
     except KeyError:
         return None
-    if sec.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+    if sec.status in StorageNode.MIGRATION_SOURCE_STATUSES:
         return sec
     return None
 
@@ -575,7 +579,7 @@ def _get_source_tertiary_node(src_node):
         ter = db.get_storage_node_by_id(src_node.tertiary_node_id)
     except KeyError:
         return None
-    if ter.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+    if ter.status in StorageNode.MIGRATION_SOURCE_STATUSES:
         return ter
     return None
 
