@@ -131,6 +131,9 @@ class RapidFioLifecycle(_RapidFioHooks):
     _rapid_base_runtime = None
     _rapid_lifecycle_ready = False
 
+    #: name -> (launched_at, runtime). Written by rapid_runtime_for.
+    _rapid_launched = None
+
     def rapid_fio_init(self, runtime):
         """Record the base runtime and arm the lifecycle. Idempotent."""
         if self._rapid_lifecycle_ready:
@@ -144,10 +147,52 @@ class RapidFioLifecycle(_RapidFioHooks):
             len(self.fio_jobs()), runtime, str(self.RUNTIME_JITTER))
 
     def rapid_runtime_for(self, name):
-        """This job's runtime, jittered so endings spread out."""
+        """This job's runtime, jittered so endings spread out.
+
+        Called once per launch, which is also what makes it the place to
+        record when the job started and how long it should take -- see
+        rapid_overdue.
+        """
         base = getattr(self, "_rapid_base_runtime", None) or 1800
         lo, hi = self.RUNTIME_JITTER
-        return int(base * random.uniform(lo, hi))
+        runtime = int(base * random.uniform(lo, hi))
+        if self._rapid_launched is None:
+            self._rapid_launched = {}
+        self._rapid_launched[name] = (time.time(), runtime)
+        return runtime
+
+    def rapid_grace_seconds(self):
+        """How long past its runtime a job may still be running.
+
+        fio's --time_based --runtime clock starts only once file layout is
+        done, so a job legitimately outlives its runtime by however long it
+        spent laying out. The suite already budgets that as
+        FIO_LAYOUT_ALLOWANCE_SEC, so use it where it exists rather than
+        inventing a second number that can drift from it.
+        """
+        return int(getattr(self, "FIO_LAYOUT_ALLOWANCE_SEC", 3600)) + 600
+
+    def rapid_overdue(self):
+        """Jobs still running well past when they should have finished.
+
+        A job that never ends is never relaunched, so its volume quietly stops
+        getting fresh IO for the rest of the run and the outages that follow
+        are landing on an idle volume. Left to the logs that reads as a healthy
+        run with fewer jobs; it is a stuck workload and the run should say so.
+        """
+        launched = self._rapid_launched or {}
+        grace = self.rapid_grace_seconds()
+        now = time.time()
+        late = []
+        for name, rec in self.fio_jobs():
+            when = launched.get(name)
+            if not when:
+                continue            # never launched through the lifecycle
+            started, runtime = when
+            overdue_by = now - started - runtime - grace
+            if overdue_by > 0 and self.fio_job_alive(name, rec):
+                late.append((name, int(overdue_by), runtime))
+        return late
 
     # ── A: read what the logs already say ────────────────────────────────
     def rapid_scan_fio_logs(self):
@@ -238,6 +283,19 @@ class RapidFioLifecycle(_RapidFioHooks):
                 f"{context}. Detected within one outage of happening, so this "
                 f"outage is the one to look at:\n    "
                 + "\n    ".join(errors[:8]))
+
+        late = self.rapid_overdue()
+        if late:
+            raise RapidFioFailure(
+                f"[rapid-fio] {len(late)} job(s) are still running long after "
+                f"their runtime ended {context}. fio's clock starts after file "
+                f"layout, and {self.rapid_grace_seconds()}s of slack is already "
+                f"allowed on top of that, so this is a workload that is not "
+                f"progressing -- its volume has stopped taking fresh IO and "
+                f"every outage since has landed on an idle one:\n    "
+                + "\n    ".join(
+                    f"{n}: {late_by}s past a {rt}s runtime"
+                    for n, late_by, rt in late[:8]))
 
         if not self.rapid_allow_relaunch():
             self.logger.info(
