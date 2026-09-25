@@ -63,6 +63,13 @@ Environment variables, all optional unless marked:
     TIMEOUT_DISCOVERY    seconds, default 900
     TIMEOUT_EXPAND       seconds, default 3600
     DRY_RUN              1 prints what it would do and touches nothing
+    DRAFT_ONLY           1 discovers and writes the draft, but does not
+                         approve it, so it can be reviewed or hand-edited
+    APPROVE_ONLY         name of an existing draft: approve that and wait,
+                         changing none of its contents
+    KUBECTL_ATTEMPTS     tries per kubectl call (default 4)
+    DISCOVERY_ATTEMPTS   discovery runs before giving up (default 3)
+    FABRIC_TYPE          default tcp; no CRD default and immutable once set
 """
 
 from __future__ import annotations
@@ -556,6 +563,20 @@ def main() -> int:
     config_name = os.environ.get(
         "CDC_NAME", f"e2e-{os.environ.get('CLUSTER_NAME', 'simplyblock-cluster')}")
 
+    # APPROVE_ONLY skips discovery and shaping and approves a draft that is
+    # already sitting there. It is the second half of a review: somebody ran
+    # DRAFT_ONLY, read or edited the document, and now wants it deployed
+    # without this script touching the contents again.
+    approve_only = (os.environ.get("APPROVE_ONLY", "") or "").strip()
+    if approve_only:
+        log(f"approving the existing draft {approve_only} as it stands")
+        approve_and_wait(approve_only,
+                         int(os.environ.get("TIMEOUT_EXPAND", "3600")))
+        wanted = (os.environ.get("SPDK_IMAGE", "") or "").strip()
+        if wanted:
+            verify_spdk_image(wanted)
+        return 0
+
     ref = discover_with_retries(
         config_name, int(os.environ.get("TIMEOUT_DISCOVERY", "900")))
 
@@ -584,6 +605,15 @@ def main() -> int:
     cfg.pop("status", None)
     log(f"writing the edited draft back to {ref}")
     kubectl("replace", "-f", "-", stdin=json.dumps(cfg))
+
+    if env_bool("DRAFT_ONLY", False):
+        log(f"DRAFT_ONLY: {ref} is written and NOT approved. Review it, edit "
+            f"anything else you need, then approve:")
+        log(f"    kubectl -n {NS} get clusterdeploymentconfig {ref} -o yaml")
+        log(f"    APPROVE_ONLY={ref} python3 {os.path.basename(__file__)}")
+        log("Nothing is deployed until it is approved, and after that the "
+            "document cannot be changed.")
+        return 0
 
     approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "3600")))
 
