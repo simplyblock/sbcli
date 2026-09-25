@@ -66,30 +66,6 @@ from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entr
 logger = logging.getLogger()
 db = DBController()
 
-#: Statuses in which a node can still act as a migration *source*.
-#:
-#: The question is "is its SPDK up and serving", not "is it staying in the
-#: cluster" -- a migration reads from the source, so a node on its way out is a
-#: perfectly good source right up until its SPDK stops. PENDING_REMOVAL is
-#: exactly that state: the Kubernetes drain stamps it before failing the node's
-#: devices (see node_drain_steps.start_device_decommission), and the node keeps
-#: serving its volumes from replicas for the whole device-rebuild phase --
-#: observed at ~2.4 MB/s with all three of its devices failed.
-#:
-#: Leaving it out made the drain unable to finish: the device phase stamps the
-#: status, and the lvol phase that follows was then refused with "Source node is
-#: not online", once per retry, each attempt leaving an orphaned migration
-#: record behind.
-#:
-#: The statuses deliberately absent are the ones where nothing can answer:
-#: IN_REMOVAL and REMOVED (SPDK stopped, see REMOVAL_SHUT_DOWN_STATUSES), and
-#: DOWN / UNREACHABLE / OFFLINE / IN_CREATION / RESTARTING.
-_MIGRATION_SOURCE_STATUSES = (
-    StorageNode.STATUS_ONLINE,
-    StorageNode.STATUS_SUSPENDED,
-    StorageNode.STATUS_PENDING_REMOVAL,
-)
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -142,7 +118,7 @@ def start_migration(migration_id,
     if source_node_id == target_node_id:
         raise ValueError("Source and target nodes must be different")
 
-    if source_node.status not in _MIGRATION_SOURCE_STATUSES:
+    if source_node.status not in StorageNode.MIGRATION_SOURCE_STATUSES:
         raise ValueError(f"Source node cannot serve a migration (status={source_node.status})")
 
     if target_node.status != StorageNode.STATUS_ONLINE:

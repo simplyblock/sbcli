@@ -467,6 +467,27 @@ class BaseNodeObject(BaseModel):
     DEPARTING_STATUSES: ClassVar[tuple] = (
         STATUS_PENDING_REMOVAL,) + REMOVAL_SHUT_DOWN_STATUSES
 
+    #: Statuses in which a node can still act as the *source* of a live volume
+    #: migration -- i.e. its SPDK is up and can be read from.
+    #:
+    #: Deliberately not the inverse of DEPARTING_STATUSES: a node on its way out
+    #: is a perfectly good source right up until its SPDK stops, and the
+    #: Kubernetes drain depends on exactly that. It stamps PENDING_REMOVAL
+    #: before failing the node's devices (otherwise the rebuild tasks queue on
+    #: the departing node itself and never run), and only then migrates the
+    #: volumes off -- which it cannot do if the stamp disqualifies the source.
+    #:
+    #: Lives on the model because two callers need it -- the API guard in
+    #: migration_controller.start_migration and the per-phase re-check in
+    #: tasks_runner_lvol_migration -- and they were previously two hand-written
+    #: copies of the same tuple. Fixing one and not the other cost a live drain:
+    #: the API accepted the migration and the runner then suspended it.
+    MIGRATION_SOURCE_STATUSES: ClassVar[tuple] = (
+        STATUS_ONLINE,
+        STATUS_SUSPENDED,
+        STATUS_PENDING_REMOVAL,
+    )
+
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,
         STATUS_OFFLINE: 1,

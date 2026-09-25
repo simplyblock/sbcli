@@ -3016,10 +3016,14 @@ def task_runner(task):
     _is_cleanup_phase = migration.phase in (
         LVolMigration.PHASE_CLEANUP_TARGET, LVolMigration.PHASE_CLEANUP_SOURCE)
     if not _is_cleanup_phase:
-        if src_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        # Same predicate as the API guard in migration_controller.start_migration,
+        # read from the one place that owns it. These were two hand-written copies:
+        # fixing only the API side let a drain's migration be accepted and then
+        # suspended here on the very next phase, which is how it was found.
+        if src_node.status not in StorageNode.MIGRATION_SOURCE_STATUSES:
             return _budget_suspend(
                 task, migration, migration_id,
-                f"source node not online (status={src_node.status})")
+                f"source node cannot serve a migration (status={src_node.status})")
 
     if tgt_node.status != StorageNode.STATUS_ONLINE:
         if (migration.phase in (LVolMigration.PHASE_SNAP_COPY,

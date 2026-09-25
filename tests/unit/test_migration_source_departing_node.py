@@ -117,7 +117,32 @@ class SourceStatusSetTests(unittest.TestCase):
         later (migrating_devices, migrating_lvols) cannot quietly admit a node
         whose SPDK is already stopped."""
         for status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
-            self.assertNotIn(status, ctl._MIGRATION_SOURCE_STATUSES)
+            self.assertNotIn(status, StorageNode.MIGRATION_SOURCE_STATUSES)
+
+    def test_the_runner_guards_the_source_with_the_shared_list(self):
+        """The API guard and the runner's per-phase re-check were two
+        hand-written copies of the same tuple. Fixing only the API side let a
+        drain's migration be accepted and then suspended by the runner on its
+        very next phase, which is how the duplicate was found.
+
+        Checked on the runner's own guard line rather than the whole module:
+        the file uses (ONLINE, SUSPENDED) legitimately elsewhere, for target
+        and peer checks that are a different question.
+        """
+        import inspect
+        import re
+
+        from simplyblock_core.services import tasks_runner_lvol_migration as runner
+
+        guards = [
+            line.strip() for line in inspect.getsource(runner).splitlines()
+            if re.search(r'src_node\.status\s+not\s+in', line)
+        ]
+        self.assertTrue(guards, "the runner's source-status guard has moved or gone")
+        for guard in guards:
+            self.assertIn(
+                "StorageNode.MIGRATION_SOURCE_STATUSES", guard,
+                f"the runner guards its source with a local list: {guard}")
 
     def test_pending_removal_is_departing_but_still_serving(self):
         """The two facts that together make this bug possible, pinned so the
@@ -127,7 +152,7 @@ class SourceStatusSetTests(unittest.TestCase):
         self.assertNotIn(StorageNode.STATUS_PENDING_REMOVAL,
                          StorageNode.REMOVAL_SHUT_DOWN_STATUSES)
         self.assertIn(StorageNode.STATUS_PENDING_REMOVAL,
-                      ctl._MIGRATION_SOURCE_STATUSES)
+                      StorageNode.MIGRATION_SOURCE_STATUSES)
 
 
 if __name__ == '__main__':
