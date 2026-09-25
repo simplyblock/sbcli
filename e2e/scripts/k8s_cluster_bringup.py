@@ -194,6 +194,61 @@ def env_int(name: str) -> int | None:
         return None
 
 
+def resolve_workers(names):
+    """Map the names we were given onto node names the cluster actually has.
+
+    On OpenShift a node is named by its FQDN -- worker-1.ocp.simplyblock.ai --
+    and both metadata.name and the kubernetes.io/hostname label carry it. A
+    worker_nodes input of "worker-1" therefore names nothing.
+
+    Discovery accepts that list and writes it into the draft. The expansion
+    then creates StorageNodes with workerNode: worker-1, whose pods can never
+    be scheduled, and the document sits in Activating until its hour is up.
+    The run fails after 60 minutes with a message about the control plane,
+    which is not the problem -- the problem is a worker that does not exist,
+    and it was knowable in the first second.
+
+    So: exact match wins; failing that a unique name that starts with
+    "<given>." is taken as the same machine written short. Anything left over
+    is fatal here rather than an hour from now.
+    """
+    if not names:
+        return names
+
+    out = kubectl("get", "nodes", "-o",
+                  "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+                  check=False)
+    actual = [n.strip() for n in (out or "").splitlines() if n.strip()]
+    if not actual:
+        log("WARNING: could not list nodes, so worker names go through "
+            "unchecked")
+        return names
+
+    resolved, unknown = [], []
+    for name in names:
+        if name in actual:
+            resolved.append(name)
+            continue
+        matches = [a for a in actual if a.startswith(name + ".")]
+        if len(matches) == 1:
+            log(f"worker {name!r} -> {matches[0]!r}")
+            resolved.append(matches[0])
+        elif matches:
+            unknown.append(f"{name} (ambiguous: {', '.join(sorted(matches))})")
+        else:
+            unknown.append(name)
+
+    if unknown:
+        raise RuntimeError(
+            "these workers do not exist on this cluster: "
+            + ", ".join(unknown)
+            + f".\nNodes present: {', '.join(sorted(actual))}.\n"
+            "Discovery would accept the names and write them into the draft, "
+            "and the expansion would then wait out its full hour on "
+            "StorageNodes whose pods can never be scheduled.")
+    return resolved
+
+
 def is_lblk() -> bool:
     return (os.environ.get("DEVICE_MODE", "nvme") or "nvme").lower() in (
         "lblk", "logicalblock", "block")
@@ -245,7 +300,7 @@ def build_discovery(name: str) -> dict:
     if device_filter:
         discover["deviceFilter"] = device_filter
 
-    workers = env_list("WORKER_NODES")
+    workers = resolve_workers(env_list("WORKER_NODES"))
     if workers:
         # Named workers rather than a selector: a selector's entries are ANDed,
         # so two hostnames in one selector match nothing at all.
@@ -556,7 +611,7 @@ def author_draft(name: str) -> str:
     wherever it will answer; see the RCA of 2026-09-25.
     """
     devices = env_list("BLOCK_DEVICES")
-    workers = env_list("WORKER_NODES")
+    workers = resolve_workers(env_list("WORKER_NODES"))
 
     # The CRD takes ^/dev/[A-Za-z0-9._/-]+$ and rejects anything else, with an
     # admission error naming the pattern rather than the value. Checking here
