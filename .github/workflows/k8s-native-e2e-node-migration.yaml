@@ -825,10 +825,10 @@ jobs:
 
           CSI_FLAGS=""
           if [ -n "${{ inputs.csi_repository }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${{ inputs.csi_repository }}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.repository=${{ inputs.csi_repository }}"
           fi
           if [ -n "${{ inputs.csi_tag }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${{ inputs.csi_tag }}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.tag=${{ inputs.csi_tag }}"
           fi
 
           helm upgrade --install spdk-csi ./ \
@@ -836,8 +836,7 @@ jobs:
             --create-namespace \
             --debug \
             --timeout 10m \
-            --set controlplane.enabled=true \
-            --set operator.enabled=true \
+            --set deployment.profile=standalone \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
             --set image.simplyblock.repository="${{ inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \

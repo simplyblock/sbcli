@@ -583,10 +583,10 @@ jobs:
 
           CSI_FLAGS=""
           if [ -n "${CSI_REPOSITORY}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${CSI_REPOSITORY}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.repository=${CSI_REPOSITORY}"
           fi
           if [ -n "${CSI_TAG}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${CSI_TAG}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.tag=${CSI_TAG}"
           fi
 
           helm upgrade --install spdk-csi ./ \
@@ -594,8 +594,7 @@ jobs:
             --create-namespace \
             --debug \
             --timeout 10m \
-            --set controlplane.enabled=true \
-            --set operator.enabled=true \
+            --set deployment.profile=standalone \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
@@ -1113,7 +1112,7 @@ jobs:
             --set csiSecret.simplybk.secret="${CLUSTER_SECRET}" \
             --set logicalVolume.pool_name="testing1" \
             --set image.simplyblock.tag="${BASE_SB_IMAGE}" \
-            --set image.csi.tag="${CSI_DRIVER_TAG}" \
+            --set driver.image.tag="${CSI_DRIVER_TAG}" \
             --set logicalVolume.numDataChunks="${NDCS}" \
             --set logicalVolume.numParityChunks="${NPCS}" \
             --set storageclass.volumeBindingMode=Immediate \

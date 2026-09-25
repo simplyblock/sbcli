@@ -853,10 +853,10 @@ jobs:
 
           CSI_FLAGS=""
           if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${{ github.event.inputs.csi_repository }}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.repository=${{ github.event.inputs.csi_repository }}"
           fi
           if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${{ github.event.inputs.csi_tag }}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.tag=${{ github.event.inputs.csi_tag }}"
           fi
 
           helm upgrade --install spdk-csi ./ \
@@ -864,8 +864,7 @@ jobs:
             --create-namespace \
             --debug \
             --timeout 10m \
-            --set controlplane.enabled=true \
-            --set operator.enabled=true \
+            --set deployment.profile=standalone \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
@@ -1125,6 +1124,21 @@ jobs:
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
+          # spdkImage and spdkProxyImage were StorageNodeSet fields. In v1alpha2
+          # they survive only as a per-StorageNode override
+          # (StorageNode.spec.config.spdkImage), and a ClusterDeploymentConfig
+          # has no field that sets them -- the nodes it creates leave the image
+          # empty and the control plane picks its own default.
+          #
+          # There is no non-racy way to pin it from here: the nodes are created
+          # and added by the expansion, so anything this job patched afterwards
+          # would land after the image had already been chosen. Rather than
+          # patch and hope, the run says the pin did not happen, because an
+          # lblk run silently testing the default SPDK build instead of the one
+          # it named is a wrong green.
+          if [ -n "${SPDK_IMAGE}" ]; then
+            echo "::warning title=spdk_image not applied::spdk_image=${SPDK_IMAGE} was requested, but a ClusterDeploymentConfig cannot set the SPDK image; the cluster will run the control plane's default. Pinning it needs an operator-side field."
+          fi
           PARTITIONS="${PARTITIONS:-0}"
           JM_COUNT="${JM_COUNT:-3}"
           # 0 (the default) means derive vcpuCount from the node's CPU count below;
@@ -1132,13 +1146,11 @@ jobs:
           VCPU_COUNT_PARAM=$(echo "${VCPU_COUNT_PARAM:-0}" | tr -d '[:space:]')
           OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'aws-openshift' && '50' || github.event.inputs.cluster_environment == 'openshift-local' && '50' || github.event.inputs.cluster_environment == 'openshift-baremetal' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
-          SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
-          ENABLE_CPU_TOPOLOGY="true"
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           if [ "$CLUSTER_ENV" = "local" ]; then
-            ENABLE_CPU_TOPOLOGY="false"
+            :
           fi
 
           # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
@@ -1172,16 +1184,27 @@ jobs:
             echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
           fi
 
-          RESERVED_CPU_YAML=""
+          RESERVED_SYSTEM_CPU=""
           if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
-            RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+            RESERVED_SYSTEM_CPU="0,1,10,11,16,17,26,27"
           fi
 
-          PCIE_MODEL_YAML=""
+          PCIE_MODEL=""
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment }}"
           if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
-            PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
+            PCIE_MODEL="SAMSUNG MZQLB1T9HAJR-00007"
           fi
+
+          # Which distribution the operator is deploying onto. It is a
+          # shorthand: naming OpenShift once sets openShiftCluster,
+          # enableCpuTopology and enableKubeletConfiguration together, so the
+          # three flags this workflow used to compute individually are now one
+          # word (expansion.go buildWorkload).
+          case "$CLUSTER_ENV" in
+            aws-openshift|openshift-local|openshift-baremetal) ENVIRONMENT="OpenShift" ;;
+            talos)                                             ENVIRONMENT="Talos" ;;
+            *)                                                 ENVIRONMENT="Vanilla" ;;
+          esac
 
           # nvme unless cluster_params says otherwise. Defaulted where it
 
@@ -1197,28 +1220,17 @@ jobs:
 
           # size(...) > 0 -- so blanking is enough, the keys may stay.
 
-          LBLK_YAML=""
           if [ "${DEVICE_MODE}" = "lblk" ]; then
-            LBLK_YAML="  enableLblk: true"
             # Mandatory on lblk: add-node refuses with "lblk device mode
             # requires --enable-journal-device; partitioned journal mode is not
-            # supported". Set here rather than via cluster_params partitions
-            # (which derives it, inverted) because partitions means nothing on
-            # lblk -- the partitioned journal is the mode being refused.
+            # supported".
             ENABLE_JOURNAL_DEVICE="true"
-            # Mutually exclusive with enableLblk under the StorageNodeSet CEL
-            # rule, which tests size(...) > 0, so blanking is enough.
+            # Both are NVMe selectors, and discovery scans one class per run.
+            # Sending them with enableLogicalBlockDevices selects nothing.
             DRIVE_SIZE_RANGE=""
-            PCIE_MODEL_YAML=""
-            echo "lblk mode: enableLblk + enableJournalDevice set, PCIe selectors blanked"
+            PCIE_MODEL=""
+            echo "lblk mode: block-device discovery, journal device on, PCIe selectors blanked"
           fi
-
-          # Build workerNodes YAML list from comma-separated input
-          WORKER_YAML=""
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-          for NODE in "${NODES[@]}"; do
-            WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
-          done
 
           # Conditionally build backup spec block
           BACKUP_SPEC=""
@@ -1255,20 +1267,55 @@ jobs:
               encryption: true"
           fi
 
-          echo "=== Custom resource YAML to apply ==="
-          cat <<EOF
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageCluster
-          metadata:
-            name: simplyblock-cluster
-            namespace: ${NAMESPACE}
+          echo "=== Bringing the cluster up through the deployment config ==="
+          # StorageNodeSet is not reconciled any more. operator/cmd/main.go
+          # registers no reconciler for it and deployment/expansion.go is the
+          # only thing that creates a StorageNode, so applying a set succeeded
+          # and produced nothing -- the cluster then waited forever for storage
+          # nodes nobody had asked for.
+          #
+          # The supported path is a ClusterDeploymentConfig: discovery inspects
+          # the workers and writes a draft, we write our parameters into it, and
+          # approving it builds the StorageCluster and its StorageNodes. The
+          # draft is immutable once approved, so everything has to be set first;
+          # the script does that in order.
+          export NAMESPACE
+          export CLUSTER_NAME="simplyblock-cluster"
+          export DEVICE_MODE NDCS NPCS VCPU_COUNT MAX_SUBSYS
+          export MGMT_IFC DATA_NICS
+          export JM_COUNT
+          export JM_PERCENT="3"
+          export ENABLE_JOURNAL_DEVICE
+          export ENVIRONMENT
+          export DRIVE_SIZE_RANGE PCIE_MODEL
+          # One field, two operations: the operator resolves it to a 4K reformat
+          # on an NVMe cluster and a wipefs on a block one.
+          export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
+          export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
+          # On lblk the workers boot from /dev/sda; without this the draft
+          # offers the root disk as storage and the approval gate is the only
+          # thing standing between that and a reformat.
+          if [ "${DEVICE_MODE}" = "lblk" ]; then
+            export BLOCK_DENY_LIST="${LBLK_DENY_LIST:-/dev/sda}"
+          fi
+
+          python3 $GITHUB_WORKSPACE/e2e/scripts/k8s_cluster_bringup.py
+
+          echo "=== Settings the deployment config does not carry ==="
+          # A deployment config describes a deployment, not every knob of a
+          # cluster: thresholds, node affinity, backup and vault have no field
+          # on it. They are mutable on the StorageCluster, so they are patched
+          # onto the cluster the expansion just created.
+          #
+          # Patched through v1alpha1 deliberately. That version is still served
+          # and carries these in exactly the shapes this workflow already
+          # builds -- backup's localEndpoint/localTesting/secondaryTarget among
+          # them -- and the conversion webhook translates. Rewriting them into
+          # v1alpha2's own backup shape by hand would be a silent guess, and a
+          # wrong guess reads as a backup test failing for its own reasons.
+          cat > /tmp/cluster-extra.yaml <<EOF
           spec:
-            fabricType: tcp
-            deviceMode: ${DEVICE_MODE}
             enableNodeAffinity: true
-            stripe:
-              dataChunks: ${NDCS}
-              parityChunks: ${NPCS}
             warningThreshold:
               capacity: 95
               provisionedCapacity: 97
@@ -1277,76 +1324,24 @@ jobs:
               provisionedCapacity: 98
           ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
-            maxSubsystemCount: ${MAX_SUBSYS}
-            vcpuCount: ${VCPU_COUNT}
-
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StoragePool
-          metadata:
-            name: simplyblock-pool
-            namespace: ${NAMESPACE}
-          spec:
-            clusterName: simplyblock-cluster
-          ${ENCRYPTION_POOL_YAML}
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageNodeSet
-          metadata:
-            name: simplyblock-node
-            namespace: ${NAMESPACE}
-          spec:
-            clusterName: simplyblock-cluster
-            clusterImage: "${SB_REPO}:${SB_TAG}"
-            spdkImage: "${SPDK_IMAGE}"
-            spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-          ${PCIE_MODEL_YAML}
-          ${LBLK_YAML}
-            driveSizeRange: "${DRIVE_SIZE_RANGE}"
-            mgmtIfname: ${MGMT_IFC}
-            dataIfname:
-              - ${DATA_NICS}
-          ${RESERVED_CPU_YAML}
-            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
-            journalManager:
-              count: ${JM_COUNT}
-              percentPerDevice: 3
-            skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
-            openShiftCluster: ${OPENSHIFT_CLUSTER}
-            ubuntuHost: false
-            forceFormat4K: ${FORCE_FORMAT_4K}
-            workerNodes:
-          ${WORKER_YAML}
           EOF
+          echo "--- cluster patch ---"; cat /tmp/cluster-extra.yaml
+          kubectl -n ${NAMESPACE} patch \
+            storageclusters.v1alpha1.storage.simplyblock.io simplyblock-cluster \
+            --type=merge --patch-file /tmp/cluster-extra.yaml
 
-          echo "=== Applying custom resources ==="
+          # reservedSystemCPU was a StorageNodeSet field and is now part of the
+          # cluster's storage-node workload, so it has no v1alpha1 home and is
+          # patched on v1alpha2 directly.
+          if [ -n "${RESERVED_SYSTEM_CPU}" ]; then
+            kubectl -n ${NAMESPACE} patch storagecluster simplyblock-cluster \
+              --type=merge \
+              -p "{\"spec\":{\"storageNodes\":{\"reservedSystemCPU\":\"${RESERVED_SYSTEM_CPU}\"}}}"
+          fi
+
+          echo "=== Applying pools ==="
           cat <<EOF | kubectl apply -f -
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageCluster
-          metadata:
-            name: simplyblock-cluster
-            namespace: ${NAMESPACE}
-          spec:
-            fabricType: tcp
-            deviceMode: ${DEVICE_MODE}
-            enableNodeAffinity: true
-            stripe:
-              dataChunks: ${NDCS}
-              parityChunks: ${NPCS}
-            warningThreshold:
-              capacity: 95
-              provisionedCapacity: 97
-            criticalThreshold:
-              capacity: 96
-              provisionedCapacity: 98
-          ${BACKUP_SPEC}
-          ${VAULT_SETTINGS}
-            maxSubsystemCount: ${MAX_SUBSYS}
-            vcpuCount: ${VCPU_COUNT}
-
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
           metadata:
             name: simplyblock-pool
@@ -1354,35 +1349,6 @@ jobs:
           spec:
             clusterName: simplyblock-cluster
           ${ENCRYPTION_POOL_YAML}
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageNodeSet
-          metadata:
-            name: simplyblock-node
-            namespace: ${NAMESPACE}
-          spec:
-            clusterName: simplyblock-cluster
-            clusterImage: "${SB_REPO}:${SB_TAG}"
-            spdkImage: "${SPDK_IMAGE}"
-            spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-          ${PCIE_MODEL_YAML}
-          ${LBLK_YAML}
-            driveSizeRange: "${DRIVE_SIZE_RANGE}"
-            mgmtIfname: ${MGMT_IFC}
-            dataIfname:
-              - ${DATA_NICS}
-          ${RESERVED_CPU_YAML}
-            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
-            journalManager:
-              count: ${JM_COUNT}
-              percentPerDevice: 3
-            skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
-            openShiftCluster: ${OPENSHIFT_CLUSTER}
-            ubuntuHost: false
-            forceFormat4K: ${FORCE_FORMAT_4K}
-            workerNodes:
-          ${WORKER_YAML}
           EOF
 
           echo "Custom resources applied"

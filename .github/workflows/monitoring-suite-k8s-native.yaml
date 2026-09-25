@@ -605,15 +605,14 @@ jobs:
           fi
           CSI_FLAGS=""
           if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${{ github.event.inputs.csi_repository }}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.repository=${{ github.event.inputs.csi_repository }}"
           fi
           if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${{ github.event.inputs.csi_tag }}"
+            CSI_FLAGS="$CSI_FLAGS --set driver.image.tag=${{ github.event.inputs.csi_tag }}"
           fi
           helm upgrade --install spdk-csi ./ \
             --namespace simplyblock --create-namespace --debug --timeout 10m \
-            --set controlplane.enabled=true \
-            --set operator.enabled=true \
+            --set deployment.profile=standalone \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
