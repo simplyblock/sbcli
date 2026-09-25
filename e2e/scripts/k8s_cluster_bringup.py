@@ -57,6 +57,11 @@ Environment variables, all optional unless marked:
     DRIVE_SIZE_RANGE     e.g. 1.7T-2T
     PCIE_MODEL           NVMe only
     BLOCK_DENY_LIST      comma-separated paths, lblk only; keeps the root disk out
+    BLOCK_DEVICES        comma-separated paths to use as block devices, e.g.
+                         /dev/nvme0n1,/dev/nvme1n1. Setting it SKIPS discovery
+                         and authors the document directly, for the case where
+                         discovery will not propose the hardware the lab has --
+                         see the RCA of 2026-09-25. Needs WORKER_NODES.
     BLOCK_ALLOW_LIST     comma-separated paths, lblk only
     ENABLE_PARTITIONED   true|false; report devices carrying a partition table
     NODES_PER_SOCKET / SOCKETS_TO_USE
@@ -76,6 +81,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -528,6 +534,84 @@ def verify_spdk_image(wanted: str) -> None:
     log(f"every storage node is running the requested SPDK image {wanted}")
 
 
+def author_draft(name: str) -> str:
+    """Write the deployment config ourselves, naming the devices directly.
+
+    Discovery refuses to propose an NVMe-transport disk for a logical-block
+    cluster: ClassRule (discovery/rules.go:190) excludes the whole class, and
+    it is a PreFilter, so the two 1.92T disks on each of this lab's workers are
+    dropped before the failure is even explained. lblk on NVMe hardware is
+    exactly how every lblk run here has worked -- an AIO bdev over /dev/nvme0n1
+    is a block device by path -- so discovery cannot deliver what the hardware
+    plainly supports.
+
+    The data model has no such objection. groups.devices.block takes any
+    ^/dev/... path, /dev/nvme0n1 included, and DeviceClassOf then reads the
+    cluster as LogicalBlock. So the document is written by hand and the
+    expansion acts on it unchanged.
+
+    This is a workaround for a discovery rule, not a second way to deploy. It
+    states the devices instead of finding them, which means it cannot notice a
+    worker whose disks differ -- the reason discovery exists. Prefer discovery
+    wherever it will answer; see the RCA of 2026-09-25.
+    """
+    devices = env_list("BLOCK_DEVICES")
+    workers = env_list("WORKER_NODES")
+
+    # The CRD takes ^/dev/[A-Za-z0-9._/-]+$ and rejects anything else, with an
+    # admission error naming the pattern rather than the value. Checking here
+    # says which entry is wrong. It also catches the shell having rewritten the
+    # path: a POSIX-emulating shell on Windows turns /dev/nvme0n1 into a
+    # C:/... path before this process ever sees it.
+    bad = [d for d in devices if not re.match(r"^/dev/[A-Za-z0-9._/-]+$", d)]
+    if bad:
+        raise RuntimeError(
+            f"BLOCK_DEVICES entries are not device paths: {bad}. Expected "
+            f"paths like /dev/nvme0n1. If these look like Windows paths, the "
+            f"shell rewrote them -- run this from the CI host or a real POSIX "
+            f"shell.")
+    if not workers:
+        raise RuntimeError(
+            "BLOCK_DEVICES names the devices but not the machines: set "
+            "WORKER_NODES too. Authoring a document means stating both, "
+            "because nothing is being discovered.")
+
+    log(f"authoring {name} directly: {len(devices)} device(s) on "
+        f"{len(workers)} worker(s), bypassing discovery")
+
+    doc = {
+        "apiVersion": API,
+        "kind": "ClusterDeploymentConfig",
+        "metadata": {"name": name, "namespace": NS},
+        "spec": {
+            "approved": False,
+            "cluster": {},
+            "nodeSets": [{
+                "name": "authored",
+                "groups": [{
+                    "name": "group-1",
+                    "workers": workers,
+                    "devices": {"block": devices},
+                }],
+            }],
+        },
+    }
+    env_name = (os.environ.get("ENVIRONMENT", "") or "").strip()
+    if env_name:
+        # Nothing inspected the fleet, so nothing concluded a distribution.
+        # Unstated, the workload flags it decides are all left at their
+        # defaults, which on OpenShift is the wrong deployment.
+        doc["spec"]["environment"] = env_name
+
+    existing = kubectl("get", "clusterdeploymentconfig", name, "-o", "json",
+                       check=False)
+    if existing.strip() and (json.loads(existing).get("spec") or {}).get("approved"):
+        log(f"{name} exists and is already approved; waiting on it")
+        return name
+    kubectl("apply", "-f", "-", stdin=json.dumps(doc))
+    return name
+
+
 def discover_with_retries(base_name: str, timeout: int) -> str:
     """Raise discovery until it produces a draft, or give up saying why.
 
@@ -577,8 +661,11 @@ def main() -> int:
             verify_spdk_image(wanted)
         return 0
 
-    ref = discover_with_retries(
-        config_name, int(os.environ.get("TIMEOUT_DISCOVERY", "900")))
+    if env_list("BLOCK_DEVICES"):
+        ref = author_draft(config_name)
+    else:
+        ref = discover_with_retries(
+            config_name, int(os.environ.get("TIMEOUT_DISCOVERY", "900")))
 
     if DRY_RUN:
         log("DRY_RUN: no draft to read back")
