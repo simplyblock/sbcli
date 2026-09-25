@@ -165,8 +165,10 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     else:
         cluster_name = cluster.cluster_name
         # Same sizing as create_lvstore, for the same reason as the stat
-        # collector: the manifest records object sizes derived from it.
-        cluster_size = cluster.page_size_in_blocks * cluster.distr_ndcs
+        # collector: the manifest records object sizes derived from it, and a
+        # cluster that records no data-chunk count falls back to one page
+        # rather than describing its objects as zero-sized.
+        cluster_size = cluster.page_size_in_blocks * max(cluster.distr_ndcs, 1)
 
     return backup_manifest.BackupManifest(
         backup_id=UUID(backup.uuid),
