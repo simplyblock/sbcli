@@ -224,11 +224,7 @@ def get_k8s_node_ip():
         return False
 
     for node in nodes:
-        if node.status == MgmtNode.STATUS_ONLINE:
-            return node.mgmt_ip
-
-    logger.error("No online mgmt nodes was found in the cluster!")
-    return False
+        return node.mgmt_ip
 
 
 def dict_agg(data, mean=False, keys=None):
