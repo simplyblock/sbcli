@@ -5163,7 +5163,16 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
     try:
         if not already_removed:
             # Phase 1 — shut the node down (graceful). Skipped on re-entry.
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+            #
+            # The question is "is this node still running", so the set is ONLINE
+            # plus every draining status, not a hand-written pair. The pair was
+            # exhaustive while a removal could only ever arrive here from a live
+            # node or from a re-entry past the shutdown -- true of the CLI flow,
+            # and false of the Kubernetes drain, which stamps PENDING_REMOVAL up
+            # front and so matched neither. The node was then dismantled with
+            # its SPDK still running: JM decommissioned, replicas relocated,
+            # devices torn down underneath a live target.
+            if snode.status in (StorageNode.STATUS_ONLINE,) + StorageNode.DRAINING_STATUSES:
                 cursor.enter("shutdown", f"[REMOVAL] {node_id}: phase 1 — shutdown")
                 ret = shutdown_storage_node(node_id, force=force_remove)
                 if isinstance(ret, tuple):
