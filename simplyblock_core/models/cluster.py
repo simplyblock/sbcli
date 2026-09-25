@@ -280,6 +280,10 @@ class Cluster(BaseModel):
     backup_s3_bucket: str = ""
     backup_s3_region: str = ""
     backup_s3_cred: str = ""
+    # Cluster Virtual IP, this is used for the load balancer,
+    # and it is used for gelf address in the storage nodes' containers.
+    # If not defined, then gelf address will be the first mgmt node's address
+    cluster_vip: str = ""
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

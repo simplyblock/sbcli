@@ -288,7 +288,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_failure_domain=False,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
-) -> str:
+                   cluster_vip=None,
+                   ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
 
@@ -451,7 +452,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.container_image_prefix = container_image_prefix or ""
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
-
+    cluster.cluster_vip = cluster_vip or ""
     if nvmeof_tls_config:
         cluster.tls = True
         cluster.tls_config = nvmeof_tls_config
