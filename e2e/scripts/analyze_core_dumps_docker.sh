@@ -35,10 +35,21 @@ GDB_TIMEOUT="${GDB_TIMEOUT:-900}"
 BDTS="/root/spdk/ultra/build_bdts/bdts"
 # Writable layer inside the container. Deliberately NOT /dev/shm or
 # /mnt/ramdisk: both are tmpfs, and these hosts are already memory-starved.
-# /tmp, not /root: the SPDK container runs as the unprivileged "simplyblock"
-# user and /root is not writable by it, so every candidate failed the mkdir
-# probe and the run symbolicated nothing. Verified by hand on vm202
-# 2026-09-25: mkdir /root/core_analysis -> Permission denied; /tmp works.
+# Scratch space for staging and expanding a core inside the container.
+#
+# /tmp rather than /root because that is where scratch belongs; the reason the
+# probe used to fail was not the path but the user. The exec calls below all
+# pass -u 0, and they have to:
+#
+#   * the image runs as the unprivileged "simplyblock" user, which cannot
+#     create a directory under /root; and
+#   * docker cp writes as root whatever the exec user is, so a core staged into
+#     the container arrives root:root 0640. An unprivileged zstd then cannot
+#     read it -- it fails quietly and leaves no .core behind, which reads as
+#     "decompression produced nothing" rather than as a permissions problem.
+#
+# Both were confirmed by hand on vm202 on 2026-09-25. Fixing only the path
+# moves the failure from mkdir to zstd; -u 0 is what actually makes this work.
 WORKDIR="/tmp/core_analysis"
 
 HOST="$(hostname -s 2>/dev/null || echo unknown)"
@@ -112,13 +123,13 @@ pick_container() {
     probe="$(mktemp)"; echo probe > "${probe}"
     for c in ${CANDIDATES}; do
         [ -n "${skip}" ] && [ "${c}" = "${skip}" ] && continue
-        sudo docker exec "${c}" true >/dev/null 2>&1 || { log "  ${c}: exec failed"; continue; }
-        sudo docker exec "${c}" mkdir -p "${WORKDIR}" >/dev/null 2>&1             || { log "  ${c}: mkdir ${WORKDIR} failed"; continue; }
+        sudo docker exec -u 0 "${c}" true >/dev/null 2>&1 || { log "  ${c}: exec failed"; continue; }
+        sudo docker exec -u 0 "${c}" mkdir -p "${WORKDIR}" >/dev/null 2>&1             || { log "  ${c}: mkdir ${WORKDIR} failed"; continue; }
         if ! sudo docker cp "${probe}" "${c}:${WORKDIR}/.probe" >/dev/null 2>&1; then
             log "  ${c}: docker cp probe failed"
             continue
         fi
-        sudo docker exec "${c}" rm -f "${WORKDIR}/.probe" >/dev/null 2>&1
+        sudo docker exec -u 0 "${c}" rm -f "${WORKDIR}/.probe" >/dev/null 2>&1
         rm -f "${probe}"
         echo "${c}"
         return 0
@@ -150,10 +161,10 @@ fi
 IMAGE="$(sudo docker inspect --format '{{.Config.Image}}' "${CONTAINER}" 2>/dev/null || echo unknown)"
 log "using container ${CONTAINER} (image ${IMAGE})"
 
-sudo docker exec "${CONTAINER}" mkdir -p "${WORKDIR}" >/dev/null 2>&1
+sudo docker exec -u 0 "${CONTAINER}" mkdir -p "${WORKDIR}" >/dev/null 2>&1
 
 HAVE_ZSTD_IN_CONTAINER=no
-if sudo docker exec "${CONTAINER}" bash -lc 'command -v zstd' >/dev/null 2>&1; then
+if sudo docker exec -u 0 "${CONTAINER}" bash -lc 'command -v zstd' >/dev/null 2>&1; then
     HAVE_ZSTD_IN_CONTAINER=yes
 fi
 log "zstd inside container: ${HAVE_ZSTD_IN_CONTAINER}"
@@ -176,7 +187,7 @@ for CORE in ${CORES}; do
     # compressed size, which is conservative for SPDK cores (mostly zeroed
     # hugepage mappings, so they compress well).
     NEED_MB=$(( ZST_MB * 5 ))
-    AVAIL_MB=$(sudo docker exec "${CONTAINER}" bash -lc \
+    AVAIL_MB=$(sudo docker exec -u 0 "${CONTAINER}" bash -lc \
         "df -Pm '${WORKDIR}' 2>/dev/null | awk 'NR==2 {print \$4}'" 2>/dev/null || echo 0)
     AVAIL_MB="${AVAIL_MB:-0}"
     if [ "${AVAIL_MB}" -gt 0 ] 2>/dev/null && [ "${NEED_MB}" -gt "${AVAIL_MB}" ] 2>/dev/null; then
@@ -201,12 +212,12 @@ for CORE in ${CORES}; do
             CONTAINER="${ALT}"
             IMAGE="$(sudo docker inspect --format '{{.Config.Image}}' "${CONTAINER}" 2>/dev/null || echo unknown)"
             HAVE_ZSTD_IN_CONTAINER=no
-            if sudo docker exec "${CONTAINER}" bash -lc 'command -v zstd' >/dev/null 2>&1; then
+            if sudo docker exec -u 0 "${CONTAINER}" bash -lc 'command -v zstd' >/dev/null 2>&1; then
                 HAVE_ZSTD_IN_CONTAINER=yes
             fi
         fi
     fi
-    if ! sudo docker exec "${CONTAINER}" test -s "${WORKDIR}/${SAFE}" 2>/dev/null          && ! sudo docker cp "${CORE}" "${CONTAINER}:${WORKDIR}/${SAFE}" >/dev/null 2>&1; then
+    if ! sudo docker exec -u 0 "${CONTAINER}" test -s "${WORKDIR}/${SAFE}" 2>/dev/null          && ! sudo docker cp "${CORE}" "${CONTAINER}:${WORKDIR}/${SAFE}" >/dev/null 2>&1; then
         log "ERROR: docker cp of ${BASE} failed on every spdk container on this host"
         echo "host=${HOST}
 core=${BASE}
@@ -218,7 +229,7 @@ status=copy_in_failed" | sudo tee "${OUT}/meta.txt" >/dev/null
     EXPANDED="${WORKDIR}/${SAFE%.zst}.core"
     ZSTD_PATH=container
     if [ "${HAVE_ZSTD_IN_CONTAINER}" = yes ]; then
-        sudo docker exec "${CONTAINER}" bash -lc \
+        sudo docker exec -u 0 "${CONTAINER}" bash -lc \
             "zstd -d -f '${WORKDIR}/${SAFE}' -o '${EXPANDED}'" >/dev/null 2>&1
     else
         ZSTD_PATH=host
@@ -233,13 +244,13 @@ status=copy_in_failed" | sudo tee "${OUT}/meta.txt" >/dev/null
         fi
     fi
 
-    if ! sudo docker exec "${CONTAINER}" test -s "${EXPANDED}" 2>/dev/null; then
+    if ! sudo docker exec -u 0 "${CONTAINER}" test -s "${EXPANDED}" 2>/dev/null; then
         log "ERROR: decompression produced nothing for ${BASE}"
         echo "host=${HOST}
 core=${BASE}
 status=decompress_failed
 zstd_path=${ZSTD_PATH}" | sudo tee "${OUT}/meta.txt" >/dev/null
-        sudo docker exec "${CONTAINER}" rm -f "${WORKDIR}/${SAFE}" "${EXPANDED}" >/dev/null 2>&1
+        sudo docker exec -u 0 "${CONTAINER}" rm -f "${WORKDIR}/${SAFE}" "${EXPANDED}" >/dev/null 2>&1
         continue
     fi
 
@@ -249,7 +260,7 @@ zstd_path=${ZSTD_PATH}" | sudo tee "${OUT}/meta.txt" >/dev/null
     run_gdb() {
         local gdb_cmd="$1" dest="$2"
         local raw rc
-        raw="$(sudo timeout "${GDB_TIMEOUT}" docker exec "${CONTAINER}" bash -lc \
+        raw="$(sudo timeout "${GDB_TIMEOUT}" docker exec -u 0 "${CONTAINER}" bash -lc \
             "gdb -batch -ex ${gdb_cmd} '${BDTS}' '${EXPANDED}' 2>&1" ; echo "EXIT_CODE=$?")"
         rc="$(printf '%s\n' "${raw}" | tail -1 | sed 's/EXIT_CODE=//')"
         # Keep the marker out of the artifact; it is recorded in meta.txt.
@@ -290,10 +301,10 @@ zstd_path=${ZSTD_PATH}" | sudo tee "${OUT}/meta.txt" >/dev/null
     } | sudo tee "${OUT}/meta.txt" >/dev/null
 
     # --- clean up inside the container -------------------------------------
-    sudo docker exec "${CONTAINER}" rm -f "${WORKDIR}/${SAFE}" "${EXPANDED}" >/dev/null 2>&1
+    sudo docker exec -u 0 "${CONTAINER}" rm -f "${WORKDIR}/${SAFE}" "${EXPANDED}" >/dev/null 2>&1
     log "wrote ${OUT}"
 done
 
-sudo docker exec "${CONTAINER}" rmdir "${WORKDIR}" >/dev/null 2>&1
+sudo docker exec -u 0 "${CONTAINER}" rmdir "${WORKDIR}" >/dev/null 2>&1
 log "done; ${TOTAL_COPIED_MB} MB of core.zst copied to ${RUN_DIR}/core_backtraces/${HOST}"
 exit 0
