@@ -478,7 +478,7 @@ def _get_target_secondary_node(tgt_node, src_node_id):
       - No secondary configured   → (None, None)   skip silently
       - Secondary STATUS_ONLINE   → (sec_node, None) register on secondary
       - Secondary STATUS_OFFLINE  → (None, None)   administratively down, skip
-      - Secondary leaving (REMOVAL_SHUT_DOWN_STATUSES) → (None, None) skip
+      - Secondary leaving (DEPARTING_STATUSES) → (None, None) skip
       - Secondary STATUS_SUSPENDED and node == src_node → (sec_node, None)
         overlap drain: source is being drained but is still the target's
         secondary; migration must continue through it
@@ -498,7 +498,7 @@ def _get_target_secondary_node(tgt_node, src_node_id):
         return sec, None
     if sec.status == StorageNode.STATUS_OFFLINE:
         return None, None
-    if sec.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+    if sec.status in StorageNode.DEPARTING_STATUSES:
         # Treated like OFFLINE, not like an unknown state. A node the removal
         # has shut down cannot register anything and is not coming back, so
         # blocking the migration on it blocks it for ever -- and because this
@@ -528,7 +528,7 @@ def _get_target_tertiary_node(tgt_node, src_node_id):
       - No tertiary configured    → (None, None)   skip silently
       - Tertiary STATUS_ONLINE    → (ter_node, None) register on tertiary
       - Tertiary STATUS_OFFLINE   → (None, None)   administratively down, skip
-      - Tertiary leaving (REMOVAL_SHUT_DOWN_STATUSES) → (None, None) skip
+      - Tertiary leaving (DEPARTING_STATUSES) → (None, None) skip
       - Tertiary STATUS_SUSPENDED and node == src_node → (ter_node, None)
         overlap drain: source is being drained but is still the target's
         tertiary; migration must continue through it
@@ -547,7 +547,7 @@ def _get_target_tertiary_node(tgt_node, src_node_id):
         return ter, None
     if ter.status == StorageNode.STATUS_OFFLINE:
         return None, None
-    if ter.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+    if ter.status in StorageNode.DEPARTING_STATUSES:
         # Same reasoning as the secondary above.
         logger.info(
             f"target tertiary {ter.get_id()[:8]} is {ter.status} (leaving the "
@@ -3122,7 +3122,7 @@ def task_runner(task):
     _is_cleanup_phase = migration.phase in (
         LVolMigration.PHASE_CLEANUP_TARGET, LVolMigration.PHASE_CLEANUP_SOURCE)
     if not _is_cleanup_phase:
-        if src_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        if src_node.status not in StorageNode.MIGRATION_SOURCE_STATUSES:
             return _node_lookup_suspend(f"source node not online (status={src_node.status})")
 
     if tgt_node.status != StorageNode.STATUS_ONLINE:
