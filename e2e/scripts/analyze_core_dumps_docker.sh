@@ -35,7 +35,11 @@ GDB_TIMEOUT="${GDB_TIMEOUT:-900}"
 BDTS="/root/spdk/ultra/build_bdts/bdts"
 # Writable layer inside the container. Deliberately NOT /dev/shm or
 # /mnt/ramdisk: both are tmpfs, and these hosts are already memory-starved.
-WORKDIR="/root/core_analysis"
+# /tmp, not /root: the SPDK container runs as the unprivileged "simplyblock"
+# user and /root is not writable by it, so every candidate failed the mkdir
+# probe and the run symbolicated nothing. Verified by hand on vm202
+# 2026-09-25: mkdir /root/core_analysis -> Permission denied; /tmp works.
+WORKDIR="/tmp/core_analysis"
 
 HOST="$(hostname -s 2>/dev/null || echo unknown)"
 # Logs go to stderr. pick_container returns the container name by echoing it,
