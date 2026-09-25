@@ -116,6 +116,92 @@ def test_delete_demoted_predecessor_tolerates_a_delete_failure(monkeypatch):
     lc._delete_demoted_predecessor(MagicMock(), lvol)  # must not raise
 
 
+class _Policy:
+    def __init__(self, uuid, status="active"):
+        self._uuid = uuid
+        self.status = status
+        self.cluster_id = "CL_A"
+
+    def get_id(self):
+        return "CL_A/" + self._uuid
+
+
+def _new_lvol():
+    lv = LVol()
+    lv.uuid = "NEWPRIMARY"
+    lv.node_id = "N_A"
+    return lv
+
+
+def test_resume_replication_reattaches_the_policy_after_failback(monkeypatch):
+    """Regression: 2026-09-25-failback-leaves-volume-unreplicated — after a
+    fail-back the recovered primary was a plain clone (do_replicate False, no
+    policy), so it served IO but replicated NOWHERE and was unprotected for the
+    next DR event (confirmed live 2026-09-25: cluster A's post-fail-back primary
+    had empty Policy / Replicated On). Promote-after-demote must re-attach the
+    new primary's own cluster policy so replication resumes, exactly as M-01's
+    protect first established it."""
+    attached: list = []
+    from simplyblock_core.controllers import replication_policy_controller as rpc
+    monkeypatch.setattr(rpc, "attach_policy",
+                        lambda lid, pol: _record(attached, (lid, pol)))
+    db = MagicMock()
+    node = MagicMock(); node.cluster_id = "CL_A"
+    db.get_storage_node_by_id.return_value = node
+    db.get_replication_policies.return_value = [_Policy("POL1")]
+    src = _lvol()
+    src.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._resume_replication_after_failback(db, src, _new_lvol())
+    assert attached == [("NEWPRIMARY", "CL_A/POL1")], \
+        "the new primary must be re-attached to its cluster's policy"
+
+
+def test_resume_replication_skipped_for_a_never_demoted_source(monkeypatch):
+    """Unplanned failover: source never demoted, its cluster is down -- there is
+    nothing to replicate to yet, and attaching then collided with the fail-back
+    (reverted 2026-09-24). demote_state gates it out."""
+    attached: list = []
+    from simplyblock_core.controllers import replication_policy_controller as rpc
+    monkeypatch.setattr(rpc, "attach_policy",
+                        lambda lid, pol: _record(attached, (lid, pol)))
+    db = MagicMock()
+    lc._resume_replication_after_failback(db, _lvol(), _new_lvol())
+    assert attached == []
+
+
+def test_resume_replication_skips_when_no_active_policy(monkeypatch):
+    """No active policy for the cluster -- nothing to re-attach; leave the new
+    primary as-is rather than guess."""
+    attached: list = []
+    from simplyblock_core.controllers import replication_policy_controller as rpc
+    monkeypatch.setattr(rpc, "attach_policy",
+                        lambda lid, pol: _record(attached, (lid, pol)))
+    db = MagicMock()
+    node = MagicMock(); node.cluster_id = "CL_A"
+    db.get_storage_node_by_id.return_value = node
+    db.get_replication_policies.return_value = [_Policy("POL1", status="inactive")]
+    src = _lvol()
+    src.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._resume_replication_after_failback(db, src, _new_lvol())
+    assert attached == []
+
+
+def test_resume_replication_tolerates_attach_failure(monkeypatch):
+    """Best-effort: a promote that already succeeded must not be undone by a
+    failure to resume replication."""
+    from simplyblock_core.controllers import replication_policy_controller as rpc
+    def _boom(lid, pol):
+        raise RuntimeError("attach failed")
+    monkeypatch.setattr(rpc, "attach_policy", _boom)
+    db = MagicMock()
+    node = MagicMock(); node.cluster_id = "CL_A"
+    db.get_storage_node_by_id.return_value = node
+    db.get_replication_policies.return_value = [_Policy("POL1")]
+    src = _lvol()
+    src.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._resume_replication_after_failback(db, src, _new_lvol())  # must not raise
+
+
 def test_failover_retires_the_source_after_the_relationship_is_durable():
     """Ordering guard: by the time the source path disappears, connect_lvol
     must already resolve the volume to the DR copy — so the relationship

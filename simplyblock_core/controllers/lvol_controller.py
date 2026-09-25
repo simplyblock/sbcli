@@ -5054,6 +5054,47 @@ def _delete_demoted_predecessor(db_controller, lvol):
                        lvol.get_id(), e)
 
 
+def _resume_replication_after_failback(db_controller, lvol, new_lvol):
+    """After a planned fail-back promote, resume replication from the new primary.
+
+    A fail-back clones the DR copy back onto the recovered cluster and promotes
+    it, but the clone is created bare -- do_replicate False, no policy -- so it
+    serves IO while replicating nowhere, leaving it unprotected for the next DR
+    event (confirmed live 2026-09-25: cluster A's post-fail-back primary had
+    empty Policy / Replicated On). Re-attach the new primary's own cluster
+    policy so replication resumes toward the peer, exactly as M-01's protect
+    first established it.
+
+    Gated on replication_demote_state == DONE, the same discriminator as
+    _delete_demoted_predecessor: this fires only for the settling fail-back /
+    relocate. An UNPLANNED fail-over's source was never demoted -- its cluster
+    is down, there is nothing to replicate to yet, and attaching a policy then
+    collided with the subsequent fail-back (reverted 2026-09-24). Best-effort:
+    a promote that already succeeded must never be undone by a failure to
+    resume replication. Attaches only when the cluster has exactly one active
+    policy, rather than guess among several.
+    """
+    if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
+        return
+    try:
+        from simplyblock_core.models.replication import ReplicationPolicy
+        from simplyblock_core.controllers import replication_policy_controller
+        node = db_controller.get_storage_node_by_id(new_lvol.node_id)
+        active = [p for p in db_controller.get_replication_policies(node.cluster_id)
+                  if p.status == ReplicationPolicy.STATUS_ACTIVE]
+        if len(active) != 1:
+            logger.info("Fail-back promote: %d active policies for cluster %s; leaving "
+                        "new primary %s unreplicated rather than guess",
+                        len(active), node.cluster_id, new_lvol.get_id())
+            return
+        replication_policy_controller.attach_policy(new_lvol.get_id(), active[0].get_id())
+        logger.info("Fail-back promote: re-attached policy %s to new primary %s; "
+                    "replication resumed", active[0].get_id(), new_lvol.get_id())
+    except Exception as e:
+        logger.warning("Could not resume replication after fail-back for %s: %s",
+                       new_lvol.get_id(), e)
+
+
 def _retire_source_data_path(db_controller, lvol):
     """Fence and unpublish the SOURCE volume's data path after a fail-over.
 
@@ -5242,11 +5283,14 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
             logger.warning("Fail-over of %s: %s", lvol_id, w)
 
     # Planned hand-off only (fail-back / relocate): the source we just cloned
-    # away from was cleanly demoted and is now superseded, so retire it. Last,
-    # after every read of `lvol` above, and best-effort so it can never undo the
-    # promote that already succeeded. An unplanned fail-over's source was never
-    # demoted and is preserved (see _delete_demoted_predecessor).
+    # away from was cleanly demoted and is now superseded, so retire it, then
+    # resume replication from the new primary back toward the peer so it is
+    # protected again. Both last, after every read of `lvol` above, both
+    # best-effort so they can never undo the promote that already succeeded, and
+    # both gated on the demote state so an unplanned fail-over's still-down
+    # source is neither deleted nor used as a replication target.
     _delete_demoted_predecessor(db_controller, lvol)
+    _resume_replication_after_failback(db_controller, lvol, new_lvol)
 
     return {
         "lvol_id": new_lvol.uuid,
