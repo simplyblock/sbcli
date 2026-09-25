@@ -365,28 +365,60 @@ def test_detach_stops_and_purges_both_sides(monkeypatch):
 # Purge
 # --------------------------------------------------------------------------- #
 
-def _snap(uuid, lvol, snap_type=SnapShot.TYPE_INTERNAL, target=""):
+def _snap(uuid, lvol, snap_type=SnapShot.TYPE_INTERNAL, target="", created_at=0):
     s = SnapShot()
     s.uuid = uuid
     s.lvol = lvol
     s.snap_type = snap_type
     s.target_replicated_snap_uuid = target
+    s.created_at = created_at
     return s
 
 
-def test_purge_deletes_internal_snapshots_on_both_sides(monkeypatch):
+def test_purge_deletes_superseded_internal_snapshots_on_both_sides(monkeypatch):
     lv = _lvol("LV1")
     # The target copy belongs to the REP_ receiving volume on the other cluster,
     # not to the source volume.
     remote = _lvol("REP_LV1")
-    src = _snap("S_SRC", lv, target="S_TGT")
+    older_src = _snap("S_SRC_OLD", lv, target="S_TGT_OLD", created_at=100)
+    older_tgt = _snap("S_TGT_OLD", remote)
+    newest_src = _snap("S_SRC_NEW", lv, target="S_TGT_NEW", created_at=200)
+    newest_tgt = _snap("S_TGT_NEW", remote)
+    db = _FakeDB(lvols=[lv, remote],
+                 snapshots=[older_src, older_tgt, newest_src, newest_tgt])
+    _install(monkeypatch, db)
+    deleted: list[str] = []
+    monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
+    rpc._purge_internal_replication_snapshots("LV1")
+    assert deleted == ["S_TGT_OLD", "S_SRC_OLD"], \
+        "the superseded pair goes, target copy first, then the source snapshot"
+
+
+def test_purge_without_demote_keeps_the_newest_replicated_pair(monkeypatch):
+    """Regression: 2026-09-25-disable-during-failover-purges-the-failover-point
+    — during an UNPLANNED failover, Ramen deletes the source side's
+    VolumeReplication while flipping its VRG to Secondary, which reaches this
+    purge through DisableVolumeReplication -> detach_policy. Nothing was ever
+    demoted (that is the whole premise of an unplanned failover) and the
+    promote has not cloned yet (it races this very teardown), so neither the
+    demote-snapshot guard nor the dependent-clone guard fires -- and the purge
+    deleted the volume's ONLY recoverable point mid-failover (confirmed live
+    2026-09-25 09:34:23: "detached from its replication policy (2 internal
+    replication snapshot(s) removed)", after which the fail-over's clone
+    selector 409-looped forever against a dead source). The newest fully
+    replicated pair is the volume's last recovery point and survives a detach
+    UNCONDITIONALLY; it is released only when the volume itself is deleted."""
+    lv = _lvol("LV1")
+    remote = _lvol("REP_LV1")
+    src = _snap("S_SRC", lv, target="S_TGT", created_at=100)
     tgt = _snap("S_TGT", remote)
     db = _FakeDB(lvols=[lv, remote], snapshots=[src, tgt])
     _install(monkeypatch, db)
     deleted: list[str] = []
     monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
     rpc._purge_internal_replication_snapshots("LV1")
-    assert deleted == ["S_TGT", "S_SRC"], "target copy first, then the source snapshot"
+    assert deleted == [], \
+        "the sole replicated pair is the last recovery point and must survive the detach"
 
 
 def test_purge_never_touches_user_snapshots(monkeypatch):
@@ -421,16 +453,19 @@ def test_purge_keeps_the_demoted_volumes_fail_over_point(monkeypatch):
 
     An older, already-superseded internal snapshot's copies have no such role
     (a newer one already carries the current state forward) and stay
-    purge-eligible. A volume that is NOT currently demoted (a plain "turn off
-    replication policy") has no pending fail-over to protect, and this guard
-    must not fire for it -- see test_purge_deletes_internal_snapshots_on_both_sides.
+    purge-eligible. This demote guard is no longer the only protection: the
+    NEWEST replicated pair now survives every detach unconditionally (see
+    test_purge_without_demote_keeps_the_newest_replicated_pair -- an unplanned
+    failover detaches without any demote), so this test pins the demote guard
+    specifically because a demote may fence the volume on a snapshot that is
+    not the newest by timestamp.
     """
     lv = _lvol("LV1", demote_snapshot_id="S_SRC_NEW")
     remote = _lvol("REP_LV1")
-    older_src = _snap("S_SRC_OLD", lv, target="S_TGT_OLD")
+    older_src = _snap("S_SRC_OLD", lv, target="S_TGT_OLD", created_at=100)
     older_src.next_snap_uuid = "S_SRC_NEW"  # superseded
     older_tgt = _snap("S_TGT_OLD", remote)
-    newest_src = _snap("S_SRC_NEW", lv, target="S_TGT_NEW")
+    newest_src = _snap("S_SRC_NEW", lv, target="S_TGT_NEW", created_at=200)
     newest_tgt = _snap("S_TGT_NEW", remote)
     db = _FakeDB(lvols=[lv, remote],
                  snapshots=[older_src, older_tgt, newest_src, newest_tgt])

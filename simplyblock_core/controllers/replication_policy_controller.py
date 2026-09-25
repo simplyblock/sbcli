@@ -309,10 +309,31 @@ def detach_policy(lvol_id):
 
 
 def _purge_internal_replication_snapshots(lvol_id):
-    """Delete the volume's internal replication snapshots, target copy first."""
+    """Delete the volume's internal replication snapshots, target copy first.
+
+    The volume's NEWEST fully replicated pair -- the source record and its
+    target copy -- survives unconditionally: it is the last recovery point,
+    and a detach cannot know whether one is about to be needed. An unplanned
+    failover reaches this purge with NO demote (nothing was reachable to
+    demote) and NO dependent clone (the promote races this very teardown),
+    because Ramen deletes the source side's VolumeReplication while flipping
+    its VRG to Secondary; with only the demote and clone guards, the purge
+    deleted the fail-over point mid-failover and the clone selector
+    409-looped forever against a dead source (confirmed live 2026-09-25).
+    The pair is released when the volume itself is deleted.
+    """
     removed = 0
     handled = set()                               # never issue a delete twice
     demote_snapshot_id = db.get_lvol_by_id(lvol_id).replication_demote_snapshot_id
+    newest_replicated_id = ""
+    replicated = [
+        s for s in db.get_snapshots()
+        if not s.deleted and s.lvol and s.lvol.get_id() == lvol_id
+        and s.snap_type == SnapShot.TYPE_INTERNAL
+        and s.target_replicated_snap_uuid
+    ]
+    if replicated:
+        newest_replicated_id = max(replicated, key=lambda s: s.created_at).get_id()
     for snap in db.get_snapshots():
         if snap.deleted or not snap.lvol or snap.lvol.get_id() != lvol_id:
             continue
@@ -334,12 +355,14 @@ def _purge_internal_replication_snapshots(lvol_id):
                 # it yet. Deleting it strands every subsequent fail-over
                 # attempt with "No replicated snapshot on target yet" for an
                 # otherwise perfectly healthy, still-demoted volume (confirmed
-                # live 2026-09-24, Ramen relocate M-02). A volume that is NOT
-                # currently demoted (a plain "turn off replication policy")
-                # has no pending fail-over to protect, so this never fires
-                # and the snapshot purges normally below.
+                # live 2026-09-24, Ramen relocate M-02).
                 logger.info("Keeping replicated snapshot %s: volume is demoted, "
                             "awaiting a pending fail-over", target_uuid)
+            elif snap.get_id() == newest_replicated_id:
+                # The newest fully replicated pair is the volume's last
+                # recovery point and survives every detach (see docstring).
+                logger.info("Keeping replicated snapshot %s: it is the volume's "
+                            "newest replicated recovery point", target_uuid)
             else:
                 try:
                     db.get_snapshot_by_id(target_uuid)
@@ -353,6 +376,13 @@ def _purge_internal_replication_snapshots(lvol_id):
         handled.add(snap.get_id())
         if _has_dependent_clone(snap.get_id()):
             logger.info("Keeping source snapshot %s: a volume is cloned from it", snap.get_id())
+            continue
+        if snap.get_id() == newest_replicated_id:
+            # The pair's source half: last_replicated_target_snapshot resolves
+            # by SOURCE snapshot id first, so the source record must survive
+            # alongside the target copy preserved above.
+            logger.info("Keeping source snapshot %s: it is the volume's "
+                        "newest replicated recovery point", snap.get_id())
             continue
         if snap.get_id() == demote_snapshot_id:
             # last_replicated_target_snapshot resolves its candidates by
