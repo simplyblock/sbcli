@@ -41,10 +41,11 @@ def _snap(uuid, replicated=""):
 class _FakeDB:
     kv_store = "KV"
 
-    def __init__(self, lvol, node, snaps=None):
+    def __init__(self, lvol, node, snaps=None, replications=None):
         self._lvol = lvol
         self._node = node
         self._snaps = snaps or {}
+        self._replications = replications or []
 
     def get_lvol_by_id(self, lid):
         return self._lvol
@@ -54,6 +55,9 @@ class _FakeDB:
 
     def get_snapshot_by_id(self, sid):
         return self._snaps[sid]
+
+    def get_lvol_replication_objects(self):
+        return self._replications
 
 
 @pytest.fixture
@@ -72,7 +76,32 @@ def patched(monkeypatch):
         return "SNAP1", False
     monkeypatch.setattr(lvol_controller.snapshot_controller, "add", _fake_snap_add)
 
-    return {"fenced": fenced, "snap_add_calls": snap_add_calls}
+    failback_calls = []
+
+    def _fake_failback(lid, source_cluster_id=None, pool_uuid=None):
+        failback_calls.append(lid)
+        return True
+    monkeypatch.setattr(lvol_controller, "replication_failback", _fake_failback)
+
+    return {"fenced": fenced, "snap_add_calls": snap_add_calls,
+            "failback_calls": failback_calls}
+
+
+def _replication(source_id, target_id, state):
+    from simplyblock_core.models.lvol_model import LVolReplication
+
+    class _End:
+        def __init__(self, uuid):
+            self._uuid = uuid
+
+        def get_id(self):
+            return self._uuid
+
+    rep = LVolReplication()
+    rep.source_lvol = _End(source_id)  # type: ignore[assignment]
+    rep.target_lvol = _End(target_id)  # type: ignore[assignment]
+    rep.state = state
+    return rep
 
 
 def test_demote_fences_before_triggering_the_final_snapshot(patched, monkeypatch):
@@ -95,6 +124,55 @@ def test_demote_fences_before_triggering_the_final_snapshot(patched, monkeypatch
     assert patched["snap_add_calls"][0][2] == SnapShot.TYPE_INTERNAL
     assert lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_PENDING
     assert lvol.replication_demote_snapshot_id == "SNAP1"
+
+
+def test_demote_of_a_failed_over_clone_configures_failback_first(patched, monkeypatch):
+    """Regression: 2026-09-25-failback-demote-has-no-reverse-pipe — relocating
+    HOME after an unplanned failover demotes the failed-over clone so cluster A
+    can promote. But that clone was born of the failover's replication_stop
+    (do_replicate=False, replication_node_id=""), so the demote's final
+    snapshot has nowhere to go: demote_lvol fences it, takes the snapshot, and
+    then waits forever for a target_replicated_snap_uuid that nothing will ever
+    set (confirmed live 2026-09-25: replication_demote_state stuck `pending`,
+    the DRPC wedged at EnsuringVolumesAreSecondary). The demote of a
+    failed-over clone must FIRST configure fail-back -- point reverse
+    replication at the original source cluster -- so the snapshot it then takes
+    replicates home and cluster A's promote can clone from it. fence must still
+    come before the snapshot; the failback config slots in on the first call,
+    before the snapshot is triggered."""
+    lvol = _lvol()
+    lvol.do_replicate = False  # the failover severed its forward pipe
+    node = _node("N_src")
+    rep = _replication("LV_ORIG", "LV1", LVol.REPLICATION_FAILED_OVER
+                       if hasattr(LVol, "REPLICATION_FAILED_OVER") else "failed_over")
+    db = _FakeDB(lvol, node, replications=[rep])
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+
+    result = lvol_controller.demote_lvol("LV1")
+
+    assert result == {"demoted": False}, "the reverse transfer has not landed yet"
+    assert patched["failback_calls"] == ["LV1"], \
+        "a failed-over clone must configure fail-back before its demote snapshot can replicate"
+    assert len(patched["snap_add_calls"]) == 1, "still takes the demote snapshot"
+    assert patched["fenced"] == [("N_src", "lvs_src", "nqn.orig:lvol:LV1", 7)], \
+        "still fences the source"
+
+
+def test_demote_of_a_forward_replicating_volume_does_not_configure_failback(patched, monkeypatch):
+    """The planned-relocate path is untouched: a volume still replicating
+    forward (do_replicate True -- 07's clean relocate) already has a live pipe
+    for its demote snapshot, so demote must NOT reconfigure it toward some
+    'source'. Only a severed failed-over clone needs fail-back set up."""
+    lvol = _lvol()
+    lvol.do_replicate = True
+    node = _node("N_src")
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: _FakeDB(lvol, node))
+
+    result = lvol_controller.demote_lvol("LV1")
+
+    assert result == {"demoted": False}
+    assert patched["failback_calls"] == [], "a forward-replicating volume needs no fail-back"
+    assert len(patched["snap_add_calls"]) == 1
 
 
 def test_demote_does_not_refence_or_retrigger_once_pending(patched, monkeypatch):

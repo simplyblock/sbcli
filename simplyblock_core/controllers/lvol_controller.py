@@ -3841,6 +3841,24 @@ def demote_lvol(lvol_id):
         replication_final_step.fence_source_paths(
             source_node, source_node.lvstore, lvol.nqn, lvol.ns_id)
 
+        # Relocating HOME after an unplanned failover demotes the failed-over
+        # clone -- but the failover severed its forward pipe (replication_stop
+        # left do_replicate=False, replication_node_id=""), so the demote
+        # snapshot taken below would have nowhere to replicate and this demote
+        # would wait for its target_replicated_snap_uuid forever (confirmed
+        # live 2026-09-25, DRPC wedged at EnsuringVolumesAreSecondary).
+        # Configure fail-back first -- point reverse replication at the
+        # original source cluster -- so the demote snapshot ships home and the
+        # source's own promote can clone from it. A volume still replicating
+        # forward (the planned-relocate path) already has a live pipe and needs
+        # none of this.
+        if not lvol.do_replicate:
+            rep = _replication_for_lvol(db_controller, lvol_id)
+            if (rep is not None and rep.state == LVolReplication.STATE_FAILED_OVER
+                    and rep.target_lvol and rep.target_lvol.get_id() == lvol_id):
+                replication_failback(lvol_id)
+                lvol = db_controller.get_lvol_by_id(lvol_id)
+
         snap_id, err = snapshot_controller.add(
             lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
         if err:
