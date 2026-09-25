@@ -5024,6 +5024,36 @@ def resolve_replication_destination(db_controller, lvol, target_node, source_nod
     return target_cluster, ""
 
 
+def _delete_demoted_predecessor(db_controller, lvol):
+    """After a planned fail-back promote, delete the demoted predecessor.
+
+    A fail-back clones the DR copy back onto the recovered cluster and promotes
+    it; the volume it cloned FROM -- the previously-failed-over clone -- was
+    cleanly DEMOTED first and is now superseded. This backend's secondary side
+    keeps no persistent lvol of its own, so that predecessor must be removed,
+    the same way replication_commit --delete-source retires a migrated source
+    (confirmed live 2026-09-25: without this, cluster B's demoted clone lingered
+    online after every M-04 fail-back).
+
+    replication_demote_state is the whole discriminator. A planned hand-off
+    (relocate / fail-back) demotes the source to DONE before the peer promotes,
+    so the source is quiesced and safe to delete. An UNPLANNED fail-over never
+    demotes -- its cluster is presumed down, and its record is still needed to
+    address a later fail-back -- so demote_state stays empty and this is a
+    no-op. Best-effort: a promote that already succeeded must never be undone by
+    a cleanup failure.
+    """
+    if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
+        return
+    try:
+        delete_lvol(lvol)
+        logger.info("Fail-back promote: deleted the demoted predecessor %s",
+                    lvol.get_id())
+    except Exception as e:
+        logger.warning("Could not delete demoted predecessor %s after promote: %s",
+                       lvol.get_id(), e)
+
+
 def _retire_source_data_path(db_controller, lvol):
     """Fence and unpublish the SOURCE volume's data path after a fail-over.
 
@@ -5210,6 +5240,13 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
             logger.warning("Group-membership warning computation failed: %s", e)
         for w in warnings:
             logger.warning("Fail-over of %s: %s", lvol_id, w)
+
+    # Planned hand-off only (fail-back / relocate): the source we just cloned
+    # away from was cleanly demoted and is now superseded, so retire it. Last,
+    # after every read of `lvol` above, and best-effort so it can never undo the
+    # promote that already succeeded. An unplanned fail-over's source was never
+    # demoted and is preserved (see _delete_demoted_predecessor).
+    _delete_demoted_predecessor(db_controller, lvol)
 
     return {
         "lvol_id": new_lvol.uuid,

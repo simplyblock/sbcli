@@ -77,6 +77,45 @@ def test_retire_tolerates_an_unreachable_source(monkeypatch):
     lc._retire_source_data_path(db, _lvol())  # must not raise
 
 
+def test_delete_demoted_predecessor_removes_a_cleanly_demoted_source(monkeypatch):
+    """Regression: 2026-09-25-failback-leaves-demoted-clone — a fail-back
+    clones the DR copy back onto the recovered cluster and promotes it; the
+    volume it cloned FROM (the previously-failed-over clone, cleanly DEMOTED
+    first) is then superseded, and this backend's secondary side keeps no
+    persistent lvol -- yet it was left online forever (confirmed live
+    2026-09-25: after M-04 fail-back, cluster B's demoted clone lingered).
+    Promote-after-demote must retire that predecessor, the same way
+    replication_commit --delete-source retires a migrated source."""
+    deleted: list = []
+    monkeypatch.setattr(lc, "delete_lvol", lambda lvol, **kw: deleted.append(lvol.get_id()))
+    lvol = _lvol()
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._delete_demoted_predecessor(MagicMock(), lvol)
+    assert deleted == ["SRC"], "a cleanly demoted, superseded predecessor must be deleted"
+
+
+def test_delete_demoted_predecessor_keeps_a_never_demoted_source(monkeypatch):
+    """The unplanned-failover source was never demoted -- its cluster is
+    presumed down, and its record is still needed to address a later
+    fail-back. demote_state is the discriminator: no demote, no delete."""
+    deleted: list = []
+    monkeypatch.setattr(lc, "delete_lvol", lambda lvol, **kw: deleted.append(lvol.get_id()))
+    lvol = _lvol()  # replication_demote_state defaults empty
+    lc._delete_demoted_predecessor(MagicMock(), lvol)
+    assert deleted == [], "a never-demoted (unplanned-failover) source must be preserved"
+
+
+def test_delete_demoted_predecessor_tolerates_a_delete_failure(monkeypatch):
+    """Best-effort: a promote that already succeeded must not be undone by a
+    cleanup failure."""
+    def _boom(lvol, **kw):
+        raise RuntimeError("backend refused")
+    monkeypatch.setattr(lc, "delete_lvol", _boom)
+    lvol = _lvol()
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lc._delete_demoted_predecessor(MagicMock(), lvol)  # must not raise
+
+
 def test_failover_retires_the_source_after_the_relationship_is_durable():
     """Ordering guard: by the time the source path disappears, connect_lvol
     must already resolve the volume to the DR copy — so the relationship
