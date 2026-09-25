@@ -557,6 +557,7 @@ def approve_and_wait(name: str, timeout: int) -> None:
 
     deadline = time.time() + timeout
     last = ""
+    reported_failed = set()
     while time.time() < deadline:
         out = kubectl("get", "clusterdeploymentconfig", name, "-o", "json",
                       check=False)
@@ -577,16 +578,26 @@ def approve_and_wait(name: str, timeout: int) -> None:
                 raise RuntimeError(f"deployment failed: {msg}")
 
         # The document stays Expanding while a node underneath it has already
-        # failed, so watch the nodes rather than only the document.
+        # failed, so watch the nodes too -- but report rather than give up.
+        #
+        # Failed does look terminal: the handler that sets it releases the
+        # node's provisioning slot ("a node that has given up holds nothing")
+        # and nothing re-enters provisioning from there. Even so, aborting on
+        # it would turn a run that recovers by some other route -- an operator
+        # restart, a StorageNodeOps, somebody uncordoning a worker -- into a
+        # failure we caused. Saying which node and why, the moment it happens,
+        # is the part worth having; the deadline can still decide the outcome.
         for node, worker, why in failed_storage_nodes():
-            raise RuntimeError(
-                f"storage node {node} on worker {worker} has Failed and the "
-                f"operator does not retry it: {why or 'no message'}. "
-                f"Worker state now: {worker_state(worker)}. "
-                f"Waiting out the remaining {int(deadline - time.time())}s "
-                f"would only repeat the document's own timeout.\n"
-                f"Check: kubectl -n {NS} get events "
+            if node in reported_failed:
+                continue
+            reported_failed.add(node)
+            log(f"WARNING: storage node {node} on worker {worker} has Failed: "
+                f"{why or 'no message'}")
+            log(f"         worker now: {worker_state(worker)}")
+            log(f"         kubectl -n {NS} get events "
                 f"--field-selector involvedObject.name={node}")
+            log("         still waiting -- usually terminal, but the deadline "
+                "decides, not this check")
         time.sleep(15)
     raise RuntimeError(
         f"deployment did not finish within {timeout}s ({last}).\n"
