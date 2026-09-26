@@ -1,3 +1,4 @@
+import contextvars
 import glob
 import hashlib
 import json
@@ -40,6 +41,15 @@ from simplyblock_web import node_utils
 from . import pci as pci_utils
 from .helpers import parse_thread_siblings_list
 from ..models.mgmt_node import MgmtNode
+
+request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('request_id', default='-')
+
+
+class RequestIdFilter(logging.Filter):
+    def filter(self, record):
+        record.request_id = request_id_var.get()
+        return True
+
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -811,11 +821,14 @@ def get_logger(name=""):
         # The QueueHandler removes that contention without dropping lines or
         # changing the level; falls back to the direct handler on setup error.
         logger_handler = logging.StreamHandler(stream=sys.stderr)
-        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: [%(request_id)s] %(levelname)s: %(message)s'))
         try:
-            logg.addHandler(make_async_handler(logger_handler))
+            queue_handler = make_async_handler(logger_handler)
+            queue_handler.addFilter(RequestIdFilter())
+            logg.addHandler(queue_handler)
         except Exception:
             # Safety: never lose logging if the async path can't be set up.
+            logger_handler.addFilter(RequestIdFilter())
             logg.addHandler(logger_handler)
         # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
         # logg.addHandler(gelf_handler)
