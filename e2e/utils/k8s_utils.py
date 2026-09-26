@@ -2533,21 +2533,34 @@ class K8sUtils:
         """
         ns = namespace or self.namespace
 
+        # v1alpha2. The older version is still served but needs the
+        # conversion webhook, and this install does not deploy one --
+        # "service simplyblock-operator-conversion-webhook-service not found"
+        # is what every v1alpha1 read and write returns. The shape differs:
+        # storageNodeRef is nodeRef, the action enum is capitalised, and
+        # targetWorkerNode/newSsdPcie moved under a migrate block.
+        action_v2 = {
+            "shutdown": "Shutdown", "restart": "Restart", "suspend": "Suspend",
+            "resume": "Resume", "remove": "Remove", "migrate": "Migrate",
+        }.get(str(action).lower(), str(action))
+
         spec_lines = (
-            f"  storageNodeRef: {storage_node_ref}\n"
-            f"  action: {action}\n"
+            f"  nodeRef: {storage_node_ref}\n"
+            f"  action: {action_v2}\n"
         )
-        if target_worker_node:
-            spec_lines += f"  targetWorkerNode: {target_worker_node}\n"
         if reattach_volume:
             spec_lines += "  reattachVolume: true\n"
-        if new_ssd_pcie:
-            spec_lines += "  newSsdPcie:\n"
-            for pcie in new_ssd_pcie:
-                spec_lines += f'    - "{pcie}"\n'
+        if target_worker_node or new_ssd_pcie:
+            spec_lines += "  migrate:\n"
+            if target_worker_node:
+                spec_lines += f"    targetWorkerNode: {target_worker_node}\n"
+            if new_ssd_pcie:
+                spec_lines += "    newSsdPcie:\n"
+                for pcie in new_ssd_pcie:
+                    spec_lines += f'      - "{pcie}"\n'
 
         yaml_content = (
-            "apiVersion: storage.simplyblock.io/v1alpha1\n"
+            "apiVersion: storage.simplyblock.io/v1alpha2\n"
             "kind: StorageNodeOps\n"
             "metadata:\n"
             f"  name: {name}\n"
@@ -3138,6 +3151,16 @@ class K8sUtils:
         """Create a StorageBackup CRD that triggers an S3 backup from a PVC."""
         ns = namespace or self.namespace
         yaml_content = (
+            # NOTE: still v1alpha1. On an install without the conversion
+            # webhook this fails with
+            #   service "simplyblock-operator-conversion-webhook-service" not found
+            # Left as-is deliberately: v1alpha2's StorageBackup is not a
+            # rename of this one. It takes backupID and clusterRef only,
+            # where this takes clusterName, pvcRef and snapshotName -- so it
+            # references a backup rather than creating one, and taking one
+            # has presumably moved to StorageBackupOps. Porting it is its own
+            # work with its own verification, not a search-and-replace, and
+            # the backup lane is not part of the lblk runs this change is for.
             f"apiVersion: storage.simplyblock.io/v1alpha1\n"
             f"kind: StorageBackup\n"
             f"metadata:\n"

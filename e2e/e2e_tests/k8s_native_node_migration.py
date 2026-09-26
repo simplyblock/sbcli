@@ -414,18 +414,20 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         )
 
         # Verify the StorageNodeOps CR was created
-        # Read back through v1alpha1, the version the CR was written as.
-        # Unqualified, kubectl serves the storage version, and v1alpha2
-        # capitalizes the action enum and renames storageNodeRef to nodeRef --
-        # so the assertion below saw "Migrate" and failed on a migration that
-        # had in fact been requested correctly.
+        # Unqualified, so kubectl serves v1alpha2 -- the version the op is now
+        # written as. Pinning this to v1alpha1 to match the old spelling was a
+        # dead end: that version needs a conversion webhook this install does
+        # not deploy, so the read fails outright rather than returning the old
+        # shape.
         ops_json = self.k8s_utils.get_resource_json(
-            "storagenodeops.v1alpha1.storage.simplyblock.io", ops_name,
+            "storagenodeops.storage.simplyblock.io", ops_name,
             namespace=self.k8s_utils.namespace,
         )
         ops_spec = ops_json.get("spec", {})
         self.logger.info(f"StorageNodeOps spec after create: {ops_spec}")
-        assert ops_spec.get("action") == "migrate", (
+        # v1alpha2 capitalises the enum; accept either so the assertion is
+        # about what was requested, not about which version served it.
+        assert str(ops_spec.get("action", "")).lower() == "migrate", (
             f"StorageNodeOps verification failed: expected action=migrate, "
             f"got: {ops_spec}"
         )

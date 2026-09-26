@@ -1239,14 +1239,16 @@ jobs:
           TESTNAME_INPUT="${{ github.event.inputs.testname || '' }}"
           TESTNAME_LOWER="$(echo "$TESTNAME_INPUT" | tr '[:upper:]' '[:lower:]')"
           if [ "$CLUSTER_SEC" = "backup" ] || echo "$TESTNAME_LOWER" | grep -q "backup"; then
+            # v1alpha2's backup block is bucket/credentialsSecretRef/endpoint/
+            # prefix/region. localTesting, secondaryTarget, snapshotBackups and
+            # withCompression have no field here any more -- they are not
+            # renamed, they are gone from the cluster spec -- so they are
+            # dropped rather than guessed at, and the run says so.
+            echo "::warning title=backup spec reshaped::v1alpha2 StorageCluster.backup keeps only endpoint and credentialsSecretRef; localTesting, secondaryTarget, snapshotBackups and withCompression were dropped. Verify backup behaviour before trusting a backup run."
             BACKUP_SPEC="  backup:
               credentialsSecretRef:
                 name: backup-credentials
-              localEndpoint: ${MINIO_ENDPOINT}
-              localTesting: true
-              secondaryTarget: 0
-              snapshotBackups: true
-              withCompression: false"
+              endpoint: ${MINIO_ENDPOINT}"
           fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)
@@ -1254,10 +1256,11 @@ jobs:
           VAULT_SETTINGS=""
           ENCRYPTION_POOL_YAML=""
           if true; then
-            VAULT_SETTINGS="  hashicorpVaultSettings:
-              baseURL: \"https://openbao.vault:8200\""
+            VAULT_SETTINGS="  kms:
+                vault:
+                  endpoint: \"https://openbao.vault:8200\""
             ENCRYPTION_POOL_YAML="---
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StoragePool
           metadata:
             name: encryption-pool
@@ -1311,12 +1314,18 @@ jobs:
           # on it. They are mutable on the StorageCluster, so they are patched
           # onto the cluster the expansion just created.
           #
-          # Patched through v1alpha1 deliberately. That version is still served
-          # and carries these in exactly the shapes this workflow already
-          # builds -- backup's localEndpoint/localTesting/secondaryTarget among
-          # them -- and the conversion webhook translates. Rewriting them into
-          # v1alpha2's own backup shape by hand would be a silent guess, and a
-          # wrong guess reads as a backup test failing for its own reasons.
+          # v1alpha2, not v1alpha1. Patching the older version looked safer --
+          # it carries these fields in the shapes this workflow already builds
+          # -- but it requires the conversion webhook, and this install does
+          # not deploy one:
+          #
+          #   conversion webhook for storage.simplyblock.io/v1alpha2 failed:
+          #   service "simplyblock-operator-conversion-webhook-service" not found
+          #
+          # Every v1alpha1 read and write against these kinds fails that way,
+          # so the whole step aborted here and the pool below was never
+          # applied. enableNodeAffinity and the two thresholds carry the same
+          # names in v1alpha2; only backup and vault are reshaped.
           cat > /tmp/cluster-extra.yaml <<EOF
           spec:
             enableNodeAffinity: true
@@ -1330,8 +1339,7 @@ jobs:
           ${VAULT_SETTINGS}
           EOF
           echo "--- cluster patch ---"; cat /tmp/cluster-extra.yaml
-          kubectl -n ${NAMESPACE} patch \
-            storageclusters.v1alpha1.storage.simplyblock.io simplyblock-cluster \
+          kubectl -n ${NAMESPACE} patch storagecluster simplyblock-cluster \
             --type=merge --patch-file /tmp/cluster-extra.yaml
 
           # reservedSystemCPU was a StorageNodeSet field and is now part of the
@@ -1345,13 +1353,13 @@ jobs:
 
           echo "=== Applying pools ==="
           cat <<EOF | kubectl apply -f -
-          apiVersion: storage.simplyblock.io/v1alpha1
+          apiVersion: storage.simplyblock.io/v1alpha2
           kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
+            clusterRef: simplyblock-cluster
           ${ENCRYPTION_POOL_YAML}
           EOF
 
