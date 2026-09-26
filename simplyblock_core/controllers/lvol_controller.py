@@ -376,6 +376,55 @@ def _sibling_replication_node(lvol, cl, all_lvols=None):
     return ""
 
 
+def _group_replication_node(lvol, group, member_lvols):
+    """Target node an already-replicating member of ``lvol``'s consistency group
+    uses, or "" when none has one yet.
+
+    Members of one consistency group MUST replicate to the SAME target node, so
+    the destination copies share one node/LVS and the group can be snapshotted
+    (one ``bdev_lvol_snapshot_group``) and failed over as a single
+    crash-consistent unit on the target -- the same co-location the source
+    enforces via CG membership (``add_member_to_group`` pins the node/LVS).
+    Unlike :func:`_sibling_replication_node`, which co-locates the namespaces of
+    ONE shared subsystem, CG members are DISTINCT subsystems, so this keys on
+    group membership instead of the NQN. Splitting a group across target nodes
+    left each member's copy on its own LVS, so the target could neither take a
+    group snapshot nor promote the group atomically (observed live 2026-09-26:
+    ramen-e2e-cg's two members replicated to nodes 55aa5f76 and d9706433).
+
+    Pure: the caller resolves the group and its member lvols from the DB.
+    """
+    if group is None:
+        return ""
+    open_members = group.members or {}
+    for m in member_lvols:
+        if m.get_id() == lvol.get_id() or m.get_id() not in open_members:
+            continue
+        if m.replication_node_id:
+            return m.replication_node_id
+    return ""
+
+
+def _group_replication_node_for(lvol, db_controller):
+    """DB-resolving wrapper over :func:`_group_replication_node`: the target node
+    another member of ``lvol``'s consistency group already replicates to, or "".
+    """
+    gid = getattr(lvol, "group_id", "")
+    if not gid:
+        return ""
+    try:
+        group = db_controller.get_consistency_group_by_id(gid)
+    except KeyError:
+        return ""
+    members = []
+    for member_id in (group.members or {}):
+        try:
+            members.append(db_controller.get_lvol_by_id(member_id))
+        except KeyError:
+            continue
+    return _group_replication_node(lvol, group, members)
+
+
 def _realign_replication_node_after_claim(lvol, cl):
     """Re-derive the target node once the AUTHORITATIVE subsystem is known.
 
@@ -4009,6 +4058,13 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         # cluster; this is the OTHER entry point -- attaching a policy -- which
         # used to pick purely by capacity.
         sibling_node_id = _sibling_replication_node(lvol, cluster)
+        if not sibling_node_id:
+            # Members of one consistency group are DISTINCT subsystems, so the
+            # subsystem check above never co-locates them. Pin them to the same
+            # target node by group membership instead, or the group's copies
+            # scatter across target nodes and cannot be snapshotted or promoted
+            # as one unit (see _group_replication_node).
+            sibling_node_id = _group_replication_node_for(lvol, db_controller)
         if sibling_node_id:
             try:
                 sib_node = db_controller.get_storage_node_by_id(sibling_node_id)
