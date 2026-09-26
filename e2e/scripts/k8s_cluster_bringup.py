@@ -409,6 +409,17 @@ def shape_draft(cfg: dict) -> dict:
     if sockets:
         cluster["socketsToUse"] = sockets
 
+    # How many workers may be added at once. The CRD defaults this to 1, which
+    # adds nodes strictly serially -- four nodes then take four node-adds
+    # end to end, and every minute of that is another minute for a worker to
+    # reboot or a controller to drop underneath the deployment. The dev's own
+    # GCP pipelines pin it to the worker count for the same reason.
+    budget = env_int("NODE_PROVISIONING_BUDGET")
+    if budget is None:
+        budget = len(env_list("WORKER_NODES")) or None
+    if budget:
+        cluster["nodeProvisioningBudget"] = budget
+
     jd = env_bool("ENABLE_JOURNAL_DEVICE")
     if jd is not None:
         cluster["enableJournalDevice"] = jd
@@ -451,10 +462,12 @@ def shape_groups(spec: dict) -> None:
     data = env_list("DATA_NICS")
     jm_count, jm_pct = env_int("JM_COUNT"), env_int("JM_PERCENT")
 
-    groups = 0
+    groups = devices = 0
     for node_set in spec.get("nodeSets") or []:
         for group in node_set.get("groups") or []:
             groups += 1
+            devs = group.get("devices") or {}
+            devices += len(devs.get("nvme") or []) + len(devs.get("block") or [])
             if mgmt:
                 group["mgmtInterface"] = mgmt
             if data:
@@ -471,6 +484,16 @@ def shape_groups(spec: dict) -> None:
             "the draft has no groups: discovery found no worker with a usable "
             "device. Check the device filter -- a driveSizeRange or pcieModel "
             "that matches nothing produces exactly this.")
+
+    # Groups can exist and still name nothing. Approving that builds nodes that
+    # hand over no storage, and the failure surfaces much later as a cluster
+    # that will not activate.
+    if devices == 0:
+        raise RuntimeError(
+            f"the draft has {groups} group(s) but names no devices at all. "
+            f"The nodes it describes would hand over nothing. Check what the "
+            f"probe refused: kubectl -n {NS} describe operatorops <run>")
+    log(f"draft names {devices} device(s) across {groups} group(s)")
 
 
 
