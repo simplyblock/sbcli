@@ -100,33 +100,45 @@ def process_task(task):
         return False
 
 
-logger.info("Starting Tasks runner node removal...")
+def main():
+    """Service entry point.
 
-while True:
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
-    try:
-        clusters = db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        continue
-    if not clusters:
-        logger.error("No clusters found!")
-        continue
-    for cl in clusters:
-        tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-        for task in tasks:
-            if task.function_name != JobSchedule.FN_NODE_REMOVAL:
-                continue
-            if task.status == JobSchedule.STATUS_DONE:
-                continue
-            # get a fresh object: cancel/other writers may have changed it
-            task = db.get_task_by_id(task.uuid)
-            # Lease gate: skip a task another live runner host owns.
-            if not tasks_controller.claim_task(task):
-                logger.info(f"Node-removal task {task.uuid} owned by another runner host; skipping")
-                continue
-            try:
-                process_task(task)
-            except Exception as e:
-                logger.error(f"Node-removal task {task.uuid} processing crashed: {e}")
-                logger.exception(e)
+    Guarded, like every sibling runner: this module is imported by unit tests
+    (tests/unit/test_node_removal_wait_ceiling.py), and a bare module-level
+    `while True` meant the import never returned -- it started the daemon
+    inside the test process and hung collection for the whole tier.
+    """
+    logger.info("Starting Tasks runner node removal...")
+
+    while True:
+        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        try:
+            clusters = db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            continue
+        if not clusters:
+            logger.error("No clusters found!")
+            continue
+        for cl in clusters:
+            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+            for task in tasks:
+                if task.function_name != JobSchedule.FN_NODE_REMOVAL:
+                    continue
+                if task.status == JobSchedule.STATUS_DONE:
+                    continue
+                # get a fresh object: cancel/other writers may have changed it
+                task = db.get_task_by_id(task.uuid)
+                # Lease gate: skip a task another live runner host owns.
+                if not tasks_controller.claim_task(task):
+                    logger.info(f"Node-removal task {task.uuid} owned by another runner host; skipping")
+                    continue
+                try:
+                    process_task(task)
+                except Exception as e:
+                    logger.error(f"Node-removal task {task.uuid} processing crashed: {e}")
+                    logger.exception(e)
+
+
+if __name__ == "__main__":
+    main()
