@@ -61,7 +61,6 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     # Same hazard: left as a child mock this reads truthy, and the removal
     # would skip phase 3b believing a drain had already reallocated the
     # replicas. A node that no drain has touched has it False.
-    n.replica_reshuffle_completed = False
     n.get_id = MagicMock(return_value=node_id)
     n.status = status
     n.cluster_id = "cluster-1"
@@ -2526,32 +2525,47 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["set_node_status"].assert_not_called()
         mocks["_decommission_node_devices"].assert_called_once_with(node)
 
-    def test_phase3b_is_skipped_when_a_drain_already_reallocated(self):
-        """A Kubernetes drain runs the reallocation as its own step and records
-        it. The removal that follows then has nothing to re-solve."""
+    def test_phase3b_always_runs_and_only_after_phase3a(self):
+        """Phase 3b has one owner and one position: here, after 3a.
+
+        3b re-homes the replicas this node hosts for others, and it needs
+        somewhere to put them. On a cluster whose replica slots are all
+        occupied the only free slot is the one 3a makes by tearing down this
+        node's OWN replicas -- so 3b run without 3a has nowhere to move to,
+        walks the ring of occupants and refuses on a cycle.
+
+        A drain briefly ran 3b as its own step and set a flag to let the
+        removal skip it; that is what put 3b outside the ordering it depends
+        on (2026-09-26, a 7-node FTT2 cluster where every node was the next
+        one's secondary). There is no flag and no skip: the order is the
+        invariant.
+        """
         cl = _cluster()
         node = _node("n1")
-        node.replica_reshuffle_completed = True
         db = FakeDB(cl, [node])
+        order = []
         with self._patch_all() as mocks:
             mocks["DBController"].return_value = db
             mocks["_decommission_node_devices"].return_value = True
+            mocks["_teardown_replicas_of_primary"].side_effect = (
+                lambda *a, **k: order.append("3a") or True)
+            mocks["_relocate_replicas_hosted_on"].side_effect = (
+                lambda *a, **k: order.append("3b") or True)
             ret = storage_node_ops.node_removal_orchestrate("n1")
 
         self.assertTrue(ret)
-        mocks["_relocate_replicas_hosted_on"].assert_not_called()
+        mocks["_relocate_replicas_hosted_on"].assert_called_once()
+        self.assertEqual(
+            order, ["3a", "3b"],
+            "3b must run after 3a -- it relies on 3a having freed this node's "
+            f"own replica slots, got {order}")
 
-    def test_phase3b_still_runs_when_nothing_is_hosted_but_no_drain_ran(self):
-        """The skip is driven by the drain having run, not by the node
-        happening to host nothing.
-
-        Phase 3b also re-solves the whole post-removal placement, which repairs
-        diversity violations elsewhere in the cluster. An ordinary
-        `sbctl sn remove` of a node that hosts no replica must still get that
-        pass -- skipping on "nothing hosted here" would quietly drop it.
-        """
+    def test_phase3b_runs_even_when_this_node_hosts_nothing(self):
+        """3b also re-solves the whole post-removal placement, repairing
+        diversity violations elsewhere in the cluster. A node that happens to
+        host no replica must still get that pass."""
         cl = _cluster()
-        node = _node("n1")  # hosts nothing, and no drain has touched it
+        node = _node("n1")  # hosts nothing
         db = FakeDB(cl, [node])
         with self._patch_all() as mocks:
             mocks["DBController"].return_value = db

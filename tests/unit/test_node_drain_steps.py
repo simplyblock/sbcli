@@ -137,61 +137,21 @@ class DeviceDecommissionTests(unittest.TestCase):
         self.assertIn("rebuild exploded", progress['message'])
 
 
-class ReplicaReshuffleTests(unittest.TestCase):
-    def setUp(self):
-        node_drain_steps._reset_for_test()
-        self.addCleanup(node_drain_steps._reset_for_test)
+class NoReshuffleStepTests(unittest.TestCase):
+    """Replica-role reallocation must not be reachable as a drain step.
 
-    def _with_db(self, node, cluster_nodes):
-        db = MagicMock()
-        db.get_storage_node_by_id = MagicMock(return_value=node)
-        db.get_storage_nodes_by_cluster_id = MagicMock(return_value=cluster_nodes)
-        return patch.object(node_drain_steps, 'DBController', MagicMock(return_value=db))
+    It is phase 3b of the removal and depends on phase 3a having freed the
+    departing node's own replica slots. Exposed here it ran without 3a, so on a
+    cluster whose slots are all occupied it had nowhere to move to and refused
+    on a cycle -- retried for four hours (2026-09-26).
+    """
 
-    def test_a_peer_still_pointing_here_is_not_done(self):
-        """The question before deleting a node is whether anything still names
-        it, and a peer holding it as secondary is exactly that."""
-        dying = _node("n1")
-        holder = _node("n2", secondary="n1")
-        bystander = _node("n3", secondary="n4")
-
-        with self._with_db(dying, [dying, holder, bystander]):
-            progress = node_drain_steps.replica_reshuffle_progress("n1")
-
-        self.assertFalse(progress['done'],
-                         "reported done while a peer still held a replica role here")
-        self.assertEqual(progress['total'], 1)
-        self.assertIn("n2", progress['message'])
-
-    def test_a_tertiary_pointing_here_counts_too(self):
-        dying = _node("n1")
-        holder = _node("n2", secondary="n5", tertiary="n1")
-
-        with self._with_db(dying, [dying, holder]):
-            progress = node_drain_steps.replica_reshuffle_progress("n1")
-
-        self.assertFalse(progress['done'], "a tertiary back-reference was missed")
-
-    def test_no_remaining_back_references_is_done(self):
-        dying = _node("n1")
-        peer = _node("n2", secondary="n3")
-
-        with self._with_db(dying, [dying, peer]):
-            progress = node_drain_steps.replica_reshuffle_progress("n1")
-
-        self.assertTrue(progress['done'])
-        self.assertEqual(progress['total'], 0)
-
-    def test_the_node_itself_is_not_counted_as_holding_its_own_role(self):
-        """A node whose own secondary pointer still names itself is not a peer
-        depending on it, and counting it would block the drain forever."""
-        dying = _node("n1", secondary="n1")
-
-        with self._with_db(dying, [dying]):
-            progress = node_drain_steps.replica_reshuffle_progress("n1")
-
-        self.assertTrue(progress['done'],
-                        "the node counted its own pointer and would never finish")
+    def test_the_module_offers_no_reshuffle_step(self):
+        for name in ('start_replica_reshuffle', 'replica_reshuffle_progress'):
+            self.assertFalse(
+                hasattr(node_drain_steps, name),
+                f'{name} is back; 3b outside the removal skips the 3a it needs')
+            self.assertNotIn(name, node_drain_steps.__all__)
 
 
 if __name__ == '__main__':

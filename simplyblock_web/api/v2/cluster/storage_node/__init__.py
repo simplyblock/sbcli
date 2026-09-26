@@ -333,21 +333,11 @@ def mark_migrating_lvols(cluster: Cluster, storage_node: StorageNode) -> Respons
     return Response(status_code=202)
 
 
-@instance_api.post(
-    '/reshuffle-replicas', name='clusters:storage-nodes:reshuffle-replicas',
-    status_code=202, responses={202: {"content": None}})
-def reshuffle_replicas(cluster: Cluster, storage_node: StorageNode) -> Response:
-    """Reallocate the replica roles other nodes still hold on this one.
-
-    Idempotent on the same terms as migrate-devices.
-    """
-    node_drain_steps.start_replica_reshuffle(storage_node.get_id())
-    return Response(status_code=202)
-
-
-@instance_api.get('/reshuffle-replicas', name='clusters:storage-nodes:reshuffle-replicas-progress')
-def reshuffle_replicas_progress(cluster: Cluster, storage_node: StorageNode) -> DrainStepProgress:
-    return DrainStepProgress(**node_drain_steps.replica_reshuffle_progress(storage_node.get_id()))
+# There is no /reshuffle-replicas endpoint: reallocating the replica roles
+# other nodes hold on this one is phase 3b of DELETE's removal, which runs it
+# after the phase 3a that frees this node's own replica slots. Called on its
+# own it skipped 3a and deadlocked on a fully-occupied cluster -- see the note
+# in node_drain_steps.
 
 
 instance_api.include_router(device_api, prefix='/devices')

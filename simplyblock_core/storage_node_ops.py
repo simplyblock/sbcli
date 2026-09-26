@@ -5337,24 +5337,18 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
 
             # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
             #
-            # Skipped only when a drain already ran this exact step and said so
-            # (replica_reshuffle_completed), and nothing has come to depend on
-            # the node since. The flag is the whole condition: "no role is
-            # hosted here" is NOT sufficient on its own, because phase 3b also
-            # re-solves the whole post-removal placement and repairs diversity
-            # violations that have nothing to do with this node -- a removal
-            # that was never drained must still get that pass, and a node that
-            # simply happens to host nothing is exactly such a removal.
-            if (snode.replica_reshuffle_completed
-                    and not replica_role_holders(node_id, db_controller)):
-                logger.info(
-                    f"[REMOVAL] {node_id}: phase 3b — skipped, the drain already "
-                    f"reallocated the replica roles and none came back")
-            else:
-                cursor.enter("relocate_hosted",
-                             f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
-                if not _relocate_replicas_hosted_on(snode):
-                    return False
+            # Always runs, and always after 3a. It briefly had a skip for a
+            # drain that claimed to have done this already, which meant the
+            # reallocation could happen outside the removal -- and therefore
+            # without 3a having freed this node's own replica slots. On a
+            # cluster whose slots are all occupied that left 3b nothing to move
+            # into: it walked the ring of occupants and refused on a cycle.
+            # There is one owner of this step again, and it is here, where the
+            # ordering it depends on is guaranteed.
+            cursor.enter("relocate_hosted",
+                         f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
+            if not _relocate_replicas_hosted_on(snode):
+                return False
 
             # Phase 3c — prove the relocations actually landed. Every pointer
             # phase 3b writes is bookkeeping; this is the only step that asks

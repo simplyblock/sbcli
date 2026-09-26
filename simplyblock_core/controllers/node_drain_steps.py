@@ -231,60 +231,19 @@ def mark_migrating_lvols(node_id: str) -> bool:
     return True
 
 
-def start_replica_reshuffle(node_id: str) -> bool:
-    """Reallocate the replica roles other nodes still hold on this one."""
-    from simplyblock_core import storage_node_ops
-
-    def drive():
-        db = DBController()
-        node = db.get_storage_node_by_id(node_id)
-        if not storage_node_ops._relocate_replicas_hosted_on(node):
-            return False
-
-        # Record that this step ran, so the removal that follows can skip its
-        # phase 3b. Written only on success, and only here: the removal reads it
-        # as "the reallocation was performed", which is a different claim from
-        # "there is nothing hosted here" and the only one it is safe to skip a
-        # global re-solve on.
-        node = db.get_storage_node_by_id(node_id)
-        node.replica_reshuffle_completed = True
-        node.write_to_db(db.kv_store)
-        return True
-
-    return _spawn(node_id, 'reshuffle', drive)
-
-
-def replica_reshuffle_progress(node_id: str) -> dict:
-    """How many nodes still name this one as their secondary or tertiary.
-
-    Counting the back-references rather than the relocations means the answer is
-    "is anything still pointing here", which is the question the caller actually
-    has before it deletes the node -- and it is the same answer whether a role
-    was moved, was never there, or was cleaned up by something else.
-    """
-    from simplyblock_core import storage_node_ops
-
-    # The same predicate the removal's phase-3b skip reads, so "the drain says
-    # it is done" and "the delete skips it" cannot disagree.
-    holders = storage_node_ops.replica_role_holders(node_id, DBController())
-
-    error = _last_error.get((node_id, 'reshuffle'))
-    running = _is_running(node_id, 'reshuffle')
-
-    return {
-        'done': not holders and not running,
-        # Total is what still had to move when asked, so completed counts down
-        # to it; there is no stored "before" to measure against, and inventing
-        # one would go stale the moment anything else touched the layout.
-        'total': len(holders),
-        'completed': 0 if holders else 1,
-        'failed': 1 if error else 0,
-        'message': error or (
-            f"{len(holders)} node(s) still hold a replica role here: "
-            + ', '.join(peer.get_id() for peer in holders)
-            if holders else 'no replica roles remain on this node'
-        ),
-    }
+# Replica-role reallocation deliberately has no step here.
+#
+# It is phase 3b of the control plane's removal, and it has a precondition the
+# drain cannot meet: phase 3a frees the departing node's OWN replica slots
+# first, and 3b needs those slots to have anywhere to move into. Exposed as a
+# drain step it ran without 3a, so on a cluster whose replica slots are all
+# occupied it found no free slot, walked the ring of occupants and refused on a
+# cycle -- and the step retried that for four hours (2026-09-26, a 7-node FTT2
+# cluster where every node was the next one's secondary).
+#
+# The removal owns that ordering, so the drain hands the node to it: once the
+# volumes are off, the node is deleted and remove_storage_node does 3a then 3b
+# exactly as it always did.
 
 
 def _reset_for_test() -> None:
@@ -298,6 +257,4 @@ __all__ = [
     'start_device_decommission',
     'mark_migrating_lvols',
     'device_decommission_progress',
-    'start_replica_reshuffle',
-    'replica_reshuffle_progress',
 ]
