@@ -657,21 +657,34 @@ def _bdev_lvol_transfer_stat(s: NodeState, p: dict):
 
 
 def _bdev_lvol_transfer_final_step(s: NodeState, p: dict):
-    """Start async final-migration (source lvol → target blobstore).
+    """Final migration (source lvol → target blobstore) — SYNCHRONOUS.
 
-    Wire name for ``RPCClient.bdev_lvol_final_migration`` (a deprecated alias
-    for ``bdev_lvol_transfer_final_step``).
+    The real RPC blocks through the IO drain and delta copy and returns a
+    stat dict; the runner requires ``transfer_state == 'Done'`` on the return
+    itself (tasks_runner_lvol_migration, strict check added 2026-08 after the
+    batch-migration "Failed slipped through" bug). This mock used to model it
+    as async (register op, return True) — a stale contract that made every
+    completed migration read as ``transfer_state=None`` and failed 26 tests
+    while the code worked on real clusters.
+
+    Failure injection still applies: the dispatch layer times out or errors
+    BEFORE this handler runs, which exercises the runner's not-ret /
+    exception paths, including the crash-recovery stat poll — served by the
+    'Done' op recorded here.
     """
     lvol_name = _req(p, 'lvol_name')
     composite = lvol_name if lvol_name in s.lvols else s.composite(lvol_name)
     if composite not in s.lvols:
         raise _RpcError(-2, f"source lvol {composite} not found")
+    # Block briefly like the real drain does, but cap the exponential tail —
+    # a synchronous multi-second stall would serialize the whole suite.
+    time.sleep(min(_async_delay(s.rng), 0.5))
     s.transfer_ops[composite] = {
-        'complete_at': time.time() + _async_delay(s.rng),
-        'state': 'In progress',
+        'complete_at': time.time(),
+        'state': 'Done',
     }
-    logger.debug("mock bdev_lvol_transfer_final_step started for %s", composite)
-    return True
+    logger.debug("mock bdev_lvol_transfer_final_step completed for %s", composite)
+    return {'transfer_state': 'Done', 'offset': 0}
 
 
 # ---- NVMe-oF subsystems ----
