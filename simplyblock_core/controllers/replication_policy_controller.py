@@ -481,14 +481,19 @@ def _has_dependent_clone(snapshot_uuid):
 def failover_policy(policy_id):
     """Fail over every volume following *policy_id*. Idempotent per volume.
 
-    A consistency-group policy fails over as ONE unit: every member is pinned
-    to the same group generation (see _resolve_group_failover_generation)
-    instead of each volume's own newest replicated snapshot.
+    Volumes that belong to a consistency group fail over as ONE unit: every
+    member is pinned to the same group generation (see
+    _resolve_group_failover_generation) instead of each volume's own newest
+    replicated snapshot. Membership is what makes the cut crash-consistent —
+    a member carries its group id — so group fail-over triggers off that, not
+    off a policy flag (the legacy consistency_group flag still triggers it).
     """
     policy = db.get_replication_policy_by_id(policy_id)
     volumes = db.get_lvols_by_replication_policy(policy.get_id())
     pinned = None
-    if getattr(policy, "consistency_group", False):
+    grouped = (getattr(policy, "consistency_group", False)
+               or any(getattr(v, "group_id", "") for v in volumes))
+    if grouped:
         try:
             _, pinned = _resolve_group_failover_generation(policy, volumes)
         except ReplicationConfigError as e:
@@ -546,11 +551,27 @@ def _resolve_group_failover_generation(policy, volumes):
     Returns (seq, {lvol_id: source_snapshot_id}) for the pending members.
     Raises ReplicationConfigError when no generation qualifies.
     """
-    group = db.get_consistency_group_for_policy(policy.get_id())
+    # Resolve the group by membership first (a member carries its group id),
+    # falling back to the legacy policy-owned link. A policy's volumes must all
+    # sit in one group for the cut to be a single crash-consistent generation.
+    group_ids = {getattr(v, "group_id", "") for v in volumes
+                 if getattr(v, "group_id", "")}
+    if len(group_ids) > 1:
+        raise ReplicationConfigError(
+            f"Policy {policy.policy_name} spans multiple consistency groups "
+            f"{sorted(group_ids)}; refusing a mixed-group fail-over")
+    group = None
+    if group_ids:
+        try:
+            group = db.get_consistency_group_by_id(next(iter(group_ids)))
+        except KeyError:
+            group = None
+    else:
+        group = db.get_consistency_group_for_policy(policy.get_id())
     if group is None:
         raise ReplicationConfigError(
-            f"Policy {policy.policy_name} declares a consistency group but "
-            f"has no group record")
+            f"Policy {policy.policy_name} volumes belong to a consistency group "
+            f"but no group record was found")
 
     pending_ids = []
     incumbent_seqs = set()

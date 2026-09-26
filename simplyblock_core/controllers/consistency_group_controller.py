@@ -445,9 +445,10 @@ def attach_group_policy(group, policy_id):
     ``storage.simplyblock.io/consistency-group`` label -- so this links the group
     to the policy and starts each OPEN member replicating. It never re-adds a
     member: ``add_member_to_group`` stamps a fresh ``joined_seq``, which would
-    tear the group's snapshot-generation history. The policy must be a
-    consistency-group policy, so the snapshot monitor ships one GROUP snapshot per
-    interval rather than per-volume snapshots.
+    tear the group's snapshot-generation history. Any replication policy works:
+    membership is what makes the group crash-consistent, so the snapshot monitor
+    ships one GROUP snapshot per interval for its members regardless of a policy
+    flag.
     """
     from simplyblock_core.controllers import replication_policy_controller
     try:
@@ -456,10 +457,6 @@ def attach_group_policy(group, policy_id):
         pol = None
     if pol is None:
         raise ConsistencyGroupError(f"replication policy {policy_id} not found")
-    if not getattr(pol, "consistency_group", False):
-        raise ConsistencyGroupError(
-            f"policy {pol.policy_name} is not a consistency-group policy; a group "
-            f"replicates as one unit and needs a consistency-group policy")
     target = db.get_replication_target_by_id(pol.target_id)
 
     group = db.get_consistency_group_by_id(group.get_id())

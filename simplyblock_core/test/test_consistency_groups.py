@@ -189,8 +189,10 @@ def test_create_path_pins_cg_volumes_to_the_group_node():
 def test_cadence_snapshots_cg_policies_as_a_group():
     from simplyblock_core.services import snapshot_monitor as sm
     src = inspect.getsource(sm.take_due_internal_snapshots)
-    assert "create_group_snapshot" in src
-    assert "grouped_ids" in src, "group members must leave the per-volume loop"
+    assert "create_group_snapshot_for_group" in src
+    # Members are partitioned off by consistency-group membership, so they
+    # leave the per-volume loop and snapshot as one generation.
+    assert "partition_by_group" in src, "group members must leave the per-volume loop"
 
 
 def test_group_snapshot_is_one_rpc_and_bumps_seq_only_on_full_success():

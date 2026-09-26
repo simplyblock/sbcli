@@ -36,7 +36,7 @@ def db():
     return db
 
 
-def _seed_policy(db, consistency_group=True):
+def _seed_policy(db, consistency_group=False):
     target = ReplicationTarget()
     target.uuid = "grp-attach-tgt-1"
     target.cluster_id = CLUSTER_ID
@@ -70,7 +70,9 @@ def _seed_group(db, members):
     return group
 
 
-def test_attach_links_the_policy_and_starts_each_member(db, monkeypatch):
+def test_attach_links_a_plain_policy_and_starts_each_member(db, monkeypatch):
+    # A plain policy (no consistency_group flag): membership, not a flag, is what
+    # makes the group crash-consistent, so any policy attaches.
     policy = _seed_policy(db)
     group = _seed_group(db, ["v1", "v2"])
     started = []
@@ -87,14 +89,13 @@ def test_attach_links_the_policy_and_starts_each_member(db, monkeypatch):
     assert reloaded.members["v2"]["joined_seq"] == 1
 
 
-def test_attach_refuses_a_non_group_policy(db, monkeypatch):
-    policy = _seed_policy(db, consistency_group=False)
+def test_attach_refuses_a_missing_policy(db, monkeypatch):
     group = _seed_group(db, ["v1"])
     monkeypatch.setattr(rpc, "start_member_replication",
                         lambda *a, **k: pytest.fail("must not start replication"))
 
     with pytest.raises(cgc.ConsistencyGroupError):
-        cgc.attach_group_policy(group, policy.get_id())
+        cgc.attach_group_policy(group, "no-such-policy")
 
     # A refused attach leaves the group unlinked.
     assert db.get_consistency_group_by_id(group.get_id()).policy_id == ""

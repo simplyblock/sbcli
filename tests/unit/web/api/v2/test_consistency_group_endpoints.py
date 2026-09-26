@@ -39,11 +39,11 @@ class TestGroupReplicationEnableDisable:
         consistency_group_controller.attach_group_policy.assert_not_called()
         consistency_group_controller.detach_group_policy.assert_not_called()
 
-    def test_a_non_group_policy_is_refused(self, client, db, cluster,
-                                           consistency_group_controller):
+    def test_an_attach_error_is_mapped_to_409(self, client, db, cluster,
+                                              consistency_group_controller):
         db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
         consistency_group_controller.attach_group_policy.side_effect = \
-            ConsistencyGroupError("policy nightly is not a consistency-group policy")
+            ConsistencyGroupError("replication policy no-such-policy not found")
         resp = client.put(f'{BASE}/replication',
                           json={"replication_policy_id": factories.REPLICATION_POLICY_ID})
         assert resp.status_code == 409

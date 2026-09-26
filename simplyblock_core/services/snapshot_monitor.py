@@ -585,6 +585,24 @@ def _replication_task_is_live(snapshot):
     return False
 
 
+def partition_by_group(pairs):
+    """Partition ``(lvol, group_id)`` pairs into grouped and ungrouped members.
+
+    Volumes that carry a consistency-group id snapshot together as ONE
+    crash-consistent generation; the rest snapshot individually. Pure — the
+    caller resolves each volume's group id and does the DB work. Returns
+    ``({group_id: [lvol, ...]}, [ungrouped_lvol, ...])``, preserving input
+    order within each bucket."""
+    grouped: dict = {}
+    ungrouped: list = []
+    for lvol, group_id in pairs:
+        if group_id:
+            grouped.setdefault(group_id, []).append(lvol)
+        else:
+            ungrouped.append(lvol)
+    return grouped, ungrouped
+
+
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
     has elapsed. The snapshot's creation auto-enqueues a replication task.
@@ -601,61 +619,70 @@ def take_due_internal_snapshots(cluster_id, now_ts):
         return
     all_snaps = db.get_mini_snapshots()
 
-    # Consistency-group policies snapshot as a GROUP (requirement 3): one
-    # frozen point-in-time across every member, via ONE group-snapshot call
-    # per tick — never per-volume snapshots. Members of such policies are
-    # removed from the per-volume loop below.
-    cg_policies = {p.get_id(): p for p in db.get_replication_policies(cluster_id)
-                   if getattr(p, "consistency_group", False)}
-    if cg_policies:
-        from simplyblock_core.controllers import consistency_group_controller
-        grouped_ids: set = set()
-        for policy_id, policy in cg_policies.items():
-            members = [lv for lv in repl_lvols
-                       if getattr(lv, "replication_policy_id", "") == policy_id]
-            if not members:
+    # Members of a consistency group snapshot together as ONE crash-consistent
+    # generation — a single group-snapshot call per tick, never per-volume.
+    # Membership is what makes a set crash-consistent, not a policy flag: a
+    # volume carries its group id (the label/native attach path stamps
+    # lvol.group_id), and the legacy policy-owned path links the group by its
+    # consistency-group policy. Either way the member is resolved to a group id
+    # here and snapshotted as a unit; the rest fall through to the per-volume
+    # loop below.
+    from simplyblock_core.controllers import consistency_group_controller
+    policies_by_id = {p.get_id(): p
+                      for p in db.get_replication_policies(cluster_id)}
+
+    def _group_id_of(lvol):
+        gid = getattr(lvol, "group_id", "")
+        if gid:
+            return gid
+        policy = policies_by_id.get(getattr(lvol, "replication_policy_id", ""))
+        if policy is not None and getattr(policy, "consistency_group", False):
+            group = db.get_consistency_group_for_policy(policy.get_id())
+            if group is not None:
+                return group.get_id()
+        return ""
+
+    grouped, repl_lvols = partition_by_group(
+        [(lv, _group_id_of(lv)) for lv in repl_lvols])
+    for group_id, members in grouped.items():
+        try:
+            # Due when ANY member's interval elapsed (they tick together, so
+            # member timestamps agree except right after a join).
+            if not any(_due_for_internal_snapshot(lv, all_snaps, now_ts)
+                       for lv in members):
                 continue
-            grouped_ids.update(lv.get_id() for lv in members)
-            try:
-                # Due when ANY member's interval elapsed (they tick together,
-                # so member timestamps agree except right after a join).
-                if not any(_due_for_internal_snapshot(lv, all_snaps, now_ts)
-                           for lv in members):
-                    continue
-                # Group-wide back-pressure: one member's unfinished transfer
-                # holds the WHOLE group's next generation, otherwise the
-                # generations stop being aligned points in time.
-                blocked = None
-                for lv in members:
-                    outstanding = _outstanding_internal_snapshot(lv, all_snaps)
-                    if outstanding is not None:
-                        # Case 11 (run 20260827_224741) ended with 2 internal
-                        # snapshots after 124 minutes at a 1-minute cadence and
-                        # nothing said why. A skipped cadence tick must be
-                        # visible, or the next investigation needs another
-                        # two-hour repro to find out.
-                        logger.info(
-                            "Cadence snapshot for lvol %s deferred: %s has not "
-                            "replicated yet", lv.get_id(), outstanding.get_id())
-                        blocked = (lv, outstanding)
-                        break
-                if blocked:
-                    logger.warning(
-                        "Skipping group snapshot for policy %s: member %s "
-                        "has an unreplicated internal snapshot (%s)",
-                        policy.policy_name, blocked[0].get_id(),
-                        blocked[1].get_id())
-                    continue
-                logger.info("Taking consistency-group snapshot for policy %s "
-                            "(%d members)", policy.policy_name, len(members))
-                _ids, err = consistency_group_controller.create_group_snapshot(policy_id)
-                if err:
-                    logger.warning("Group snapshot for policy %s failed: %s",
-                                   policy.policy_name, err)
-            except Exception as e:
-                logger.error("Group snapshot scheduling failed for policy %s: %s",
-                             policy_id, e)
-        repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in grouped_ids]
+            # Group-wide back-pressure: one member's unfinished transfer holds
+            # the WHOLE group's next generation, otherwise the generations stop
+            # being aligned points in time.
+            blocked = None
+            for lv in members:
+                outstanding = _outstanding_internal_snapshot(lv, all_snaps)
+                if outstanding is not None:
+                    # Case 11 (run 20260827_224741) ended with 2 internal
+                    # snapshots after 124 minutes at a 1-minute cadence and
+                    # nothing said why. A skipped cadence tick must be visible,
+                    # or the next investigation needs another two-hour repro.
+                    logger.info(
+                        "Cadence snapshot for lvol %s deferred: %s has not "
+                        "replicated yet", lv.get_id(), outstanding.get_id())
+                    blocked = (lv, outstanding)
+                    break
+            if blocked:
+                logger.warning(
+                    "Skipping group snapshot for group %s: member %s has an "
+                    "unreplicated internal snapshot (%s)",
+                    group_id, blocked[0].get_id(), blocked[1].get_id())
+                continue
+            group = db.get_consistency_group_by_id(group_id)
+            logger.info("Taking consistency-group snapshot for group %s "
+                        "(%d members)", group_id, len(members))
+            _ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
+            if err:
+                logger.warning("Group snapshot for group %s failed: %s",
+                               group_id, err)
+        except Exception as e:
+            logger.error("Group snapshot scheduling failed for group %s: %s",
+                         group_id, e)
 
     for lvol in repl_lvols:
         try:
