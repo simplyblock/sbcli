@@ -284,26 +284,53 @@ if kubectl $KUBECTL_TIMEOUT get crd kubeletconfigs.machineconfiguration.openshif
     echo "  deleting kubeletconfig/$KC"
     kubectl $KUBECTL_TIMEOUT delete kubeletconfig "$KC" --ignore-not-found 2>/dev/null || true
   done
-  # Pools after the KubeletConfigs that select them, and ONLY pools that hold
-  # no machines.
+  # Pools after the KubeletConfigs that select them.
   #
-  # Deleting a pool that still selects nodes hands those nodes back to the
-  # built-in worker pool, which is a config change, which makes the
-  # machine-config operator reboot them. Cleanup would then be starting the
-  # very reboot that fails the next run's storage nodes at CheckingHost. The
-  # dead pools are the accumulation worth removing -- 27 of 28 on this lab --
-  # and a live one belongs to a cluster that phases 1-4 have just deleted, so
-  # it empties out and the next run's cleanup takes it.
+  # machineCount is the wrong test, though it is the obvious one. These pools
+  # select nodes by kubernetes.io/hostname, not by any simplyblock label, so
+  # stripping node labels in a later phase does not empty them and a live pool
+  # never reaches zero on its own. Judging by machineCount keeps it forever,
+  # which is how this lab reached 29 pools. The 28 that do read zero got there
+  # because somebody rewrote their selector by hand to a hostname that does
+  # not exist -- "retired-empty-storage-pool" appears nowhere in either repo.
+  #
+  # The honest predicate is whether the pool's cluster still exists. Phases 1-4
+  # have already deleted every StorageCluster in the namespace, so by the time
+  # this runs the answer is no for all of them.
+  #
+  # Removing a pool that still holds nodes returns them to the built-in worker
+  # pool, and that is a config change the machine-config operator applies by
+  # rebooting. That reboot is unavoidable if the nodes are to go back to
+  # baseline -- the only choice is when. Here, during cleanup, is much better
+  # than during the next bring-up, where it expires a storage node's
+  # CheckingHost deadline and fails the run. So this deletes, then waits for
+  # the worker pool to settle before returning.
+  REBOOT_EXPECTED=no
   for MCP in $(kubectl $KUBECTL_TIMEOUT get mcp --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -E "^storage-|simplyblock" 2>/dev/null); do
-    COUNT=$(kubectl $KUBECTL_TIMEOUT get mcp "$MCP" -o jsonpath='{.status.machineCount}' 2>/dev/null || echo "")
-    if [ "${COUNT:-0}" = "0" ]; then
-      echo "  deleting machineconfigpool/$MCP (no machines)"
-      kubectl $KUBECTL_TIMEOUT delete mcp "$MCP" --ignore-not-found 2>/dev/null || true
-    else
-      echo "  keeping machineconfigpool/$MCP: still holds ${COUNT} machine(s);"
-      echo "    removing it would return them to the worker pool and reboot them"
+    COUNT=$(kubectl $KUBECTL_TIMEOUT get mcp "$MCP" -o jsonpath='{.status.machineCount}' 2>/dev/null || echo 0)
+    if [ "${COUNT:-0}" != "0" ]; then
+      echo "  machineconfigpool/$MCP holds ${COUNT} machine(s); they return to the worker pool"
+      REBOOT_EXPECTED=yes
     fi
+    echo "  deleting machineconfigpool/$MCP"
+    kubectl $KUBECTL_TIMEOUT delete mcp "$MCP" --ignore-not-found 2>/dev/null || true
   done
+
+  if [ "$REBOOT_EXPECTED" = "yes" ]; then
+    # Absorb the rollout here rather than leave it for the bring-up. Bounded,
+    # because a cleanup that hangs is worse than one that returns early: the
+    # next step waits on the cluster anyway.
+    echo "  waiting up to 30m for the worker pool to finish rolling..."
+    for _ in $(seq 1 120); do
+      UPDATED=$(kubectl $KUBECTL_TIMEOUT get mcp worker -o jsonpath='{.status.conditions[?(@.type=="Updated")].status}' 2>/dev/null || echo "")
+      UPDATING=$(kubectl $KUBECTL_TIMEOUT get mcp worker -o jsonpath='{.status.conditions[?(@.type=="Updating")].status}' 2>/dev/null || echo "")
+      if [ "$UPDATED" = "True" ] && [ "$UPDATING" = "False" ]; then
+        echo "  worker pool is settled"
+        break
+      fi
+      sleep 15
+    done
+  fi
   for MC in $(kubectl $KUBECTL_TIMEOUT get machineconfig --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -E "storage-mc-|-storage-.*-generated-kubelet" 2>/dev/null); do
     echo "  deleting machineconfig/$MC"
     kubectl $KUBECTL_TIMEOUT delete machineconfig "$MC" --ignore-not-found 2>/dev/null || true
