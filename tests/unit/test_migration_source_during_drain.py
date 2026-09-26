@@ -70,39 +70,67 @@ class ResolveSourceNodeTests(unittest.TestCase):
             self._resolve(primary, peers)
 
 
-class GuardsAskResolveSourceNodeTests(unittest.TestCase):
-    """Both guards must route through it rather than re-deriving the rule.
+class ResolvedOnceAtCreateTests(unittest.TestCase):
+    """The answer is computed once, by create, and only read afterwards.
 
-    Asserted on the guard lines themselves: the failure mode is a status
-    comparison reappearing beside resolve_source_node, not a wrong value, and
-    the behavioural test above cannot see that.
+    The bug this file was first written for looked like a missing guard, and
+    was fixed as one -- by resolving the source again inside start_migration.
+    That is the wrong shape. Resolution depends on replica health, so a second
+    resolution is free to pick a different node than the one whose target
+    subsystem create_migration already built, and neither caller would know.
+
+    Worse, it hides the defect that actually broke the cluster: create
+    resolved nothing at all, so active_source_node_id stayed "" and every
+    reader fell through to the stopped primary. A guard that re-resolves
+    returns the right node and makes the unset field invisible.
+
+    So the invariant is about *where* resolution happens, which no behavioural
+    test can observe -- both shapes pass those. It is asserted on the source
+    of each function instead.
     """
 
-    def _guard_lines(self, module, pattern):
+    def _body(self, fn):
         import inspect
-        import re
-        return [line.strip() for line in inspect.getsource(module).splitlines()
-                if re.search(pattern, line)]
+        return inspect.getsource(fn)
 
-    def test_the_api_guard_resolves_rather_than_comparing_status(self):
-        lines = self._guard_lines(ctl, r'source_node\.status\s+not\s+in')
-        self.assertEqual(
-            lines, [],
-            "start_migration compares the primary's status again; a drained "
-            f"primary is never up, so this refuses every drain: {lines}")
-        self.assertIn("resolve_source_node(source_node)",
-                      "".join(self._guard_lines(ctl, r'resolve_source_node\(source_node\)')))
+    def test_create_pins_the_resolved_source_on_the_record(self):
+        """Without this write every reader below silently means "the primary"."""
+        body = self._body(ctl.create_migration)
+        self.assertIn("_resolve_active_source_node(src_node, target_node_id)", body)
+        self.assertIn("migration.active_source_node_id = active_src_node.get_id()", body)
 
-    def test_the_runner_guard_resolves_too(self):
+    def test_create_batch_pins_it_on_the_group(self):
+        body = self._body(ctl.create_batch_migration)
+        self.assertIn("group.active_source_node_id = active_source_node_id", body)
+
+    def test_start_reads_the_pinned_value_and_does_not_re_resolve(self):
+        body = self._body(ctl.start_migration)
+        self.assertIn("migration.active_source_node_id or source_node_id", body)
+        self.assertNotIn(
+            "resolve_source_node(", body,
+            "start_migration resolves the source a second time; it must read "
+            "the value create_migration pinned, or the two can disagree")
+
+    def test_start_takes_the_source_from_the_record_not_the_volume(self):
+        """lvol.node_id is the primary, which is exactly the node that is down;
+        re-deriving from it discards the fallback create chose."""
+        body = self._body(ctl.start_migration)
+        self.assertIn("source_node_id = migration.source_node_id", body)
+        self.assertNotIn("source_node_id = lvol.node_id", body)
+
+    def test_start_batch_reads_the_pinned_value_too(self):
+        body = self._body(ctl.start_batch_migration)
+        self.assertIn("group.active_source_node_id or group.source_node_id", body)
+        self.assertNotIn("resolve_source_node(", body)
+
+    def test_the_runner_addresses_the_pinned_source(self):
+        """The failure this caused on the cluster: RPCs went to the stopped
+        primary and came back as a bare `connection error` in cleanup_target."""
         from simplyblock_core.services import tasks_runner_lvol_migration as runner
-
-        lines = self._guard_lines(runner, r'src_node\.status\s+not\s+in')
-        self.assertEqual(
-            lines, [],
-            f"the runner compares the primary's status again: {lines}")
-        self.assertTrue(
-            self._guard_lines(runner, r'resolve_source_node\(src_node\)'),
-            "the runner does not resolve the source at all")
+        import inspect
+        body = inspect.getsource(runner.task_runner)
+        self.assertIn("migration.active_source_node_id or migration.source_node_id", body)
+        self.assertNotIn("resolve_source_node(", body)
 
 
 class StatusSetInvariantTests(unittest.TestCase):

@@ -3123,15 +3123,13 @@ def task_runner(task):
     _is_cleanup_phase = migration.phase in (
         LVolMigration.PHASE_CLEANUP_TARGET, LVolMigration.PHASE_CLEANUP_SOURCE)
     if not _is_cleanup_phase:
-        # Same question as the API guard in migration_controller.start_migration,
-        # asked the same way: can this migration find a source at all? The
-        # primary is down for the whole of a drain -- every removal stops the
-        # node before moving its volumes -- so its own status cannot answer,
-        # and an online replica stands in for it.
-        try:
-            migration_controller.resolve_source_node(src_node)
-        except ValueError as e:
-            return _node_lookup_suspend(f"source node cannot serve a migration: {e}")
+        # src_node is the *active* source (active_source_node_id), not the
+        # primary: for the whole of a drain the primary is stopped, and an
+        # online replica stands in for it. Asking the primary's own status
+        # here refused every migration a removal issued. Re-resolving is
+        # deliberately not done -- create_migration pinned the answer.
+        if src_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+            return _node_lookup_suspend(f"source node not online (status={src_node.status})")
 
     if tgt_node.status != StorageNode.STATUS_ONLINE:
         if (migration.phase in (LVolMigration.PHASE_SNAP_COPY,
