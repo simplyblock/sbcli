@@ -266,60 +266,26 @@ for RTYPE in deployment service sa configmap; do
   done
 done
 
-echo "=== Phase 4c: OpenShift MachineConfig leftovers ==="
-# Each cluster the operator builds on OpenShift gets its own KubeletConfig and
-# MachineConfigPool, named for the cluster. Both are CLUSTER-scoped, so
-# deleting the namespace leaves them behind: by 2026-09-25 this lab had 29
-# KubeletConfigs and 28 pools, 27 of the pools with no machines at all.
+# NOTE: no MachineConfig phase here, deliberately.
 #
-# They are not inert. A pool still selects nodes by label, and a KubeletConfig
-# still renders a MachineConfig, so a stale pair can hold a node in a config
-# the next run did not ask for -- and a node whose config changes gets
-# rebooted by the machine-config operator, which is what fails a storage node
-# mid-bring-up.
+# An earlier version of this script deleted the KubeletConfigs,
+# MachineConfigPools and MachineConfigs the operator creates per cluster, to
+# stop them accumulating. That was a mistake. Nothing else in this suite
+# touches MCO objects and neither does the manual OpenShift deploy the
+# operator team runs -- they install the chart, wait for ControlPlaneReady,
+# and approve the draft. The MCO objects are the operator's to own.
 #
-# Guarded on the CRD existing so this is a no-op everywhere but OpenShift.
-if kubectl $KUBECTL_TIMEOUT get crd kubeletconfigs.machineconfiguration.openshift.io >/dev/null 2>&1; then
-  for KC in $(kubectl $KUBECTL_TIMEOUT get kubeletconfig --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -E "^storage-kubelet-|simplyblock" 2>/dev/null); do
-    echo "  deleting kubeletconfig/$KC"
-    kubectl $KUBECTL_TIMEOUT delete kubeletconfig "$KC" --ignore-not-found 2>/dev/null || true
-  done
-  # Pools that hold no machines. NOT the live one -- and this is the opposite
-  # of what an earlier version of this script did, for a reason worth keeping.
-  #
-  # spdk_process_start blocks on the worker converging onto its cluster's MCP
-  # (simplyblock_web/api/internal/storage_node/kubernetes.py:536). That wait
-  # passes instantly when the node already runs a config with the same hash,
-  # even under a different pool name -- "no false wait, no needless pool
-  # migration/reboot". It only takes minutes when the node has to migrate.
-  #
-  # So leaving a converged node converged is what makes the next run fast.
-  # Deleting the live pool hands its nodes back to the worker config, and the
-  # next run must then migrate them into a fresh pool: a reboot, ~5-10 minutes,
-  # against a client that gives up at SPDK_PROXY_TIMEOUT=300s. Cleanup would be
-  # manufacturing the exact failure the next run dies on.
-  #
-  # The dead pools are still worth removing -- 28 of 29 on this lab -- and they
-  # cost nothing to delete because no node is in them.
-  for MCP in $(kubectl $KUBECTL_TIMEOUT get mcp --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -E "^storage-|simplyblock" 2>/dev/null); do
-    COUNT=$(kubectl $KUBECTL_TIMEOUT get mcp "$MCP" -o jsonpath='{.status.machineCount}' 2>/dev/null || echo 0)
-    if [ "${COUNT:-0}" = "0" ]; then
-      echo "  deleting machineconfigpool/$MCP (no machines)"
-      kubectl $KUBECTL_TIMEOUT delete mcp "$MCP" --ignore-not-found 2>/dev/null || true
-    else
-      echo "  keeping machineconfigpool/$MCP: ${COUNT} machine(s) converged on it;"
-      echo "    removing it would reboot them into the worker config and the next"
-      echo "    add_node would then time out waiting for them to migrate back"
-    fi
-  done
-
-  for MC in $(kubectl $KUBECTL_TIMEOUT get machineconfig --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -E "storage-mc-|-storage-.*-generated-kubelet" 2>/dev/null); do
-    echo "  deleting machineconfig/$MC"
-    kubectl $KUBECTL_TIMEOUT delete machineconfig "$MC" --ignore-not-found 2>/dev/null || true
-  done
-else
-  echo "  not an OpenShift cluster, nothing to do"
-fi
+# Deleting them is actively harmful: spdk_process_start blocks until the
+# worker has converged onto its cluster MCP
+# (simplyblock_web/api/internal/storage_node/kubernetes.py:508), and that
+# wait passes instantly when the node already runs a same-hash config.
+# Removing the pool puts the node back on the worker config, so the next
+# deploy has to migrate and reboot it -- minutes, against a client that gives
+# up at SPDK_PROXY_TIMEOUT=300s. Cleanup was manufacturing the timeout the
+# next run died on.
+#
+# If the accumulation needs addressing, it belongs in the operator, which
+# knows when a pool stops being referenced.
 
 echo "=== Phase 5: Verify nothing remains ==="
 echo "Namespaced resources:"

@@ -67,6 +67,8 @@ Environment variables, all optional unless marked:
     NODES_PER_SOCKET / SOCKETS_TO_USE
     TIMEOUT_DISCOVERY    seconds, default 900
     TIMEOUT_EXPAND       seconds, default 1800 (30 min)
+    TIMEOUT_CP_READY     seconds to wait for ControlPlane Available
+                         before approving, default 1800
     DRY_RUN              1 prints what it would do and touches nothing
     DRAFT_ONLY           1 discovers and writes the draft, but does not
                          approve it, so it can be reviewed or hand-edited
@@ -571,7 +573,42 @@ def worker_state(worker):
             f"{' CORDONED' if cordoned.strip() == 'true' else ''}")
 
 
+def wait_control_plane_ready(timeout=1800):
+    """Block until the ControlPlane reports Available.
+
+    The manual OpenShift deploy gates on this explicitly -- install the chart,
+    watch for "the control plane's readiness probe passed", and only then edit
+    and approve the draft. This did not, and approved as soon as discovery
+    produced one; a run that got ahead of the control plane then sat in
+    Activating being told "ControlPlane simplyblock is Unavailable, so it is
+    not answering yet" until its deadline.
+    """
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        out = kubectl("get", "controlplane", "-o",
+                      "jsonpath={range .items[*]}{.status.phase}	"
+                      "{.status.step.state}{\"\n\"}{end}", check=False)
+        line = (out or "").strip().splitlines()
+        if line:
+            parts = line[0].split("	")
+            phase = parts[0].strip()
+            step = (parts[1] if len(parts) > 1 else "").strip()
+            if (phase, step) != last:
+                log(f"control plane: {phase or '-'}/{step or '-'}")
+                last = (phase, step)
+            if phase == "Available":
+                return
+        time.sleep(10)
+    raise RuntimeError(
+        f"the control plane did not become Available within {timeout}s "
+        f"(last {last}). Approving now would deploy storage nodes against a "
+        f"control plane that cannot answer them.")
+
+
 def approve_and_wait(name: str, timeout: int) -> None:
+    # The gate the manual deploy waits on before it edits the draft.
+    wait_control_plane_ready(int(os.environ.get("TIMEOUT_CP_READY", "1800")))
     log(f"approving {name}")
     kubectl("patch", "clusterdeploymentconfig", name, "--type=merge",
             "-p", json.dumps({"spec": {"approved": True}}))
