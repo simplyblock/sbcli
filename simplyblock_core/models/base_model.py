@@ -439,10 +439,13 @@ class BaseNodeObject(BaseModel):
     STATUS_DOWN = 'down'
     STATUS_IN_REMOVAL = 'in_removal'
     STATUS_PENDING_REMOVAL = 'pending_removal'
-    #: A removal is draining the node: its devices' data is being rebuilt
-    #: elsewhere and its volumes migrated to other nodes. Between
-    #: PENDING_REMOVAL and IN_REMOVAL -- nothing has been torn down yet, so a
-    #: removal that gives up here leaves the node intact.
+    #: A removal is rebuilding the node's devices onto its peers. The node is
+    #: already shut down -- every removal shuts it down first -- so its volumes
+    #: are being served by their replicas throughout.
+    STATUS_MIGRATING_DEVICES = 'migrating_devices'
+    #: A removal is migrating the node's volumes to other nodes, the step after
+    #: MIGRATING_DEVICES. Still before IN_REMOVAL: nothing has been torn down
+    #: yet, so a removal that gives up here leaves the node intact.
     STATUS_MIGRATING_LVOLS = 'migrating_lvols'
     #: Terminal state for a removal that gave up. The node is shut down and
     #: may still own data that could not be migrated off it, so it is neither
@@ -457,6 +460,7 @@ class BaseNodeObject(BaseModel):
     #: a node carrying it may still be up and serving, and treating a live peer
     #: as gone would skip the port-block that keeps it from writing.
     REMOVAL_SHUT_DOWN_STATUSES: ClassVar[tuple] = (
+        STATUS_MIGRATING_DEVICES,
         STATUS_MIGRATING_LVOLS,
         STATUS_IN_REMOVAL,
         STATUS_REMOVED,
@@ -535,4 +539,5 @@ class BaseNodeObject(BaseModel):
         STATUS_PENDING_REMOVAL: 42,
         STATUS_MIGRATING_LVOLS: 43,
         STATUS_REMOVED_FAILED: 44,
+        STATUS_MIGRATING_DEVICES: 45,
     }

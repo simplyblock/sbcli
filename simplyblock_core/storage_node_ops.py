@@ -5214,8 +5214,8 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
             # down by now. Only the DEVICE half runs here -- the JM half stays
             # at phase 2, after 3a, for the reason in
             # _decommission_node_devices' docstring.
-            if snode.status != StorageNode.STATUS_MIGRATING_LVOLS:
-                set_node_status(node_id, StorageNode.STATUS_MIGRATING_LVOLS,
+            if snode.status != StorageNode.STATUS_MIGRATING_DEVICES:
+                set_node_status(node_id, StorageNode.STATUS_MIGRATING_DEVICES,
                                 caused_by="remove")
             cursor.enter("migrate_devices",
                          f"[REMOVAL] {node_id}: migrate devices — fail and rebuild onto peers")
@@ -5224,12 +5224,18 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
             snode = db_controller.get_storage_node_by_id(node_id)
 
             # Drain — migrate this node's volumes off it before anything is
-            # torn down. Still MIGRATING_LVOLS: the device step above already
-            # moved the node into it, and both halves are one state as far as
-            # anything outside the removal is concerned. Deliberately BEFORE
-            # in_removal: nothing here is destructive, so a drain that cannot
-            # finish leaves the node intact and the removal can be abandoned
-            # without damage.
+            # torn down. Deliberately BEFORE in_removal: nothing here is
+            # destructive, so a drain that cannot finish leaves the node intact
+            # and the removal can be abandoned without damage.
+            #
+            # Stamped separately from the device half so an operator watching
+            # `sbctl sn list` can tell which of the two is running. They used to
+            # share MIGRATING_LVOLS, which meant a removal stuck rebuilding
+            # devices and one stuck migrating volumes were indistinguishable --
+            # and those fail for entirely different reasons.
+            if snode.status != StorageNode.STATUS_MIGRATING_LVOLS:
+                set_node_status(node_id, StorageNode.STATUS_MIGRATING_LVOLS,
+                                caused_by="remove")
             cursor.enter("drain_lvols", f"[REMOVAL] {node_id}: drain — migrate volumes off the node")
             if not _drain_lvols_from_node(snode, cursor, db_controller):
                 return False

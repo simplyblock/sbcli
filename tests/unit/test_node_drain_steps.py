@@ -50,9 +50,18 @@ class DeviceDecommissionTests(unittest.TestCase):
         return patch.object(node_drain_steps, 'DBController', MagicMock(return_value=db))
 
     def _stamping_suppressed(self):
-        """The departing stamp writes through the real control plane; these
-        tests are about the poll loop, not the write."""
-        return patch('simplyblock_core.storage_node_ops.set_node_status', MagicMock())
+        """The shutdown and the departing stamp both go through the real
+        control plane; these tests are about the poll loop, not either write.
+
+        shutdown_storage_node is stubbed to True: the step now stops the node
+        before rebuilding its devices, and a False here would (correctly) abort
+        the step before the loop under test ever runs.
+        """
+        return patch.multiple(
+            'simplyblock_core.storage_node_ops',
+            set_node_status=MagicMock(),
+            shutdown_storage_node=MagicMock(return_value=True),
+        )
 
     def test_a_rebuild_already_running_is_not_started_again(self):
         """Re-POSTing must not restart the work the caller is waiting for."""
@@ -187,3 +196,58 @@ class ReplicaReshuffleTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ShutdownBeforeDrainTests(unittest.TestCase):
+    """Every removal stops the node before it moves anything.
+
+    The CLI removal always did; the drain used to leave it serving and stamp
+    PENDING_REMOVAL instead. That made MIGRATING_* mean "down" on one path and
+    "up" on the other, so every check asking "can this node still answer?" was
+    right for one path and wrong for the other -- found one at a time, each on a
+    live cluster.
+    """
+
+    def setUp(self):
+        node_drain_steps._reset_for_test()
+        self.addCleanup(node_drain_steps._reset_for_test)
+
+    def _run(self, status, shutdown_result=True):
+        node = _node(status=status, devices=[_device(NVMeDevice.STATUS_ONLINE)])
+        db = MagicMock()
+        db.get_storage_node_by_id = MagicMock(return_value=node)
+        calls = []
+        shutdown = MagicMock(side_effect=lambda *a, **k: (calls.append('shutdown'),
+                                                          shutdown_result)[1])
+        stamp = MagicMock(side_effect=lambda *a, **k: calls.append(('stamp', a[1])))
+        decommission = MagicMock(side_effect=lambda *a: (calls.append('devices'), True)[1])
+        with patch.object(node_drain_steps, 'DBController', MagicMock(return_value=db)), \
+             patch.multiple('simplyblock_core.storage_node_ops',
+                            shutdown_storage_node=shutdown,
+                            set_node_status=stamp,
+                            _decommission_node_devices=decommission):
+            started = node_drain_steps.start_device_decommission("n1")
+            for _ in range(50):
+                if 'devices' in calls or not started:
+                    break
+                time.sleep(0.02)
+        return started, calls
+
+    def test_the_node_is_shut_down_before_its_devices_are_rebuilt(self):
+        started, calls = self._run(StorageNode.STATUS_ONLINE)
+        self.assertTrue(started)
+        self.assertEqual(calls[0], 'shutdown',
+                         f"the rebuild started without stopping the node: {calls}")
+        self.assertIn(('stamp', StorageNode.STATUS_MIGRATING_DEVICES), calls)
+
+    def test_a_failed_shutdown_stops_the_step(self):
+        """Rebuilding a live node's devices out from under it is the thing the
+        shutdown exists to prevent, so a failed shutdown must not proceed."""
+        started, calls = self._run(StorageNode.STATUS_ONLINE, shutdown_result=False)
+        self.assertFalse(started)
+        self.assertNotIn('devices', calls)
+
+    def test_a_node_already_shut_down_is_not_shut_down_again(self):
+        _, calls = self._run(StorageNode.STATUS_MIGRATING_DEVICES)
+        self.assertNotIn('shutdown', calls,
+                         "re-POSTing the step tried to stop an already-stopped node")

@@ -100,28 +100,57 @@ def _is_running(node_id: str, step: str) -> bool:
 
 
 def start_device_decommission(node_id: str) -> bool:
-    """Fail this node's data devices and rebuild them onto its peers.
+    """Shut the node down, then rebuild its data devices onto its peers.
 
-    The node is stamped PENDING_REMOVAL first. Failing a device queues a
-    rebuild task against every node whose distribs reference it, and the task
-    runner will not run one on a node that is not ONLINE -- so a task queued
-    against this node, which is suspended for the drain, retries forever while
-    the device it belongs to never reaches failed_and_migrated. The status is
-    what tells the queuing side to skip this node and put its distribs' work on
-    a replica peer instead.
+    Shutdown comes first, as it does in the CLI removal: a node being removed
+    stops serving before anything is moved, and its volumes are served by their
+    replicas for the rest of the drain. Both removal paths therefore mean the
+    same thing by MIGRATING_DEVICES -- the node is down -- and every check that
+    asks "can this node still answer?" gets one answer whichever path is
+    driving. When the two disagreed, each such check had to be found the hard
+    way, on a live cluster, one at a time.
 
-    The monolithic removal never needed this: it failed devices last, by which
-    point the node's lvstore was torn down and it had no distrib to queue
-    against. A drain that fails devices first still has one.
+    The stamp also does the job it always did: failing a device queues a rebuild
+    task against every node whose distribs reference it, and the runner will not
+    run one on a node that is not ONLINE, so a task queued against this node
+    retries for ever while its device never reaches failed_and_migrated. The
+    status is what tells the queuing side to skip this node and put its
+    distribs' work on a replica peer instead.
+
+    Idempotent: a node already shut down by an earlier pass is left alone, so
+    re-POSTing the step does not try to stop it twice.
     """
     from simplyblock_core import storage_node_ops
     from simplyblock_core.models.storage_node import StorageNode
 
     node = DBController().get_storage_node_by_id(node_id)
-    if node.status not in StorageNode.DEPARTING_STATUSES:
+    # The same predicate remove_storage_node's phase 1 uses: shut down only a
+    # node that is actually still running. A node already stopped -- by the
+    # operator's own ShuttingDown step, or by an earlier pass of this one, or
+    # because it went offline by itself -- is left alone, so the two owners of
+    # the shutdown cannot fight over it.
+    if node.status in (StorageNode.STATUS_ONLINE,) + StorageNode.DRAINING_STATUSES:
+        logger.info(f"[DRAIN] {node_id}: shutting the node down before the drain")
+        ret = storage_node_ops.shutdown_storage_node(node_id, force=True)
+        if isinstance(ret, tuple):
+            ret, reason = ret
+            if not ret:
+                logger.error(f"[DRAIN] {node_id}: shutdown failed: {reason}")
+                return False
+        elif not ret:
+            logger.error(f"[DRAIN] {node_id}: shutdown failed")
+            return False
+
+    # Stamped outside the branch above: the node may already be stopped -- the
+    # operator has its own ShuttingDown step -- and it still has to carry the
+    # status that says which half of the drain is running, or the queuing side
+    # has nothing to skip on and `sbctl sn list` shows a removal that could be
+    # anywhere.
+    node = DBController().get_storage_node_by_id(node_id)
+    if node.status != StorageNode.STATUS_MIGRATING_DEVICES:
         storage_node_ops.set_node_status(
-            node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="drain")
-        logger.info(f"[DRAIN] {node_id}: marked pending_removal before failing devices")
+            node_id, StorageNode.STATUS_MIGRATING_DEVICES, caused_by="drain")
+        logger.info(f"[DRAIN] {node_id}: marked migrating_devices")
 
     def drive():
         node = DBController().get_storage_node_by_id(node_id)
