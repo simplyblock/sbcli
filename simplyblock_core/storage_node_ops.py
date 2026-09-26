@@ -4366,7 +4366,15 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             return False
         snode = db_controller.get_storage_node_by_id(node_id)
 
-    if snode.status != StorageNode.STATUS_PENDING_REMOVAL:
+    # PENDING_REMOVAL is where a removal STARTS -- pending_removal ->
+    # migrating_devices -> migrating_lvols -> in_removal -> removed -- and the
+    # machine only moves forward. A node the drain hands over is already at
+    # migrating_lvols: shut down, devices rebuilt, volumes moved. Stamping it
+    # pending_removal here rewound it to the start, and the orchestrator then
+    # read "still to be shut down" off a node with no SPDK left to stop and
+    # refused every attempt (2026-09-26). Only a node that has not started
+    # departing is moved onto the first step.
+    if snode.status not in StorageNode.DEPARTING_STATUSES:
         set_node_status(node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
 
     task_id = tasks_controller.add_node_removal_task(
@@ -5174,15 +5182,18 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
         if not already_removed:
             # Phase 1 — shut the node down (graceful). Skipped on re-entry.
             #
-            # The question is "is this node still running", so the set is ONLINE
-            # plus every draining status, not a hand-written pair. The pair was
-            # exhaustive while a removal could only ever arrive here from a live
-            # node or from a re-entry past the shutdown -- true of the CLI flow,
-            # and false of the Kubernetes drain, which stamps PENDING_REMOVAL up
-            # front and so matched neither. The node was then dismantled with
-            # its SPDK still running: JM decommissioned, replicas relocated,
-            # devices torn down underneath a live target.
-            if snode.status in (StorageNode.STATUS_ONLINE,) + StorageNode.DRAINING_STATUSES:
+            # The question is "is this node still running", and only ONLINE and
+            # SUSPENDED answer yes. Every other status a removal can start from
+            # is one where the node is already down: remove_storage_node shuts
+            # an ONLINE/SUSPENDED node down itself before it stamps
+            # PENDING_REMOVAL, so a node seen here as PENDING_REMOVAL has had
+            # its shutdown; a Kubernetes drain stops the node in its own
+            # ShuttingDown step, before any device or volume moves; and
+            # OFFLINE/UNREACHABLE have nothing to stop. shutdown_storage_node
+            # refuses PENDING_REMOVAL without force in any case, so widening
+            # this to the draining statuses -- as it briefly was -- could only
+            # ever fail here, and did, on every retry (2026-09-26).
+            if snode.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
                 cursor.enter("shutdown", f"[REMOVAL] {node_id}: phase 1 — shutdown")
                 ret = shutdown_storage_node(node_id, force=force_remove)
                 if isinstance(ret, tuple):

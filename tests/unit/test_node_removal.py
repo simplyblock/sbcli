@@ -213,6 +213,49 @@ class TestRemovePreconditions(unittest.TestCase):
             departing <= set(storage_node_ops.REMOVABLE_STATUSES),
             f"departing but not removable: {departing - set(storage_node_ops.REMOVABLE_STATUSES)}")
 
+    def test_a_departing_node_keeps_its_status_when_the_removal_is_queued(self):
+        """pending_removal is where a removal STARTS, and the machine only moves
+        forward: pending_removal -> migrating_devices -> migrating_lvols ->
+        in_removal -> removed. A node the drain hands over is already at
+        migrating_lvols. Stamping it pending_removal at queue time rewound it
+        to the start, and the orchestrator then tried to shut down a node with
+        no SPDK left to stop, and refused every attempt (2026-09-26)."""
+        for status in (StorageNode.STATUS_MIGRATING_DEVICES,
+                       StorageNode.STATUS_MIGRATING_LVOLS,
+                       StorageNode.STATUS_IN_REMOVAL,
+                       StorageNode.STATUS_PENDING_REMOVAL):
+            with self.subTest(status=status):
+                cl = _cluster()
+                nodes = [_node("n1", status=status), _node("n2"), _node("n3")]
+                with patch.object(storage_node_ops, "set_node_status") as stamp:
+                    with patch.object(storage_node_ops, "DBController", return_value=FakeDB(cl, nodes)),                          patch.object(storage_node_ops, "shutdown_storage_node", return_value=True),                          patch.object(storage_node_ops, "tasks_controller") as tc,                          patch.object(storage_node_ops, "_check_ftt_allows_node_removal", return_value=(True, "")),                          patch.object(storage_node_ops, "_check_replica_relocation_feasible", return_value=(True, "")):
+                        tc.get_active_node_removal_task.return_value = False
+                        tc.get_active_node_tasks.return_value = []
+                        tc.get_active_node_restart_task.return_value = []
+                        tc.get_active_lvol_migration.return_value = []
+                        tc.add_node_removal_task.return_value = "task-uuid-1"
+                        ret = storage_node_ops.remove_storage_node("n1")
+                self.assertEqual(ret, "task-uuid-1")
+                for call in stamp.call_args_list:
+                    self.assertNotEqual(
+                        call.args[1], StorageNode.STATUS_PENDING_REMOVAL,
+                        f"a node in {status} was moved back to pending_removal")
+
+    def test_a_node_that_has_not_started_departing_is_moved_onto_pending_removal(self):
+        """The forward move the previous test forbids is still the right one
+        for a node that is only now being asked to leave."""
+        cl = _cluster()
+        nodes = [_node("n1", status=StorageNode.STATUS_OFFLINE), _node("n2"), _node("n3")]
+        with patch.object(storage_node_ops, "set_node_status") as stamp:
+            with patch.object(storage_node_ops, "DBController", return_value=FakeDB(cl, nodes)),                  patch.object(storage_node_ops, "shutdown_storage_node", return_value=True),                  patch.object(storage_node_ops, "tasks_controller") as tc,                  patch.object(storage_node_ops, "_check_ftt_allows_node_removal", return_value=(True, "")),                  patch.object(storage_node_ops, "_check_replica_relocation_feasible", return_value=(True, "")):
+                tc.get_active_node_removal_task.return_value = False
+                tc.get_active_node_tasks.return_value = []
+                tc.get_active_node_restart_task.return_value = []
+                tc.get_active_lvol_migration.return_value = []
+                tc.add_node_removal_task.return_value = "task-uuid-1"
+                storage_node_ops.remove_storage_node("n1")
+        stamp.assert_any_call("n1", StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
+
     def test_removed_peer_is_ignored(self):
         cl = _cluster()
         nodes = [_node("n1"), _node("n2"),
@@ -2568,6 +2611,37 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["_finalize_node_removal"].assert_not_called()
         mocks["set_node_status"].assert_not_called()
         mocks["_decommission_node_devices"].assert_called_once_with(node)
+
+    def test_phase1_shuts_down_only_a_node_that_is_still_running(self):
+        """"Is this node still running" is answered yes by ONLINE and SUSPENDED
+        and by nothing else a removal starts from. remove_storage_node shuts an
+        ONLINE/SUSPENDED node down itself before stamping PENDING_REMOVAL, and
+        a drain stops the node in its own step before moving anything, so a
+        PENDING_REMOVAL or MIGRATING_* node here has already had its shutdown.
+        Widening this to the draining statuses made phase 1 re-shut-down a
+        node with no SPDK left, which shutdown_storage_node refuses without
+        force -- so the removal failed on every retry (2026-09-26)."""
+        expect_shutdown = {
+            StorageNode.STATUS_ONLINE: True,
+            StorageNode.STATUS_SUSPENDED: True,
+            StorageNode.STATUS_PENDING_REMOVAL: False,
+            StorageNode.STATUS_MIGRATING_DEVICES: False,
+            StorageNode.STATUS_MIGRATING_LVOLS: False,
+            StorageNode.STATUS_OFFLINE: False,
+        }
+        for status, wanted in expect_shutdown.items():
+            with self.subTest(status=status):
+                cl = _cluster()
+                node = _node("n1", status=status)
+                db = FakeDB(cl, [node])
+                with self._patch_all() as mocks:
+                    mocks["DBController"].return_value = db
+                    mocks["_decommission_node_devices"].return_value = True
+                    mocks["_relocate_replicas_hosted_on"].return_value = True
+                    storage_node_ops.node_removal_orchestrate("n1")
+                self.assertEqual(
+                    mocks["shutdown_storage_node"].called, wanted,
+                    f"{status}: shutdown {'not ' if wanted else ''}attempted")
 
     def test_phase3b_always_runs_and_only_after_phase3a(self):
         """Phase 3b has one owner and one position: here, after 3a.

@@ -1,20 +1,26 @@
-"""A removal must shut the node down before it dismantles it.
+"""A removal shuts a node down only if the node is still running.
 
-remove_storage_node's phase 1 decides whether to call shutdown_storage_node by
-asking what state the node is in. It used to ask for ONLINE or SUSPENDED, which
-was exhaustive only because a removal could reach that line from exactly two
-places: a live node, or a re-entry that had already moved the status past
-shutdown.
+remove_storage_node's orchestrator decides whether to call
+shutdown_storage_node in phase 1 by asking what state the node is in. The
+question is "is this node still running", and only ONLINE and SUSPENDED
+answer yes. Every other status a removal can start from is one where the
+node is already down:
 
-The Kubernetes drain reaches it from a third. It stamps PENDING_REMOVAL before
-failing the devices -- the node is still up and serving -- and then calls
-remove_storage_node for the final teardown. PENDING_REMOVAL is neither ONLINE
-nor SUSPENDED nor past-shutdown, so phase 1 was skipped and the node was
-dismantled with its SPDK running: JM decommissioned, replicas relocated off it,
-devices torn down underneath a target that was still answering.
+* PENDING_REMOVAL: remove_storage_node shuts an ONLINE/SUSPENDED node down
+  itself, at queue time, and only then stamps PENDING_REMOVAL. A node seen in
+  phase 1 as PENDING_REMOVAL has had its shutdown.
+* MIGRATING_DEVICES / MIGRATING_LVOLS / IN_REMOVAL: a Kubernetes drain stops
+  the node in its own ShuttingDown step, before any device or volume moves,
+  and hands the node over in one of these.
+* OFFLINE / DOWN / UNREACHABLE: nothing is answering to be stopped.
 
-The condition is "is this node still running", so it is asked as ONLINE plus
-every draining status.
+The gate was briefly widened to ONLINE plus every draining status, on the
+reasoning that the drain stamped PENDING_REMOVAL on a node that was still
+serving. That drain no longer exists -- it shuts down first -- and the widened
+gate re-ran shutdown on a PENDING_REMOVAL node with no SPDK left to stop,
+which shutdown_storage_node refuses without force, so the removal failed on
+every retry (2026-09-26). Behaviour is pinned in test_node_removal.py; what is
+kept here is the shape of the sets, which several call sites rely on agreeing.
 """
 import unittest
 
@@ -23,42 +29,41 @@ from simplyblock_core.models.storage_node import StorageNode
 
 class ShutdownGateStatusTests(unittest.TestCase):
 
-    #: The statuses phase 1 must act on, kept here rather than imported so the
-    #: test states the intent independently of the expression under test.
+    #: The statuses in which the node's SPDK is known to be up, kept here rather
+    #: than imported so the test states the intent independently of the code.
     STILL_RUNNING = (
         StorageNode.STATUS_ONLINE,
         StorageNode.STATUS_SUSPENDED,
-        StorageNode.STATUS_PENDING_REMOVAL,
     )
 
     def _gate(self, status):
         """The phase-1 condition, evaluated the way the code evaluates it."""
-        return status in (StorageNode.STATUS_ONLINE,) + StorageNode.DRAINING_STATUSES
+        return status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
 
     def test_every_still_running_status_triggers_the_shutdown(self):
         for status in self.STILL_RUNNING:
             with self.subTest(status=status):
-                self.assertTrue(
-                    self._gate(status),
-                    f"a node in {status} is still serving, so a removal that "
-                    "skips phase 1 tears it down with its SPDK running")
+                self.assertTrue(self._gate(status))
 
-    def test_pending_removal_specifically(self):
-        """The drain's status, and the one the original pair missed."""
-        self.assertTrue(self._gate(StorageNode.STATUS_PENDING_REMOVAL))
+    def test_pending_removal_has_already_been_shut_down(self):
+        """The status the widened gate wrongly treated as running. It is
+        stamped after remove_storage_node's own shutdown, so acting on it here
+        tries to stop a node that is already stopped -- and is refused."""
+        self.assertFalse(self._gate(StorageNode.STATUS_PENDING_REMOVAL))
 
-    def test_a_node_already_shut_down_is_not_shut_down_again(self):
-        """Re-entry after the removal has already stopped the SPDK: phase 1 has
-        nothing left to do, and calling it again would fail the removal."""
+    def test_a_node_the_drain_handed_over_is_not_shut_down_again(self):
+        """The drain stops the node before it moves anything; phase 1 has
+        nothing left to do for the statuses it hands the node over in."""
         for status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
             with self.subTest(status=status):
                 self.assertFalse(self._gate(status))
 
-    def test_the_gate_and_the_shut_down_set_are_complementary(self):
+    def test_the_gate_never_overlaps_the_shut_down_set(self):
         """Stated as an invariant: a status cannot be both "still running" and
         "already stopped", however many statuses are added later."""
-        gate = set((StorageNode.STATUS_ONLINE,) + StorageNode.DRAINING_STATUSES)
+        gate = set(self.STILL_RUNNING)
         self.assertEqual(gate & set(StorageNode.REMOVAL_SHUT_DOWN_STATUSES), set())
+        self.assertEqual(gate & set(StorageNode.DEPARTING_STATUSES), set())
 
     def test_an_unreachable_node_is_left_alone(self):
         """Not an oversight: shutting down a node that cannot be reached fails,
