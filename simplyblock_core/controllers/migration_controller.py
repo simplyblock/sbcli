@@ -73,11 +73,17 @@ db = DBController()
 
 def start_migration(migration_id,
                     max_retries=constants.LVOL_MIG_MAX_RETRIES,
-                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC,
+                    retry_on_failure=False):
     """
     Promote a PHASE_PRE_CREATED migration record to PHASE_SNAP_COPY and launch
     the task runner.  Always call create_migration first to set up target
     infrastructure and obtain the migration_id and connect strings.
+
+    retry_on_failure: if this migration later ends in STATUS_FAILED (not
+    cancelled), the task runner automatically starts a brand-new migration
+    for the same lvol/target once preconditions hold again -- see
+    tasks_runner_lvol_migration.py's terminal-FAILED handling.
 
     Returns migration_uuid on success; raises ValueError on failure.
     """
@@ -150,6 +156,7 @@ def start_migration(migration_id,
     migration.started_at = int(time.time())
     migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
     migration.max_retries = max_retries
+    migration.retry_on_failure = retry_on_failure
     # RUNNING, not NEW: _cancel_stale_new_migrations treats STATUS_NEW as
     # "operator never called migrate-continue" and auto-cancels it after 5
     # minutes. Once continued, the migration is actively in progress even if

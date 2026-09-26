@@ -769,6 +769,12 @@ MIG_JOB_SIZE = 64
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
+#: How long a migration that ended in STATUS_FAILED waits before the task
+#: runner starts a brand-new migration (full precreate + start) for the same
+#: lvol/target, so a transient condition -- a bouncing target node, an
+#: in-flight rebalance -- has time to clear before the preconditions are
+#: retried. Only applies when the migration set retry_on_failure.
+LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC = 300
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs

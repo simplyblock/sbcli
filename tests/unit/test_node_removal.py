@@ -2602,12 +2602,17 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["_teardown_replicas_of_primary"].assert_called_once()
         mocks["_relocate_replicas_hosted_on"].assert_called_once()
         mocks["_finalize_node_removal"].assert_called_once()
-        # Three transitions: MIGRATING_LVOLS while the node is drained (nothing
-        # destructive has happened yet, so a removal abandoned here leaves it
-        # intact), IN_REMOVAL once teardown begins (so other code / monitors can
-        # see the node is mid-removal, not still ONLINE), then REMOVED once
-        # phase 4 finalizes.
+        # Four transitions, one per step an operator can be waiting on.
+        # MIGRATING_DEVICES and MIGRATING_LVOLS are both pre-teardown -- nothing
+        # destructive has happened yet, so a removal abandoned in either leaves
+        # the node intact -- but they are separate statuses because the two
+        # steps fail for entirely different reasons, and while they shared one
+        # status a stalled removal could not say which of them it was stuck in.
+        # IN_REMOVAL follows once teardown begins (so monitors can see the node
+        # is mid-removal, not still ONLINE), then REMOVED once phase 4
+        # finalizes.
         self.assertEqual(mocks["set_node_status"].call_args_list, [
+            call("n1", StorageNode.STATUS_MIGRATING_DEVICES, caused_by="remove"),
             call("n1", StorageNode.STATUS_MIGRATING_LVOLS, caused_by="remove"),
             call("n1", StorageNode.STATUS_IN_REMOVAL, caused_by="remove"),
             call("n1", StorageNode.STATUS_REMOVED, caused_by="remove"),

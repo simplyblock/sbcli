@@ -54,6 +54,12 @@ class LVolMigration(BaseModel):
     cluster_id: str = ""
     lvol_id: str = ""
     source_node_id: str = ""
+    # Node to actually issue source-side RPCs against. Equals source_node_id
+    # (the primary) unless the primary was offline at create_migration() time,
+    # in which case this is the online secondary/tertiary replica that was
+    # chosen as the effective source. Resolved once at create time and never
+    # re-derived afterward -- the runner only ever reads it.
+    active_source_node_id: str = ""
     target_node_id: str = ""
 
     # --- Phase tracking ---
@@ -129,6 +135,15 @@ class LVolMigration(BaseModel):
     retry_count: int = 0
     max_retries: int = constants.LVOL_MIG_MAX_RETRIES
     canceled: bool = False
+
+    # CLI: `migrate-continue --retry-on-failure`. When True and this migration
+    # ends in STATUS_FAILED (not cancelled), the task runner automatically
+    # starts a brand-new migration (full precreate + start) for the same
+    # lvol_id/target_node_id once LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC has
+    # passed, provided preconditions hold again (no rebalancing, active
+    # source node and target node both online) -- see the terminal-FAILED
+    # handling in tasks_runner_lvol_migration.py.
+    retry_on_failure: bool = False
 
     # Set when this migration is part of a batch (shared-namespace) migration.
     # References an LVolMigrationGroup.uuid.  Empty for standalone migrations.
