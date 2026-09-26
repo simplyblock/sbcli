@@ -32,8 +32,14 @@ retry_cmd() {
   return 1
 }
 
-echo "=== Phase 1: Helm uninstall ==="
-helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
+echo "=== Phase 1: Helm uninstall (R25 and R26 release names) ==="
+# spdk-csi is what the 26.x workflows install the operator chart as; sbcli and
+# simplyblock-operator are the names earlier releases used. A leftover release
+# under any of them keeps its objects alive through everything below, so all
+# three are uninstalled rather than only the one this branch happens to use.
+for RELEASE in spdk-csi sbcli simplyblock-operator simplyblock-csi; do
+  helm uninstall "$RELEASE" -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
+done
 
 echo "=== Phase 2: Patch finalizers and delete CRs ==="
 RESOURCES=(
@@ -259,6 +265,52 @@ for RTYPE in deployment service sa configmap; do
     kubectl -n kube-system $KUBECTL_TIMEOUT delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
   done
 done
+
+echo "=== Phase 4c: OpenShift MachineConfig leftovers ==="
+# Each cluster the operator builds on OpenShift gets its own KubeletConfig and
+# MachineConfigPool, named for the cluster. Both are CLUSTER-scoped, so
+# deleting the namespace leaves them behind: by 2026-09-25 this lab had 29
+# KubeletConfigs and 28 pools, 27 of the pools with no machines at all.
+#
+# They are not inert. A pool still selects nodes by label, and a KubeletConfig
+# still renders a MachineConfig, so a stale pair can hold a node in a config
+# the next run did not ask for -- and a node whose config changes gets
+# rebooted by the machine-config operator, which is what fails a storage node
+# mid-bring-up.
+#
+# Guarded on the CRD existing so this is a no-op everywhere but OpenShift.
+if kubectl $KUBECTL_TIMEOUT get crd kubeletconfigs.machineconfiguration.openshift.io >/dev/null 2>&1; then
+  for KC in $(kubectl $KUBECTL_TIMEOUT get kubeletconfig --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -E "^storage-kubelet-|simplyblock" 2>/dev/null); do
+    echo "  deleting kubeletconfig/$KC"
+    kubectl $KUBECTL_TIMEOUT delete kubeletconfig "$KC" --ignore-not-found 2>/dev/null || true
+  done
+  # Pools after the KubeletConfigs that select them, and ONLY pools that hold
+  # no machines.
+  #
+  # Deleting a pool that still selects nodes hands those nodes back to the
+  # built-in worker pool, which is a config change, which makes the
+  # machine-config operator reboot them. Cleanup would then be starting the
+  # very reboot that fails the next run's storage nodes at CheckingHost. The
+  # dead pools are the accumulation worth removing -- 27 of 28 on this lab --
+  # and a live one belongs to a cluster that phases 1-4 have just deleted, so
+  # it empties out and the next run's cleanup takes it.
+  for MCP in $(kubectl $KUBECTL_TIMEOUT get mcp --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -E "^storage-|simplyblock" 2>/dev/null); do
+    COUNT=$(kubectl $KUBECTL_TIMEOUT get mcp "$MCP" -o jsonpath='{.status.machineCount}' 2>/dev/null || echo "")
+    if [ "${COUNT:-0}" = "0" ]; then
+      echo "  deleting machineconfigpool/$MCP (no machines)"
+      kubectl $KUBECTL_TIMEOUT delete mcp "$MCP" --ignore-not-found 2>/dev/null || true
+    else
+      echo "  keeping machineconfigpool/$MCP: still holds ${COUNT} machine(s);"
+      echo "    removing it would return them to the worker pool and reboot them"
+    fi
+  done
+  for MC in $(kubectl $KUBECTL_TIMEOUT get machineconfig --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -E "storage-mc-|-storage-.*-generated-kubelet" 2>/dev/null); do
+    echo "  deleting machineconfig/$MC"
+    kubectl $KUBECTL_TIMEOUT delete machineconfig "$MC" --ignore-not-found 2>/dev/null || true
+  done
+else
+  echo "  not an OpenShift cluster, nothing to do"
+fi
 
 echo "=== Phase 5: Verify nothing remains ==="
 echo "Namespaced resources:"
