@@ -57,6 +57,33 @@ def migration_completed(migration, caused_by=ec.CAUSED_BY_MONITOR):
         caused_by,
         ec.EVENT_STATUS_CHANGE,
     )
+    _log_lvol_moved(migration, caused_by)
+
+
+def _log_lvol_moved(migration, caused_by):
+    """Human-readable companion to migration_completed: node hostnames and
+    the lvol's name, for operators reading the event feed rather than
+    resolving source_node_id/target_node_id by hand."""
+    try:
+        src_hostname = db_controller.get_storage_node_by_id(migration.source_node_id).hostname
+    except KeyError:
+        src_hostname = migration.source_node_id
+    try:
+        tgt_hostname = db_controller.get_storage_node_by_id(migration.target_node_id).hostname
+    except KeyError:
+        tgt_hostname = migration.target_node_id
+    try:
+        lvol_name = db_controller.get_lvol_by_id(migration.lvol_id).lvol_name
+    except KeyError:
+        lvol_name = migration.lvol_id
+
+    _migration_event(
+        migration,
+        f"LVol '{lvol_name}' (id={migration.lvol_id}) moved from node "
+        f"{src_hostname} to node {tgt_hostname}",
+        caused_by,
+        ec.EVENT_STATUS_CHANGE,
+    )
 
 
 def migration_failed(migration, reason, caused_by=ec.CAUSED_BY_MONITOR):

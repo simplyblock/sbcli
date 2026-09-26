@@ -7,7 +7,6 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
-from simplyblock_core import constants
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.chain import BackupChain, location_of
@@ -165,7 +164,11 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
                        "object size", backup.cluster_id, backup.uuid)
     else:
         cluster_name = cluster.cluster_name
-        cluster_size = cluster.page_size_in_blocks * constants.LVOL_CLUSTER_RATIO
+        # Same sizing as create_lvstore, for the same reason as the stat
+        # collector: the manifest records object sizes derived from it, and a
+        # cluster that records no data-chunk count falls back to one page
+        # rather than describing its objects as zero-sized.
+        cluster_size = cluster.page_size_in_blocks * max(cluster.distr_ndcs, 1)
 
     return backup_manifest.BackupManifest(
         backup_id=UUID(backup.uuid),

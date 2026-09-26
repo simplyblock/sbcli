@@ -12,6 +12,40 @@ from simplyblock_core.db_controller import DBController
 logger = logging.getLogger()
 
 
+#: Control-plane node statuses the data plane has no vocabulary for. They must
+#: be canonicalised to UNREACHABLE before being sent to it or compared against
+#: what it reports.
+#:
+#: This matters more than a cosmetic mismatch: SPDK's decoder rejects the WHOLE
+#: status-event batch when it meets a status string it does not know, and does
+#: so silently from our side -- the RPC returns success while SPDK logs
+#: `!lctx||spdk_json_decode_object(&lctx->d)` and drops the event. When
+#: node-removal grew MIGRATING_LVOLS and REMOVED_FAILED this list still named
+#: only IN_REMOVAL and PENDING_REMOVAL, so every node-status event for a node
+#: being removed was discarded for the entire removal: 106 of 194 events
+#: rejected on one node between 17:20 and 17:34 (cluster a6e7569d, 2026-09-15),
+#: starting with the very first `'status': 'migrating_lvols'`.
+#:
+#: Derived from DEPARTING_STATUSES so the next removal status cannot miss it.
+#: REMOVED is excluded deliberately -- the data plane knows that one and the
+#: control plane has always passed it through unchanged.
+_DATA_PLANE_UNKNOWN_NODE_STATUSES = (
+    StorageNode.STATUS_SCHEDULABLE,
+) + tuple(st for st in StorageNode.DEPARTING_STATUSES
+          if st != StorageNode.STATUS_REMOVED)
+
+
+def data_plane_node_status(node_status):
+    """The status string to hand the data plane for a control-plane status.
+
+    One owner for the translation, so a caller cannot send a status the data
+    plane will silently drop by forgetting to canonicalise it first.
+    """
+    if node_status in _DATA_PLANE_UNKNOWN_NODE_STATUSES:
+        return StorageNode.STATUS_UNREACHABLE
+    return node_status
+
+
 def _remote_device_from_device(device, status, remote_bdev=None):
     remote_device = RemoteDevice()
     remote_device.uuid = device.uuid
@@ -60,11 +94,21 @@ def _persist_target_device_event(device, status, target_node):
     db_controller.atomic_update(node, _mutate)
 
 
+#: Nodes that can actually receive a status event. A departing node's SPDK is
+#: stopped and its mgmt hostname no longer resolves, so an event addressed to
+#: it cannot land; DOWN is included because only its client-facing LVS port is
+#: fenced -- SPDK and its RPC channel are alive.
+_EVENT_RECIPIENT_STATUSES = (
+    StorageNode.STATUS_ONLINE,
+    StorageNode.STATUS_SUSPENDED,
+    StorageNode.STATUS_DOWN,
+)
+
+
 def send_node_status_event(node, node_status, target_node=None):
     db_controller = DBController()
     node_id = node.get_id()
-    if node_status in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_PENDING_REMOVAL]:
-        node_status = StorageNode.STATUS_UNREACHABLE
+    node_status = data_plane_node_status(node_status)
     logger.info(f"Sending event updates, node: {node_id}, status: {node_status}")
     node_status_event = {
         "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
@@ -84,7 +128,7 @@ def send_node_status_event(node, node_status, target_node=None):
                 skipped_nodes.append(node)
 
     for node in snodes:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,  StorageNode.STATUS_DOWN]:
+        if node.status not in _EVENT_RECIPIENT_STATUSES:
             continue
         node_found_same_host = False
         for n in skipped_nodes:
@@ -121,7 +165,21 @@ def send_dev_status_event(device, status, target_node=None):
 
     results = []
     for node in snodes:
-        if node.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        # Same positive condition as send_node_status_event above, not an
+        # exclusion list. Written as [OFFLINE, REMOVED] this skipped no
+        # in-flight removal status, so every device event was also fanned out
+        # to a node whose SPDK the removal had already stopped. That send can
+        # only fail, and the caller's gate is `all(results)` -- so the failure
+        # is not merely wasted, it is indistinguishable from a real peer that
+        # refused the event.
+        #
+        # tasks_runner_port_allow uses that gate as its positive confirmation
+        # before touching hublvols, leadership or the port. A node recovering
+        # while another was being removed therefore parked forever on
+        # "Local device status for <dev> not applied by all distribs, retry
+        # task" -- the unreachable "peer" being the node on its way out
+        # (cluster a6e7569d, 2026-09-15).
+        if node.status not in _EVENT_RECIPIENT_STATUSES:
             logger.info(f"skipping node: {node.get_id()} with status: {node.status}")
             continue
         node_found_same_host = False
@@ -281,9 +339,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
             # placement tree and trigger a full-cluster rebalance on the next distr_send_cluster_map.
             node_w += dev_w_gib
 
-        node_status = snode.status
-        if node_status in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_PENDING_REMOVAL]:
-            node_status = StorageNode.STATUS_UNREACHABLE
+        node_status = data_plane_node_status(snode.status)
         map_cluster[snode.get_id()] = {
             "status": node_status,
             "devices": dev_map}
@@ -332,6 +388,15 @@ _NODE_NOT_SERVING = frozenset({
     StorageNode.STATUS_IN_SHUTDOWN,
 })
 
+#: What the CP status is canonicalised to before comparing it with what the
+#: data plane reports. The statuses the data plane cannot name (above) plus the
+#: transient CP-side states during which its cluster map still shows the last
+#: reachability event rather than the state we are in.
+_HEALTH_CHECK_NOT_SERVING_STATUSES = _DATA_PLANE_UNKNOWN_NODE_STATUSES + (
+    StorageNode.STATUS_RESTARTING,
+    StorageNode.STATUS_IN_SHUTDOWN,
+)
+
 
 def parse_distr_cluster_map(map_string, nodes=None, devices=None):
     db_controller = DBController()
@@ -375,13 +440,7 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
                 # strict mismatches caused peers' health checks to flip
                 # Health=False cluster-wide while one node was stuck in a
                 # transient state.
-                if node_status in (
-                    StorageNode.STATUS_SCHEDULABLE,
-                    StorageNode.STATUS_RESTARTING,
-                    StorageNode.STATUS_IN_SHUTDOWN,
-                    StorageNode.STATUS_IN_REMOVAL,
-                    StorageNode.STATUS_PENDING_REMOVAL
-                ):
+                if node_status in _HEALTH_CHECK_NOT_SERVING_STATUSES:
                     node_status = StorageNode.STATUS_UNREACHABLE
                 data["Desired Status"] = node_status
                 # An exact match is ok; so is any pairing of two "not serving"

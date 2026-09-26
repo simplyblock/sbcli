@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import node_drain_steps, tasks_controller
 from simplyblock_core import storage_node_ops
 
 from ... import util as util
@@ -279,6 +279,65 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
 def promote(cluster: Cluster, storage_node: StorageNode) -> Response:
     storage_node_ops.make_sec_new_primary(storage_node.uuid)
     return Response(status_code=204)
+
+
+class DrainStepProgress(BaseModel):
+    """How far one drain step has got.
+
+    ``done`` is authoritative and the only field a caller must honour: a step
+    that cannot count its work still has to say when it has finished. The counts
+    are for reporting, so a removal that pauses for minutes has a number
+    attached rather than being an unexplained wait.
+    """
+    done: bool
+    total: int = 0
+    completed: int = 0
+    failed: int = 0
+    message: str = ''
+
+
+@instance_api.post(
+    '/migrate-devices', name='clusters:storage-nodes:migrate-devices',
+    status_code=202, responses={202: {"content": None}})
+def migrate_devices(cluster: Cluster, storage_node: StorageNode) -> Response:
+    """Fail this node's data devices and rebuild them onto its peers.
+
+    Starting a rebuild that is already running is a no-op rather than an error,
+    so a caller that restarts and re-POSTs does not restart the work it is
+    waiting for.
+    """
+    node_drain_steps.start_device_decommission(storage_node.get_id())
+    return Response(status_code=202)
+
+
+@instance_api.get('/migrate-devices', name='clusters:storage-nodes:migrate-devices-progress')
+def migrate_devices_progress(cluster: Cluster, storage_node: StorageNode) -> DrainStepProgress:
+    return DrainStepProgress(**node_drain_steps.device_decommission_progress(storage_node.get_id()))
+
+
+@instance_api.post(
+    '/migrating-lvols', name='clusters:storage-nodes:migrating-lvols',
+    status_code=202, responses={202: {"content": None}})
+def mark_migrating_lvols(cluster: Cluster, storage_node: StorageNode) -> Response:
+    """Record that the drain has moved from the device half to the volume half.
+
+    A status transition only, with no work behind it: the volumes themselves are
+    moved by the caller, which on this path is the operator creating
+    VolumeMigration CRs. Without it the node would keep saying migrating_devices
+    for the whole of a phase it had already finished, and the node's own status
+    would disagree with the CR about which step a removal is on.
+
+    Idempotent, and never moves a node backwards.
+    """
+    node_drain_steps.mark_migrating_lvols(storage_node.get_id())
+    return Response(status_code=202)
+
+
+# There is no /reshuffle-replicas endpoint: reallocating the replica roles
+# other nodes hold on this one is phase 3b of DELETE's removal, which runs it
+# after the phase 3a that frees this node's own replica slots. Called on its
+# own it skipped 3a and deadlocked on a fully-occupied cluster -- see the note
+# in node_drain_steps.
 
 
 instance_api.include_router(device_api, prefix='/devices')
