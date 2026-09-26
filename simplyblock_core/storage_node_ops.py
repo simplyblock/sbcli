@@ -4220,6 +4220,23 @@ def delete_storage_node(node_id, force=False):
     logger.info("done")
 
 
+#: The statuses a removal may start from. Built from the named sets rather
+#: than listed by hand: the list this replaced named pending_removal and
+#: in_removal but not migrating_devices or migrating_lvols, which were added
+#: later for the drain, so a drained node arrived at DELETE in migrating_lvols
+#: and was refused as unremovable -- after every one of its volumes had been
+#: moved (2026-09-26). Every departing status is one a removal must be able to
+#: continue from; REMOVED is the one exception and is handled before this
+#: check, as "already removed" rather than "not removable".
+REMOVABLE_STATUSES = (
+    StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+    StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE,
+    # A removal that gave up is re-drivable (REMOVED_FAILED, in the set): the
+    # operator fixes whatever blocked it and starts again. The old task is
+    # DONE, not active, so the in-flight check above creates a fresh one.
+) + tuple(s for s in StorageNode.DEPARTING_STATUSES if s != StorageNode.STATUS_REMOVED)
+
+
 def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     """Start the online removal of a storage node from its cluster.
 
@@ -4264,14 +4281,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.warning(f"Node already removed: {node_id}")
         return False
 
-    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                            StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_IN_REMOVAL,
-                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE,
-                            # A removal that gave up is re-drivable: the
-                            # operator fixes whatever blocked it and starts
-                            # again. The old task is DONE, not active, so the
-                            # guard above correctly creates a fresh one.
-                            StorageNode.STATUS_REMOVED_FAILED]:
+    if snode.status not in REMOVABLE_STATUSES:
         logger.error(
             f"Can not remove node {node_id}: (current status: {snode.status}).")
         return False

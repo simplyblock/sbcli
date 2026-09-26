@@ -169,6 +169,50 @@ class TestRemovePreconditions(unittest.TestCase):
         tc.add_node_removal_task.assert_called_once()
 
 
+    def test_every_departing_status_is_removable(self):
+        """A drain hands the node to the removal in whatever status the drain
+        left it in. The status guard was a hand-written list that named
+        pending_removal and in_removal but not the two the drain added later,
+        so a node that had finished migrating every volume arrived at DELETE
+        in migrating_lvols and was refused as unremovable (2026-09-26). The
+        guard now reads the same set the drain writes, and this pins that the
+        two cannot drift apart again."""
+        for status in StorageNode.DEPARTING_STATUSES:
+            if status == StorageNode.STATUS_REMOVED:
+                continue
+            with self.subTest(status=status):
+                cl = _cluster()
+                nodes = [_node("n1", status=status), _node("n2"), _node("n3")]
+                ret, tc = self._run(FakeDB(cl, nodes))
+                self.assertEqual(
+                    ret, "task-uuid-1",
+                    f"a node in {status} was refused at the status guard")
+                tc.add_node_removal_task.assert_called_once()
+
+    def test_the_live_case_migrating_lvols_specifically(self):
+        cl = _cluster()
+        nodes = [_node("n1", status=StorageNode.STATUS_MIGRATING_LVOLS), _node("n2"), _node("n3")]
+        ret, _ = self._run(FakeDB(cl, nodes))
+        self.assertEqual(ret, "task-uuid-1")
+
+    def test_removed_is_already_removed_not_unremovable(self):
+        """REMOVED is the one departing status a removal must not start from,
+        and it is answered before the status guard, as 'already removed'."""
+        self.assertNotIn(StorageNode.STATUS_REMOVED, storage_node_ops.REMOVABLE_STATUSES)
+        cl = _cluster()
+        nodes = [_node("n1", status=StorageNode.STATUS_REMOVED), _node("n2")]
+        ret, tc = self._run(FakeDB(cl, nodes))
+        self.assertFalse(ret)
+        tc.add_node_removal_task.assert_not_called()
+
+    def test_removable_statuses_cover_every_departing_status_but_removed(self):
+        """The set relationship itself, so a status added to DEPARTING_STATUSES
+        is removable by construction rather than by remembering to list it."""
+        departing = set(StorageNode.DEPARTING_STATUSES) - {StorageNode.STATUS_REMOVED}
+        self.assertTrue(
+            departing <= set(storage_node_ops.REMOVABLE_STATUSES),
+            f"departing but not removable: {departing - set(storage_node_ops.REMOVABLE_STATUSES)}")
+
     def test_removed_peer_is_ignored(self):
         cl = _cluster()
         nodes = [_node("n1"), _node("n2"),
