@@ -1230,6 +1230,23 @@ jobs:
             # Sending them with enableLogicalBlockDevices selects nothing.
             DRIVE_SIZE_RANGE=""
             PCIE_MODEL=""
+            # No drive format on lblk. FORCE_FORMAT_4K is true for every
+            # OpenShift environment, and on a block cluster the operator
+            # resolves enableDriveFormat to enableBlockFormat -- a wipefs
+            # node_configure.py performs on the worker before the node is
+            # added. Against 2x1.9TB that is what the control plane is waiting
+            # on when add_node gives up:
+            #
+            #   ERROR: add_node aborting after SPDK start:
+            #   HTTPSConnectionPool(host=worker-N...:5000): Read timed out.
+            #   (read timeout=300)
+            #   Cleaned up SPDK pod on port 4420 after failed add_node
+            #
+            # Every add failed that way and the cluster never activated. The
+            # dev's own GCP lblk pipeline sets no enableDriveFormat at all, so
+            # this matches it. Set FORCE_DRIVE_FORMAT=true explicitly if a run
+            # genuinely needs the wipe.
+            FORCE_FORMAT_4K="${LBLK_FORCE_FORMAT:-false}"
             echo "lblk mode: block-device discovery, journal device on, PCIe selectors blanked"
           fi
 
