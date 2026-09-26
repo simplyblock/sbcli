@@ -316,6 +316,24 @@ def migrate_devices_progress(cluster: Cluster, storage_node: StorageNode) -> Dra
 
 
 @instance_api.post(
+    '/migrating-lvols', name='clusters:storage-nodes:migrating-lvols',
+    status_code=202, responses={202: {"content": None}})
+def mark_migrating_lvols(cluster: Cluster, storage_node: StorageNode) -> Response:
+    """Record that the drain has moved from the device half to the volume half.
+
+    A status transition only, with no work behind it: the volumes themselves are
+    moved by the caller, which on this path is the operator creating
+    VolumeMigration CRs. Without it the node would keep saying migrating_devices
+    for the whole of a phase it had already finished, and the node's own status
+    would disagree with the CR about which step a removal is on.
+
+    Idempotent, and never moves a node backwards.
+    """
+    node_drain_steps.mark_migrating_lvols(storage_node.get_id())
+    return Response(status_code=202)
+
+
+@instance_api.post(
     '/reshuffle-replicas', name='clusters:storage-nodes:reshuffle-replicas',
     status_code=202, responses={202: {"content": None}})
 def reshuffle_replicas(cluster: Cluster, storage_node: StorageNode) -> Response:

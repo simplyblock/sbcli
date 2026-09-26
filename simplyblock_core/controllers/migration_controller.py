@@ -124,8 +124,26 @@ def start_migration(migration_id,
     if source_node_id == target_node_id:
         raise ValueError("Source and target nodes must be different")
 
-    if source_node.status not in StorageNode.MIGRATION_SOURCE_STATUSES:
-        raise ValueError(f"Source node cannot serve a migration (status={source_node.status})")
+    # "Can this migration find a source?", not "is the primary up?".
+    #
+    # A removal shuts the node down before it moves anything, so by the time the
+    # volumes migrate the primary is never up -- it is MIGRATING_DEVICES or
+    # MIGRATING_LVOLS, both of which mean its SPDK is stopped. Asking the
+    # primary's own status therefore refuses every migration a drain issues,
+    # which is what resolve_source_node exists to avoid: with the primary down,
+    # source-side RPCs are served by an online replica.
+    #
+    # The old check ran before that resolution and rejected the migration
+    # outright, so the replica it would have used was never consulted. The CR
+    # then failed on a precondition, before the target was engaged, and was
+    # recreated against the same target indefinitely.
+    #
+    # resolve_source_node raises when the primary is unreachable and no replica
+    # is online, which is the case this guard is really for.
+    try:
+        resolve_source_node(source_node)
+    except ValueError as e:
+        raise ValueError(f"Source node cannot serve a migration: {e}")
 
     if target_node.status != StorageNode.STATUS_ONLINE:
         raise ValueError(f"Target node is not online (status={target_node.status})")

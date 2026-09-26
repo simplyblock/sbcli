@@ -200,6 +200,37 @@ def device_decommission_progress(node_id: str) -> dict:
     }
 
 
+def mark_migrating_lvols(node_id: str) -> bool:
+    """Record that the drain has moved on from devices to volumes.
+
+    The CLI removal stamps both halves itself, because it runs both. The
+    Kubernetes drain runs only the device half through this module -- the
+    volume half is the operator creating VolumeMigration CRs -- so without
+    this the node would sit in MIGRATING_DEVICES for the whole of a phase it
+    finished long ago, and `sbctl sn list` would disagree with the CR about
+    which step a removal is on.
+
+    Idempotent, and never moves a node backwards: a removal that has already
+    reached IN_REMOVAL or beyond keeps the status it has.
+    """
+    from simplyblock_core import storage_node_ops
+    from simplyblock_core.models.storage_node import StorageNode
+
+    node = DBController().get_storage_node_by_id(node_id)
+    if node.status == StorageNode.STATUS_MIGRATING_LVOLS:
+        return True
+    if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES and \
+            node.status != StorageNode.STATUS_MIGRATING_DEVICES:
+        logger.info(f"[DRAIN] {node_id}: past the volume phase already ({node.status}); "
+                    f"not stamping migrating_lvols")
+        return True
+
+    storage_node_ops.set_node_status(
+        node_id, StorageNode.STATUS_MIGRATING_LVOLS, caused_by="drain")
+    logger.info(f"[DRAIN] {node_id}: marked migrating_lvols")
+    return True
+
+
 def start_replica_reshuffle(node_id: str) -> bool:
     """Reallocate the replica roles other nodes still hold on this one."""
     from simplyblock_core import storage_node_ops
@@ -265,6 +296,7 @@ def _reset_for_test() -> None:
 
 __all__ = [
     'start_device_decommission',
+    'mark_migrating_lvols',
     'device_decommission_progress',
     'start_replica_reshuffle',
     'replica_reshuffle_progress',
