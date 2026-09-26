@@ -849,6 +849,55 @@ class ReplicationStatusDTO(BaseModel):
         )
 
 
+class ConsistencyGroupReplicationIntentDTO(BaseModel):
+    """Request body to enable or disable group replication (design §14.4).
+
+    A UUID attaches the whole consistency group to that group replication policy;
+    an explicit ``null`` detaches it (the group and its members stay grouped by
+    label, only replication stops). The field is required, so omitting it is a
+    422 rather than an ambiguous no-op.
+    """
+    replication_policy_id: UUID | None
+
+
+class ConsistencyGroupReplicationStatusDTO(BaseModel):
+    """The replication status of a consistency group as one unit.
+
+    A group's recovery point is its OLDEST member's, its lag and health its
+    WORST member's, and its backlog the sum, because a group is only as
+    protected as its slowest, sickest member. Never a 404, matching the
+    per-volume ``ReplicationStatusDTO`` (design-csi-addons-replication.md
+    §14.4/§14.6).
+    """
+    role: ReplicationRole
+    state: ReplicationHealthState
+    member_count: util.Unsigned = 0
+    #: Oldest member's newest-replicated time; null until every member has a
+    #: recovery point.
+    last_replicated_at: datetime | None = None
+    #: Worst (largest) member lag; null when the group has no recovery point.
+    lag_seconds: util.OptionalUnsigned = None
+    outstanding_count: util.Unsigned = 0
+    outstanding_bytes: util.Unsigned = 0
+    #: A divergence catch-up in flight on any member.
+    resyncing: bool = False
+
+    @staticmethod
+    def from_info(info: dict) -> 'ConsistencyGroupReplicationStatusDTO':
+        last_replicated_at = info.get('last_replicated_at')
+        return ConsistencyGroupReplicationStatusDTO(
+            role=info.get('role', 'none'),
+            state=info.get('state', 'not_replicating'),
+            member_count=info.get('member_count', 0),
+            last_replicated_at=(datetime.fromtimestamp(last_replicated_at, tz=UTC)
+                                if last_replicated_at is not None else None),
+            lag_seconds=info.get('lag_seconds'),
+            outstanding_count=info.get('outstanding_count', 0),
+            outstanding_bytes=info.get('outstanding_bytes', 0),
+            resyncing=bool(info.get('resyncing', False)),
+        )
+
+
 class ReplicatedSnapshotDTO(BaseModel):
     """A fully replicated snapshot on the secondary, addressed as a cloneable
     object. ``lvol_id`` is the volume the snapshot belongs to on the

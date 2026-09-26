@@ -205,6 +205,65 @@ def _resolve_policy(policy):
     raise KeyError(f'ReplicationPolicy {policy} not found')
 
 
+def start_member_replication(lvol_id, pol, target):
+    """Point one volume at *pol* and start replicating to *target*, WITHOUT
+    touching consistency-group membership.
+
+    Mirrors :func:`attach_policy`'s tail (set the policy pointer, start
+    replication, roll the pointer back on failure), but adds no group member.
+    ``attach_policy`` adds the volume to the policy's group first; the
+    group-replication path (``consistency_group_controller.attach_group_policy``)
+    calls this for members that ALREADY belong to the group, so re-adding them
+    would reset their generation epochs (``add_member_to_group`` stamps a fresh
+    ``joined_seq``) and tear the group's snapshot history.
+    """
+    lvol = db.get_lvol_by_id(lvol_id)
+    lvol.replication_policy_id = pol.get_id()
+    lvol.write_to_db()
+    ret = lvol_controller.replication_start(
+        lvol_id,
+        replication_cluster_id=target.target_cluster_id,
+        mode=pol.mode,
+        interval_min=pol.interval_min,
+        from_policy=True,
+    )
+    if not ret:
+        fresh = db.get_lvol_by_id(lvol_id)
+        fresh.replication_policy_id = ""
+        fresh.write_to_db()
+        raise ReplicationConfigError(
+            f"Could not start replication of {lvol_id} to target {target.target_name}")
+    return True
+
+
+def stop_member_replication(lvol_id):
+    """Stop one volume replicating and purge its internal replication snapshots,
+    WITHOUT touching consistency-group membership.
+
+    Mirrors :func:`detach_policy`'s tail (cutover guard, clear the policy
+    pointer, stop streaming, purge internal snapshots), but leaves the volume in
+    its group: the group-replication path (``detach_group_policy``) disables
+    replication for a group whose members stay grouped by their label. Idempotent
+    no-op when the volume follows no policy.
+    """
+    lvol = db.get_lvol_by_id(lvol_id)
+    if not lvol.replication_policy_id:
+        logger.info("Volume %s follows no replication policy; stop is a no-op", lvol_id)
+        return True
+    rep = _active_relationship(lvol_id)
+    if rep is not None and rep.state == LVolReplication.STATE_CUTOVER_PENDING:
+        raise ReplicationConfigError(
+            f"Volume {lvol_id} has a cutover in flight; wait for it to finish "
+            f"before stopping its replication")
+    lvol.replication_policy_id = ""
+    lvol.write_to_db()
+    lvol_controller.replication_stop(lvol_id, from_policy=True)
+    removed = _purge_internal_replication_snapshots(lvol_id)
+    logger.info("Volume %s replication stopped (%d internal replication "
+                "snapshot(s) removed)", lvol_id, removed)
+    return True
+
+
 def attach_policy(lvol_id, policy):
     """Put a volume under a policy and start replicating.
 

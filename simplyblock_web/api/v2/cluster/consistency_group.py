@@ -8,11 +8,19 @@ deleting one. Detaching a member closes its epoch while preserving the snapshots
 prior generations depend on (§8.2).
 """
 import builtins
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import consistency_group_controller
+from simplyblock_core.controllers import (
+    consistency_group_controller,
+    lvol_controller,
+    replication_policy_controller,
+)
+from simplyblock_core.controllers.consistency_group_controller import ConsistencyGroupError
 
 from .._dependencies import Cluster, ConsistencyGroupResource
 from .._dtos import (
@@ -21,6 +29,8 @@ from .._dtos import (
     ConsistencyGroupGenerationMemberDTO,
     ConsistencyGroupMemberDTO,
     ConsistencyGroupMemberJoinDTO,
+    ConsistencyGroupReplicationIntentDTO,
+    ConsistencyGroupReplicationStatusDTO,
 )
 
 api = APIRouter(tags=['consistency-groups'])
@@ -136,6 +146,93 @@ def delete_generation(cluster: Cluster, group: ConsistencyGroupResource, seq: in
     _deleted, err = consistency_group_controller.delete_generation(group, seq)
     if err is not None:
         raise HTTPException(404, err)
+    return Response(status_code=204)
+
+
+@instance_api.put('/replication', name='clusters:consistency-groups:replication:configure',
+                  status_code=204, responses={204: {"content": None}})
+def configure_replication(cluster: Cluster, group: ConsistencyGroupResource,
+                          body: ConsistencyGroupReplicationIntentDTO) -> Response:
+    """Enable or disable group replication (design-csi-addons-replication.md
+    §14.4): a policy id attaches the whole group to that group replication
+    policy; ``null`` detaches it (the group and its members stay grouped by
+    label). A refused attach (not a consistency-group policy, missing policy) is
+    a 409.
+    """
+    if body.replication_policy_id is None:
+        consistency_group_controller.detach_group_policy(group)
+    else:
+        try:
+            consistency_group_controller.attach_group_policy(
+                group, str(body.replication_policy_id))
+        except ConsistencyGroupError as e:
+            raise HTTPException(409, str(e))
+    return Response(status_code=204)
+
+
+@instance_api.get('/replication/status', name='clusters:consistency-groups:replication:status',
+                  response_model=ConsistencyGroupReplicationStatusDTO)
+def replication_status(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupReplicationStatusDTO:
+    """The group's replication status as one unit: oldest recovery point, worst
+    member lag and health, summed backlog (design-csi-addons-replication.md
+    §14.4/§14.6). Never 404s -- a group with no replicating member reports
+    ``state: not_replicating``.
+    """
+    infos = []
+    for member in consistency_group_controller.list_members(group):
+        info = lvol_controller.get_replication_info(member["lvol_id"])
+        infos.append(info or {"role": "none", "state": "not_replicating"})
+    agg = consistency_group_controller.aggregate_group_replication_info(infos)
+    return ConsistencyGroupReplicationStatusDTO.from_info(agg)
+
+
+@instance_api.post('/replication/failover', name='clusters:consistency-groups:replication:failover')
+def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> dict:
+    """Fail the whole group over as ONE unit through its replication policy
+    (design-csi-addons-replication.md §14.4): every member is pinned to the same
+    group generation, all-or-nothing. Refuses (412) a group not attached to a
+    policy.
+    """
+    if not group.policy_id:
+        raise HTTPException(
+            412, f'consistency group {group.get_id()} is not attached to a replication policy')
+    return {"members": replication_policy_controller.failover_policy(group.policy_id)}
+
+
+@instance_api.post('/replication/demote', name='clusters:consistency-groups:replication:demote',
+                   status_code=204, responses={204: {"content": None}, 202: {"content": None}})
+def replication_demote(cluster: Cluster, group: ConsistencyGroupResource) -> Response:
+    """Demote the whole group: fence every member and confirm each one's last
+    write replicated (design-csi-addons-replication.md §14.4). Re-drivable, not
+    queued: 204 once every member is demoted, 202 (with per-member detail) while
+    any is still converging, 500 on a hard failure.
+    """
+    result = consistency_group_controller.demote_group(group)
+    if result.get("error"):
+        raise HTTPException(500, result["error"])
+    if result["demoted"]:
+        return Response(status_code=204)
+    return JSONResponse(status_code=202, content=result)
+
+
+class GroupFailbackParams(BaseModel):
+    source_cluster_id: UUID | None = None
+
+
+@instance_api.post('/replication/failback', name='clusters:consistency-groups:replication:failback',
+                   status_code=204, responses={204: {"content": None}})
+def replication_failback(cluster: Cluster, group: ConsistencyGroupResource,
+                         body: GroupFailbackParams) -> Response:
+    """Fail the whole group back: point every member's replication back at the
+    source cluster (design-csi-addons-replication.md §14.4). The cutover itself is
+    each member's own commit.
+    """
+    result = consistency_group_controller.failback_group(
+        group,
+        source_cluster_id=str(body.source_cluster_id) if body.source_cluster_id else None,
+    )
+    if not result["configured"]:
+        raise HTTPException(500, f'failed to configure group fail-back: {result["members"]}')
     return Response(status_code=204)
 
 

@@ -371,6 +371,190 @@ def warnings_for_snapshot(lvol, snapshot):
 
 
 # --------------------------------------------------------------------------- #
+# Group replication status roll-up (design-csi-addons-replication.md §14.4/§14.6)
+# --------------------------------------------------------------------------- #
+
+# Severity order for rolling a group's health up to its worst member: a group is
+# only as healthy as its sickest member. An unknown state ranks worst (5), so a
+# state the roll-up does not recognize is never silently treated as healthy.
+_GROUP_STATE_SEVERITY = {
+    "error": 5,
+    "degraded": 4,
+    "not_replicating": 3,
+    "lagging": 2,
+    "replicating": 1,
+    "in_sync": 0,
+}
+
+
+def aggregate_group_replication_info(member_infos):
+    """Roll a consistency group's per-member replication status up to one group
+    verdict: the group's recovery point is its OLDEST member's, its lag and
+    health are its WORST member's, and its backlog is the sum, because a group is
+    only as protected as its slowest, sickest member. A member with no recovery
+    point leaves the whole group without one. Roles report ``none`` unless every
+    member agrees, since a healthy group's members share a role.
+
+    Pure function over the dicts ``lvol_controller.get_replication_info`` returns
+    (design-csi-addons-replication.md §14.4/§14.6).
+    """
+    if not member_infos:
+        return {
+            "member_count": 0,
+            "role": "none",
+            "state": "not_replicating",
+            "last_replicated_at": None,
+            "lag_seconds": None,
+            "outstanding_count": 0,
+            "outstanding_bytes": 0,
+            "resyncing": False,
+        }
+
+    roles = {info.get("role", "none") for info in member_infos}
+    role = roles.pop() if len(roles) == 1 else "none"
+
+    state = max((info.get("state", "not_replicating") for info in member_infos),
+                key=lambda s: _GROUP_STATE_SEVERITY.get(s, 5))
+
+    lasts = [info.get("last_replicated_at") for info in member_infos]
+    if any(value is None for value in lasts):
+        last_replicated_at = None
+        lag_seconds = None
+    else:
+        last_replicated_at = min(lasts)
+        lags = [info.get("lag_seconds") for info in member_infos if info.get("lag_seconds") is not None]
+        lag_seconds = max(lags) if lags else None
+
+    return {
+        "member_count": len(member_infos),
+        "role": role,
+        "state": state,
+        "last_replicated_at": last_replicated_at,
+        "lag_seconds": lag_seconds,
+        "outstanding_count": sum(int(info.get("outstanding_count", 0) or 0) for info in member_infos),
+        "outstanding_bytes": sum(int(info.get("outstanding_bytes", 0) or 0) for info in member_infos),
+        "resyncing": any(bool(info.get("resyncing", False)) for info in member_infos),
+    }
+
+
+def attach_group_policy(group, policy_id):
+    """Attach a standalone consistency group to a group replication policy so the
+    whole group replicates as one unit (design-csi-addons-replication.md §14.4).
+
+    The members already belong to the group -- they joined at provisioning by the
+    ``storage.simplyblock.io/consistency-group`` label -- so this links the group
+    to the policy and starts each OPEN member replicating. It never re-adds a
+    member: ``add_member_to_group`` stamps a fresh ``joined_seq``, which would
+    tear the group's snapshot-generation history. The policy must be a
+    consistency-group policy, so the snapshot monitor ships one GROUP snapshot per
+    interval rather than per-volume snapshots.
+    """
+    from simplyblock_core.controllers import replication_policy_controller
+    try:
+        pol = db.get_replication_policy_by_id(policy_id)
+    except KeyError:
+        pol = None
+    if pol is None:
+        raise ConsistencyGroupError(f"replication policy {policy_id} not found")
+    if not getattr(pol, "consistency_group", False):
+        raise ConsistencyGroupError(
+            f"policy {pol.policy_name} is not a consistency-group policy; a group "
+            f"replicates as one unit and needs a consistency-group policy")
+    target = db.get_replication_target_by_id(pol.target_id)
+
+    group = db.get_consistency_group_by_id(group.get_id())
+    group.policy_id = pol.get_id()
+    group.write_to_db(db.kv_store)
+
+    open_members = [m for m in list_members(group) if not m.get("removed_seq")]
+    for member in open_members:
+        replication_policy_controller.start_member_replication(
+            member["lvol_id"], pol, target)
+    logger.info("Consistency group %s attached to replication policy %s "
+                "(%d member(s) replicating)", group.uuid[:8], pol.policy_name,
+                len(open_members))
+    return group
+
+
+def detach_group_policy(group):
+    """Disable group replication: stop every member replicating and unlink the
+    group from its policy, WITHOUT dissolving the group. The members stay grouped
+    by their label (design-csi-addons-replication.md §14.4). Idempotent: a group
+    following no policy still stops each member (a no-op per member) and clears
+    the pointer.
+    """
+    from simplyblock_core.controllers import replication_policy_controller
+    group = db.get_consistency_group_by_id(group.get_id())
+    for member in list_members(group):
+        if member.get("removed_seq"):
+            continue
+        replication_policy_controller.stop_member_replication(member["lvol_id"])
+    group.policy_id = ""
+    group.write_to_db(db.kv_store)
+    logger.info("Consistency group %s detached from its replication policy",
+                group.uuid[:8])
+    return group
+
+
+def aggregate_group_demote(member_results):
+    """Roll each member's demote result up to one group verdict (design
+    §14.4). ``member_results`` is a list of ``(lvol_id, result)`` where result is
+    ``demote_lvol``'s return: a dict ``{"demoted": bool, ...}`` or a
+    ``(False, error)`` tuple. The group is demoted only when EVERY member is;
+    a member that hard-errors makes the whole group's demote an error. Pure
+    function.
+    """
+    members = []
+    error = None
+    all_demoted = True
+    for lvol_id, result in member_results:
+        if isinstance(result, tuple):        # (False, error)
+            all_demoted = False
+            error = error or f"{lvol_id}: {result[1]}"
+            members.append({"lvol_id": lvol_id, "demoted": False, "error": str(result[1])})
+            continue
+        demoted = bool(result.get("demoted"))
+        all_demoted = all_demoted and demoted
+        members.append({"lvol_id": lvol_id, "demoted": demoted})
+    return {"demoted": all_demoted and error is None, "members": members, "error": error}
+
+
+def demote_group(group):
+    """Demote the whole consistency group: fence every member and confirm each
+    one's last write replicated (design-csi-addons-replication.md §14.4). By the
+    time this is called the workload has unmounted (Ramen relocation), so the
+    members quiesce to the same point and their final snapshots are group-
+    consistent. Re-drivable, not queued: each call does the work its state calls
+    for, and the group is ``demoted`` only once every member is.
+    """
+    from simplyblock_core.controllers import lvol_controller
+    member_results = [(m["lvol_id"], lvol_controller.demote_lvol(m["lvol_id"]))
+                      for m in list_members(group)]
+    return aggregate_group_demote(member_results)
+
+
+def failback_group(group, source_cluster_id=None):
+    """Fail the whole group back: point every member's replication back at the
+    source cluster (design-csi-addons-replication.md §14.4). The cutover itself is
+    each member's own commit, as at the per-volume level. Returns ``configured:
+    False`` with per-member detail if any member could not be configured.
+    """
+    from simplyblock_core.controllers import lvol_controller
+    members = []
+    configured = True
+    for member in list_members(group):
+        lvol_id = member["lvol_id"]
+        result = lvol_controller.replication_failback(lvol_id, source_cluster_id=source_cluster_id)
+        if isinstance(result, tuple) or not result:
+            configured = False
+            detail = str(result[1]) if isinstance(result, tuple) else "failed to configure fail-back"
+            members.append({"lvol_id": lvol_id, "configured": False, "error": detail})
+        else:
+            members.append({"lvol_id": lvol_id, "configured": True})
+    return {"configured": configured, "members": members}
+
+
+# --------------------------------------------------------------------------- #
 # The group snapshot tick
 # --------------------------------------------------------------------------- #
 
