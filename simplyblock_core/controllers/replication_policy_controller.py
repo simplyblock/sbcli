@@ -540,8 +540,120 @@ def failover_group(group):
     policy = db.get_replication_policy_by_id(group.policy_id)
     members = [v for v in db.get_lvols_by_replication_policy(policy.get_id())
                if getattr(v, "group_id", "") == group.get_id()]
-    return _failover_group_members(policy, members,
-                                   f"consistency group {group.group_name}")
+    if members:
+        return _failover_group_members(policy, members,
+                                       f"consistency group {group.group_name}")
+    # Fail-BACK. This group is empty because its members were failed over and now
+    # live in the peer group. Promoting the empty local group clones nothing (the
+    # silent fail-back no-op caught live 2026-09-27, where the workload kept
+    # writing to the peer's clones while the promote reported success). Resolve
+    # the peer group and clone its members home -- the group analog of the
+    # driver's resolveToLocalReplica, which redirects a per-volume promote from
+    # the stale origin handle to the active replica before cloning it back.
+    return _failback_group(group, policy)
+
+
+def _failback_group(group, policy):
+    """Clone the members of *group* home from the peer group that holds them after
+    a fail-over. Returns per-member result dicts (empty when no peer group or peer
+    member is found; all ``failed`` when the demote cut has not finished shipping).
+    """
+    peer = _resolve_active_peer_group(group, policy)
+    if peer is None:
+        logger.error("Fail-back of consistency group %s: no peer group found to "
+                     "clone home from", group.group_name)
+        return []
+    peer_members = [v for v in db.get_lvols(peer.cluster_id)
+                    if getattr(v, "group_id", "") == peer.get_id()]
+    if not peer_members:
+        logger.error("Fail-back of consistency group %s: peer group %s has no "
+                     "members to clone home", group.group_name, peer.group_name)
+        return []
+    try:
+        seq, pinned = _resolve_group_failback_generation(peer, peer_members)
+    except ReplicationConfigError as e:
+        logger.error("Fail-back of consistency group %s refused: %s",
+                     group.group_name, e)
+        return [{"lvol_id": v.get_id(), "status": "failed", "detail": str(e)}
+                for v in peer_members]
+    logger.info("Failing back consistency group %s from peer group %s "
+                "generation %d", group.group_name, peer.group_name, seq)
+    return _clone_members_home(
+        peer_members, pinned,
+        f"consistency group {group.group_name} (fail-back)")
+
+
+def _resolve_active_peer_group(group, policy):
+    """The peer group that holds *group*'s data after a fail-over -- the source of
+    a fail-back.
+
+    Keyed by name on the policy's replication-target cluster, the same key
+    reconstitute_group_after_handoff formed the peer group under, so a fail-back
+    returns to the group its members left. Returns None when the target or the
+    peer group cannot be resolved.
+    """
+    try:
+        target = db.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    peer_cluster_id = getattr(target, "target_cluster_id", "")
+    if not peer_cluster_id:
+        return None
+    return db.get_consistency_group_by_name(peer_cluster_id, group.group_name)
+
+
+def _resolve_group_failback_generation(peer_group, peer_members):
+    """The newest generation of *peer_group* every member has replicated home --
+    the demote cut the peer shipped for fail-back.
+
+    Returns ``(group_seq, {lvol_id: source_snapshot_id})`` where the source
+    snapshot lives on the peer cluster; replicate_lvol_on_target_cluster resolves
+    its home-side copy to clone from. A generation qualifies by the same rule
+    _resolve_group_failover_generation applies (task DONE, target copy present and
+    not being pruned), but this does NOT filter to unsettled members: a
+    fail-back's members are the failed-over targets, all settled, and all are what
+    we clone home. Raises ReplicationConfigError when no generation is fully
+    replicated home for every member yet (the demote cut is still shipping).
+    """
+    member_ids = {m.get_id() for m in peer_members}
+    replicated = {
+        task.function_params.get("snapshot_id")
+        for task in db.get_job_tasks(peer_group.cluster_id)
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+        and task.status == JobSchedule.STATUS_DONE
+    }
+    by_seq: dict = {}
+    for snap in db.get_snapshots():
+        if getattr(snap, "group_id", "") != peer_group.get_id():
+            continue
+        seq = getattr(snap, "group_seq", 0)
+        lvol_id = snap.lvol.get_id() if snap.lvol else ""
+        if not seq or lvol_id not in member_ids:
+            continue
+        if snap.get_id() not in replicated or not snap.target_replicated_snap_uuid:
+            continue
+        try:
+            target_copy = db.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+        except KeyError:
+            continue
+        if (target_copy.status == SnapShot.STATUS_IN_DELETION
+                or getattr(target_copy, "deleted", False)):
+            continue
+        by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
+
+    for seq in sorted(by_seq, reverse=True):
+        if member_ids <= set(by_seq[seq]):
+            return seq, by_seq[seq]
+
+    missing = ""
+    if by_seq:
+        best = max(by_seq)
+        absent = sorted(member_ids - set(by_seq[best]))
+        missing = f"; generation {best} lacks {', '.join(absent)}"
+    raise ReplicationConfigError(
+        f"No generation of consistency group {peer_group.group_name} is fully "
+        f"replicated home for all {len(member_ids)} member(s); the demote cut "
+        f"has not finished shipping{missing}")
 
 
 def failover_target(target_id):
@@ -759,17 +871,58 @@ def _failover_volumes(volumes, what, pinned=None):
             logger.error("Fail-over of %s failed: %s", lvol_id, e)
             results.append({"lvol_id": lvol_id, "status": "failed", "detail": str(e)})
             continue
-        if isinstance(ret, tuple):                   # (False, error)
-            results.append({"lvol_id": lvol_id, "status": "failed", "detail": str(ret[1])})
-        elif not ret:
-            results.append({"lvol_id": lvol_id, "status": "failed", "detail": "fail-over returned no volume"})
-        elif isinstance(ret, dict):
-            results.append({"lvol_id": lvol_id, "status": "failed_over",
-                            "target_lvol_id": ret.get("lvol_id", ""),
-                            "connection_strings": ret.get("connection_strings", []),
-                            "warnings": ret.get("warnings", [])})
-        else:
-            results.append({"lvol_id": lvol_id, "status": "failed_over", "target_lvol_id": str(ret)})
+        results.append(_clone_result(lvol_id, ret))
+    return results
+
+
+def _clone_result(lvol_id, ret):
+    """Shape a replicate_lvol_on_target_cluster return into a per-volume result
+    dict. ``ret`` is a truthy clone id / dict on success, ``(False, error)`` or a
+    falsy value on failure. Shared by the fail-over and the fail-back paths so
+    both report status identically."""
+    if isinstance(ret, tuple):                       # (False, error)
+        return {"lvol_id": lvol_id, "status": "failed", "detail": str(ret[1])}
+    if not ret:
+        return {"lvol_id": lvol_id, "status": "failed",
+                "detail": "fail-over returned no volume"}
+    if isinstance(ret, dict):
+        return {"lvol_id": lvol_id, "status": "failed_over",
+                "target_lvol_id": ret.get("lvol_id", ""),
+                "connection_strings": ret.get("connection_strings", []),
+                "warnings": ret.get("warnings", [])}
+    return {"lvol_id": lvol_id, "status": "failed_over", "target_lvol_id": str(ret)}
+
+
+def _clone_members_home(members, pinned, what):
+    """Clone each failed-over member back to its origin cluster, pinned to the
+    group's fail-back generation.
+
+    The fail-back mirror of _failover_volumes, with one deliberate difference: it
+    does NOT skip a member with a settled relationship. A fail-back's members are
+    exactly the failed-over targets -- every one carries a STATE_FAILED_OVER
+    relationship -- and they are precisely what must be cloned home. Routing them
+    through _failover_volumes would skip all of them (the silent fail-back no-op
+    caught live 2026-09-27). Each member's replication_node_id was pointed home at
+    demote, so replicate_lvol_on_target_cluster clones it to the origin cluster
+    and reconstitute_group_after_handoff rejoins it to the origin group.
+    """
+    results = []
+    logger.info("Failing back %d member(s) of %s", len(members), what)
+    for lvol in members:
+        lvol_id = lvol.get_id()
+        pin = pinned.get(lvol_id)
+        if not pin:
+            results.append({"lvol_id": lvol_id, "status": "failed",
+                            "detail": "no snapshot of the group's fail-back generation"})
+            continue
+        try:
+            ret = lvol_controller.replicate_lvol_on_target_cluster(
+                lvol_id, pin_snapshot_id=pin)
+        except Exception as e:                       # one member must not stop the group
+            logger.error("Fail-back of %s failed: %s", lvol_id, e)
+            results.append({"lvol_id": lvol_id, "status": "failed", "detail": str(e)})
+            continue
+        results.append(_clone_result(lvol_id, ret))
     return results
 
 

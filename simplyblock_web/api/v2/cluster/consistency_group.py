@@ -197,11 +197,16 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> d
         raise HTTPException(
             412, f'consistency group {group.get_id()} is not attached to a replication policy')
     members = replication_policy_controller.failover_group(group)
-    # A group fail-over is all-or-nothing: surface any member failure as a non-2xx
-    # so the caller (the csi-addons driver) does not read an all-"failed" body as
-    # success and promote to a group with no clones (silent no-op, live
-    # 2026-09-27). 409 is retryable while replication catches up to a common
-    # generation.
+    # A group fail-over/-back is all-or-nothing: surface any member failure -- or
+    # an empty result, which means nothing was promoted at all -- as a non-2xx so
+    # the caller (the csi-addons driver) does not read it as success and promote to
+    # a group with no clones (silent no-op, live 2026-09-27, both when a member had
+    # no common generation and when a fail-back could not resolve its peer group).
+    # 409 is retryable while replication catches up to a common generation.
+    if not members:
+        raise HTTPException(
+            409, f'group fail-over promoted no members for {group.get_id()}: '
+                 'no members to fail over, or a fail-back could not resolve its peer group')
     failed = [m for m in members if m.get("status") == "failed"]
     if failed:
         raise HTTPException(

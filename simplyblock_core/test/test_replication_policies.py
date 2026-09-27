@@ -98,8 +98,11 @@ class _FakeDB:
                 return lv
         raise KeyError(f'LVol {lvol_id} not found')
 
-    def get_lvols(self):
-        return self._lvols
+    def get_lvols(self, cluster_id=None):
+        if not cluster_id:
+            return self._lvols
+        return [lv for lv in self._lvols
+                if getattr(lv, "cluster_id", cluster_id) == cluster_id]
 
     def get_mini_lvols(self):
         return self._lvols
@@ -131,6 +134,12 @@ class _FakeDB:
             if g.uuid == wanted:
                 return g
         raise KeyError(f'ConsistencyGroup {group_id} not found')
+
+    def get_consistency_group_by_name(self, cluster_id, name):
+        for g in self._groups:
+            if g.cluster_id == cluster_id and getattr(g, "group_name", "") == name:
+                return g
+        return None
 
     def get_job_tasks(self, cluster_id):
         return self._tasks
@@ -821,6 +830,121 @@ def test_failover_group_touches_only_its_members(monkeypatch):
     assert {r["lvol_id"] for r in results} == {"LV1", "LV2"}
     assert all(r["status"] == "failed_over" for r in results), results
     assert "STD" not in touched, "the standalone volume must NOT be failed over by a group fail-over"
+
+
+def _failback_scenario(monkeypatch, db, unshipped=()):
+    """A failed-over consistency group ready to fail BACK: an EMPTY local group on
+    CL_SRC whose members now live in the peer group on CL_TGT, with a demote cut
+    (generation 1) shipped home for every peer member. Returns (local_group,
+    policy_id). ``unshipped`` names member ids whose generation-1 replication task
+    is omitted -- their cut never finished shipping home."""
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+
+    local = ConsistencyGroup()
+    local.uuid, local.cluster_id, local.group_name = "CG_SRC", "CL_SRC", "cg"
+    local.policy_id = policy_id
+    local.members = {}                                 # emptied by the fail-over
+    db._groups.append(local)
+
+    peer = ConsistencyGroup()
+    peer.uuid, peer.cluster_id, peer.group_name = "CG_TGT", "CL_TGT", "cg"
+    peer.members = {"PB1": {"joined_seq": 1, "removed_seq": 0},
+                    "PB2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(peer)
+
+    pb1, pb2 = _lvol("PB1"), _lvol("PB2")
+    for m in (pb1, pb2):
+        m.group_id = peer.get_id()
+        m.cluster_id = "CL_TGT"
+    db._lvols.extend([pb1, pb2])
+
+    # Demote generation 1, shipped home (a home-side copy + a DONE task).
+    home = _lvol("HOME")
+    for src, snap_id, tgt_id in (("PB1", "D1_PB1", "H1_PB1"),
+                                 ("PB2", "D1_PB2", "H1_PB2")):
+        db._snapshots.extend([
+            _group_snap(snap_id, db.get_lvol_by_id(src), peer, 1, target=tgt_id),
+            _snap(tgt_id, home)])
+        if src not in unshipped:
+            db._tasks.append(_done_replication_task(snap_id))
+    return local, policy_id
+
+
+def test_failback_group_clones_peer_members_home_pinned_to_the_demote_cut(monkeypatch):
+    """Regression (2026-09-27): promoting an empty local group on fail-back cloned
+    NOTHING -- the promote reported success while the workload kept writing to the
+    peer's clones. The empty local group must resolve to the peer group and clone
+    EVERY member home, pinned to the one demote generation the peer shipped."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db)
+    pins: dict = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"HOME_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_group(local)
+    assert {r["lvol_id"]: r["status"] for r in results} == \
+        {"PB1": "failed_over", "PB2": "failed_over"}, results
+    assert pins == {"PB1": "D1_PB1", "PB2": "D1_PB2"}, \
+        "every peer member cloned home pinned to the common demote generation 1"
+
+
+def test_failback_group_clones_settled_targets_not_skipped(monkeypatch):
+    """The members to clone home are the failed-over targets, every one settled
+    (STATE_FAILED_OVER). The fail-over path skips settled volumes; the fail-back
+    must NOT -- routing these through it is exactly the silent no-op."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db)
+    for src in ("PB1", "PB2"):
+        rep = LVolReplication()
+        rep.source_lvol = _lvol(f"ORIG_{src}")
+        rep.target_lvol = db.get_lvol_by_id(src)
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+    touched: list = []
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        touched.append(lvol_id)
+        return {"lvol_id": f"HOME_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_group(local)
+    assert sorted(touched) == ["PB1", "PB2"], \
+        "settled failed-over targets must still be cloned home, not skipped"
+    assert all(r["status"] == "failed_over" for r in results), results
+
+
+def test_failback_group_refuses_until_the_demote_cut_finished_shipping(monkeypatch):
+    """A fail-back cut is atomic: if the demote generation has shipped home for one
+    member but not the other, refuse rather than clone a split group -- and clone
+    nothing."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db, unshipped=("PB2",))
+    touched: list = []
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        lambda lvol_id, **kw: touched.append(lvol_id))
+    results = rpc.failover_group(local)
+    assert all(r["status"] == "failed" for r in results), results
+    assert "not finished shipping" in results[0]["detail"]
+    assert touched == [], "a mixed-generation fail-back must clone nothing"
+
+
+def test_resolve_active_peer_group_by_name_on_the_target_cluster(monkeypatch):
+    """The peer group is found by the group's name on the policy's replication
+    TARGET cluster -- the key reconstitute_group_after_handoff formed it under."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, policy_id = _failback_scenario(monkeypatch, db)
+    policy = db.get_replication_policy_by_id(policy_id)
+    peer = rpc._resolve_active_peer_group(local, policy)
+    assert peer is not None and peer.cluster_id == "CL_TGT" and peer.group_name == "cg"
 
 
 def test_relationship_resolves_source_to_target_and_back(monkeypatch):

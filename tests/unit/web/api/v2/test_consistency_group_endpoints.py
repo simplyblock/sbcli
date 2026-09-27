@@ -111,6 +111,18 @@ class TestGroupFailover:
         assert resp.status_code == 412
         replication_policy_controller.failover_group.assert_not_called()
 
+    def test_an_empty_result_is_surfaced_as_409(self, client, db, cluster,
+                                                replication_policy_controller):
+        # An empty member list means nothing was promoted -- a fail-back that could
+        # not resolve its peer group, or an empty group. It must NOT read as 2xx, or
+        # the driver promotes to a group with no clones (the fail-back silent no-op,
+        # live 2026-09-27).
+        db.get_consistency_group_by_id.return_value = \
+            factories.make_consistency_group(policy_id=factories.REPLICATION_POLICY_ID)
+        replication_policy_controller.failover_group.return_value = []
+        resp = client.post(f'{BASE}/replication/failover')
+        assert resp.status_code == 409
+
 
 class TestGroupDemote:
 
