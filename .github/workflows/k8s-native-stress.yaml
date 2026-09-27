@@ -1337,6 +1337,16 @@ jobs:
           # No default in the CRD and immutable on the cluster once set,
           # so an unstated fabric is not a thing that can be fixed later.
           export FABRIC_TYPE="tcp"
+          # The other two images spec.images carries. These were
+          # StorageNodeSet.clusterImage and .spdkProxyImage, both built from
+          # SB_REPO:SB_TAG; without them the deployment takes the operator's
+          # defaults and a run that pinned a simplyblock build got it only on
+          # the control plane, not on the node agent the control plane drives.
+          # Skipped when the tag is empty, which is what "chart default" means.
+          if [ -n "${SB_TAG}" ]; then
+            export NODE_AGENT_IMAGE="${SB_REPO}:${SB_TAG}"
+            export SPDK_PROXY_IMAGE="${SB_REPO}:${SB_TAG}"
+          fi
           # One field, two operations: the operator resolves it to a 4K reformat
           # on an NVMe cluster and a wipefs on a block one.
           export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
