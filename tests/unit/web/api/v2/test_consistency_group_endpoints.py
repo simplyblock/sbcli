@@ -79,16 +79,29 @@ class TestGroupReplicationStatus:
 
 class TestGroupFailover:
 
-    def test_fails_the_whole_group_over_through_its_policy(self, client, db, cluster,
-                                                           replication_policy_controller):
-        db.get_consistency_group_by_id.return_value = \
-            factories.make_consistency_group(policy_id=factories.REPLICATION_POLICY_ID)
-        replication_policy_controller.failover_policy.return_value = [
-            {"lvol_id": "v1", "status": "ok"}, {"lvol_id": "v2", "status": "ok"}]
+    def test_fails_only_the_group_members_over(self, client, db, cluster,
+                                               replication_policy_controller):
+        # Fails over ONLY the group's members (failover_group), never every volume
+        # on the shared policy (failover_policy would sweep in unrelated workloads).
+        group = factories.make_consistency_group(policy_id=factories.REPLICATION_POLICY_ID)
+        db.get_consistency_group_by_id.return_value = group
+        replication_policy_controller.failover_group.return_value = [
+            {"lvol_id": "v1", "status": "failed_over"}, {"lvol_id": "v2", "status": "failed_over"}]
         resp = client.post(f'{BASE}/replication/failover')
         assert resp.status_code == 200
-        replication_policy_controller.failover_policy.assert_called_once_with(
-            factories.REPLICATION_POLICY_ID)
+        replication_policy_controller.failover_group.assert_called_once_with(group)
+
+    def test_member_failure_is_surfaced_as_409(self, client, db, cluster,
+                                               replication_policy_controller):
+        # An all-or-nothing group fail-over that could not complete must NOT return
+        # 2xx, or the driver reads it as success and promotes to a group with no
+        # clones (silent no-op, 2026-09-27).
+        db.get_consistency_group_by_id.return_value = \
+            factories.make_consistency_group(policy_id=factories.REPLICATION_POLICY_ID)
+        replication_policy_controller.failover_group.return_value = [
+            {"lvol_id": "v1", "status": "failed", "detail": "no common generation"}]
+        resp = client.post(f'{BASE}/replication/failover')
+        assert resp.status_code == 409
 
     def test_refuses_when_the_group_is_not_attached_to_a_policy(self, client, db, cluster,
                                                                replication_policy_controller):
@@ -96,7 +109,7 @@ class TestGroupFailover:
             factories.make_consistency_group(policy_id="")
         resp = client.post(f'{BASE}/replication/failover')
         assert resp.status_code == 412
-        replication_policy_controller.failover_policy.assert_not_called()
+        replication_policy_controller.failover_group.assert_not_called()
 
 
 class TestGroupDemote:

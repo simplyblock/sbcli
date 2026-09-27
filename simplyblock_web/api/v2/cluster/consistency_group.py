@@ -196,7 +196,17 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> d
     if not group.policy_id:
         raise HTTPException(
             412, f'consistency group {group.get_id()} is not attached to a replication policy')
-    return {"members": replication_policy_controller.failover_policy(group.policy_id)}
+    members = replication_policy_controller.failover_group(group)
+    # A group fail-over is all-or-nothing: surface any member failure as a non-2xx
+    # so the caller (the csi-addons driver) does not read an all-"failed" body as
+    # success and promote to a group with no clones (silent no-op, live
+    # 2026-09-27). 409 is retryable while replication catches up to a common
+    # generation.
+    failed = [m for m in members if m.get("status") == "failed"]
+    if failed:
+        raise HTTPException(
+            409, f'group fail-over incomplete: {failed[0].get("detail", "no common generation")}')
+    return {"members": members}
 
 
 @instance_api.post('/replication/demote', name='clusters:consistency-groups:replication:demote',

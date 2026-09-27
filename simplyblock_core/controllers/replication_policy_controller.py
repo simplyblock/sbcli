@@ -478,30 +478,70 @@ def _has_dependent_clone(snapshot_uuid):
 # Group fail-over
 # --------------------------------------------------------------------------- #
 
+def _group_and_standalone(policy, volumes):
+    """Partition a policy's volumes into consistency-group members and volumes
+    that merely share the policy.
+
+    Membership is what makes a cut crash-consistent: a member carries its
+    group_id, and those fail over together pinned to one common group
+    generation, while volumes with no group_id fail over per volume. The legacy
+    consistency_group flag predates group_id and treats the WHOLE policy as one
+    group. Mixing the two tore a group fail-over apart: a policy shared by a
+    group and an unrelated volume demanded a group generation for the non-member
+    and refused the whole set ("generation N lacks <standalone volume>", live
+    2026-09-27). Returns (group_members, standalone)."""
+    if (getattr(policy, "consistency_group", False)
+            and not any(getattr(v, "group_id", "") for v in volumes)):
+        return list(volumes), []          # legacy policy-owned group
+    group_members = [v for v in volumes if getattr(v, "group_id", "")]
+    standalone = [v for v in volumes if not getattr(v, "group_id", "")]
+    return group_members, standalone
+
+
+def _failover_group_members(policy, group_members, label):
+    """Fail over a set of consistency-group members as ONE crash-consistent unit,
+    pinned to a common group generation. Returns per-member result dicts (all
+    ``failed`` with the reason when no common generation qualifies)."""
+    if not group_members:
+        return []
+    try:
+        _, pinned = _resolve_group_failover_generation(policy, group_members)
+    except ReplicationConfigError as e:
+        logger.error("Group fail-over of %s refused: %s", label, e)
+        return [{"lvol_id": v.get_id(), "status": "failed", "detail": str(e)}
+                for v in group_members]
+    return _failover_volumes(group_members, label, pinned=pinned)
+
+
 def failover_policy(policy_id):
     """Fail over every volume following *policy_id*. Idempotent per volume.
 
-    Volumes that belong to a consistency group fail over as ONE unit: every
-    member is pinned to the same group generation (see
-    _resolve_group_failover_generation) instead of each volume's own newest
-    replicated snapshot. Membership is what makes the cut crash-consistent —
-    a member carries its group id — so group fail-over triggers off that, not
-    off a policy flag (the legacy consistency_group flag still triggers it).
+    Consistency-group members fail over as ONE unit pinned to a common group
+    generation (see _resolve_group_failover_generation); volumes that only share
+    the policy fail over per volume. See _group_and_standalone for why the two
+    must be kept apart.
     """
     policy = db.get_replication_policy_by_id(policy_id)
     volumes = db.get_lvols_by_replication_policy(policy.get_id())
-    pinned = None
-    grouped = (getattr(policy, "consistency_group", False)
-               or any(getattr(v, "group_id", "") for v in volumes))
-    if grouped:
-        try:
-            _, pinned = _resolve_group_failover_generation(policy, volumes)
-        except ReplicationConfigError as e:
-            logger.error("Group fail-over of policy %s refused: %s",
-                         policy.policy_name, e)
-            return [{"lvol_id": v.get_id(), "status": "failed", "detail": str(e)}
-                    for v in volumes]
-    return _failover_volumes(volumes, f"policy {policy.policy_name}", pinned=pinned)
+    group_members, standalone = _group_and_standalone(policy, volumes)
+    results = _failover_group_members(policy, group_members, f"policy {policy.policy_name}")
+    if standalone:
+        results.extend(_failover_volumes(standalone, f"policy {policy.policy_name}"))
+    return results
+
+
+def failover_group(group):
+    """Fail over ONLY the members of consistency group *group*, as one
+    crash-consistent unit (design-csi-addons-replication.md §14.4). Volumes that
+    merely share the group's replication policy are NOT touched -- they carry
+    their own DR lifecycle (e.g. a single-PVC workload under its own DRPC). This
+    is the VGR fail-over entry point; failover_policy is the policy-wide one.
+    """
+    policy = db.get_replication_policy_by_id(group.policy_id)
+    members = [v for v in db.get_lvols_by_replication_policy(policy.get_id())
+               if getattr(v, "group_id", "") == group.get_id()]
+    return _failover_group_members(policy, members,
+                                   f"consistency group {group.group_name}")
 
 
 def failover_target(target_id):

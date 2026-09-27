@@ -757,6 +757,72 @@ def test_cg_failover_triggers_on_membership_without_the_flag(monkeypatch):
         "membership alone must pin every member to generation 1, the newest COMMON one"
 
 
+def _shared_policy_group_and_standalone(monkeypatch, db):
+    """A policy shared by a 2-member consistency group AND a standalone volume
+    (STD, no group_id) -- the live shape where a single-PVC workload and a VGR
+    group land on one backend replication policy. Returns policy_id."""
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "shared", target_id)
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=2)
+    db._groups.append(group)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    lv1.group_id = group.get_id()
+    lv2.group_id = group.get_id()
+    std = _lvol("STD", policy_id=policy_id)          # no group_id
+    db._lvols.extend([lv1, lv2, std])
+    remote = _lvol("REP")
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"), _snap("T1_LV1", remote),
+        _group_snap("S1_LV2", lv2, group, 1, target="T1_LV2"), _snap("T1_LV2", remote),
+    ])
+    db._tasks.extend([_done_replication_task("S1_LV1"), _done_replication_task("S1_LV2")])
+    return policy_id
+
+
+def test_failover_policy_does_not_demand_a_group_generation_for_a_standalone(monkeypatch):
+    """Regression (2026-09-27): a policy shared by a consistency group and a
+    standalone volume refused the WHOLE fail-over because the group-generation
+    check demanded the standalone be in the group's generation ("generation N
+    lacks STD"). The standalone must fail over per-volume, the members as a
+    group -- not one poisoning the other."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _shared_policy_group_and_standalone(monkeypatch, db)
+    pins: dict = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"T_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_policy(policy_id)
+    by_id = {r["lvol_id"]: r["status"] for r in results}
+    assert by_id == {"LV1": "failed_over", "LV2": "failed_over", "STD": "failed_over"}, results
+    assert pins["LV1"] == "S1_LV1" and pins["LV2"] == "S1_LV2", "members pinned to the group cut"
+    assert pins["STD"] is None, "standalone fails over per-volume, not pinned to the group"
+
+
+def test_failover_group_touches_only_its_members(monkeypatch):
+    """The VGR entry point fails over ONLY the group's members; a standalone
+    volume that merely shares the policy is left alone (it has its own DRPC)."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _shared_policy_group_and_standalone(monkeypatch, db)
+    group = db._groups[0]
+    touched: list = []
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        touched.append(lvol_id)
+        return {"lvol_id": f"T_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_group(group)
+    assert {r["lvol_id"] for r in results} == {"LV1", "LV2"}
+    assert all(r["status"] == "failed_over" for r in results), results
+    assert "STD" not in touched, "the standalone volume must NOT be failed over by a group fail-over"
+
+
 def test_relationship_resolves_source_to_target_and_back(monkeypatch):
     source = _lvol("LV_SRC")
     target = _lvol("LV_TGT")
