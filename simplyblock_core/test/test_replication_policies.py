@@ -1005,6 +1005,59 @@ def test_resolve_active_peer_group_by_name_on_the_target_cluster(monkeypatch):
     assert peer is not None and peer.cluster_id == "CL_TGT" and peer.group_name == "cg"
 
 
+def test_group_demote_resolves_to_peer_primary_and_ships_home(monkeypatch):
+    """Regression (2026-09-28): a relocate demote lands on the empty ORIGIN group
+    (the origin-pinned cg: handle always resolves there), where it no-op'd --
+    returning demoted=True with no members and shipping nothing. The fail-back
+    promote then looped forever on 'the demote cut has not finished shipping'
+    because the current primary's clones were never demoted. The demote must
+    resolve to the PEER (current-primary) group and drive ITS clones through the
+    ship-home cut: point each reverse pipe home and seed the one demote generation
+    -- the demote analog of _failback_group / the driver's resolveToLocalReplica."""
+    from simplyblock_core.controllers import consistency_group_controller as cgc
+    from simplyblock_core.controllers import lvol_controller as lc
+    from simplyblock_core.services import replication_final_step as rfs
+
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(cgc, "db", db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    local, _ = _failback_scenario(monkeypatch, db)
+
+    # The peer's clones are settled failed-over TARGETS -- exactly the side a
+    # relocate demote must now ship back the other way.
+    for src in ("PB1", "PB2"):
+        rep = LVolReplication()
+        rep.source_lvol = _lvol(f"ORIG_{src}")
+        rep.target_lvol = db.get_lvol_by_id(src)
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+
+    failed_back: list = []
+    monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
+    monkeypatch.setattr(rfs, "fence_source_paths", lambda *a, **k: None)
+
+    def _group_snap_cut(group, **kw):
+        ids = []
+        for src, sid in (("PB1", "DEMOTE_PB1"), ("PB2", "DEMOTE_PB2")):
+            db._snapshots.append(_snap(sid, db.get_lvol_by_id(src)))
+            ids.append(sid)
+        return ids, None
+    monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _group_snap_cut)
+
+    result = cgc.demote_group(local)
+
+    assert result["demoted"] is False, \
+        "the demote is still shipping the peer's cut home, not a no-op 'done'"
+    assert {m["lvol_id"] for m in result["members"]} == {"PB1", "PB2"}, result
+    assert sorted(failed_back) == ["PB1", "PB2"], \
+        "each peer clone's reverse pipe must be pointed home"
+    for src in ("PB1", "PB2"):
+        m = db.get_lvol_by_id(src)
+        assert m.replication_demote_state == LVol.REPLICATION_DEMOTE_PENDING
+        assert m.replication_demote_snapshot_id == f"DEMOTE_{src}"
+
+
 def test_relationship_resolves_source_to_target_and_back(monkeypatch):
     source = _lvol("LV_SRC")
     target = _lvol("LV_TGT")

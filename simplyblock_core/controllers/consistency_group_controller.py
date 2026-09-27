@@ -647,7 +647,7 @@ def demote_group(group):
         reuse demote_lvol's per-member wait, whose retrigger branch would take a
         fresh single-volume snapshot and break the group cut.
     """
-    from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.controllers import lvol_controller, replication_policy_controller
     from simplyblock_core.services import replication_final_step
     from simplyblock_core.models.lvol_model import LVolReplication
 
@@ -658,6 +658,41 @@ def demote_group(group):
             members.append(db.get_lvol_by_id(m["lvol_id"]))
         except KeyError:
             continue
+
+    # Relocate fail-back: the demote is issued against THIS (origin) group via its
+    # origin-pinned handle (cg:<origin>:<id>), but after a fail-over the current
+    # primary -- the data that must actually be demoted and shipped home -- lives
+    # in the PEER group. So when this group holds no shippable members of its own
+    # (empty, or only superseded sources whose writes already moved to the peer),
+    # resolve the peer group and demote ITS live clones instead: point each clone's
+    # reverse pipe home and take the demote cut there. This is the demote analog of
+    # _failback_group (the promote) and the per-volume resolveToLocalReplica the
+    # driver runs -- DemoteGroup does neither, so without this the relocate demote
+    # no-ops the origin and the fail-back promote loops on "the demote cut has not
+    # finished shipping" (live 2026-09-28).
+    if not members or _members_are_superseded_source(members):
+        try:
+            policy = (db.get_replication_policy_by_id(group.policy_id)
+                      if group.policy_id else None)
+        except KeyError:
+            policy = None
+        if policy is not None:
+            peer = replication_policy_controller._resolve_active_peer_group(group, policy)
+            if peer is not None:
+                peer_members = []
+                for m in list_members(peer):
+                    try:
+                        peer_members.append(db.get_lvol_by_id(m["lvol_id"]))
+                    except KeyError:
+                        continue
+                if peer_members and not _members_are_superseded_source(peer_members):
+                    logger.info("Group demote of %s resolved to peer group %s on "
+                                "cluster %s: demoting its %d live member(s) so the "
+                                "demote cut ships home",
+                                group.group_name, peer.uuid[:8], peer.cluster_id,
+                                len(peer_members))
+                    group, members = peer, peer_members
+
     if not members:
         return {"demoted": True, "members": []}
 
