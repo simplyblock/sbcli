@@ -71,6 +71,20 @@ def get(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupDT
     return ConsistencyGroupDTO.from_model(group)
 
 
+@instance_api.delete('/', name='clusters:consistency-groups:delete',
+                     status_code=204, responses={204: {"content": None}})
+def delete(cluster: Cluster, group: ConsistencyGroupResource) -> Response:
+    """Delete an EMPTY consistency group. Refused (409) while it still has a
+    current member -- detach or hand them off first. Emptied by a hand-off, the
+    group is safe to remove; removing it lets the next hand-off mint a fresh,
+    correctly node-pinned group instead of reusing a stale record."""
+    try:
+        consistency_group_controller.delete_group(group)
+    except ConsistencyGroupError as e:
+        raise HTTPException(409, str(e))
+    return Response(status_code=204)
+
+
 @instance_api.get('/members', name='clusters:consistency-groups:members',
                   response_model=builtins.list[ConsistencyGroupMemberDTO])
 def members(cluster: Cluster, group: ConsistencyGroupResource) -> builtins.list[ConsistencyGroupMemberDTO]:

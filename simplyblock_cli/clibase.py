@@ -1224,6 +1224,15 @@ class CLIWrapperBase:
         } for m in cgc.list_members(self._cg_resolve(args.group_id))]
         return _format_result(data, json=args.json)
 
+    def consistency_group__delete(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        group = self._cg_resolve(args.group_id)
+        try:
+            cgc.delete_group(group)
+        except cgc.ConsistencyGroupError as e:
+            return f"Delete refused: {e}"
+        return f"Consistency group {group.get_id()} deleted"
+
     def consistency_group__add_member(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller as cgc
         db = db_controller.DBController()

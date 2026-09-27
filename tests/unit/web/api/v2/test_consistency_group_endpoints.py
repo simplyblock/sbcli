@@ -49,6 +49,24 @@ class TestGroupReplicationEnableDisable:
         assert resp.status_code == 409
 
 
+class TestGroupDelete:
+
+    def test_empty_group_is_deleted(self, client, db, cluster,
+                                    consistency_group_controller):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        resp = client.delete(BASE)
+        assert resp.status_code == 204
+        consistency_group_controller.delete_group.assert_called_once()
+
+    def test_group_with_members_is_refused_as_409(self, client, db, cluster,
+                                                  consistency_group_controller):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        consistency_group_controller.delete_group.side_effect = \
+            ConsistencyGroupError("consistency group ramen-e2e-cg still has 2 member(s)")
+        resp = client.delete(BASE)
+        assert resp.status_code == 409
+
+
 class TestGroupReplicationStatus:
 
     def test_rolls_up_member_status(self, client, db, cluster, lvol_controller, monkeypatch):

@@ -74,6 +74,35 @@ def delete_group_for_policy(policy_id):
                     group.get_id(), policy_id)
 
 
+def delete_group(group):
+    """Delete a consistency-group record, but ONLY when it has no current
+    (open-epoch) member.
+
+    A group with live members is refused: removing it would leave its members
+    pointing at a group that no longer exists and orphan its generation history.
+    Once a hand-off has emptied a group (fail-over / fail-back moves every member
+    to the peer), it is safe to remove -- and removing it is what lets the NEXT
+    hand-off mint a FRESH group, correctly node-pinned, instead of reusing a
+    stale record whose node pin no longer matches where the clones landed. Live
+    2026-09-27: a peer group left pinned to a departed node from an earlier cycle
+    made reconstitute_group_after_handoff refuse every clone (single-LVS pin), so
+    the clones stayed ungrouped, the demote shipped nothing home, and the group
+    fail-back could resolve no members.
+
+    Raises ConsistencyGroupError when the group still has an open member.
+    """
+    open_members = [lid for lid, m in (group.members or {}).items()
+                    if m.get("removed_seq", 0) == 0]
+    if open_members:
+        raise ConsistencyGroupError(
+            f"consistency group {group.group_name or group.uuid[:8]} still has "
+            f"{len(open_members)} member(s); detach or hand them off before "
+            f"deleting it")
+    group.remove(db.kv_store)
+    logger.info("Deleted consistency group %s (%s)", group.uuid[:8],
+                group.group_name or "-")
+
+
 def ensure_group(cluster_id, name):
     """Resolve the standalone group named ``name`` in ``cluster_id``, or create
     it. Idempotent by (cluster_id, name): concurrent first volumes that carry
@@ -123,20 +152,36 @@ def add_member_to_group(group, lvol):
             f"{constants.MAX_CONSISTENCY_GROUP_MEMBERS} members; "
             f"volume {lvol.get_id()} cannot join")
 
-    if group.lvs_name and (lvol.lvs_name != group.lvs_name
-                           or lvol.node_id != group.node_id):
+    # A group with live members enforces its single-LVS pin; a group with NONE
+    # (emptied by a hand-off, or brand new) has no live pin and takes this member's
+    # node. A pin left over from a departed cycle must never block a hand-off's
+    # clones -- they can land on a different node than the previous cycle's members
+    # did, and refusing them leaves them ungrouped so reconstitute_group_after_handoff
+    # regroups nothing, the demote ships nothing home, and the group fail-back
+    # resolves no members (live 2026-09-27: a peer group left pinned to a departed
+    # node broke the whole fail-back this way).
+    pin_is_live = bool(group.lvs_name) and open_count > 0
+    if pin_is_live and (lvol.lvs_name != group.lvs_name
+                        or lvol.node_id != group.node_id):
         raise ConsistencyGroupError(
             f"Volume {lvol.get_id()} lives on {lvol.node_id[:8]}/{lvol.lvs_name} "
             f"but consistency group {group.uuid[:8]} is pinned to "
             f"{group.node_id[:8]}/{group.lvs_name}; all members of a "
             f"consistency group must share one LVS")
 
-    if not group.lvs_name:
+    if not pin_is_live and (group.node_id != lvol.node_id
+                            or group.lvs_name != lvol.lvs_name):
+        if group.lvs_name:
+            logger.info("Consistency group %s re-pinned from %s/%s to %s/%s "
+                        "(no live members; stale pin reset)", group.uuid[:8],
+                        (group.node_id or "-")[:8], group.lvs_name,
+                        lvol.node_id[:8], lvol.lvs_name)
+        else:
+            logger.info("Consistency group %s pinned to node %s / %s by its "
+                        "first member %s", group.uuid[:8], lvol.node_id[:8],
+                        lvol.lvs_name, lvol.get_id())
         group.node_id = lvol.node_id
         group.lvs_name = lvol.lvs_name
-        logger.info("Consistency group %s pinned to node %s / %s by its first "
-                    "member %s", group.uuid[:8], lvol.node_id[:8],
-                    lvol.lvs_name, lvol.get_id())
 
     members[lvol.get_id()] = {"joined_seq": group.last_group_seq + 1,
                               "removed_seq": 0}
