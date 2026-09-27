@@ -23,6 +23,7 @@ from simplyblock_core.models.replication import (
     ReplicationPolicy,
     ReplicationTarget,
 )
+from simplyblock_core.models.snapshot import SnapShot
 
 PEER_CLUSTER = "grp-attach-peer-cluster-1"
 
@@ -122,19 +123,80 @@ def test_detach_unlinks_and_stops_without_dissolving_the_group(db, monkeypatch):
     assert set(reloaded.members) == {"v1", "v2"}
 
 
-def test_demote_group_is_demoted_only_when_every_member_is(db, monkeypatch):
+def test_demote_group_ship_home_takes_ONE_group_snapshot(db, monkeypatch):
+    # The demote generation must be a SINGLE bdev_lvol_snapshot_group across all
+    # members (one group_seq the peer can promote from), NOT a per-member snapshot
+    # each. Regression: 2026-09-27 — per-member demote snapshots share no common
+    # generation, so the peer's group promote finds no cut to clone.
+    import simplyblock_core.services.replication_final_step as rfs
     from simplyblock_core.controllers import lvol_controller as lc
     group = _seed_group(db, ["v1", "v2"])
+    _seed_lvol(db, "v1", NODE, LVS, group_id=group.get_id())
+    _seed_lvol(db, "v2", NODE, LVS, group_id=group.get_id())
+    monkeypatch.setattr(cgc, "_members_are_superseded_source", lambda members: False)
+    monkeypatch.setattr(rfs, "fence_source_paths", lambda *a, **k: None)
+    monkeypatch.setattr(lc, "_replication_for_lvol", lambda db_, lid: None)
 
+    grp_calls = []
+
+    def _grp_snap(g, **k):
+        grp_calls.append(g.get_id())
+        ids = []
+        for mid in ("v1", "v2"):
+            s = SnapShot()
+            s.uuid = f"snap-{mid}"
+            s.lvol = db.get_lvol_by_id(mid)
+            s.write_to_db(db.kv_store)
+            ids.append(s.uuid)
+        return ids, None
+    monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _grp_snap)
+
+    result = cgc.demote_group(group)
+    assert len(grp_calls) == 1, "exactly ONE group snapshot for the whole demote, not per member"
+    assert result["demoted"] is False, "not done until the generation replicates"
+    v1 = db.get_lvol_by_id("v1")
+    assert v1.replication_demote_state == LVol.REPLICATION_DEMOTE_PENDING
+    assert v1.replication_demote_snapshot_id == "snap-v1", "member tracks its group-cut slice"
+
+
+def test_demote_group_superseded_source_does_not_take_a_group_snapshot(db, monkeypatch):
+    # The recovered old primary (source side of a failed-over rep) is superseded:
+    # fence + done per member, nothing to ship, no group snapshot.
+    from simplyblock_core.controllers import lvol_controller as lc
+    group = _seed_group(db, ["v1", "v2"])
+    _seed_lvol(db, "v1", NODE, LVS, group_id=group.get_id())
+    _seed_lvol(db, "v2", NODE, LVS, group_id=group.get_id())
+    monkeypatch.setattr(cgc, "_members_are_superseded_source", lambda members: True)
+    grp_calls = []
+    monkeypatch.setattr(cgc, "create_group_snapshot_for_group",
+                        lambda g, **k: grp_calls.append(g) or ([], None))
     monkeypatch.setattr(lc, "demote_lvol", lambda lvol_id: {"demoted": True})
+
     result = cgc.demote_group(group)
     assert result["demoted"] is True
-    assert {m["lvol_id"] for m in result["members"]} == {"v1", "v2"}
+    assert grp_calls == [], "a superseded source ships nothing -- no group snapshot"
 
-    # One member still converging keeps the whole group un-demoted.
-    monkeypatch.setattr(lc, "demote_lvol", lambda lvol_id: {"demoted": lvol_id == "v1"})
-    result = cgc.demote_group(group)
-    assert result["demoted"] is False
+
+def test_demote_group_completes_only_when_every_member_generation_replicated(db):
+    group = _seed_group(db, ["v1", "v2"])
+    for mid, replicated in (("v1", "tgt-v1"), ("v2", "")):
+        lv = _seed_lvol(db, mid, NODE, LVS, group_id=group.get_id())
+        lv.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+        lv.replication_demote_snapshot_id = f"snap-{mid}"
+        lv.write_to_db(db.kv_store)
+        s = SnapShot()
+        s.uuid = f"snap-{mid}"
+        s.target_replicated_snap_uuid = replicated
+        s.write_to_db(db.kv_store)
+
+    # v2's slice has not replicated yet -> group not demoted.
+    assert cgc.demote_group(group)["demoted"] is False
+
+    # once v2's slice lands, the whole group is demoted.
+    s2 = db.get_snapshot_by_id("snap-v2")
+    s2.target_replicated_snap_uuid = "tgt-v2"
+    s2.write_to_db(db.kv_store)
+    assert cgc.demote_group(group)["demoted"] is True
 
 
 def _seed_lvol(db, lvol_id, node, lvs, group_id=""):

@@ -3903,10 +3903,25 @@ def demote_lvol(lvol_id):
         # none of this.
         if not lvol.do_replicate:
             rep = _replication_for_lvol(db_controller, lvol_id)
-            if (rep is not None and rep.state == LVolReplication.STATE_FAILED_OVER
-                    and rep.target_lvol and rep.target_lvol.get_id() == lvol_id):
-                replication_failback(lvol_id)
-                lvol = db_controller.get_lvol_by_id(lvol_id)
+            if rep is not None and rep.state == LVolReplication.STATE_FAILED_OVER:
+                if rep.target_lvol and rep.target_lvol.get_id() == lvol_id:
+                    replication_failback(lvol_id)
+                    lvol = db_controller.get_lvol_by_id(lvol_id)
+                elif rep.source_lvol and rep.source_lvol.get_id() == lvol_id:
+                    # The SOURCE side of an unplanned failover being demoted: the
+                    # recovered old primary that Ramen is making Secondary before
+                    # a relocate home. It is SUPERSEDED -- the target's clone
+                    # already carries every post-failover write -- so there is
+                    # nothing to ship. Taking a demote snapshot here would wait
+                    # forever for a reverse pipe that does not exist (do_replicate
+                    # is False and this side has no fail-back to configure). Fence
+                    # (done above) and mark demoted at once, the same net effect
+                    # as a standalone recovered source's unprotect. Without this
+                    # the whole group demote never converges ("group demote is
+                    # still converging" indefinitely, live 2026-09-27).
+                    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+                    lvol.write_to_db(db_controller.kv_store)
+                    return {"demoted": True}
 
         snap_id, err = snapshot_controller.add(
             lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)

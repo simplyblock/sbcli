@@ -808,7 +808,7 @@ def test_failover_group_touches_only_its_members(monkeypatch):
     volume that merely shares the policy is left alone (it has its own DRPC)."""
     db = _FakeDB()
     _install(monkeypatch, db)
-    policy_id = _shared_policy_group_and_standalone(monkeypatch, db)
+    _shared_policy_group_and_standalone(monkeypatch, db)
     group = db._groups[0]
     touched: list = []
 

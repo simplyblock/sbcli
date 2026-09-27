@@ -563,18 +563,133 @@ def aggregate_group_demote(member_results):
     return {"demoted": all_demoted and error is None, "members": members, "error": error}
 
 
+def _members_are_superseded_source(members):
+    """True when every member is the SOURCE side of a failed-over relationship --
+    the recovered old primary after an unplanned failover. Such a source is
+    superseded (the peer's clone already holds every post-failover write), so it
+    demotes by fencing alone, with nothing to ship."""
+    from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.models.lvol_model import LVolReplication
+    for m in members:
+        if getattr(m, "do_replicate", False):
+            return False
+        rep = lvol_controller._replication_for_lvol(db, m.get_id())
+        if rep is None or rep.state != LVolReplication.STATE_FAILED_OVER:
+            return False
+        if not (rep.source_lvol and rep.source_lvol.get_id() == m.get_id()):
+            return False
+    return True
+
+
 def demote_group(group):
-    """Demote the whole consistency group: fence every member and confirm each
-    one's last write replicated (design-csi-addons-replication.md §14.4). By the
-    time this is called the workload has unmounted (Ramen relocation), so the
-    members quiesce to the same point and their final snapshots are group-
-    consistent. Re-drivable, not queued: each call does the work its state calls
-    for, and the group is ``demoted`` only once every member is.
+    """Demote the whole consistency group as ONE crash-consistent unit
+    (design-csi-addons-replication.md §14.4).
+
+    The demote generation is a SINGLE ``bdev_lvol_snapshot_group`` -- one atomic
+    cut across every member, carrying one ``group_seq`` -- NOT a per-member
+    snapshot each. That is what lets the peer's promote clone the whole group
+    from one common generation; per-member demote snapshots share no group_seq
+    and the peer's group-generation resolution would find no common cut.
+
+    Re-drivable, not queued:
+      * First call, ship-home (the current primary demoting for a relocate):
+        fence every member, configure each member's fail-back so the reverse pipe
+        exists, then take ONE group snapshot and track each member's slice of it.
+      * First call, superseded source (the recovered old primary): nothing to
+        ship -- demote_lvol fences each and completes at once.
+      * Later calls: report done once every member's slice of the demote
+        generation has replicated to the peer. This path deliberately does NOT
+        reuse demote_lvol's per-member wait, whose retrigger branch would take a
+        fresh single-volume snapshot and break the group cut.
     """
     from simplyblock_core.controllers import lvol_controller
-    member_results = [(m["lvol_id"], lvol_controller.demote_lvol(m["lvol_id"]))
-                      for m in list_members(group)]
-    return aggregate_group_demote(member_results)
+    from simplyblock_core.services import replication_final_step
+    from simplyblock_core.models.lvol_model import LVolReplication
+
+    group = db.get_consistency_group_by_id(group.get_id())
+    members = []
+    for m in list_members(group):
+        try:
+            members.append(db.get_lvol_by_id(m["lvol_id"]))
+        except KeyError:
+            continue
+    if not members:
+        return {"demoted": True, "members": []}
+
+    started = any(m.replication_demote_state in
+                  (LVol.REPLICATION_DEMOTE_PENDING, LVol.REPLICATION_DEMOTE_DONE)
+                  for m in members)
+
+    if not started:
+        # Superseded source: nothing to ship, demote_lvol fences + marks done.
+        if _members_are_superseded_source(members):
+            results = [(m.get_id(), lvol_controller.demote_lvol(m.get_id()))
+                       for m in members]
+            return aggregate_group_demote(results)
+
+        # Ship-home: fence every member and point its reverse pipe home BEFORE
+        # the group snapshot, so the one generation we take actually replicates.
+        for m in members:
+            try:
+                node = db.get_storage_node_by_id(m.node_id)
+                replication_final_step.fence_source_paths(
+                    node, node.lvstore, m.nqn, m.ns_id)
+            except Exception as e:
+                logger.warning("Demote fence of %s failed: %s", m.get_id(), e)
+            if not m.do_replicate:
+                rep = lvol_controller._replication_for_lvol(db, m.get_id())
+                if (rep is not None and rep.state == LVolReplication.STATE_FAILED_OVER
+                        and rep.target_lvol and rep.target_lvol.get_id() == m.get_id()):
+                    lvol_controller.replication_failback(m.get_id())
+
+        group = db.get_consistency_group_by_id(group.get_id())
+        created_ids, err = create_group_snapshot_for_group(group)
+        if err:
+            return {"demoted": False, "error": err,
+                    "members": [{"lvol_id": m.get_id(), "demoted": False, "error": err}
+                                for m in members]}
+
+        by_lvol = {}
+        for sid in created_ids or []:
+            try:
+                s = db.get_snapshot_by_id(sid)
+            except KeyError:
+                continue
+            if s.lvol:
+                by_lvol[s.lvol.get_id()] = sid
+        for m in members:
+            sid = by_lvol.get(m.get_id())
+            if not sid:
+                continue
+            m = db.get_lvol_by_id(m.get_id())
+            m.replication_demote_snapshot_id = sid
+            m.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+            m.write_to_db(db.kv_store)
+        return {"demoted": False,
+                "members": [{"lvol_id": m.get_id(), "demoted": False} for m in members]}
+
+    # Already taken: report done once every member's slice of the demote
+    # generation has replicated. No retrigger -- the group cut is fixed.
+    member_status = []
+    all_done = True
+    for m in members:
+        if m.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE:
+            member_status.append({"lvol_id": m.get_id(), "demoted": True})
+            continue
+        replicated = False
+        try:
+            snap = db.get_snapshot_by_id(m.replication_demote_snapshot_id)
+            replicated = bool(snap.target_replicated_snap_uuid)
+        except KeyError:
+            replicated = False
+        if replicated:
+            m.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+            m.write_to_db(db.kv_store)
+            member_status.append({"lvol_id": m.get_id(), "demoted": True})
+        else:
+            all_done = False
+            member_status.append({"lvol_id": m.get_id(), "demoted": False})
+    return {"demoted": all_done, "members": member_status}
 
 
 def failback_group(group, source_cluster_id=None):

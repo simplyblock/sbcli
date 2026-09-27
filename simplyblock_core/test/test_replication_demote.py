@@ -175,6 +175,35 @@ def test_demote_of_a_forward_replicating_volume_does_not_configure_failback(patc
     assert len(patched["snap_add_calls"]) == 1
 
 
+def test_demote_of_a_superseded_failed_over_source_completes_without_shipping(patched, monkeypatch):
+    """Regression: 2026-09-27-failback-group-demote-source-hang. Relocating home
+    after an UNPLANNED failover makes the recovered old primary Secondary, so
+    Ramen demotes it. Its volume is the SOURCE side of the failed-over
+    relationship and is SUPERSEDED -- the target's clone already carries every
+    post-failover write, so there is nothing to ship home. The old code skipped
+    the (target-only) fail-back branch but still took a demote snapshot with no
+    reverse pipe (do_replicate False), then waited on target_replicated_snap_uuid
+    forever ("group demote is still converging" indefinitely, DRPC wedged at
+    EnsuringVolumesAreSecondary). A superseded source must fence and mark demoted
+    at once -- no snapshot -- the same effect as a standalone recovered source's
+    unprotect."""
+    from simplyblock_core.models.lvol_model import LVolReplication
+    lvol = _lvol()
+    lvol.do_replicate = False               # the failover severed its forward pipe
+    node = _node("N_src")
+    rep = _replication("LV1", "LV_TGT", LVolReplication.STATE_FAILED_OVER)  # LV1 is the SOURCE
+    db = _FakeDB(lvol, node, replications=[rep])
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+
+    result = lvol_controller.demote_lvol("LV1")
+
+    assert result == {"demoted": True}, "a superseded failed-over source demotes at once"
+    assert patched["fenced"] == [("N_src", "lvs_src", "nqn.orig:lvol:LV1", 7)], "still fences the source"
+    assert patched["snap_add_calls"] == [], "nothing to ship -- must NOT take a demote snapshot"
+    assert patched["failback_calls"] == [], "the source has no reverse pipe to configure"
+    assert lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE
+
+
 def test_demote_does_not_refence_or_retrigger_once_pending(patched, monkeypatch):
     """Second call while still waiting: check the marker, nothing else.
 
