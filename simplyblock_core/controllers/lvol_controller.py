@@ -5258,6 +5258,7 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
         if rep.source_lvol and getattr(rep, "target_lvol", None)
         and rep.source_lvol.get_id() == lvol.get_id()
     }
+    existing_clone = None
     for lv in db_controller.get_lvols(target_cluster.get_id()):
         if lv.nqn != lvol.nqn:
             continue
@@ -5266,33 +5267,55 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
                 continue                       # a sibling's copy, not ours
         elif lv.ns_id != lvol.ns_id:
             continue                           # no record: nsid is all we have
-        logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-        # The clone already exists (a prior promote, or a persisted target-side
-        # copy), but it may not be GROUPED: this idempotency return used to skip
-        # the reconstitute the fresh-clone path does below, so a fail-over whose
-        # earlier group record had been cleaned up left every clone ungrouped --
-        # no consistency group on the target, the mount resolving cross-cluster,
-        # and the group fail-back resolving no members (live 2026-09-27). Group
-        # it here too, best-effort and idempotently (add_member_to_group is a
-        # no-op for an already-open member), so the group is formed whether the
-        # clone is freshly cloned or already present.
-        if getattr(lvol, "group_id", ""):
-            try:
-                from simplyblock_core.controllers import consistency_group_controller
-                consistency_group_controller.reconstitute_group_after_handoff(
-                    lvol, lv, target_cluster.get_id())
-            except Exception as e:
-                logger.warning("Group reconstitution of existing clone %s failed: %s",
-                               lv.get_id(), e)
-        return lv.get_id()
+        existing_clone = lv
+        break
 
-    new_lvol, _snapshot, error = _clone_from_last_replicated(
-        db_controller, lvol_id, lvol, target_node,
-        target_pool_uuid, source_node.cluster_id, generation=generation,
-        pin_snapshot_id=pin_snapshot_id)
-    if error:
-        logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
-        return False, error
+    _snapshot = None
+    if existing_clone is not None:
+        logger.info(f"LVol with same nqn already exists on target cluster: {existing_clone.get_id()}")
+        # If the fail-over RELATIONSHIP is already recorded, the fail-over on this
+        # clone is complete: the driver's resolveToLocalReplica can walk it and the
+        # mount resolves to this copy. Just make sure it is grouped (idempotent)
+        # and return.
+        already_failed_over = any(
+            rep.source_lvol and getattr(rep, "target_lvol", None)
+            and rep.source_lvol.get_id() == lvol.get_id()
+            and rep.target_lvol.get_id() == existing_clone.get_id()
+            and rep.state in (LVolReplication.STATE_FAILED_OVER,
+                              LVolReplication.STATE_CUTOVER_DONE)
+            for rep in db_controller.get_lvol_replication_objects())
+        if already_failed_over:
+            if getattr(lvol, "group_id", ""):
+                try:
+                    from simplyblock_core.controllers import consistency_group_controller
+                    consistency_group_controller.reconstitute_group_after_handoff(
+                        lvol, existing_clone, target_cluster.get_id())
+                except Exception as e:
+                    logger.warning("Group reconstitution of existing clone %s failed: %s",
+                                   existing_clone.get_id(), e)
+            return existing_clone.get_id()
+        # The clone exists but NO fail-over relationship is recorded for it -- it
+        # is a pre-materialized target copy (a running group's members are cloned
+        # to the target before the disaster) or an earlier attempt returned before
+        # writing the relationship. Returning it bare leaves nothing for
+        # resolveToLocalReplica to walk, so the mount falls back to the (now-down)
+        # source and fails with "connection refused" (live 2026-09-27: this is why
+        # a group fail-over's clone would not mount while a standalone one did --
+        # the standalone path always cloned fresh through the completion below).
+        # Complete the fail-over on the existing clone -- write the relationship
+        # and connection paths, the same completion the fresh-clone path runs --
+        # instead of returning a hollow copy.
+        logger.info("Completing the fail-over on the pre-existing clone %s "
+                    "(no relationship recorded yet)", existing_clone.get_id())
+        new_lvol = existing_clone
+    else:
+        new_lvol, _snapshot, error = _clone_from_last_replicated(
+            db_controller, lvol_id, lvol, target_node,
+            target_pool_uuid, source_node.cluster_id, generation=generation,
+            pin_snapshot_id=pin_snapshot_id)
+        if error:
+            logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
+            return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.write_to_db(db_controller.kv_store)

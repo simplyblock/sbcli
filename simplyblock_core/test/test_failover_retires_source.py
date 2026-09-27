@@ -212,20 +212,29 @@ def test_failover_retires_the_source_after_the_relationship_is_durable():
     assert rel < retire
 
 
-def test_existing_clone_is_reconstituted_into_its_group():
+def test_existing_clone_without_relationship_completes_the_failover():
     """Regression (2026-09-27): the 'LVol with same nqn already exists on target
-    cluster' idempotency return skipped the reconstitute the fresh-clone path
-    does, so a fail-over whose earlier group record had been cleaned up returned
-    the clone UNGROUPED -- no consistency group on the target, the mount resolving
-    cross-cluster, and the group fail-back resolving no members. The early return
-    must reconstitute the pre-existing clone into its group too."""
+    cluster' idempotency return handed the clone back WITHOUT writing the
+    LVolReplication relationship the fresh-clone path writes. With no relationship,
+    the driver's resolveToLocalReplica had nothing to walk, so a group fail-over's
+    mount fell back to the now-down source and failed with 'connection refused'
+    (a standalone volume did NOT hit this: it always cloned fresh through the
+    completion). The early return must ONLY short-circuit when the fail-over
+    relationship already exists; otherwise it falls through to the shared
+    completion that writes the relationship and connection paths on the existing
+    clone."""
     src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
     already = src.index("already exists on target cluster")
-    early_return = src.index("return lv.get_id()")
-    reconstitute = src.index("reconstitute_group_after_handoff", already)
-    # the reconstitute of the existing clone happens between the 'already exists'
-    # log and the idempotency return -- i.e. the early return no longer skips it.
-    assert already < reconstitute < early_return
+    # short-circuit is now GUARDED on an already-recorded relationship
+    assert "already_failed_over" in src
+    guarded_return = src.index("return existing_clone.get_id()")
+    # otherwise the existing clone becomes the fail-over target and falls through
+    fallthrough = src.index("new_lvol = existing_clone")
+    rel_write = src.index("lvol_replication.write_to_db")
+    # the guarded early return and the fall-through both sit after the 'already
+    # exists' match, and the fall-through reaches the relationship write.
+    assert already < guarded_return
+    assert already < fallthrough < rel_write
 
 
 def test_monitor_skips_retired_sources():
