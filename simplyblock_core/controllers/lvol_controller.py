@@ -5267,6 +5267,23 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
         elif lv.ns_id != lvol.ns_id:
             continue                           # no record: nsid is all we have
         logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+        # The clone already exists (a prior promote, or a persisted target-side
+        # copy), but it may not be GROUPED: this idempotency return used to skip
+        # the reconstitute the fresh-clone path does below, so a fail-over whose
+        # earlier group record had been cleaned up left every clone ungrouped --
+        # no consistency group on the target, the mount resolving cross-cluster,
+        # and the group fail-back resolving no members (live 2026-09-27). Group
+        # it here too, best-effort and idempotently (add_member_to_group is a
+        # no-op for an already-open member), so the group is formed whether the
+        # clone is freshly cloned or already present.
+        if getattr(lvol, "group_id", ""):
+            try:
+                from simplyblock_core.controllers import consistency_group_controller
+                consistency_group_controller.reconstitute_group_after_handoff(
+                    lvol, lv, target_cluster.get_id())
+            except Exception as e:
+                logger.warning("Group reconstitution of existing clone %s failed: %s",
+                               lv.get_id(), e)
         return lv.get_id()
 
     new_lvol, _snapshot, error = _clone_from_last_replicated(
