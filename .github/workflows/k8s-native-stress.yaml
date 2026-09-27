@@ -1308,9 +1308,9 @@ jobs:
             name: encryption-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
-            storageClassParameters:
-              encryption: true"
+            clusterRef: simplyblock-cluster
+            volumeDefaults:
+              enableEncryption: true"
           fi
 
           echo "=== Bringing the cluster up through the deployment config ==="
