@@ -404,9 +404,70 @@ def run_discovery(config_name: str, timeout: int) -> str:
 # ── step 2: edit the draft ───────────────────────────────────────────────
 
 
+#: Registries the CRD's ImageSpec pattern admits. Anything else is refused by
+#: the apiserver with a message naming the regex rather than the value, so this
+#: is checked here where the offending variable can be named.
+_IMAGE_RE = re.compile(
+    r"^(quay\.io/simplyblock-io|docker\.io/simplyblock|public\.ecr\.aws/simply-block)"
+    r"/[a-z0-9][a-z0-9._-]*:[a-zA-Z0-9][a-zA-Z0-9._-]*(@sha256:[a-f0-9]{64})?$")
+
+
+def shape_images(spec: dict) -> None:
+    """Pin the images the deployment runs, in spec.images.
+
+    This is what replaced StorageNodeSet.spdkImage, and it landed on
+    2026-09-27. Before it there was no field at all: a document could not carry
+    an SPDK image, the StorageNodes the expansion created came out with
+    spec.config.spdkImage empty, and storage_node_ops.py fell back to
+    constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE. A run that named a build got the
+    default and, until the check below existed, said nothing about it.
+
+    The expansion spends these on two kinds: nodeAgent goes to
+    StorageCluster.spec.storageNodes, spdk and spdkProxy onto every
+    StorageNode.spec.config, which is why they are per node and can be rolled
+    one machine at a time later.
+
+    An earlier version of this script set SIMPLY_BLOCK_SPDK_ULTRA_IMAGE on the
+    control-plane Deployment instead, on the reasoning that get_config_var reads
+    the environment first. The variable applied and survived, and the nodes
+    still came up on the default -- so the add does not read it on this path.
+    That workaround is gone; this is the supported field.
+    """
+    wanted = {
+        "spdk": (os.environ.get("SPDK_IMAGE", "") or "").strip(),
+        "spdkProxy": (os.environ.get("SPDK_PROXY_IMAGE", "") or "").strip(),
+        "nodeAgent": (os.environ.get("NODE_AGENT_IMAGE", "") or "").strip(),
+    }
+    named = {k: v for k, v in wanted.items() if v}
+    if not named:
+        return
+
+    bad = [f"{k}={v}" for k, v in named.items() if not _IMAGE_RE.match(v)]
+    if bad:
+        raise RuntimeError(
+            "these images name a registry the CRD does not admit, so the "
+            "document would be refused: " + ", ".join(bad) + ".\n"
+            "    It takes quay.io/simplyblock-io, docker.io/simplyblock or "
+            "public.ecr.aws/simply-block, each with an explicit tag -- a bare "
+            "repository like simplyblock/spdk:main-latest is rejected, so the "
+            "registry has to be written out.")
+
+    images = spec.setdefault("images", {})
+    for slot, ref in named.items():
+        # Always, matching the CRD default: every tag this product ships by
+        # default is a moving one, and a node added later otherwise runs
+        # whatever its kubelet already held.
+        images[slot] = {"image": ref, "imagePullPolicy": "Always"}
+        log(f"  pinning {slot} -> {ref}")
+
+
 def shape_draft(cfg: dict) -> dict:
     """Write our parameters into the draft, before anyone approves it."""
     spec = cfg.setdefault("spec", {})
+
+    # Before the growth branch: spdk and spdkProxy are written per StorageNode,
+    # so a document that only adds nodes still pins what those nodes run.
+    shape_images(spec)
 
     # A growth document names the cluster it grows and describes no new one.
     # Writing a cluster template into it as well is how a draft ends up both
@@ -671,64 +732,9 @@ def wait_control_plane_ready(timeout=1800):
         f"that cannot answer them. Check: kubectl -n {NS} get controlplane")
 
 
-def pin_spdk_image(wanted: str) -> None:
-    """Make the control plane start the requested SPDK image, before any node.
-
-    A ClusterDeploymentConfig has no spdkImage field, so the document cannot
-    carry the pin. StorageNode.spec.config.spdkImage still exists, but the
-    expansion creates and adds the nodes in one motion with no pause hook, so
-    there is no point at which patching the node object reliably lands first.
-
-    What is left is the control plane's own default. storage_node_ops.py:3753
-    falls back to constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE when the add carries
-    no image, and constants.py:337 resolves that through get_config_var, which
-    reads the process environment before anything else. So setting the variable
-    on the deployment that serves add_node changes what every node is started
-    with.
-
-    The ordering is what makes this safe rather than racy. Nodes are added only
-    after the document is approved, and this runs before the approval, so the
-    rollout is finished long before the value is read. Contrast patching the
-    StorageNode, which races the adder.
-
-    This is a workaround for a missing field, not a supported knob -- neither
-    the chart nor the ControlPlane CR exposes any env passthrough, so it edits
-    a product Deployment directly. Ask the operator team for spdkImage on the
-    deployment config and delete this.
-    """
-    if not wanted:
-        return
-
-    dep = os.environ.get("CP_API_DEPLOYMENT", "simplyblock-webappapi")
-    out = kubectl("get", "deploy", dep, "-o",
-                  "jsonpath={.spec.template.spec.containers[0].name}",
-                  check=False)
-    container = out.strip()
-    if not container:
-        log(f"WARNING: no deployment {dep}, so the requested SPDK image "
-            f"{wanted} cannot be pinned; the nodes will come up on the "
-            f"control plane's default and the check after approval will say so")
-        return
-
-    log(f"pinning SPDK image to {wanted} via {dep}/{container} "
-        f"SIMPLY_BLOCK_SPDK_ULTRA_IMAGE")
-    kubectl("set", "env", f"deployment/{dep}",
-            f"SIMPLY_BLOCK_SPDK_ULTRA_IMAGE={wanted}",
-            f"--containers={container}")
-
-    # Wait for the new pods before approving: the old ones still answer
-    # add_node with the old value.
-    kubectl("rollout", "status", f"deployment/{dep}", "--timeout=300s",
-            check=False)
-    log("control plane restarted with the pinned image")
-
-
 def approve_and_wait(name: str, timeout: int) -> None:
     # The gate the manual deploy waits on before it edits the draft.
     wait_control_plane_ready(int(os.environ.get("TIMEOUT_CP_READY", "1800")))
-
-    # Before approval, because approval is what adds the nodes that read it.
-    pin_spdk_image((os.environ.get("SPDK_IMAGE", "") or "").strip())
 
     log(f"approving {name}")
     kubectl("patch", "clusterdeploymentconfig", name, "--type=merge",

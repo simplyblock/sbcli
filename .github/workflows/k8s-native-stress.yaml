@@ -1140,19 +1140,21 @@ jobs:
           # document cannot set spdkImage, so the run verifies what the nodes
           # actually came up on and fails if it is not what was asked for.
           #
-          # Except for the default, which is not a pin. "simplyblock/spdk:main-latest"
-          # is this input's hardcoded default in every k8s workflow and dates from the
-          # StorageNodeSet era, when spdkImage was a field a CR could set.
+          # The document can carry this again as of 2026-09-27:
+          # ClusterDeploymentConfig.spec.images.spdk, alongside spdkProxy and nodeAgent.
+          # The bring-up writes it into the draft before approval and the expansion
+          # spends it on every StorageNode.spec.config. Between the StorageNodeSet
+          # retirement and that field there was no slot at all, which is why run
+          # 36309737828 asked for a build and silently got
+          # public.ecr.aws/simply-block/ultra:main-latest on all four nodes.
           #
-          # The image is real and current -- docker.io/simplyblock/spdk:main-latest has
-          # 4603 tags behind it and was pushed 2026-09-27 -- so the problem is not the
-          # value. It is that nothing carries it to a node any more. A
-          # ClusterDeploymentConfig has no spdkImage field, the StorageNodes it creates
-          # come out with spec.config.spdkImage empty, and storage_node_ops.py:3753 then
-          # falls back to constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-          # (public.ecr.aws/simply-block/ultra:main-latest). So the default can never be
-          # satisfied, and enforcing it fails every run for a pin nobody asked for --
-          # which is what run 36309737828 did.
+          # The default is still not a pin, for a new reason: the CRD's ImageSpec
+          # admits only quay.io/simplyblock-io, docker.io/simplyblock or
+          # public.ecr.aws/simply-block, each with an explicit tag. This input's
+          # hardcoded default is the bare "simplyblock/spdk:main-latest", which names
+          # no registry and the apiserver refuses. Passing it would fail the document,
+          # not the image check. Write the registry out to pin a build:
+          # docker.io/simplyblock/spdk:main-latest.
           #
           # So the default means "no pin": the bring-up then reports which SPDK image
           # the nodes came up on instead of failing. Overriding the input still enforces
