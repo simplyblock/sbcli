@@ -1141,12 +1141,18 @@ jobs:
           # actually came up on and fails if it is not what was asked for.
           #
           # Except for the default, which is not a pin. "simplyblock/spdk:main-latest"
-          # is this input's hardcoded default in every k8s workflow and dates from
-          # the StorageNodeSet era, when spdkImage was a field a CR could set. The
-          # control plane's own default is public.ecr.aws/simply-block/ultra:main-latest
-          # -- a different registry AND a different image name -- so the default value
-          # names an image no node has ever run and can never match. Enforcing it fails
-          # every run for a pin nobody asked for, which is what run 36309737828 did.
+          # is this input's hardcoded default in every k8s workflow and dates from the
+          # StorageNodeSet era, when spdkImage was a field a CR could set.
+          #
+          # The image is real and current -- docker.io/simplyblock/spdk:main-latest has
+          # 4603 tags behind it and was pushed 2026-09-27 -- so the problem is not the
+          # value. It is that nothing carries it to a node any more. A
+          # ClusterDeploymentConfig has no spdkImage field, the StorageNodes it creates
+          # come out with spec.config.spdkImage empty, and storage_node_ops.py:3753 then
+          # falls back to constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+          # (public.ecr.aws/simply-block/ultra:main-latest). So the default can never be
+          # satisfied, and enforcing it fails every run for a pin nobody asked for --
+          # which is what run 36309737828 did.
           #
           # So the default means "no pin": the bring-up then reports which SPDK image
           # the nodes came up on instead of failing. Overriding the input still enforces
