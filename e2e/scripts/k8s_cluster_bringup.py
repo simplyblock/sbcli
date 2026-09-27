@@ -173,6 +173,23 @@ def kubectl(*args: str, check: bool = True, stdin: str | None = None) -> str:
     return ""
 
 
+def kubectl_out(*args):
+    """kubectl read that returns (stdout, stderr) instead of swallowing both.
+
+    kubectl() returns "" for both "no such object" and "the call failed", which
+    is fine where the caller only wants the happy path and hides the cause
+    where it does not.
+    """
+    cmd = ["kubectl", "-n", NS, *args]
+    if DRY_RUN:
+        return "", ""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return "", "kubectl is not on PATH"
+    return proc.stdout.strip(), proc.stderr
+
+
 def env_list(name: str) -> list[str]:
     """Split a comma- or whitespace-separated variable, dropping blanks."""
     raw = os.environ.get(name, "") or ""
@@ -578,32 +595,72 @@ def wait_control_plane_ready(timeout=1800):
 
     The manual OpenShift deploy gates on this explicitly -- install the chart,
     watch for "the control plane's readiness probe passed", and only then edit
-    and approve the draft. This did not, and approved as soon as discovery
-    produced one; a run that got ahead of the control plane then sat in
-    Activating being told "ControlPlane simplyblock is Unavailable, so it is
-    not answering yet" until its deadline.
+    and approve the draft.
+
+    The first version of this read phase and step through one jsonpath with a
+    tab in it and treated any empty result as "not ready yet". When the read
+    came back empty it waited the full 1800s and then said
+
+        the control plane did not become Available within 1800s (last )
+
+    which names neither what it saw nor why it saw nothing -- the reading was
+    empty every time and the failure could not be told apart from a control
+    plane that genuinely never came up. So: read one field at a time, keep the
+    stderr, and say plainly whether the object is missing, unreadable, or
+    simply not ready.
     """
     deadline = time.time() + timeout
-    last = ""
+    last = None
+    complained = False
+
     while time.time() < deadline:
-        out = kubectl("get", "controlplane", "-o",
-                      "jsonpath={range .items[*]}{.status.phase}	"
-                      "{.status.step.state}{\"\n\"}{end}", check=False)
-        line = (out or "").strip().splitlines()
-        if line:
-            parts = line[0].split("	")
-            phase = parts[0].strip()
-            step = (parts[1] if len(parts) > 1 else "").strip()
-            if (phase, step) != last:
-                log(f"control plane: {phase or '-'}/{step or '-'}")
-                last = (phase, step)
+        phase, err = kubectl_out("get", "controlplane", "-o",
+                                 "jsonpath={.items[0].status.phase}")
+        if phase:
+            step, _ = kubectl_out("get", "controlplane", "-o",
+                                  "jsonpath={.items[0].status.step.state}")
+            reading = f"{phase}/{step or '-'}"
+            if reading != last:
+                log(f"control plane: {reading}")
+                last = reading
             if phase == "Available":
                 return
+            if phase == "Degraded":
+                # Degraded means up-but-something-is-unhealthy, not down. On a
+                # namespace whose previous runs failed, tasks-runner-sync-lvol-del
+                # crash-loops with "No clusters found!" because there is no
+                # cluster yet -- a consequence of the thing we are here to fix,
+                # and it would gate us out of ever fixing it. The pod is 16/17
+                # ready and the management API answers; node-add lives in a
+                # different container.
+                #
+                # So this proceeds, loudly. Waiting on Available would deadlock
+                # against a condition only a successful deploy can clear.
+                msg, _ = kubectl_out("get", "controlplane", "-o",
+                                     "jsonpath={.items[0].status.message}")
+                log(f"WARNING: control plane is Degraded, proceeding anyway: "
+                    f"{msg or 'no message'}")
+                return
+        elif not complained:
+            # Say it once, with whatever the API actually said, rather than
+            # silently retrying for half an hour.
+            names, _ = kubectl_out("get", "controlplane", "-o",
+                                   "jsonpath={.items[*].metadata.name}")
+            if names.strip():
+                log(f"control plane {names.strip()} exists but reports no "
+                    f"phase yet")
+            else:
+                log("no ControlPlane object in this namespace yet"
+                    + (f" (kubectl said: {err.strip()[:160]})" if err.strip()
+                       else ""))
+            complained = True
         time.sleep(10)
+
     raise RuntimeError(
-        f"the control plane did not become Available within {timeout}s "
-        f"(last {last}). Approving now would deploy storage nodes against a "
-        f"control plane that cannot answer them.")
+        f"the control plane did not reach Available within {timeout}s "
+        f"(last reading: {last or 'none -- nothing was ever read'}). "
+        f"Approving now would deploy storage nodes against a control plane "
+        f"that cannot answer them. Check: kubectl -n {NS} get controlplane")
 
 
 def approve_and_wait(name: str, timeout: int) -> None:
