@@ -1139,6 +1139,23 @@ jobs:
           # Exported so the bring-up checks it rather than assumes it: the
           # document cannot set spdkImage, so the run verifies what the nodes
           # actually came up on and fails if it is not what was asked for.
+          #
+          # Except for the default, which is not a pin. "simplyblock/spdk:main-latest"
+          # is this input's hardcoded default in every k8s workflow and dates from
+          # the StorageNodeSet era, when spdkImage was a field a CR could set. The
+          # control plane's own default is public.ecr.aws/simply-block/ultra:main-latest
+          # -- a different registry AND a different image name -- so the default value
+          # names an image no node has ever run and can never match. Enforcing it fails
+          # every run for a pin nobody asked for, which is what run 36309737828 did.
+          #
+          # So the default means "no pin": the bring-up then reports which SPDK image
+          # the nodes came up on instead of failing. Overriding the input still enforces
+          # it, and still fails, because v1alpha2 genuinely cannot carry the pin -- that
+          # failure is the honest one and is the point of the check.
+          if [ "$SPDK_IMAGE" = "simplyblock/spdk:main-latest" ]; then
+            echo "spdk_image is the legacy default; not enforcing a pin (v1alpha2 has no field for it)"
+            SPDK_IMAGE=""
+          fi
           export SPDK_IMAGE
           PARTITIONS="${PARTITIONS:-0}"
           JM_COUNT="${JM_COUNT:-3}"

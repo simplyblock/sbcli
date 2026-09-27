@@ -725,8 +725,8 @@ def approve_and_wait(name: str, timeout: int) -> None:
         f"the bring-up again -- cleanup_k8s.sh does both.")
 
 
-def verify_spdk_image(wanted: str) -> None:
-    """Fail if the nodes are not running the SPDK image that was asked for.
+def verify_spdk_image(wanted: str, timeout: int = 600) -> None:
+    """Fail if the SPDK pods are not running the image that was asked for.
 
     spdkImage lives on the StorageNode (spec.config.spdkImage in v1alpha2,
     spec.overrides.spdkImage in v1alpha1) and not on the deployment config, so
@@ -741,18 +741,76 @@ def verify_spdk_image(wanted: str) -> None:
     is that the build under test is the variable -- so this is an error rather
     than a warning.
     """
-    out = kubectl(
-        "get", "pods", "-l", "app=storage-node", "-o",
-        "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}"
-        "{range .spec.containers[*]}{.image}{\" \"}{end}{\"\\n\"}{end}",
-        check=False)
-    if not out.strip():
-        log(f"WARNING: no storage-node pods found, so the requested SPDK "
-            f"image {wanted} could not be checked")
+    # Select the SPDK pods, which are not the node-agent DaemonSet.
+    #
+    # This asked for "app=storage-node" and got
+    # simplyblock-storage-node-ds-<cluster>-<hash>, the DaemonSet that runs the
+    # node agent. Those legitimately run simplyblock/simplyblock:main, so every
+    # one of them was reported as carrying the wrong SPDK image and a cluster
+    # that had deployed correctly failed the gate.
+    #
+    # storage_deploy_spdk.yaml.j2 names the real pods
+    # snode-spdk-pod-<rpc_port>-<cluster_id> and labels them
+    # "role: simplyblock-storage-node" plus "app: spdk-app-<rpc_port>". The role
+    # is the stable one -- app carries the port, so it differs per node.
+    selector = "role=simplyblock-storage-node"
+
+    # Wait for them, rather than reading an empty list as an answer.
+    #
+    # The SPDK pod is created at node-add, so it appears while the nodes are
+    # Activating. approve_and_wait returns at phase Expanded, and the step line
+    # at that point is routinely "Expanded/Activating" -- the document is done,
+    # the nodes are not. Checking immediately can find nothing.
+    #
+    # An empty result used to WARN and return, which is the wrong green this
+    # function exists to prevent: a run that pinned an image, never checked it,
+    # and passed. So the absence of pods is a failure once the wait is spent.
+    expected = len(kubectl("get", "storagenode", "-o",
+                           "jsonpath={.items[*].metadata.name}",
+                           check=False).split())
+    deadline = time.time() + timeout
+    lines: list[str] = []
+    while True:
+        out = kubectl(
+            "get", "pods", "-l", selector, "-o",
+            "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}"
+            "{range .spec.containers[*]}{.image}{\" \"}{end}{\"\\n\"}{end}",
+            check=False)
+        lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+        if lines and len(lines) >= expected:
+            break
+        if time.time() >= deadline:
+            break
+        log(f"  waiting for SPDK pods: {len(lines)}/{expected or '?'} up")
+        time.sleep(15)
+
+    if not lines:
+        raise RuntimeError(
+            f"no SPDK pods (-l {selector}) exist, so the requested image "
+            f"{wanted} could not be checked after {timeout}s. The cluster "
+            f"reported {expected} StorageNode(s); a node whose SPDK pod never "
+            f"started has not finished activating.\n    "
+            f"kubectl -n {NS} get pods -l {selector}\n    "
+            f"kubectl -n {NS} get storagenode")
+
+    if len(lines) < expected:
+        log(f"WARNING: only {len(lines)} of {expected} SPDK pods are up; "
+            f"checking the ones that are")
+
+    # No pin asked for: say what the nodes actually came up on and stop.
+    #
+    # Worth printing even when nothing is being enforced. Which SPDK build a
+    # run exercised is the first thing anyone reading a failure wants, and
+    # until now it appeared in no log at all -- the only way to find it was to
+    # go to the cluster, which is gone by the time the run is read.
+    if not wanted:
+        for line in lines:
+            name, _, images = line.partition("\t")
+            log(f"  {name}: {images.strip()}")
         return
 
     wrong = []
-    for line in out.strip().splitlines():
+    for line in lines:
         name, _, images = line.partition("\t")
         if wanted not in images:
             wrong.append(f"{name}: {images.strip()}")
@@ -763,7 +821,7 @@ def verify_spdk_image(wanted: str) -> None:
             f"image {wanted}. The deployment config cannot set spdkImage, and "
             f"it is consumed at node-add, so the pin did not take:\n    "
             + "\n    ".join(wrong[:8]))
-    log(f"every storage node is running the requested SPDK image {wanted}")
+    log(f"all {len(lines)} SPDK pod(s) run the requested image {wanted}")
 
 
 def author_draft(name: str) -> str:
@@ -888,9 +946,7 @@ def main() -> int:
         log(f"approving the existing draft {approve_only} as it stands")
         approve_and_wait(approve_only,
                          int(os.environ.get("TIMEOUT_EXPAND", "1800")))
-        wanted = (os.environ.get("SPDK_IMAGE", "") or "").strip()
-        if wanted:
-            verify_spdk_image(wanted)
+        verify_spdk_image((os.environ.get("SPDK_IMAGE", "") or "").strip())
         return 0
 
     if env_list("BLOCK_DEVICES"):
@@ -936,9 +992,7 @@ def main() -> int:
 
     approve_and_wait(ref, int(os.environ.get("TIMEOUT_EXPAND", "1800")))
 
-    wanted = (os.environ.get("SPDK_IMAGE", "") or "").strip()
-    if wanted:
-        verify_spdk_image(wanted)
+    verify_spdk_image((os.environ.get("SPDK_IMAGE", "") or "").strip())
     return 0
 
 
