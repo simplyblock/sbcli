@@ -229,6 +229,53 @@ def add_member(policy, lvol):
     return add_member_to_group(group, lvol)
 
 
+def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
+    """Re-form the consistency group on the destination cluster after a
+    fail-over / fail-back / migration hand-off, so the group stays crash-
+    consistent across it (design-csi-addons-replication.md §14.4).
+
+    A hand-off clones each member on its own (replicate_lvol_on_target_cluster
+    for fail-over, the cutover runner for fail-back/migration), leaving the
+    clones ungrouped. The snapshot monitor keys group snapshots off ``group_id``
+    and the driver resolves the backend group by membership, so ungrouped clones
+    can be neither group-snapshotted nor promoted atomically, and the next
+    hand-off degrades to per-volume. This puts each clone back into its group.
+
+    Keyed by group NAME, not id: each cluster owns its own CG record, but both
+    carry the same name (the ``storage.simplyblock.io/consistency-group`` label),
+    so a fail-back RETURNS the volume to the SAME group it came from -- the
+    destination cluster's existing record of that name is reused rather than a
+    new one minted. ``add_member_to_group`` re-opens a closed epoch, so a volume
+    whose fail-over closed its membership (its source was deleted) rejoins
+    cleanly. Group members share one node/LVS (the hand-off co-locates them on
+    one replication node, and delta fail-back lands on the original node), which
+    satisfies ``add_member_to_group``'s single-LVS pin.
+
+    No-op when the source is not a group member. The caller invokes this
+    best-effort: a failure here must never undo the promote/cutover that already
+    succeeded.
+    """
+    src_group_id = getattr(source_lvol, "group_id", "")
+    if not src_group_id:
+        return None
+    try:
+        src_group = db.get_consistency_group_by_id(src_group_id)
+    except KeyError:
+        logger.warning(
+            "Group reconstitution skipped: source group %s of %s not found",
+            src_group_id, dest_lvol.get_id())
+        return None
+    group = ensure_group(dest_cluster_id, src_group.group_name)
+    add_member_to_group(group, dest_lvol)
+    dest_lvol.group_id = group.get_id()
+    dest_lvol.write_to_db(db.kv_store)
+    logger.info(
+        "Consistency group %s (%s) reconstituted on cluster %s: %s rejoined so "
+        "the group stays crash-consistent across the hand-off",
+        group.uuid[:8], src_group.group_name, dest_cluster_id, dest_lvol.get_id())
+    return group
+
+
 def remove_member_from_group(group, lvol_id):
     """Close the member's epoch at the current generation (detach semantics).
 

@@ -17,11 +17,14 @@ import pytest
 from simplyblock_core.controllers import consistency_group_controller as cgc
 from simplyblock_core.controllers import replication_policy_controller as rpc
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import (
     ConsistencyGroup,
     ReplicationPolicy,
     ReplicationTarget,
 )
+
+PEER_CLUSTER = "grp-attach-peer-cluster-1"
 
 CLUSTER_ID = "grp-attach-cluster-1"
 NODE = "grp-attach-node-1"
@@ -132,6 +135,72 @@ def test_demote_group_is_demoted_only_when_every_member_is(db, monkeypatch):
     monkeypatch.setattr(lc, "demote_lvol", lambda lvol_id: {"demoted": lvol_id == "v1"})
     result = cgc.demote_group(group)
     assert result["demoted"] is False
+
+
+def _seed_lvol(db, lvol_id, node, lvs, group_id=""):
+    lv = LVol()
+    lv.uuid = lvol_id
+    lv.node_id = node
+    lv.lvs_name = lvs
+    lv.group_id = group_id
+    lv.write_to_db(db.kv_store)
+    return lv
+
+
+def test_reconstitute_forms_the_group_on_the_target_after_failover(db):
+    # A fail-over clones each member individually onto the target, leaving them
+    # ungrouped; reconstitution re-forms the group there so the target stays
+    # crash-consistent. Keyed by name, on the peer cluster, a NEW record.
+    src_group = _seed_group(db, ["src1"])
+    src_lvol = _seed_lvol(db, "src1", NODE, LVS, group_id=src_group.get_id())
+
+    clone = _seed_lvol(db, "tgt1", "peer-node-1", "LVS_9")
+    grp = cgc.reconstitute_group_after_handoff(src_lvol, clone, PEER_CLUSTER)
+
+    assert grp is not None
+    assert grp.cluster_id == PEER_CLUSTER
+    assert grp.group_name == src_group.group_name
+    assert grp.get_id() != src_group.get_id()   # distinct record on the peer cluster
+    reloaded = db.get_consistency_group_by_id(grp.get_id())
+    assert "tgt1" in reloaded.members and reloaded.members["tgt1"]["removed_seq"] == 0
+    assert db.get_lvol_by_id("tgt1").group_id == grp.get_id()
+
+
+def test_reconstitute_failback_returns_to_the_original_group(db):
+    # The original group on the source cluster, its member's epoch CLOSED because
+    # the fail-over deleted the source. A fail-back must rejoin THIS group (same
+    # record, keyed by name), re-opening the epoch -- not mint a new one.
+    orig = _seed_group(db, [])
+    orig.members = {"vol1": {"joined_seq": 1, "removed_seq": 2}}
+    orig.write_to_db(db.kv_store)
+
+    # The peer-cluster group (same NAME) that held the failed-over volume.
+    peer = ConsistencyGroup()
+    peer.uuid = "grp-attach-peer-cg-1"
+    peer.cluster_id = PEER_CLUSTER
+    peer.group_name = orig.group_name
+    peer.node_id = "peer-node-1"
+    peer.lvs_name = "LVS_9"
+    peer.members = {"tvol": {"joined_seq": 1, "removed_seq": 0}}
+    peer.write_to_db(db.kv_store)
+    peer_lvol = _seed_lvol(db, "tvol", "peer-node-1", "LVS_9", group_id=peer.get_id())
+
+    # The failed-back clone lands back on the ORIGINAL node/LVS with the original
+    # UUID (the cutover's UUID swap restored it).
+    failed_back = _seed_lvol(db, "vol1", NODE, LVS)
+    grp = cgc.reconstitute_group_after_handoff(peer_lvol, failed_back, CLUSTER_ID)
+
+    assert grp.get_id() == orig.get_id(), "fail-back must return to the SAME group"
+    reloaded = db.get_consistency_group_by_id(orig.get_id())
+    assert reloaded.members["vol1"]["removed_seq"] == 0, "epoch re-opened"
+    assert db.get_lvol_by_id("vol1").group_id == orig.get_id()
+
+
+def test_reconstitute_is_a_noop_for_a_non_group_volume(db):
+    src_lvol = _seed_lvol(db, "plain1", NODE, LVS)   # no group_id
+    clone = _seed_lvol(db, "plain-clone", "peer-node-1", "LVS_9")
+    assert cgc.reconstitute_group_after_handoff(src_lvol, clone, PEER_CLUSTER) is None
+    assert db.get_lvol_by_id("plain-clone").group_id == ""
 
 
 def test_failback_group_configures_every_member(db, monkeypatch):

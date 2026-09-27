@@ -5305,6 +5305,22 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
 
     lvol_events.lvol_replicated(lvol, new_lvol)
 
+    # Re-form the consistency group on the target so the failed-over members
+    # stay a crash-consistent group there (needed for group snapshots on the new
+    # primary and an atomic fail-back). The clones are co-located on one target
+    # node/LVS (all members share replication_node_id), so the group's single-LVS
+    # pin is satisfied. Best-effort: never undo the promote that already
+    # succeeded. Keyed by group name, so a later fail-back returns to the same
+    # group.
+    if getattr(lvol, "group_id", ""):
+        try:
+            from simplyblock_core.controllers import consistency_group_controller
+            consistency_group_controller.reconstitute_group_after_handoff(
+                lvol, new_lvol, target_cluster.get_id())
+        except Exception as e:
+            logger.warning("Group reconstitution after fail-over of %s failed: %s",
+                           lvol_id, e)
+
     # The relationship is durable and the DR copy is online: retire the
     # source's data path NOW (fence + namespace removal, best-effort) so a
     # still-alive source cannot keep serving superseded data. See
