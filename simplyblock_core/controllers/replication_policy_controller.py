@@ -530,6 +530,43 @@ def failover_policy(policy_id):
     return results
 
 
+def _members_are_live_primary(members):
+    """True when every member is still the UNTOUCHED serving primary on its own
+    cluster: not demoted, not failed over, and its storage node online.
+
+    A promote of such members is the origin-primary / steady-state case (protect),
+    not a hand-off -- the group path's counterpart of the per-volume endpoint's
+    `planned && demote != DONE` guard, inferred from state because the driver does
+    not forward the planned/forced flag for a group (its PromoteGroup comment:
+    "the planned/forced split is the backend group failover's own concern").
+
+    The three ways a promote IS a real hand-off, each disqualifying the no-op --
+    the SAME distinctions the standalone volume fail-over draws (see the volume
+    endpoint's `failover` guard and lvol_controller.replication_source_online):
+
+      * **Demote in progress/done** -- a PLANNED relocate demotes the source first,
+        and the source stays ONLINE throughout, so source health alone cannot tell
+        a relocate from protect; the demote state can. This is the case source
+        health would otherwise misread.
+      * **Already failed over** -- a settled relationship means the copy lives on
+        the peer now; a re-promote is a resume, not steady state.
+      * **Source down** -- an UNPLANNED fail-over, where there is no demote to key
+        off because the source died first. Decided by the SAME source-health check
+        the standalone path uses (replication_source_online).
+    """
+    for m in members:
+        if getattr(m, "replication_demote_state", ""):
+            return False                       # a planned hand-off (relocate), source stays up
+        if _settled_relationship(m.get_id()) is not None:
+            return False                       # already failed over -> a resume
+        try:
+            if not lvol_controller.replication_source_online(m):
+                return False                   # source down -> unplanned fail-over
+        except KeyError:
+            return False                       # source gone -> unplanned fail-over
+    return True
+
+
 def failover_group(group):
     """Fail over ONLY the members of consistency group *group*, as one
     crash-consistent unit (design-csi-addons-replication.md §14.4). Volumes that
@@ -541,6 +578,22 @@ def failover_group(group):
     members = [v for v in db.get_lvols_by_replication_policy(policy.get_id())
                if getattr(v, "group_id", "") == group.get_id()]
     if members:
+        # Origin-primary promote (protect / steady state) is NOT a fail-over.
+        # csi-addons calls PromoteGroup whenever the VGR is Primary -- including on
+        # its own origin cluster during protect -- and the group path has no
+        # equivalent of the per-volume endpoint's `planned && demote != DONE -> 409`
+        # guard. Without this check every protect-promote cloned the still-primary
+        # members to the target and stopped their replication, pre-staging hollow
+        # clones and breaking protect (live 2026-09-27). When the members are still
+        # the live primary here (their source nodes are online and none has failed
+        # over), the promote is a no-op success; only a genuine fail-over -- the
+        # source is down -- clones and completes.
+        if _members_are_live_primary(members):
+            logger.info("Promote of consistency group %s is a no-op: its %d "
+                        "member(s) are the live primary on this cluster, not a "
+                        "fail-over", group.group_name, len(members))
+            return [{"lvol_id": m.get_id(), "status": "already_primary"}
+                    for m in members]
         return _failover_group_members(policy, members,
                                        f"consistency group {group.group_name}")
     # Fail-BACK. This group is empty because its members were failed over and now

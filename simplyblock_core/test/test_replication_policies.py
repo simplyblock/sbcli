@@ -19,7 +19,7 @@ class _FakeDB:
     kv_store = object()
 
     def __init__(self, clusters=("CL_SRC", "CL_TGT"), pools=(), lvols=(),
-                 snapshots=(), replications=(), groups=(), tasks=()):
+                 snapshots=(), replications=(), groups=(), tasks=(), nodes=()):
         self._clusters = list(clusters)
         self._pools = list(pools)
         self._lvols = list(lvols)
@@ -27,8 +27,19 @@ class _FakeDB:
         self._replications = list(replications)
         self._groups = list(groups)
         self._tasks = list(tasks)
+        self._nodes = list(nodes)
         self.written = []
         self.removed = []
+
+    def get_storage_node_by_id(self, node_id):
+        # Absent by default: the origin-primary guard then treats a member's source
+        # as gone (KeyError) and the fail-over proceeds -- the behaviour every
+        # existing fail-over test asserts. The protect no-op test seeds online
+        # nodes so the members read as the live primary.
+        for n in self._nodes:
+            if getattr(n, "uuid", None) == node_id:
+                return n
+        raise KeyError(f'StorageNode {node_id} not found')
 
     # clusters / pools
     def get_cluster_by_id(self, cluster_id):
@@ -825,11 +836,58 @@ def test_failover_group_touches_only_its_members(monkeypatch):
         touched.append(lvol_id)
         return {"lvol_id": f"T_{lvol_id}", "connection_strings": []}
 
+    # Source down -> a genuine fail-over (same signal the standalone path reads).
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: False)
     monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
     results = rpc.failover_group(group)
     assert {r["lvol_id"] for r in results} == {"LV1", "LV2"}
     assert all(r["status"] == "failed_over" for r in results), results
     assert "STD" not in touched, "the standalone volume must NOT be failed over by a group fail-over"
+
+
+def test_failover_group_promote_is_a_noop_for_the_live_primary(monkeypatch):
+    """Regression (2026-09-27): csi-addons calls PromoteGroup whenever the VGR is
+    Primary -- including the origin cluster during protect -- and the group path
+    lacks the per-volume endpoint's planned/demote guard. Without this check the
+    protect-promote cloned the still-primary members to the target and stopped
+    their replication (pre-staging hollow clones, breaking protect). When the
+    members are the live primary (source online via the SAME replication_source_online
+    check the standalone path uses, none failed over, none demoted), the promote is
+    a no-op success -- nothing is cloned."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    _shared_policy_group_and_standalone(monkeypatch, db)
+    group = db._groups[0]
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: True)
+    touched: list = []
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        _recording(touched))
+    results = rpc.failover_group(group)
+    assert all(r["status"] == "already_primary" for r in results), results
+    assert {r["lvol_id"] for r in results} == {"LV1", "LV2"}
+    assert touched == [], "an origin-primary promote must NOT clone anything"
+
+
+def test_failover_group_promote_proceeds_when_members_are_demoted(monkeypatch):
+    """A PLANNED relocate demotes the source first and the source stays ONLINE, so
+    source health alone cannot tell it apart from protect -- the demote state must.
+    A demoted member is a real hand-off, not the untouched primary, so the promote
+    must proceed (not no-op) even though the source is online."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    _shared_policy_group_and_standalone(monkeypatch, db)
+    group = db._groups[0]
+    # Source online, but the members are demoted (a relocate) -> not the untouched
+    # primary, so the guard must NOT no-op.
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: True)
+    for lv in db._lvols:
+        if getattr(lv, "group_id", "") == group.get_id():
+            lv.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        lambda lvol_id, **kw: {"lvol_id": f"T_{lvol_id}", "connection_strings": []})
+    results = rpc.failover_group(group)
+    assert all(r["status"] != "already_primary" for r in results), \
+        "a demoted (relocating) member is a hand-off, not the live primary"
 
 
 def _failback_scenario(monkeypatch, db, unshipped=()):
