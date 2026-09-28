@@ -126,7 +126,7 @@ class TestTheFilterIsWiredIn(unittest.TestCase):
         import inspect
         src = inspect.getsource(mc.create_migration)
         self.assertIn("_usable_replica", src)
-        self.assertIn("REMOVAL_SHUT_DOWN_STATUSES", src)
+        self.assertIn("replica_is_departing(node)", src)  # the one shared rule
         self.assertIn("tgt_sec_node = _usable_replica(tgt_sec_node)", src)
         self.assertIn("tgt_ter_node = _usable_replica(tgt_ter_node)", src)
 
