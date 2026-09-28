@@ -6,7 +6,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import utils, constants
+from simplyblock_core import utils, constants, index_ops
+from simplyblock_core.models.indices import UniqueIndexViolation
 from simplyblock_core.controllers import object_limits, ops_gate
 from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
@@ -4655,6 +4656,34 @@ def _subsystem_home_node(db_controller, nqn, cluster_id):
     return ""
 
 
+def _persist_clone_reclaiming_ghost_unique(db_controller, new_lvol):
+    """``write_to_db`` for a fail-over/-back clone, self-healing a stale unique
+    index entry.
+
+    A clone RETURNS a volume into the subsystem/name its origin held, so it
+    reuses that origin's ``(pool_uuid, lvol_name)``. Under the heavy concurrent
+    create/delete of a group fail-over/-back, a unique-index entry can outlive the
+    record it named -- an orphan left when the origin was deleted -- and the
+    clone's write then raises :class:`UniqueIndexViolation` against a holder that
+    no longer exists. That aborts the whole group promote (live 2026-09-29, a
+    5-member fail-back: every member 409'd on ``already held by <deleted lvol>``
+    and the group never reconstituted).
+
+    ``index_ops.check_indices`` clears ONLY confirmed orphans -- it re-reads each
+    holder and leaves a live one's key intact -- so this reclaims a ghost-held
+    value and retries once, while a genuine duplicate re-raises on the retry
+    rather than being masked.
+    """
+    try:
+        new_lvol.write_to_db(db_controller.kv_store)
+    except UniqueIndexViolation:
+        logger.warning(
+            "Clone %s hit a stale unique index entry; repairing orphaned LVol "
+            "index entries and retrying the write once", new_lvol.get_id())
+        index_ops.check_indices([LVol], repair=True)
+        new_lvol.write_to_db(db_controller.kv_store)
+
+
 def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snapshot,
                               for_migration=False):
     """Create a writable clone of *lvol* on *target_node* (primary + online HA
@@ -4837,7 +4866,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # the CSI which /dev/disk/by-id/nvme-uuid.<id> the device really carries.
     new_lvol.ns_uuid = _src_ns_uuid if _src_ns_uuid != new_lvol.uuid else ""
 
-    new_lvol.write_to_db(db_controller.kv_store)
+    _persist_clone_reclaiming_ghost_unique(db_controller, new_lvol)
 
     _evict_stale_namespace(new_lvol, target_node, superseded=superseded)
 
@@ -5469,7 +5498,7 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
             return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
-    new_lvol.write_to_db(db_controller.kv_store)
+    _persist_clone_reclaiming_ghost_unique(db_controller, new_lvol)
 
     # Stop replicating FROM the source we just failed away from, BEFORE the
     # relationship is recorded.
