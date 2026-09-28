@@ -72,10 +72,21 @@ single `DBController.query()` primitive — not through a table scan. See
 **`simplyblock_core/AGENTS.md`** § Secondary Indices before adding a `get_*_by_*` helper
 or a new model field you intend to look records up by.
 
+**The deployment is distributed, not single-process.** The Web API runs as multiple replicas,
+`sbctl` invocations happen concurrently from different machines, and background services run as
+their own processes — all synchronized only through FoundationDB. A `threading.Lock`,
+module-level variable, or any other in-process primitive excludes contention within one process
+and nothing else; it is not a fix for a race between two API replicas, a CLI invocation and a
+background service, or two background service instances. Treat every new piece of shared mutable
+state this way by default and use a distributed primitive, unless you can state in the code why
+the state is genuinely process-local (e.g. a per-process cache with no correctness dependency on
+other processes agreeing).
+
 ## Coding Conventions
 
 - **Error handling**: Raise specific exceptions — never return `None`/booleans for errors, never bare `except Exception`. See `CONTRIBUTING.md`.
 - **Retries**: Use `tenacity` (`@retry` decorator, or `Retrying`/`AsyncRetrying` for a single call site) instead of hand-written attempt loops with `time.sleep()`. Always set an explicit `stop=` and `wait=`, and log attempts via `before_sleep=before_sleep_log(logger, logging.WARNING)`. Refactor hand-rolled retry loops you touch.
+- **Locking**: Use `DbLock` (`simplyblock_core/models/lock/__init__.py`) for mutual exclusion that must hold across processes/hosts — it is an FDB-backed distributed lock, safe from the CLI, the Web API, and background services alike. Do not reach for `threading.Lock`/`multiprocessing.Lock` for anything that also needs to exclude another process; see the module docstring for what `DbLock` is not for (a short critical section that fits in one FDB transaction needs no lock at all — use the transaction). Always take it with `with DbLock(...):`. Never call `.acquire()`/`.release()` by hand in a try/except/finally — that is the pattern `DbLock` exists to replace, and `__exit__` does more than `release()` (it also raises `DbLockLostError` if the lease died mid-section).
 - **Pydantic fields**: Use the [annotated pattern](https://pydantic.dev/docs/validation/latest/concepts/fields/#the-annotated-pattern) for field metadata, not the assignment form. See below.
 - **Ruff** and **mypy** are enforced in CI. `simplyblock_cli/cli.py` is excluded from ruff (auto-generated).
 - `tests/perf/` is excluded from pytest discovery.
