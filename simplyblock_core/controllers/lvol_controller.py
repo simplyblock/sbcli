@@ -4756,6 +4756,11 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
     new_lvol.create_dt = str(datetime.now())
     new_lvol.node_id = target_node.get_id()
+    # The clone lives on the target node now, not the source: carry the target's
+    # hostname so listings and lookups report where the volume actually runs.
+    # A deep copy inherits the SOURCE hostname, which is stale on this cluster
+    # (mirrors the normal create path, where node_id and hostname are set together).
+    new_lvol.hostname = target_node.hostname
     new_lvol.nodes = [target_node.get_id()]
     if target_node.secondary_node_id:
         new_lvol.nodes.append(target_node.secondary_node_id)

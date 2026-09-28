@@ -421,6 +421,7 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             self.lvstore = "LVS_1"
             self.status = lc.StorageNode.STATUS_ONLINE
             self.cluster_id = "CL_tgt"
+            self.hostname = f"host-{nid}"
             self.lvol_subsys_port = 4420
 
         def rpc_client(self):
@@ -482,6 +483,13 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     assert evicted == ["P", "S"], \
         "stale-namespace eviction must run on the primary AND every online HA peer"
     assert ("S", False) in added
+    # Regression: 2026-09-29-clone-keeps-source-hostname — the clone is a deep copy
+    # of the source, which carries the SOURCE node's hostname. On the target cluster
+    # that name is stale; the clone lives on target_node now, so its hostname must
+    # follow node_id to the target (the fail-over/relocate clone reported the wrong
+    # host in listings until this was set alongside node_id).
+    assert new_lvol.hostname == primary.hostname
+    assert new_lvol.node_id == primary.get_id()
 
 
 def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
@@ -518,6 +526,7 @@ def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
             self.lvstore = "LVS_1"
             self.status = lc.StorageNode.STATUS_ONLINE
             self.cluster_id = "CL_tgt"
+            self.hostname = f"host-{nid}"
 
         def get_lvol_subsys_port(self, lvstore):
             return 4420

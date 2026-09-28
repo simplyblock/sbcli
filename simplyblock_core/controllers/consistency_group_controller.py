@@ -321,11 +321,36 @@ def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
     return group
 
 
+def _reset_generation_if_emptied(group, members):
+    """When the last live member leaves, put the group back to a clean slate.
+
+    A group with no open epoch is dormant: the next member to join should start
+    a fresh generation 1, not inherit the departed cycle's counter. And a
+    generation-0 group is only internally consistent if it carries no epochs at
+    all -- ``included_in_seq`` math is relative to a monotonic counter, so a
+    closed entry whose ``removed_seq`` outranks ``last_group_seq`` is
+    uninterpretable. So the counter reset and the epoch history are cleared
+    together, which is also the state ``add_member_to_group`` already treats a
+    hand-off-emptied group as (no live pin, re-pinnable by the next member).
+
+    Returns the members map to persist (emptied when no live member remains).
+    """
+    if any(m.get("removed_seq", 0) == 0 for m in members.values()):
+        return members
+    if group.last_group_seq or members:
+        logger.info("Consistency group %s has no live members; generation reset "
+                    "to 0 and closed epochs cleared", group.uuid[:8])
+    group.last_group_seq = 0
+    return {}
+
+
 def remove_member_from_group(group, lvol_id):
     """Close the member's epoch at the current generation (detach semantics).
 
     History-preserving: the member's snapshots in prior generations are
-    untouched (design §8.2), only the epoch's ``removed_seq`` is set.
+    untouched (design §8.2), only the epoch's ``removed_seq`` is set -- until the
+    member is the last one out, at which point the group is reset to generation 0
+    (see :func:`_reset_generation_if_emptied`).
     """
     if group is None:
         return
@@ -340,7 +365,7 @@ def remove_member_from_group(group, lvol_id):
             # open and the member would count as one forever (2026-09-11: a
             # restored group at generation 0 kept every deleted member).
             del members[lvol_id]
-            group.members = members
+            group.members = _reset_generation_if_emptied(group, members)
             group.write_to_db(db.kv_store)
             logger.info("Volume %s left consistency group %s before any "
                         "generation contained it; membership entry dropped",
@@ -349,10 +374,10 @@ def remove_member_from_group(group, lvol_id):
         entry = dict(entry)
         entry["removed_seq"] = group.last_group_seq
         members[lvol_id] = entry
-        group.members = members
-        group.write_to_db(db.kv_store)
         logger.info("Volume %s left consistency group %s (included up to "
                     "generation %d)", lvol_id, group.uuid[:8], entry["removed_seq"])
+        group.members = _reset_generation_if_emptied(group, members)
+        group.write_to_db(db.kv_store)
 
 
 def remove_member(policy_id, lvol_id):
