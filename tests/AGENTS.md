@@ -67,6 +67,8 @@ Build real model objects and persist them with `write_to_db(db.kv_store)`; read 
 
 What you *may* still mock: everything **above** the database. Storage nodes are always mocked (in-process `RPCClient`/`SNodeClient` mock servers — see the per-suite `mock_rpc_server` fixtures), and external side-effects (firewall API, `ping_host`, k8s lookups, `time.sleep`, distrib-map sends) are patched. The integration tier never starts SPDK. The line is: real DB, mocked nodes.
 
+Injecting a *driver* failure is not mocking the DB layer and is fine — a raised `fdb.FDBError(<code>)` is how the tier covers a transient FoundationDB error. Get the class from a top-level `import fdb` in the test module; do not tunnel to it through the module under test (`import simplyblock_core.models.lock as lock_module` … `lock_module.fdb.FDBError`), which mixes import styles for no gain — the `fdb` module object is the same either way.
+
 ## Running tests
 
 ```bash
