@@ -1221,20 +1221,39 @@ class _LblkBase(TestClusterBase):
         self._wait_cluster_settled()
         self.logger.info("[lblk] %s recovered", uuid)
 
+    #: Whether to let a rebalance finish before starting the next outage.
+    #:
+    #: OFF, and that is the point rather than a default nobody set. The rapid
+    #: and no-gap families exist to break a node while the previous recovery is
+    #: still migrating -- the migration is attempted and never completes, and
+    #: that is the scenario under test. Waiting here would quietly convert
+    #: every one of them into a paced test that exercises something else and
+    #: still reports the same name.
+    #:
+    #: Turn it on only for a lane whose question is what happens to a settled
+    #: cluster, and say so where it is set. LBLK_WAIT_REBALANCE=1 forces it on
+    #: for a one-off run without editing a class.
+    #:
+    #: When it is off, the next outage's StorageNodeOps parks in the operator's
+    #: cluster gate until the rebalance settles
+    #: (storagenodeops_controller.go:794) rather than running immediately. That
+    #: is the product's behaviour under exactly the pressure these tests apply,
+    #: so it is a finding, not something for the harness to paper over.
+    WAIT_FOR_REBALANCE = False
+
     def _wait_cluster_settled(self):
         """Let the cluster finish rebalancing before the next outage.
 
-        A healthy node is not a settled cluster. The operator holds every
-        StorageNodeOps while the cluster rebalances
-        (storagenodeops_controller.go:794), so starting the next cycle here
-        does not overlap two outages -- it parks the next operation in the
-        gate and spends its step deadline there.
+        Gated on WAIT_FOR_REBALANCE, which is off by default -- see there.
 
         k8s only, and only since the operator began publishing the phase: the
         cluster reports status ``active`` throughout a rebalance, so nothing
         the sbcli side returns distinguishes it from settled.
         """
         if not self.k8s_test:
+            return
+        if not (self.WAIT_FOR_REBALANCE
+                or os.environ.get("LBLK_WAIT_REBALANCE", "") in ("1", "true", "yes")):
             return
         try:
             phase = self._ensure_k8s_utils().wait_cluster_settled()
