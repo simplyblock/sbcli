@@ -833,36 +833,25 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             group.intermediate_more_needed = []
             group.write_to_db(db.kv_store)
 
-            # bdev_lvol_set_migration_flag drives the distrib-level special_io
-            # machinery for the target bdev (see snapshot_replication.py's
-            # comment on the same flag); it's only ever set once, at initial
-            # target-bdev creation (migration_controller.create_migration).
-            # A failed/aborted final_step attempt may clear it on the target,
-            # so re-assert it on every member's target bdev before retrying —
-            # otherwise the retry's cutover could run without the target
-            # being treated as migration-aware.
-            tgt_sec_node, _ = _get_target_secondary_node(tgt_node, src_node.get_id())
-            tgt_ter_node, _ = _get_target_tertiary_node(tgt_node, src_node.get_id())
-            tgt_sec_rpc_reflag = _make_rpc(tgt_sec_node) if tgt_sec_node else None
-            tgt_ter_rpc_reflag = _make_rpc(tgt_ter_node) if tgt_ter_node else None
-            for m in member_migrations:
-                try:
-                    m_lvol = db.get_lvol_by_id(m.lvol_id)
-                    m_tgt_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(m_lvol.lvol_bdev)}"
-                except KeyError:
-                    continue
-                if not tgt_rpc.bdev_lvol_set_migration_flag(m_tgt_composite):
-                    logger.warning(
-                        f"Group {group.uuid[:8]}: re-assert migration flag on primary "
-                        f"failed for {m_tgt_composite} (may already be flagged)")
-                for _extra_rpc in (tgt_sec_rpc_reflag, tgt_ter_rpc_reflag):
-                    if _extra_rpc:
-                        try:
-                            _extra_rpc.bdev_lvol_set_migration_flag(m_tgt_composite)
-                        except Exception as e:
-                            logger.warning(
-                                f"Group {group.uuid[:8]}: re-assert migration flag on "
-                                f"replica failed for {m_tgt_composite} (non-fatal): {e}")
+            # bdev_lvol_set_migration_flag used to be re-asserted here, on every
+            # member's target bdev (primary + secondary + tertiary), on every
+            # failed-cutover retry. DISABLED as of 2026-09-28: this call drives
+            # SPDK's leadership-sensitive special_io machinery, and re-firing it
+            # once per retry gives a live leadership race (check-then-act across
+            # a separate RPC round-trip -- see set_migration_flag_on_primary's
+            # docstring) one more roll every time. Live node-removal runs traced
+            # this session showed the reassert landing squarely on nodes whose
+            # leadership had just moved, triggering spdk_lvs_queued_failed_IO ->
+            # self-demotion -> port block -> the node reported "down", failing
+            # the round and forcing yet another retry (and another reassert) --
+            # solo migrations, which only ever set the flag once at creation,
+            # never hit this. Skipping the reassert trades that frequent,
+            # self-inflicted failure for a narrower, pre-existing risk: if a
+            # failed final_step attempt genuinely cleared the flag on the
+            # target, a later successful cutover could run against a target
+            # not marked migration-aware. This is a stopgap pending the real
+            # fix, which is on the SPDK side (a failed special_io due to
+            # non-leadership should be a clean rejection, not a self-demotion).
 
             logger.warning(
                 f"Group {group.uuid[:8]}: batch_final_step failed; forcing another "
