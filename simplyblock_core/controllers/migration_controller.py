@@ -1098,6 +1098,27 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
     return True, ""
 
 
+def _target_replica_for_registration(replica_id, role, composite):
+    """The target's ``role`` replica to pre-register ``composite`` on, or
+    ``None`` when that replica is a node under removal.
+
+    Its SPDK is stopped and its proxy name no longer resolves, so every RPC
+    to it burns the client's connect retries (~6 s) before the tolerant
+    registration gives up and moves on. Per volume that is a nuisance; a
+    batch create runs it once per member, and five members pushed the
+    request past the operator's 30 s client timeout, so the operator never
+    saw the answer, asked again, and a new backend group was created every
+    minute (2026-09-28, run 8: seven volumes stuck at "2 of 7 migrated").
+    The subsystem step below already drops such replicas; this is the same
+    rule for the registration step."""
+    node = db.get_storage_node_by_id(replica_id)
+    if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        logger.info(
+            f"create_migration: target {role} {node.get_id()[:8]} is {node.status} "
+            f"(being removed); skipping registration of {composite} there")
+        return None
+    return node
+
 def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                          host_nqn=None,
@@ -1232,28 +1253,29 @@ def create_migration(lvol_id, target_node_id,
     _pre_sec_node = None
     if lvol.ha_type != "single" and tgt_node.secondary_node_id:
         try:
-            _pre_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
-            _sec_rpc_reg  = _pre_sec_node.rpc_client()
-            if _sec_rpc_reg.get_bdevs(composite):
-                logger.info(
-                    f"create_migration: {composite} already on secondary "
-                    f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
-            elif _tgt_blobid is not None and _tgt_uuid is not None:
-                ret_sec = _sec_rpc_reg.bdev_lvol_register(
-                    bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
-                    lvol.lvol_priority_class)
-                if ret_sec:
-                    _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
+            _pre_sec_node = _target_replica_for_registration(tgt_node.secondary_node_id, "secondary", composite)
+            if _pre_sec_node is not None:
+                _sec_rpc_reg  = _pre_sec_node.rpc_client()
+                if _sec_rpc_reg.get_bdevs(composite):
                     logger.info(
-                        f"create_migration: registered {composite} on "
-                        f"secondary {_pre_sec_node.get_id()}")
+                        f"create_migration: {composite} already on secondary "
+                        f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
+                elif _tgt_blobid is not None and _tgt_uuid is not None:
+                    ret_sec = _sec_rpc_reg.bdev_lvol_register(
+                        bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                        lvol.lvol_priority_class)
+                    if ret_sec:
+                        _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
+                        logger.info(
+                            f"create_migration: registered {composite} on "
+                            f"secondary {_pre_sec_node.get_id()}")
+                    else:
+                        logger.warning(
+                            f"create_migration: bdev_lvol_register on secondary "
+                            f"{_pre_sec_node.get_id()} failed (continuing)")
                 else:
                     logger.warning(
-                        f"create_migration: bdev_lvol_register on secondary "
-                        f"{_pre_sec_node.get_id()} failed (continuing)")
-            else:
-                logger.warning(
-                    f"create_migration: no bdev info for secondary registration of {composite}")
+                        f"create_migration: no bdev info for secondary registration of {composite}")
         except Exception as _e:
             logger.warning(
                 f"create_migration: secondary registration error (continuing): {_e}")
@@ -1261,28 +1283,29 @@ def create_migration(lvol_id, target_node_id,
     _pre_ter_node = None
     if tgt_node.tertiary_node_id:
         try:
-            _pre_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
-            _ter_rpc_reg  = _pre_ter_node.rpc_client()
-            if _ter_rpc_reg.get_bdevs(composite):
-                logger.info(
-                    f"create_migration: {composite} already on tertiary "
-                    f"{_pre_ter_node.get_id()} — skipping bdev_lvol_register")
-            elif _tgt_blobid is not None and _tgt_uuid is not None:
-                ret_ter = _ter_rpc_reg.bdev_lvol_register(
-                    bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
-                    lvol.lvol_priority_class)
-                if ret_ter:
-                    _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)
+            _pre_ter_node = _target_replica_for_registration(tgt_node.tertiary_node_id, "tertiary", composite)
+            if _pre_ter_node is not None:
+                _ter_rpc_reg  = _pre_ter_node.rpc_client()
+                if _ter_rpc_reg.get_bdevs(composite):
                     logger.info(
-                        f"create_migration: registered {composite} on "
-                        f"tertiary {_pre_ter_node.get_id()}")
+                        f"create_migration: {composite} already on tertiary "
+                        f"{_pre_ter_node.get_id()} — skipping bdev_lvol_register")
+                elif _tgt_blobid is not None and _tgt_uuid is not None:
+                    ret_ter = _ter_rpc_reg.bdev_lvol_register(
+                        bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                        lvol.lvol_priority_class)
+                    if ret_ter:
+                        _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)
+                        logger.info(
+                            f"create_migration: registered {composite} on "
+                            f"tertiary {_pre_ter_node.get_id()}")
+                    else:
+                        logger.warning(
+                            f"create_migration: bdev_lvol_register on tertiary "
+                            f"{_pre_ter_node.get_id()} failed (continuing)")
                 else:
                     logger.warning(
-                        f"create_migration: bdev_lvol_register on tertiary "
-                        f"{_pre_ter_node.get_id()} failed (continuing)")
-            else:
-                logger.warning(
-                    f"create_migration: no bdev info for tertiary registration of {composite}")
+                        f"create_migration: no bdev info for tertiary registration of {composite}")
         except Exception as _e:
             logger.warning(
                 f"create_migration: tertiary registration error (continuing): {_e}")

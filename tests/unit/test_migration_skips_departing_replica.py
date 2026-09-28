@@ -39,6 +39,29 @@ def _usable(status):
     return node
 
 
+class TestRegistrationSkipsADepartingReplica(unittest.TestCase):
+    """The tolerant pre-registration step used the same replica set without
+    the filter: it RPC'd the departing node, burnt ~6 s of connect retries
+    per volume and moved on. A five-member batch create therefore outlived
+    the operator's 30 s client timeout, the operator never saw the answer and
+    re-created the migration every minute (2026-09-28, run 8)."""
+
+    def _call(self, status):
+        node = _node("replica", status)
+        with unittest.mock.patch.object(mc, "db") as db:
+            db.get_storage_node_by_id.return_value = node
+            return mc._target_replica_for_registration("replica", "secondary", "LVS_1/LVOL_1m")
+
+    def test_a_node_under_removal_is_skipped(self):
+        for status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+            self.assertIsNone(self._call(status), status)
+
+    def test_a_usable_replica_is_returned(self):
+        for status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+                       StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE):
+            self.assertIsNotNone(self._call(status), status)
+
+
 class TestDepartingReplicasAreDropped(unittest.TestCase):
 
     def test_every_shut_down_status_is_dropped(self):
