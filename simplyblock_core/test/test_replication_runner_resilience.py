@@ -11,6 +11,8 @@ five layers away from the actual cause.
 from typing import cast
 import inspect
 
+import pytest
+
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.services import snapshot_replication as sr
 
@@ -104,3 +106,56 @@ def test_runner_loop_catches_task_exceptions():
     assert "try:" in src and "task_runner(task)" in src
     assert "except Exception" in src, (
         "an RPC error from one node would stop replication cluster-wide")
+
+
+def test_runner_skips_a_task_that_vanished_before_dispatch(monkeypatch):
+    """Regression (2026-09-28): a task get_job_tasks returned but that was deleted
+    before the re-read -- retention, a concurrent cleanup, or a stale index entry a
+    repair has yet to clear -- raised KeyError straight out of main(). It took the
+    whole replication runner down and crash-looped it on the same entry, so no
+    snapshot ever shipped and every DRPC stalled with no lastGroupSyncTime. The
+    re-read must be as guarded as the task_runner call right below it."""
+    class _Stop(Exception):
+        pass
+
+    class _Task:
+        function_name = JobSchedule.FN_SNAPSHOT_REPLICATION
+        status = JobSchedule.STATUS_NEW
+        uuid = "GONE"
+        cluster_id = "C1"
+        canceled = False
+
+        def __init__(self):
+            self.function_params = {"snapshot_id": "S1"}
+
+        def get_id(self):
+            return self.uuid
+
+    dispatched: list = []
+
+    class _DB:
+        def get_clusters(self):
+            return [type("C", (), {"get_id": lambda s=None: "C1"})()]
+
+        def get_job_tasks(self, cluster_id, reverse=False):
+            return [_Task()]
+
+        def get_task_by_id(self, uuid):
+            raise KeyError(f"Task {uuid} not found")   # vanished before the re-read
+
+    def _stop(*_a, **_k):
+        raise _Stop()
+
+    def _dispatch(task):
+        dispatched.append(task)
+        return True
+
+    monkeypatch.setattr(sr, "db", _DB())
+    monkeypatch.setattr(sr, "task_runner", _dispatch)
+    monkeypatch.setattr(sr.time, "sleep", _stop)
+
+    # Reaching the end-of-pass sleep (_Stop) proves the loop completed a full pass;
+    # a KeyError escaping instead is the bug.
+    with pytest.raises(_Stop):
+        sr.main()
+    assert dispatched == [], "a vanished task must be skipped, never dispatched"

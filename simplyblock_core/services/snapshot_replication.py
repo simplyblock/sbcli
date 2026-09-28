@@ -1523,8 +1523,19 @@ def main():
                                 logger.info("replication task found for same snapshot, retry")
                                 continue
                         if task.status != JobSchedule.STATUS_DONE:
-                            # get new task object because it could be changed from cancel task
-                            task = db.get_task_by_id(task.uuid)
+                            # Re-read the task in case cancel changed it. If it has
+                            # since vanished -- retention, a concurrent cleanup, or a
+                            # stale index entry a repair has yet to clear -- skip it.
+                            # One missing task must never take the runner down with
+                            # it: this KeyError used to propagate out of main() and
+                            # stop replication for every cluster, then crash the
+                            # restarted container on the same entry (live 2026-09-28).
+                            try:
+                                task = db.get_task_by_id(task.uuid)
+                            except KeyError:
+                                logger.warning("Replication task %s vanished before "
+                                               "dispatch; skipping", task.uuid)
+                                continue
                             # One task must never take the runner down with it:
                             # an RPC to a node that just went offline, or a
                             # malformed param, used to propagate out of main()
