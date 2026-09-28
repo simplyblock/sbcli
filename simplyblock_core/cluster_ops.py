@@ -2918,6 +2918,11 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             service_image = mgmt_image
         logger.info(f"Pulling image {service_image}")
         pull_docker_image_with_retry(cluster_docker, service_image)
+        gelf_log_driver_options = {
+            "gelf-address": "tcp://127.0.0.1:12202",
+            "mode": "non-blocking",
+            "max-buffer-size": "40m",
+        }
         service_names = []
         image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         for service in cluster_docker.services.list():
@@ -2934,7 +2939,9 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                             service_env.remove("SIMPLYBLOCK_LOG_LEVEL=DEBUG")
                             service_env.append("SIMPLYBLOCK_LOG_LEVEL=INFO")
 
-                        service.update(image=service_image, env=service_env, force_update=True)
+                        service.update(
+                            image=service_image, env=service_env, force_update=True,
+                            log_driver="gelf", log_driver_options=gelf_log_driver_options)
                         service_names.append(service.attrs['Spec']['Name'])
                     break
 
