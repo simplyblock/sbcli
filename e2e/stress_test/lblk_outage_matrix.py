@@ -85,6 +85,28 @@ class _LblkOutageMatrix(_LblkBase):
     #: every other outage it still does.
     DRAINING_OUTAGES = ("storage_node_reboot",)
 
+    #: Outages the live-FIO client cannot survive on the node being broken, so
+    #: the reserved node sits these out.
+    #:
+    #: It is not every destructive outage, and the distinction is what the
+    #: client actually runs on. graceful_shutdown, restart and pod delete take
+    #: down the SPDK pod; the FIO pod is a different pod on the same worker and
+    #: keeps running throughout, which is the continuity this test is for. A
+    #: network cut isolates the worker, and storage_node_reboot cordons and
+    #: drains it -- both take the client away with the storage, and a FIO
+    #: failure then measures where the client was scheduled rather than
+    #: anything about the product.
+    #:
+    #: storage_node_reboot was missing from this until 2026-09-28, which is a
+    #: coverage bug rather than a correctness one: the reboot cycle would have
+    #: evicted the FIO pod and read as a loss of availability.
+    CLIENT_EVICTING_OUTAGES = (
+        "interface_full_network_interrupt",
+        "short_network_interrupt",
+        "node_network_isolation",
+        "storage_node_reboot",
+    )
+
     #: How far back _assert_attached looks for volume-attach events. One
     #: cycle's worth: the outage, its recovery, and the checks since. Long
     #: enough to catch this cycle's failure, short enough that the previous
@@ -178,8 +200,8 @@ class _LblkOutageMatrix(_LblkBase):
         # only means the client was inside the blast radius. So the reserved
         # node sits that one out.
         self._fio_home_node = self._pick_fio_home(nodes)
-        no_network_cut = [n for n in nodes
-                          if n is not self._fio_home_node] or nodes
+        no_client_evict = [n for n in nodes
+                           if n is not self._fio_home_node] or nodes
         skip_env = os.environ.get("LBLK_MATRIX_SKIP_OUTAGES")
         skip = ({o.strip() for o in skip_env.split(",") if o.strip()}
                 if skip_env is not None else set(self.SKIP_OUTAGES))
@@ -200,10 +222,8 @@ class _LblkOutageMatrix(_LblkBase):
             # node dicts, and the API answered "Pool not found:" followed by a
             # dump of every storage node -- which reads like a cluster fault
             # rather than a variable collision.
-            targets = (no_network_cut
-                       if outage in ("interface_full_network_interrupt",
-                                     "short_network_interrupt",
-                                     "node_network_isolation")
+            targets = (no_client_evict
+                       if outage in self.CLIENT_EVICTING_OUTAGES
                        else nodes)
             cycles += [(node, outage) for node in targets]
 
@@ -221,10 +241,12 @@ class _LblkOutageMatrix(_LblkBase):
             cycles = []
             for outage in outages:
                 # Same exclusion as above: trimming the node count must not
-                # quietly put the network cut back on the node hosting FIO.
+                # quietly put an evicting outage back on the node hosting FIO.
+                # This tested one type where the list has four, so a trimmed
+                # run could still reboot the client's own node.
                 cycles += [(node, outage) for node in
                            (trimmed_no_cut
-                            if outage == "interface_full_network_interrupt"
+                            if outage in self.CLIENT_EVICTING_OUTAGES
                             else trimmed)]
             self.logger.warning(
                 "[matrix] LBLK_MATRIX_NODES=%d: running %d of %d nodes, so "
@@ -301,8 +323,11 @@ class _LblkOutageMatrix(_LblkBase):
         self._fio_home_worker = worker
         self.logger.warning(
             "[matrix] no client-role nodes: reserving %s (%s) for live FIO "
-            "and excluding it from outages, so the client is never inside the "
-            "blast radius of the node being broken", worker, ip)
+            "and excluding it from the outages that would take the client with "
+            "it (%s), so a FIO failure never just means the client was inside "
+            "the blast radius. Shutdown, restart and pod delete still run on "
+            "it: those stop the SPDK pod, not the worker, and FIO keeps going",
+            worker, ip, ", ".join(self.CLIENT_EVICTING_OUTAGES))
         return home
 
     # ── the durability lane ───────────────────────────────────────────────
