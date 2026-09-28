@@ -627,6 +627,37 @@ def check_snapshot_capacity(pool, cluster, lvol, all_lvols=None, all_snaps=None)
     return None
 
 
+def _snapshot_create_is_transient(result):
+    """Retry predicate for the ``bdev_lvol_snapshot`` create call.
+
+    SPDK reports every rejection of this RPC as JSON-RPC code -32602
+    (invalid_params) regardless of cause, so the code alone can't tell a
+    genuinely transient condition apart from a definitive one. Two distinct
+    messages share that code in practice:
+
+    - lvol.c:1927 spdk_lvol_create_snapshot "not leader, update in progress.
+      try again later" -- an explicit, SPDK-issued invitation to retry the
+      SAME call while leadership settles.
+    - lvol.c:1587/1594 lvs_verify_lvol_name "already exists" / "is being
+      already created" -- a definitive collision with THIS SAME snapshot
+      name. It shows up because a "not leader" rejection can still leave the
+      name partially registered, so a same-name retry right after one lands
+      on its own leftover.
+
+    Retrying on the second condition can never succeed (the name is already
+    taken by our own prior attempt) and only burns the 5-attempt budget
+    fighting itself -- live trace 2026-09-28, node vm08 taking over as
+    active source during node removal: name SNAP_43 alternated
+    not-leader/already-exists across all 5 attempts, none of which could
+    have worked. Only the first message is worth retrying; anything else
+    (including this one) is treated as a final answer.
+    """
+    ret, err = result
+    if ret or not err or err.get("code") != -32602:
+        return False
+    return "try again later" in (err.get("message") or "")
+
+
 def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
         bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
     try:
@@ -834,7 +865,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 logger.info("Creating Snapshot bdev")
 
                 @retry(
-                    retry=retry_if_result(lambda result: not result[0] and result[1] and result[1].get("code") == -32602),
+                    retry=retry_if_result(_snapshot_create_is_transient),
                     stop=stop_after_attempt(5),
                     wait=wait_fixed(2),
                     before_sleep=before_sleep_log(logger, lg.WARNING),
