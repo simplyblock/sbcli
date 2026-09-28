@@ -46,6 +46,28 @@ from utils.common_utils import sleep_n_sec
 class _LblkOutageMatrix(_LblkBase):
     """Every outage type once, on a different node each time."""
 
+    #: Let the rebalance finish before the next outage, unlike the base.
+    #:
+    #: This is the lane the default is wrong for. _LblkBase defaults it off so
+    #: that the rapid and no-gap families, whose whole subject is a migration
+    #: that never completes, are never quietly converted into paced runs. This
+    #: test is the opposite: OUTAGES below says "the cluster is fully healthy
+    #: again before the next", and it asks whether each outage type is survived
+    #: from a settled starting point, one type at a time.
+    #:
+    #: Without it the two questions blur. A failure in cycle 5 could be
+    #: node_network_isolation mishandled, or it could be that cycle 4's
+    #: migration was still running -- and at 450s a cycle against migrations
+    #: that have run for tens of minutes on this lab, that is not a remote
+    #: possibility. Waiting is what makes a cycle's result attributable to the
+    #: outage it names.
+    #:
+    #: k8s only for now. The wait reads StorageCluster.status.phase, which the
+    #: operator began publishing on 2026-09-28; docker has no equivalent and
+    #: would need the migration task list instead, so the docker matrix still
+    #: starts its next cycle as soon as the node is healthy.
+    WAIT_FOR_REBALANCE = True
+
     #: One outage per node, in the order a cluster is most likely to meet them:
     #: planned first, then progressively less polite. Each is applied to a
     #: different node so no node is asked to survive two in a row, and the
