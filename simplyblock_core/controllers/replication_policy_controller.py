@@ -594,6 +594,20 @@ def failover_group(group):
                         "fail-over", group.group_name, len(members))
             return [{"lvol_id": m.get_id(), "status": "already_primary"}
                     for m in members]
+        # Fail-back already completed. After _failback_group clones the peer's
+        # members HOME, this group's members ARE those home clones -- each the
+        # settled TARGET of the reverse relationship. Ramen re-drives PromoteGroup
+        # every reconcile, so the re-promote must report success. _failover_group_members
+        # resolves the fail-over generation SOURCE-keyed (via _active_relationship),
+        # so it reads these target-side members as pending, finds no generation that
+        # qualifies for them, and refuses with "mixed-generation fail-over" -- leaving
+        # the relocate stuck although the data is already home (live 2026-09-28).
+        if all(_failed_home_relationship(m.get_id()) is not None for m in members):
+            logger.info("Promote of consistency group %s is a no-op: its %d "
+                        "member(s) already failed home to this cluster",
+                        group.group_name, len(members))
+            return [{"lvol_id": m.get_id(), "status": "failed_over",
+                     "target_lvol_id": m.get_id()} for m in members]
         return _failover_group_members(policy, members,
                                        f"consistency group {group.group_name}")
     # Fail-BACK. This group is empty because its members were failed over and now
@@ -728,6 +742,22 @@ def _settled_relationship(lvol_id):
     if rep is not None and rep.state in (LVolReplication.STATE_FAILED_OVER,
                                          LVolReplication.STATE_CUTOVER_DONE):
         return rep
+    return None
+
+
+def _failed_home_relationship(lvol_id):
+    """The relationship in which *lvol_id* is the settled TARGET -- the clone that
+    was failed HOME to this cluster and is now the local primary -- or None.
+
+    The mirror of _settled_relationship, which is SOURCE-keyed (_active_relationship
+    follows the source end). A fail-back's members are the home-side clones, i.e.
+    the TARGET end of the reverse relationship, so the source-keyed check never sees
+    them as settled and a re-promote reads them as pending."""
+    for rep in reversed(db.get_lvol_replication_objects()):
+        if (rep.target_lvol and rep.target_lvol.get_id() == lvol_id
+                and rep.state in (LVolReplication.STATE_FAILED_OVER,
+                                  LVolReplication.STATE_CUTOVER_DONE)):
+            return rep
     return None
 
 

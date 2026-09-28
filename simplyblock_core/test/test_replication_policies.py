@@ -1058,6 +1058,51 @@ def test_group_demote_resolves_to_peer_primary_and_ships_home(monkeypatch):
         assert m.replication_demote_snapshot_id == f"DEMOTE_{src}"
 
 
+def test_group_promote_is_idempotent_once_members_failed_home(monkeypatch):
+    """Regression (2026-09-28): after _failback_group clones the peer's members
+    HOME, this group's members are the home-side clones -- the settled TARGET end of
+    the reverse relationship. Ramen re-drives PromoteGroup every reconcile, so the
+    re-promote must report success. The settled check is SOURCE-keyed
+    (_active_relationship), so without recognising the target side these members read
+    as pending, no fail-over generation qualifies, and the promote refuses with a
+    'mixed-generation fail-over' -- leaving the relocate stuck though the data is
+    already home on this cluster."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = "CG_HOME", "CL_SRC", "cg"
+    group.policy_id = policy_id
+    group.members = {"HC1": {"joined_seq": 1, "removed_seq": 0},
+                     "HC2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(group)
+
+    for hc in ("HC1", "HC2"):
+        lv = _lvol(hc, policy_id=policy_id)
+        lv.group_id = group.get_id()
+        lv.cluster_id = "CL_SRC"
+        lv.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+        db._lvols.append(lv)
+        rep = LVolReplication()
+        rep.source_lvol = _lvol(f"PEER_{hc}")       # the peer (current) clone on CL_TGT
+        rep.target_lvol = db.get_lvol_by_id(hc)     # the home clone == this member
+        rep.source_cluster_id = "CL_TGT"
+        rep.target_cluster_id = "CL_SRC"
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+
+    touched: list = []
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        lambda lvol_id, **kw: touched.append(lvol_id))
+    results = rpc.failover_group(group)
+    assert {r["status"] for r in results} == {"failed_over"}, results
+    assert {r["lvol_id"] for r in results} == {"HC1", "HC2"}, results
+    assert touched == [], "an already-home group must clone nothing on re-promote"
+
+
 def test_relationship_resolves_source_to_target_and_back(monkeypatch):
     source = _lvol("LV_SRC")
     target = _lvol("LV_TGT")
