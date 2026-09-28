@@ -238,10 +238,39 @@ def main():
                     except Exception:
                         pass
 
-        if check_for_dumps():
+        # Guarded, like every other post-test step in this loop. This one was
+        # not, and it is the only thing between a finished test and the counts
+        # below. On 2026-09-28 a 10h31m MassCreateRapidRestart_6k_3Snap_Docker
+        # run completed every phase -- 1500 lvols, 4500 snapshots, 1500 clones,
+        # 30 restart cycles, all deleted -- and then this raised
+        #
+        #   Exception: Tunnel established, but all usernames failed for target
+        #   192.168.10.201. Last error: AuthenticationException(...)
+        #
+        # which killed the process before "Number of Passed Cases" was ever
+        # printed. The run reported FAILURE with "(test counts not found in
+        # log)", and a passing result was discarded by its own core-dump check.
+        #
+        # A diagnostic that cannot reach a node is worth a warning, not the
+        # result. Treated as "no dumps found", because that is the honest
+        # reading: we did not look, so we cannot claim we found one -- and the
+        # message says so rather than letting a silent False imply a clean scan.
+        try:
+            dumps_found = check_for_dumps()
+        except Exception:
+            logger.warning("Could not check for core dumps; treating as none "
+                           "found. The test result above stands -- this step "
+                           "only decides whether LATER tests run.")
+            logger.warning(traceback.format_exc())
+            dumps_found = False
+        if dumps_found:
             logger.info("Found a core dump during test execution. "
                         "Cannot execute more tests as cluster is not stable. Exiting")
-            test_obj.collect_management_details()
+            try:
+                test_obj.collect_management_details()
+            except Exception:
+                logger.error("Error collecting management details after a dump")
+                logger.error(traceback.format_exc())
             break
 
     failed_cases = list(errors.keys())
