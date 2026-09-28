@@ -875,7 +875,7 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
     def test_repoints_old_host_to_new_host(self):
         cl = _cluster()
         db = FakeDB(cl, [], lvols={"p1": [_lvol("p1", ["p1", "old"])]})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="secondary")
         lvol = db.lvols["p1"][0]
         self.assertEqual(lvol.nodes, ["p1", "new"])
         lvol.write_to_db.assert_called_once()
@@ -883,15 +883,15 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
     def test_leaves_unrelated_hosts_untouched(self):
         cl = _cluster()
         db = FakeDB(cl, [], lvols={"p1": [_lvol("p1", ["p1", "old", "tert"])]})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="secondary")
         self.assertEqual(db.lvols["p1"][0].nodes, ["p1", "new", "tert"])
 
-    def test_no_op_when_old_host_not_present(self):
-        # e.g. a tertiary-only move must not touch an lvol with no tertiary.
+    def test_no_op_when_lvol_has_no_such_slot(self):
+        # A tertiary move must not touch an lvol with no tertiary path.
         cl = _cluster()
         lvol = _lvol("p1", ["p1", "sec"])
         db = FakeDB(cl, [], lvols={"p1": [lvol]})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="tertiary")
         self.assertEqual(lvol.nodes, ["p1", "sec"])
         lvol.write_to_db.assert_not_called()
 
@@ -899,7 +899,7 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
         cl = _cluster()
         lvols = [_lvol("p1", ["p1", "old"]) for _ in range(3)]
         db = FakeDB(cl, [], lvols={"p1": lvols})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="secondary")
         for lvol in lvols:
             self.assertEqual(lvol.nodes, ["p1", "new"])
 
@@ -908,9 +908,49 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
         cl = _cluster()
         lvol = _lvol("p1", ["p1", "new"])
         db = FakeDB(cl, [], lvols={"p1": [lvol]})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="secondary")
         self.assertEqual(lvol.nodes, ["p1", "new"])
         lvol.write_to_db.assert_not_called()
+
+    def test_chained_moves_on_one_primary_keep_both_paths(self):
+        # Live on 2026-09-28 (third CRD removal, 4 survivors): the planner
+        # moved p1's secondary K -> T and then its tertiary T -> X. A
+        # by-value rewrite turned [p1, K, T] into [p1, T, T] and then
+        # [p1, X, X]: the real secondary T vanished from the client's path
+        # list and X was listed twice. The rewrite is by role slot.
+        cl = _cluster()
+        lvol = _lvol("p1", ["p1", "K", "T"])
+        db = FakeDB(cl, [], lvols={"p1": [lvol]})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "K", "T", db, role="secondary")
+        self.assertEqual(lvol.nodes, ["p1", "T", "T"])
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "T", "X", db, role="tertiary")
+        self.assertEqual(lvol.nodes, ["p1", "T", "X"])
+
+    def test_the_reverse_chain_order_is_just_as_safe(self):
+        cl = _cluster()
+        lvol = _lvol("p1", ["p1", "K", "T"])
+        db = FakeDB(cl, [], lvols={"p1": [lvol]})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "T", "X", db, role="tertiary")
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "K", "T", db, role="secondary")
+        self.assertEqual(lvol.nodes, ["p1", "T", "X"])
+
+    def test_a_stale_slot_is_repaired_to_the_new_host(self):
+        # A list already corrupted by the old by-value rewrite: the slot
+        # names neither the host the role is leaving nor the one it lands
+        # on. The role's host IS new_host now, so the slot is set to it.
+        cl = _cluster()
+        lvol = _lvol("p1", ["p1", "X", "X"])
+        db = FakeDB(cl, [], lvols={"p1": [lvol]})
+        with self.assertLogs(storage_node_ops.logger, level="WARNING"):
+            storage_node_ops._update_lvol_nodes_for_replica_move("p1", "T", "N", db, role="secondary")
+        self.assertEqual(lvol.nodes, ["p1", "N", "X"])
+        lvol.write_to_db.assert_called_once()
+
+    def test_role_is_required(self):
+        cl = _cluster()
+        db = FakeDB(cl, [], lvols={"p1": [_lvol("p1", ["p1", "old"])]})
+        with self.assertRaises(TypeError):
+            storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------

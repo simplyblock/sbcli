@@ -271,15 +271,14 @@ class SpdkMoveExecutor(MoveExecutor):
         #    lvol monitor iterate lvol.nodes; leaving the donor listed makes
         #    lvol health fail forever against the torn-down stack — worse,
         #    the monitor keeps recreating empty subsystem shells (0
-        #    namespaces) on the donor after teardown deletes them. Swap
-        #    donor -> recipient now that the recipient's stack and per-lvol
-        #    subsystems exist, and before the donor teardown below.
-        for lvol in db.get_lvols_by_node_id(primary.get_id()):
-            nodes = list(lvol.nodes or [])
-            if move.from_node_id in nodes:
-                lvol.nodes = [move.to_node_id if n == move.from_node_id
-                              else n for n in nodes]
-                lvol.write_to_db()
+        #    namespaces) on the donor after teardown deletes them. Repoint
+        #    the slot to the recipient now that the recipient's stack and
+        #    per-lvol subsystems exist, and before the donor teardown below.
+        #    Shared with node removal's phase 3b: the rewrite is by role
+        #    slot, not by value, so a chain of two moves on one primary
+        #    cannot clobber the other role's path.
+        storage_node_ops._update_lvol_nodes_for_replica_move(
+            primary.get_id(), move.from_node_id, move.to_node_id, db, role=slot)
 
         # 3. Tear down the donor's stack for this LVS. The primary's
         #    pointer was already moved to the recipient in step 1, so we

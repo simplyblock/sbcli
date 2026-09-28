@@ -5675,7 +5675,12 @@ def _teardown_lvol_subsystems_on_vacated_peer(peer, primary, db_controller):
                 f"on vacated peer {peer.get_id()} failed: {e}")
 
 
-def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db_controller):
+# Index of each replica role in ``LVol.nodes`` (``[primary, secondary,
+# tertiary]``, as lvol_controller builds it at create time).
+_LVOL_PATH_SLOT = {"secondary": 1, "tertiary": 2}
+
+
+def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db_controller, *, role):
     """Re-point every LVol hosted on ``primary_id`` from ``old_host_id`` to
     ``new_host_id`` in its own ``nodes`` list, once that primary's
     secondary/tertiary replica has been relocated between the two hosts.
@@ -5692,14 +5697,36 @@ def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db
     ``nodes`` naming the just-removed node; the CSI initiator never
     reconnected to the actual new secondary.)
 
+    ``nodes`` is positional -- ``[primary, secondary, tertiary]``, the
+    order lvol_controller builds it in -- so the rewrite addresses the
+    slot of ``role``, never a value. A by-value swap (``old -> new``
+    wherever ``old`` appears) corrupts the list whenever one planned move
+    lands on the host another move of the same primary is about to leave:
+    secondary ``K -> T`` followed by tertiary ``T -> X`` left ``[P, X, X]``
+    -- the real secondary ``T`` gone from the client's path list and ``X``
+    listed twice (2026-09-28, third CRD removal on a 4-survivor cluster;
+    the node-level role fields were correct throughout, because they are
+    per role). Two roles of one primary may legitimately share a host for
+    the duration of such a chain, so ordering the moves cannot prevent it.
+
     Safe to call redundantly (e.g. on a retry after an earlier attempt
-    already applied it): each lvol is only rewritten if ``old_host_id`` is
-    still present in its ``nodes``."""
+    already applied it): an lvol whose slot already names ``new_host_id``
+    is left alone, and an lvol with no such slot (a tertiary move against
+    an lvol that has no tertiary path) is skipped. A slot naming neither
+    host is stale from an earlier by-value rewrite and is repaired -- the
+    role's host IS ``new_host_id`` now, whatever the list said before."""
+    slot = _LVOL_PATH_SLOT[role]
     for lvol in db_controller.get_lvols_by_node_id(primary_id):
         nodes = list(lvol.nodes or [])
-        if old_host_id in nodes:
-            lvol.nodes = [new_host_id if n == old_host_id else n for n in nodes]
-            lvol.write_to_db()
+        if len(nodes) <= slot or nodes[slot] == new_host_id:
+            continue
+        if nodes[slot] != old_host_id:
+            logger.warning(
+                f"lvol {lvol.get_id()} {role} path named {nodes[slot]} instead of "
+                f"{old_host_id}; repointing it to {new_host_id}")
+        nodes[slot] = new_host_id
+        lvol.nodes = nodes
+        lvol.write_to_db()
 
 
 def replica_role_holders(node_id, db_controller):
@@ -6008,7 +6035,7 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     # docstring. Unconditional (not gated on "did we just build it above")
     # so a retry that resumes past the build-skip branch still catches up
     # if an earlier attempt crashed between the build and this step.
-    _update_lvol_nodes_for_replica_move(primary_id, removed_node.get_id(), new_id, db_controller)
+    _update_lvol_nodes_for_replica_move(primary_id, removed_node.get_id(), new_id, db_controller, role=role)
 
     _clear_replica_backref(removed_node, backref)
     return True
@@ -6223,7 +6250,7 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
     # Unconditional (outside the "if not already built" guard above) so a
     # retry that skips straight past that guard still catches up if an
     # earlier attempt crashed between the build and this step.
-    _update_lvol_nodes_for_replica_move(occupant_primary_id, old_host_id, new_host_id, db_controller)
+    _update_lvol_nodes_for_replica_move(occupant_primary_id, old_host_id, new_host_id, db_controller, role=role)
 
     old_host = db_controller.get_storage_node_by_id(old_host_id)
     if getattr(old_host, backref) == occupant_primary_id:
