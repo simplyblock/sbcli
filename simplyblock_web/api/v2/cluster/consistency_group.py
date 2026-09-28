@@ -226,10 +226,10 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> d
                  'no members to fail over, or a fail-back could not resolve its peer group')
     failed = [m for m in members if m.get("status") == "failed"]
     if failed:
-        # Log the per-member detail server-side; return only a generic reason so an
-        # internal error/stack string never reaches the API caller.
-        logger.error("group fail-over incomplete for %s: %s",
-                     group.get_id(), [m.get("detail") for m in failed])
+        # Do not log per-member error detail strings because they may contain
+        # sensitive internal topology/state. Log only sanitized identifiers.
+        logger.error("group fail-over incomplete for %s: failed_members=%d lvol_ids=%s",
+                     group.get_id(), len(failed), [m.get("lvol_id") for m in failed])
         raise HTTPException(
             409, 'group fail-over incomplete; retry while replication converges')
     return {"members": members}
