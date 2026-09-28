@@ -1209,6 +1209,7 @@ class _LblkBase(TestClusterBase):
                     uuid, self.AUTO_RESTART_SEC, str(exc)[:120])
             self._restart_until_online(uuid, ip)
             self.sbcli_utils.wait_for_health_status(uuid, True, timeout=300)
+            self._wait_cluster_settled()
             self.logger.info("[lblk] %s recovered", uuid)
             return
         else:
@@ -1217,7 +1218,39 @@ class _LblkBase(TestClusterBase):
         self.sbcli_utils.wait_for_storage_node_status(uuid, "offline", timeout=600)
         self._restart_until_online(uuid, ip)
         self.sbcli_utils.wait_for_health_status(uuid, True, timeout=300)
+        self._wait_cluster_settled()
         self.logger.info("[lblk] %s recovered", uuid)
+
+    def _wait_cluster_settled(self):
+        """Let the cluster finish rebalancing before the next outage.
+
+        A healthy node is not a settled cluster. The operator holds every
+        StorageNodeOps while the cluster rebalances
+        (storagenodeops_controller.go:794), so starting the next cycle here
+        does not overlap two outages -- it parks the next operation in the
+        gate and spends its step deadline there.
+
+        k8s only, and only since the operator began publishing the phase: the
+        cluster reports status ``active`` throughout a rebalance, so nothing
+        the sbcli side returns distinguishes it from settled.
+        """
+        if not self.k8s_test:
+            return
+        try:
+            phase = self._ensure_k8s_utils().wait_cluster_settled()
+        except Exception as exc:                          # noqa: BLE001
+            # Never fail the run here. This is a courtesy wait before the next
+            # outage, and the outage itself reports properly if the cluster is
+            # not ready for it.
+            self.logger.warning(
+                "[lblk] could not read the cluster phase (%s); continuing "
+                "without waiting for it to settle", str(exc)[:120])
+            return
+        if phase == "Degraded":
+            self.logger.warning(
+                "[lblk] cluster is Degraded after recovery, not Online; the "
+                "next outage starts against a cluster that is already down a "
+                "node")
 
     #: Restart attempts before giving up on a node.
     RESTART_ATTEMPTS = 3

@@ -2918,6 +2918,62 @@ class K8sUtils:
         out, err = self._exec_kubectl(cmd)
         return out, err
 
+    def wait_cluster_settled(self, name: str = "simplyblock-cluster",
+                             timeout: int = 1800,
+                             namespace: str = None) -> str:
+        """Wait for the StorageCluster to leave Rebalancing and reach Online.
+
+        Node operations are held while the cluster rebalances --
+        storagenodeops_controller.go:794, "cluster %s is rebalancing; the
+        operation resumes when it settles" -- so firing the next outage before
+        the previous one has settled does not overlap the two, it parks the new
+        operation in the gate and spends its step deadline waiting.
+
+        Waiting on the sbcli status does not catch it. A rebalancing cluster
+        reports status ``active`` and only the CR's phase says Rebalancing, so
+        the check that reads status alone sees a settled cluster and proceeds.
+        Since 2026-09-28 the phase is published, which is what makes this
+        possible at all.
+
+        Degraded is not waited out. A node that is genuinely down keeps the
+        cluster degraded indefinitely, and blocking here would turn the
+        caller's own timeout into this one; the caller has already established
+        the node it broke is back before getting here. Rebalancing is the
+        transient this exists for.
+
+        Returns the last phase seen, so a caller can log what it settled into.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl -n {ns} get storagecluster {name} "
+                f"-o jsonpath='{{.status.phase}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            phase = (out or "").strip()
+            if phase and phase != last:
+                self.logger.info(f"[cluster] phase: {phase}")
+                last = phase
+            if phase in ("Online", "Degraded"):
+                return phase
+            if not phase:
+                # No phase at all is an older operator that never publishes
+                # one. Returning beats blocking for the full timeout on a
+                # field that is never going to appear.
+                self.logger.info(
+                    "[cluster] no status.phase on this build; not waiting for "
+                    "the cluster to settle")
+                return ""
+            time.sleep(10)
+
+        self.logger.warning(
+            f"[cluster] still {last or 'unknown'} after {timeout}s; continuing. "
+            f"The next node operation will sit in the operator's cluster gate "
+            f"until it settles.")
+        return last
+
     def wait_spdk_pods_ready(self, expected_count: int, timeout: int = 600,
                               namespace: str = None) -> int:
         """Wait until at least *expected_count* snode-spdk pods are Running.
