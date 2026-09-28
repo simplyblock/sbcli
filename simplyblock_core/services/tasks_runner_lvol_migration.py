@@ -1774,8 +1774,21 @@ def _take_intermediate_snapshot(migration):
     """
     Take an additional "shrink" snapshot from the live lvol on the source node
     to reduce the delta that must be frozen during PHASE_LVOL_MIGRATE.
+
+    The name carries a fresh vuid on every call, not just the round number:
+    on failure this function jumps ``intermediate_snap_rounds`` straight to
+    max (below) without advancing it further, so the caller's next retry
+    re-enters with the SAME round. A round-only name would be replayed
+    identically on every such retry and collide with the previous attempt's
+    own SPDK-side leftover (a "not leader" rejection can still partially
+    register the bdev) -- live trace 2026-09-28, node-removal run: group
+    worker 38e416d9 retried round 3 four times under the name
+    "_mig_38e416d9_r3", each retry failing faster than the last as it
+    re-collided with itself, until the group gave up. The vuid suffix makes
+    every attempt's name unique so a retry only ever meets a genuinely fresh
+    name, regardless of how many times the round has been retried.
     """
-    snap_name = f"_mig_{migration.uuid[:8]}_r{migration.intermediate_snap_rounds}"
+    snap_name = f"_mig_{migration.uuid[:8]}_r{migration.intermediate_snap_rounds}_{db.next_vuid()}"
     logger.info(
         f"[IO-FREEZE] {_now_ms()} intermediate snapshot starting: "
         f"lvol={migration.lvol_id} round={migration.intermediate_snap_rounds} name={snap_name}")
