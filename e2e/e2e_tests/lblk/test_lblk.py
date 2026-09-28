@@ -1250,11 +1250,59 @@ class _LblkBase(TestClusterBase):
         cluster reports status ``active`` throughout a rebalance, so nothing
         the sbcli side returns distinguishes it from settled.
         """
-        if not self.k8s_test:
-            return
         if not (self.WAIT_FOR_REBALANCE
                 or os.environ.get("LBLK_WAIT_REBALANCE", "") in ("1", "true", "yes")):
             return
+
+        if not self.k8s_test:
+            # Docker has no StorageCluster CR to read a phase from, but the
+            # same question is answerable from the task list the control plane
+            # already publishes -- which is what the docker lanes have always
+            # used. Returning early here instead was leaving
+            # LblkOutageMatrixDocker starting its next cycle mid-migration, the
+            # bug this flag exists to fix, on the one platform where it had
+            # already been observed: the rapid run of 2026-09-25 went into its
+            # next outage with 40 of 50 sub-tasks outstanding.
+            # All three migration kinds, not just wait_migration_tasks_complete's.
+            # That helper filters to failed_device_migration, which is right for
+            # its callers in device_failure_migration.py -- they inject a device
+            # failure and that is the task it produces. A node coming back from
+            # an outage produces device_migration and new_device_migration
+            # instead (job_schedule.py:17-19), so reusing that helper here would
+            # have returned immediately on exactly the tasks this needs to wait
+            # for, and read as a wait that was working.
+            migrating = ("device_migration", "failed_device_migration",
+                         "new_device_migration")
+            settled = ("done", "cancelled", "error")
+            deadline = time.time() + 1800
+            last = -1
+            while time.time() < deadline:
+                try:
+                    tasks = self.sbcli_utils.list_migration_tasks(
+                        self.cluster_id).get("results", [])
+                except Exception as exc:                  # noqa: BLE001
+                    self.logger.warning(
+                        "[lblk] could not read the task list (%s); continuing "
+                        "without waiting for migration", str(exc)[:120])
+                    return
+                active = [t for t in tasks
+                          if t.get("function_name") in migrating
+                          and t.get("status") not in settled]
+                if not active:
+                    if last > 0:
+                        self.logger.info("[lblk] migration settled")
+                    return
+                if len(active) != last:
+                    self.logger.info(
+                        "[lblk] waiting for %d migration task(s)", len(active))
+                    last = len(active)
+                sleep_n_sec(10)
+            self.logger.warning(
+                "[lblk] %d migration task(s) still running after 1800s; "
+                "continuing. The next outage starts against a cluster that is "
+                "still moving data", last)
+            return
+
         try:
             phase = self._ensure_k8s_utils().wait_cluster_settled()
         except Exception as exc:                          # noqa: BLE001

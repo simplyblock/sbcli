@@ -62,10 +62,10 @@ class _LblkOutageMatrix(_LblkBase):
     #: possibility. Waiting is what makes a cycle's result attributable to the
     #: outage it names.
     #:
-    #: k8s only for now. The wait reads StorageCluster.status.phase, which the
-    #: operator began publishing on 2026-09-28; docker has no equivalent and
-    #: would need the migration task list instead, so the docker matrix still
-    #: starts its next cycle as soon as the node is healthy.
+    #: Both platforms, by different readings of the same thing: k8s reads
+    #: StorageCluster.status.phase, which the operator began publishing on
+    #: 2026-09-28, and docker reads the control plane's migration task list,
+    #: which it has always had.
     WAIT_FOR_REBALANCE = True
 
     #: One outage per node, in the order a cluster is most likely to meet them:
