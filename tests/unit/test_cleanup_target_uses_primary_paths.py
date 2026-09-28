@@ -40,8 +40,8 @@ class TestEveryBuildPathsCallNamesThePrimary(unittest.TestCase):
 
     def test_cleanup_target_receives_the_primary_from_both_dispatchers(self):
         src = inspect.getsource(solo)
-        calls = re.findall(r"_handle_cleanup_target\((?:[^()]|\([^()]*\))*\)", src)
-        calls = [c for c in calls if "def " not in c]
+        calls = [m.group(0) for m in re.finditer(r"_handle_cleanup_target\((?:[^()]|\([^()]*\))*\)", src)
+                 if not src[max(0, m.start() - 4):m.start()].endswith("def ")]
         self.assertEqual(len(calls), 2, calls)
         for c in calls:
             self.assertIn("primary_src_node=primary_src_node", c, c)
