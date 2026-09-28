@@ -176,5 +176,60 @@ class TestRemovedFailedIsRedrivable(unittest.TestCase):
                             codes[StorageNode.STATUS_REMOVED])
 
 
+
+class TestCeilingIsWired(unittest.TestCase):
+    """The runner enforces `0 < max_retry <= retry`, so a task queued with
+    max_retry=-1 has no ceiling at all. That is how it was queued while the
+    ceiling above was written and tested: the test came across the backport,
+    the wiring did not (2026-09-28 review)."""
+
+    def test_the_removal_task_is_queued_with_the_ceiling(self):
+        from simplyblock_core.controllers import tasks_controller
+        with patch.object(tasks_controller, "_add_task", return_value="t1") as add:
+            tasks_controller.add_node_removal_task("c1", "n1", {"force_remove": False})
+        self.assertEqual(add.call_args.kwargs.get("max_retry"), constants.NODE_REMOVAL_MAX_RETRY)
+        self.assertGreater(constants.NODE_REMOVAL_MAX_RETRY, 0)
+
+
+class TestInActivationStampIsForwardOnly(unittest.TestCase):
+    """While the cluster activates, the runner parks the task and marks the
+    node as pending removal -- but only a node that has not started leaving.
+    Stamping unconditionally rewound a node past pending_removal, up to and
+    including one already REMOVED, into the first step of a removal the
+    orchestrator then re-ran on a finalized node (2026-09-28 review)."""
+
+    def _park(self, node_status):
+        task = JobSchedule()
+        task.uuid, task.cluster_id, task.node_id = "t1", "c1", "n1"
+        task.function_name = JobSchedule.FN_NODE_REMOVAL
+        task.status = JobSchedule.STATUS_RUNNING
+        task.retry, task.max_retry, task.function_params, task.canceled = 0, 100, {}, False
+        cluster = MagicMock()
+        cluster.status = "in_activation"
+        node = MagicMock()
+        node.status = node_status
+        db = MagicMock()
+        db.get_cluster_by_id.return_value = cluster
+        db.get_storage_node_by_id.return_value = node
+        with patch.object(runner, "db", db), \
+             patch.object(runner.storage_node_ops, "set_node_status") as stamp:
+            handled = runner.process_task(task)
+        return handled, task, stamp
+
+    def test_a_node_not_yet_departing_is_marked_pending(self):
+        handled, task, stamp = self._park(StorageNode.STATUS_ONLINE)
+        self.assertFalse(handled)
+        self.assertEqual(task.status, JobSchedule.STATUS_SUSPENDED)
+        stamp.assert_called_once_with("n1", StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
+
+    def test_a_node_already_on_its_way_out_keeps_its_place(self):
+        for status in (StorageNode.STATUS_MIGRATING_DEVICES, StorageNode.STATUS_MIGRATING_LVOLS,
+                       StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_REMOVED):
+            with self.subTest(status=status):
+                handled, task, stamp = self._park(status)
+                self.assertFalse(handled)
+                self.assertEqual(task.status, JobSchedule.STATUS_SUSPENDED)
+                stamp.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

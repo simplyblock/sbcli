@@ -34,7 +34,10 @@ def process_task(task):
         task.function_result = "cluster is in_activation, waiting"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
-        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
+        # Forward only: a node past pending_removal keeps its place while the
+        # activation runs, instead of being rewound to the start.
+        storage_node_ops.advance_removal_status(
+            task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove", db_controller=db)
         return False
 
     if task.status != JobSchedule.STATUS_RUNNING:

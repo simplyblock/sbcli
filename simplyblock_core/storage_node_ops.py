@@ -4237,6 +4237,31 @@ REMOVABLE_STATUSES = (
 ) + tuple(s for s in StorageNode.DEPARTING_STATUSES if s != StorageNode.STATUS_REMOVED)
 
 
+def advance_removal_status(node_id, status, caused_by="remove", db_controller=None):
+    """Stamp *status* on the node only if that moves it forward along
+    StorageNode.REMOVAL_STATUS_ORDER.
+
+    The orchestrator stamps each of its phases as it enters them, and it
+    re-enters on every retry. Stamping unconditionally walked a node backwards
+    -- in_removal -> migrating_devices -> migrating_lvols -> in_removal on each
+    10s tick -- and moved a node the Kubernetes drain had already brought to
+    migrating_lvols back to migrating_devices on the first pass (2026-09-28
+    review). Statuses outside the order count as before its start, so an
+    ONLINE node, or a REMOVED_FAILED one being re-driven, is stamped as before.
+
+    Returns True if a stamp was written.
+    """
+    db_controller = db_controller or DBController()
+    node = db_controller.get_storage_node_by_id(node_id)
+    order = StorageNode.REMOVAL_STATUS_ORDER
+    if status not in order:
+        raise ValueError(f"{status!r} is not a removal status")
+    if node.status in order and order.index(node.status) >= order.index(status):
+        return False
+    set_node_status(node_id, status, caused_by=caused_by)
+    return True
+
+
 def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     """Start the online removal of a storage node from its cluster.
 
@@ -4956,6 +4981,10 @@ def _drain_lvols_from_node(snode, cursor, db_controller):
         if result == "done":
             # The volume should have left the node; if the enumeration above
             # still lists it the next pass will simply start a fresh migration.
+            # That needs the finished migration's id cleared, or every later
+            # pass re-reads the same DONE record, counts the unit outstanding
+            # and never starts anything (2026-09-28 review).
+            state["migration_id"] = None
             outstanding += 1
             continue
 
@@ -5235,9 +5264,8 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
             # down by now. Only the DEVICE half runs here -- the JM half stays
             # at phase 2, after 3a, for the reason in
             # _decommission_node_devices' docstring.
-            if snode.status != StorageNode.STATUS_MIGRATING_DEVICES:
-                set_node_status(node_id, StorageNode.STATUS_MIGRATING_DEVICES,
-                                caused_by="remove")
+            advance_removal_status(node_id, StorageNode.STATUS_MIGRATING_DEVICES,
+                                   caused_by="remove", db_controller=db_controller)
             cursor.enter("migrate_devices",
                          f"[REMOVAL] {node_id}: migrate devices — fail and rebuild onto peers")
             if not _fail_and_migrate_node_devices(snode):
@@ -5254,9 +5282,8 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
             # share MIGRATING_LVOLS, which meant a removal stuck rebuilding
             # devices and one stuck migrating volumes were indistinguishable --
             # and those fail for entirely different reasons.
-            if snode.status != StorageNode.STATUS_MIGRATING_LVOLS:
-                set_node_status(node_id, StorageNode.STATUS_MIGRATING_LVOLS,
-                                caused_by="remove")
+            advance_removal_status(node_id, StorageNode.STATUS_MIGRATING_LVOLS,
+                                   caused_by="remove", db_controller=db_controller)
             cursor.enter("drain_lvols", f"[REMOVAL] {node_id}: drain — migrate volumes off the node")
             if not _drain_lvols_from_node(snode, cursor, db_controller):
                 return False
@@ -5269,8 +5296,8 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
                 cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
                 shrink_marked = True
 
-            if snode.status != StorageNode.STATUS_IN_REMOVAL:
-                set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
+            advance_removal_status(node_id, StorageNode.STATUS_IN_REMOVAL,
+                                   caused_by="remove", db_controller=db_controller)
 
             # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
             # node's own primary LVS, on the peers that host them (Case A).

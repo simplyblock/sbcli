@@ -119,6 +119,22 @@ class TestDrainLoop(unittest.TestCase):
         self.assertTrue(ret)
         mc.create_migration.assert_not_called()
 
+    def test_a_finished_migration_is_forgotten_so_the_next_pass_can_start_a_fresh_one(self):
+        """A unit whose migration is DONE but whose volume the node still
+        enumerates is re-migrated on the next pass -- which needs the finished
+        id cleared. The done branch counted the unit outstanding and returned
+        without clearing it, so every later pass re-read the same DONE record
+        and never started anything (2026-09-28 review)."""
+        lvols = [_lvol("a", nqn="nqn:one")]
+        self._drain(lvols)  # first pass: migration created, id recorded
+        state = next(iter(self.cursor.data["drain"].values()))
+        self.assertEqual(state.get("migration_id"), "mig-1")
+
+        ret, _ = self._drain(lvols, migration_status=LVolMigration.STATUS_DONE)
+        self.assertFalse(ret, "the volume is still on the node, so the drain is not finished")
+        self.assertIsNone(state.get("migration_id"),
+                          "the DONE migration was kept, so the next pass polls it instead of starting anew")
+
     def test_starts_a_single_migration_for_a_lone_volume(self):
         ret, mc = self._drain([_lvol("a", nqn="nqn:one")])
         self.assertFalse(ret, "drain is not finished the moment it is started")

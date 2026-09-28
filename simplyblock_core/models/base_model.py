@@ -467,6 +467,21 @@ class BaseNodeObject(BaseModel):
         STATUS_REMOVED_FAILED,
     )
 
+    #: The removal's own statuses, in the order a removal walks them. It only
+    #: ever moves forward along this: a node at MIGRATING_LVOLS is never
+    #: stamped MIGRATING_DEVICES again, however many times the orchestrator
+    #: re-enters, and a node the drain hands over mid-way keeps its place.
+    #: Every status not listed here -- ONLINE, SUSPENDED, OFFLINE, and
+    #: REMOVED_FAILED, which a re-driven removal starts over from -- counts as
+    #: before the start. See storage_node_ops.advance_removal_status.
+    REMOVAL_STATUS_ORDER: ClassVar[tuple] = (
+        STATUS_PENDING_REMOVAL,
+        STATUS_MIGRATING_DEVICES,
+        STATUS_MIGRATING_LVOLS,
+        STATUS_IN_REMOVAL,
+        STATUS_REMOVED,
+    )
+
     #: A node that is on its way out but whose SPDK is still up and serving.
     #:
     #: The removal flow leaves a node serving for its whole drain -- the device

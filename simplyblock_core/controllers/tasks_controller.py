@@ -809,11 +809,17 @@ def add_node_add_task(cluster_id, function_params):
 
 
 def add_node_removal_task(cluster_id, node_id, function_params=None):
-    # max_retry=-1: the removal runner drives a multi-step, possibly multi-hour
-    # orchestration (shutdown -> LVS rewire -> device fail+migrate). Migration
-    # waits legitimately suspend-and-retry many times; do not cap retries.
+    # Bounded, at the ceiling the runner enforces (NODE_REMOVAL_MAX_RETRY, one
+    # retry per TASK_EXEC_INTERVAL_SEC across NODE_REMOVAL_MAX_WAIT_SEC). The
+    # orchestration is multi-step and its migration waits legitimately
+    # suspend-and-retry many times, which is why the ceiling is hours, not
+    # minutes -- but it has to exist: this was queued with max_retry=-1 while
+    # the runner's check reads `0 < max_retry <= retry`, so the ceiling the
+    # runner and its test both described could never fire, and a removal that
+    # could not finish retried every 10s for ever (2026-09-28 review).
     return _add_task(JobSchedule.FN_NODE_REMOVAL, cluster_id, node_id, "",
-                     function_params=function_params or {}, max_retry=-1)
+                     function_params=function_params or {},
+                     max_retry=constants.NODE_REMOVAL_MAX_RETRY)
 
 
 def get_active_node_removal_task(cluster_id, node_id):

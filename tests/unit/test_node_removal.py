@@ -2678,6 +2678,52 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
             "3b must run after 3a -- it relies on 3a having freed this node's "
             f"own replica slots, got {order}")
 
+    def _stamps(self, start_status):
+        """The removal statuses the orchestrator writes for a node that enters
+        it in *start_status*, in order. FakeDB never changes the node's status
+        (set_node_status is mocked), so every stamp decision is made against
+        the entry status -- exactly the re-entry case."""
+        cl = _cluster()
+        node = _node("n1", status=start_status)
+        db = FakeDB(cl, [node])
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["_decommission_node_devices"].return_value = True
+            mocks["_relocate_replicas_hosted_on"].return_value = True
+            storage_node_ops.node_removal_orchestrate("n1")
+        return [c.args[1] for c in mocks["set_node_status"].call_args_list
+                if c.args[1] in StorageNode.REMOVAL_STATUS_ORDER]
+
+    def test_a_removal_entered_from_online_walks_the_machine_forward(self):
+        stamps = self._stamps(StorageNode.STATUS_ONLINE)
+        order = StorageNode.REMOVAL_STATUS_ORDER
+        idx = [order.index(st) for st in stamps]
+        self.assertEqual(idx, sorted(idx), f"statuses were stamped out of order: {stamps}")
+        self.assertIn(StorageNode.STATUS_MIGRATING_DEVICES, stamps)
+        self.assertIn(StorageNode.STATUS_IN_REMOVAL, stamps)
+
+    def test_re_entry_after_in_removal_does_not_rewind_the_node(self):
+        """Every retry pass re-enters the orchestrator from the top. Each phase
+        stamped its status whenever the node was not already in it, so a pass
+        after in_removal wrote migrating_devices, then migrating_lvols, then
+        in_removal again -- three status events and three peer broadcasts per
+        10s tick, and a status that read as 'still migrating' for a node whose
+        migration finished long ago (2026-09-28 review)."""
+        stamps = self._stamps(StorageNode.STATUS_IN_REMOVAL)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_DEVICES, stamps)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_LVOLS, stamps)
+        self.assertNotIn(StorageNode.STATUS_IN_REMOVAL, stamps,
+                         "in_removal re-stamped on a node already in it")
+
+    def test_a_node_the_drain_handed_over_keeps_its_place(self):
+        """The Kubernetes drain hands the node over at migrating_lvols: shut
+        down, devices rebuilt, volumes moved. The first pass must not stamp it
+        back to migrating_devices."""
+        stamps = self._stamps(StorageNode.STATUS_MIGRATING_LVOLS)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_DEVICES, stamps)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_LVOLS, stamps)
+        self.assertIn(StorageNode.STATUS_IN_REMOVAL, stamps)
+
     def test_phase3b_runs_even_when_this_node_hosts_nothing(self):
         """3b also re-solves the whole post-removal placement, repairing
         diversity violations elsewhere in the cluster. A node that happens to
@@ -2804,6 +2850,54 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
 # entries for a node with no SPDK process left to back them (2026-08-13,
 # found live after a removal).
 # ---------------------------------------------------------------------------
+
+
+class TestAdvanceRemovalStatus(unittest.TestCase):
+    """The one owner of 'the machine only moves forward'."""
+
+    def _advance(self, current, target):
+        node = MagicMock()
+        node.status = current
+        db = MagicMock()
+        db.get_storage_node_by_id.return_value = node
+        with patch.object(storage_node_ops, "set_node_status") as stamp:
+            wrote = storage_node_ops.advance_removal_status("n1", target, db_controller=db)
+        return wrote, stamp
+
+    def test_moves_forward(self):
+        wrote, stamp = self._advance(StorageNode.STATUS_MIGRATING_DEVICES,
+                                     StorageNode.STATUS_MIGRATING_LVOLS)
+        self.assertTrue(wrote)
+        stamp.assert_called_once_with("n1", StorageNode.STATUS_MIGRATING_LVOLS, caused_by="remove")
+
+    def test_never_moves_backward_or_sideways(self):
+        for current, target in ((StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_MIGRATING_DEVICES),
+                                (StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.STATUS_MIGRATING_LVOLS),
+                                (StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL)):
+            with self.subTest(current=current, target=target):
+                wrote, stamp = self._advance(current, target)
+                self.assertFalse(wrote)
+                stamp.assert_not_called()
+
+    def test_statuses_outside_the_machine_count_as_before_its_start(self):
+        """ONLINE is the ordinary entry; REMOVED_FAILED is a re-driven removal,
+        which legitimately starts over and must be allowed to."""
+        for current in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_OFFLINE,
+                        StorageNode.STATUS_REMOVED_FAILED):
+            with self.subTest(current=current):
+                wrote, _ = self._advance(current, StorageNode.STATUS_MIGRATING_DEVICES)
+                self.assertTrue(wrote)
+
+    def test_only_removal_statuses_can_be_advanced_to(self):
+        with self.assertRaises(ValueError):
+            self._advance(StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
+
+    def test_the_order_is_the_machine(self):
+        self.assertEqual(StorageNode.REMOVAL_STATUS_ORDER, (
+            StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_MIGRATING_DEVICES,
+            StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.STATUS_IN_REMOVAL,
+            StorageNode.STATUS_REMOVED))
+
 
 class TestFinalizeNodeRemovalClearsLvstorePorts(unittest.TestCase):
 
