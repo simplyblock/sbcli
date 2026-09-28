@@ -1098,6 +1098,21 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
     return True, ""
 
 
+def replica_is_departing(node) -> bool:
+    """The one rule for "this replica is leaving the cluster and gets no
+    target-side work": its status is one of DEPARTING_STATUSES.
+
+    That set is REMOVAL_SHUT_DOWN_STATUSES plus PENDING_REMOVAL. A node at
+    PENDING_REMOVAL still serves, but its shutdown is seconds away: anything
+    registered or created on it now is torn down with it and has to be
+    redone. create_migration filtered with the shut-down set only, while the
+    runner's _get_target_secondary_node/_get_target_tertiary_node skipped the
+    whole departing set, so the same replica could be given a subsystem and a
+    registration by the create and then be skipped by every runner step. Both
+    ask here now."""
+    return node is not None and node.status in StorageNode.DEPARTING_STATUSES
+
+
 def _target_replica_for_registration(replica_id, role, composite):
     """The target's ``role`` replica to pre-register ``composite`` on, or
     ``None`` when that replica is a node under removal.
@@ -1112,7 +1127,7 @@ def _target_replica_for_registration(replica_id, role, composite):
     The subsystem step below already drops such replicas; this is the same
     rule for the registration step."""
     node = db.get_storage_node_by_id(replica_id)
-    if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+    if replica_is_departing(node):
         logger.info(
             f"create_migration: target {role} {node.get_id()[:8]} is {node.status} "
             f"(being removed); skipping registration of {composite} there")
@@ -1341,7 +1356,7 @@ def create_migration(lvol_id, target_node_id,
     def _usable_replica(node):
         if node is None:
             return None
-        if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        if replica_is_departing(node):
             logger.info(
                 f"create_migration: skipping target replica {node.get_id()[:8]} "
                 f"(status={node.status}); it is leaving the cluster")

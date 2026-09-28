@@ -499,7 +499,7 @@ def _get_target_secondary_node(tgt_node, src_node_id):
         return sec, None
     if sec.status == StorageNode.STATUS_OFFLINE:
         return None, None
-    if sec.status in StorageNode.DEPARTING_STATUSES:
+    if migration_controller.replica_is_departing(sec):
         # Treated like OFFLINE, not like an unknown state. A node the removal
         # has shut down cannot register anything and is not coming back, so
         # blocking the migration on it blocks it for ever -- and because this
@@ -548,7 +548,7 @@ def _get_target_tertiary_node(tgt_node, src_node_id):
         return ter, None
     if ter.status == StorageNode.STATUS_OFFLINE:
         return None, None
-    if ter.status in StorageNode.DEPARTING_STATUSES:
+    if migration_controller.replica_is_departing(ter):
         # Same reasoning as the secondary above.
         logger.info(
             f"target tertiary {ter.get_id()[:8]} is {ter.status} (leaving the "

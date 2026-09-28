@@ -32,11 +32,46 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE):
 
 
 def _usable(status):
-    """Exercise the replica filter the way create_migration does."""
+    """Exercise the replica filter the way create_migration does: through the
+    one shared rule, mc.replica_is_departing."""
     node = _node("replica", status)
-    if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+    if mc.replica_is_departing(node):
         return None
     return node
+
+
+class TestOneRuleForBothSides(unittest.TestCase):
+    """create_migration used REMOVAL_SHUT_DOWN_STATUSES, the runner's target
+    replica lookups DEPARTING_STATUSES: the same PENDING_REMOVAL replica could
+    be given a subsystem by the create and then skipped by every runner step.
+    Both ask mc.replica_is_departing now, and it means DEPARTING_STATUSES."""
+
+    def test_the_rule_is_the_departing_set(self):
+        for status in StorageNode._STATUS_CODE_MAP:
+            self.assertEqual(mc.replica_is_departing(_node("r", status)),
+                             status in StorageNode.DEPARTING_STATUSES, status)
+        for status in StorageNode.DEPARTING_STATUSES:
+            self.assertTrue(mc.replica_is_departing(_node("r", status)), status)
+        for status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN,
+                       StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_RESTARTING):
+            self.assertFalse(mc.replica_is_departing(_node("r", status)), status)
+        self.assertFalse(mc.replica_is_departing(None))
+
+    def test_pending_removal_is_departing_for_the_create_too(self):
+        """Its shutdown is seconds away; whatever the create put on it would
+        go down with it and be redone."""
+        self.assertIsNone(_usable(StorageNode.STATUS_PENDING_REMOVAL))
+
+    def test_the_runner_lookups_use_the_same_rule(self):
+        import inspect
+        import simplyblock_core.services.tasks_runner_lvol_migration as runner
+        for fn in (runner._get_target_secondary_node, runner._get_target_tertiary_node):
+            body = inspect.getsource(fn)
+            self.assertIn("migration_controller.replica_is_departing(", body, fn.__name__)
+            self.assertNotIn("DEPARTING_STATUSES:", body.split('"""')[-1], fn.__name__)
+        for fn in (mc._target_replica_for_registration,):
+            self.assertIn("replica_is_departing(", inspect.getsource(fn))
+        self.assertIn("if replica_is_departing(node):", inspect.getsource(mc.create_migration))
 
 
 class TestRegistrationSkipsADepartingReplica(unittest.TestCase):
