@@ -1096,10 +1096,40 @@ class _LblkBase(TestClusterBase):
                     # so the wait runs its full count and then fails the run.
                     # That is what ended the k8s run of 2026-09-23 at cycle 9,
                     # 52 minutes after a reboot that had already recovered.
-                    self.sbcli_utils.wait_for_storage_node_status(
-                        uuid, "online", timeout=300)
+                    # A rebooted host does not always bring its storage node
+                    # back by itself. Cordoning the worker makes the operator
+                    # raise a HostMaintenance StorageNodeOps, and its Releasing
+                    # step ends in Workload.PodGone -- it waits for the SPDK pod
+                    # to disappear. Rebooting the host underneath that is a race
+                    # the operator does not have to lose gracefully: on
+                    # 2026-09-28 the step ran out its deadline
+                    #
+                    #   simplyblock-cluster-worker-2-0-maintenance
+                    #   HostMaintenance  Failed  step Releasing outlived its deadline
+                    #
+                    # and the operator is explicit about what that leaves behind:
+                    # "an expiry fails the operation and leaves the node offline,
+                    # needing a Restart to recover, so the deadline is a
+                    # detection mechanism rather than a recovery one"
+                    # (hostmaintenance.go:235-240).
+                    #
+                    # So this waits, and restarts if waiting was not enough,
+                    # rather than spending 300s establishing that nothing is
+                    # going to happen on its own. _restart_until_online is the
+                    # same recovery every other outage type in this method uses.
+                    try:
+                        self.sbcli_utils.wait_for_storage_node_status(
+                            uuid, "online", timeout=300)
+                    except Exception:
+                        self.logger.warning(
+                            "[lblk] %s did not come back online on its own "
+                            "after the reboot of %s; restarting it. Check for "
+                            "a failed HostMaintenance op: kubectl -n "
+                            "simplyblock get storagenodeops", uuid, ip)
+                        self._restart_until_online(uuid, ip)
                     self.sbcli_utils.wait_for_health_status(uuid, True,
                                                             timeout=300)
+                    self._wait_cluster_settled()
                     self.logger.info("[lblk] %s recovered", uuid)
                     return
                 else:
