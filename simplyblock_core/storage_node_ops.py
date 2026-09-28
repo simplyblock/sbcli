@@ -5529,7 +5529,7 @@ def _verify_replica_stacks(cluster_id, db_controller, context=""):
     def stack_present(node, lvstore):
         try:
             return bool(node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore))
-        except Exception as e:
+        except RPCException as e:
             logger.warning(
                 f"[REMOVAL] could not probe {lvstore} on {node.get_id()} "
                 f"({e}); not counting it as missing")
@@ -6391,7 +6391,7 @@ def _release_jm_from_jc(node, name_old) -> bool:
             f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) failed ({re.code}): "
             f"{re}; leaving the bdev in place")
         return False
-    except Exception as e:
+    except RPCException as e:
         logger.error(
             f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) raised: {e}; "
             f"leaving the bdev in place")
@@ -6415,7 +6415,7 @@ def _drop_superseded_jm_bdev(node, name_old, removed_jm_id) -> None:
     controller = name_old.removesuffix("n1")
     try:
         node.rpc_client().bdev_nvme_detach_controller(controller)
-    except Exception as de:
+    except RPCException as de:
         logger.warning(
             f"Failed to detach superseded controller {controller} on {node.get_id()}: {de}")
     node.remote_jm_devices = [

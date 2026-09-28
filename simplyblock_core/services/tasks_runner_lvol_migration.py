@@ -82,8 +82,10 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
+import logging
 import random
 import time
+from tenacity import RetryError, Retrying, before_sleep_log, retry_if_result, stop_after_attempt, wait_fixed
 from typing import Optional
 
 from simplyblock_core import db_controller as db_mod, utils, constants
@@ -1771,43 +1773,23 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
                 f"Started intermediate snap transfer: {snap_uuid} "
                 f"({src_composite} -> {tgt_composite})")
 
-            # Busy-poll: spin at _INTERMEDIATE_POLL_INTERVAL_S until done or timeout
-            for _ in range(_INTERMEDIATE_POLL_MAX):
-                result = src_rpc.bdev_lvol_transfer_stat(src_composite)
-                if result is None:
-                    try:
-                        _delete_bdev_blocking(tgt_composite, tgt_rpc,
-                                              secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
-                                              all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                                              lvs_name=tgt_node.lvstore)
-                    except Exception as e:
-                        logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
-                    return False, True, (
-                        f"Transfer stat failed for intermediate snap {snap_uuid}")
-                state = result.get('transfer_state', 'No process')
-                if state == 'Done':
-                    break
-                if state in ('Failed', 'No process'):
-                    try:
-                        _delete_bdev_blocking(tgt_composite, tgt_rpc,
-                                              secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
-                                              all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                                              lvs_name=tgt_node.lvstore)
-                    except Exception as e:
-                        logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
-                    return False, True, (
-                        f"Intermediate snap transfer {state} for {snap_uuid}")
-                time.sleep(_INTERMEDIATE_POLL_INTERVAL_S)
-            else:
+            state = _poll_intermediate_transfer(src_rpc, src_composite)
+            if state != 'Done':
                 try:
                     _delete_bdev_blocking(tgt_composite, tgt_rpc,
                                           secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
                                           all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
                                           lvs_name=tgt_node.lvstore)
-                except Exception as e:
+                except (RPCException, RuntimeError) as e:
                     logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
+                if state == _TRANSFER_STAT_FAILED:
+                    return False, True, (
+                        f"Transfer stat failed for intermediate snap {snap_uuid}")
+                if state == _TRANSFER_TIMED_OUT:
+                    return False, True, (
+                        f"Intermediate snap transfer timed out for {snap_uuid}")
                 return False, True, (
-                    f"Intermediate snap transfer timed out for {snap_uuid}")
+                    f"Intermediate snap transfer {state} for {snap_uuid}")
 
         ok, err = _post_process_snap(
             snap, tgt_node, tgt_rpc, migration, t,
@@ -1821,6 +1803,44 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
         logger.info(f"Intermediate snapshot {snap_uuid} migrated successfully")
 
     return True, False, None  # SNAP_COPY phase complete
+
+
+# Outcomes of _poll_intermediate_transfer besides SPDK's own transfer states.
+_TRANSFER_STAT_FAILED = 'stat_failed'   # bdev_lvol_transfer_stat answered nothing
+_TRANSFER_TIMED_OUT = 'timeout'         # still in flight after _INTERMEDIATE_POLL_MAX polls
+_TRANSFER_SETTLED = ('Done', 'Failed', 'No process', _TRANSFER_STAT_FAILED)
+
+
+def _poll_intermediate_transfer(src_rpc, src_composite):
+    """Poll an intermediate snapshot transfer until it settles.
+
+    Returns SPDK's final ``transfer_state`` ('Done', 'Failed' or 'No process'),
+    _TRANSFER_STAT_FAILED when the stat call answers nothing, or
+    _TRANSFER_TIMED_OUT after _INTERMEDIATE_POLL_MAX polls
+    _INTERMEDIATE_POLL_INTERVAL_S apart. Never raises for those outcomes.
+    """
+    def _stat():
+        result = src_rpc.bdev_lvol_transfer_stat(src_composite)
+        if result is None:
+            return _TRANSFER_STAT_FAILED
+        return result.get('transfer_state', 'No process')
+
+    state = None
+    try:
+        for attempt in Retrying(
+                stop=stop_after_attempt(_INTERMEDIATE_POLL_MAX),
+                wait=wait_fixed(_INTERMEDIATE_POLL_INTERVAL_S),
+                retry=retry_if_result(lambda st: st not in _TRANSFER_SETTLED),
+                # A transfer still in flight is not a failure; keep the log quiet.
+                before_sleep=before_sleep_log(logger, logging.DEBUG)):
+            with attempt:
+                state = _stat()
+            outcome = attempt.retry_state.outcome
+            if outcome is not None and not outcome.failed:
+                attempt.retry_state.set_result(state)
+    except RetryError:
+        return _TRANSFER_TIMED_OUT
+    return state
 
 
 def _get_lvol_delta_bytes(src_rpc, composite_name):

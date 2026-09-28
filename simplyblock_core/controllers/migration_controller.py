@@ -1752,7 +1752,7 @@ def create_batch_migration(lvol_id, target_node_id,
             member_records.append({"ns_id": member.ns_id, "migration_id": migration_id})
             if member.ns_id == 1:
                 master_connect_strings = connect_strings
-    except BaseException:
+    except Exception:
         if reservation is not None:
             try:
                 reservation.remove(db_inst.kv_store)
