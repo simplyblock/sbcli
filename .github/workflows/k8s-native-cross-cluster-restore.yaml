@@ -457,7 +457,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${1}" "bash -s" <<< "$2"
           }

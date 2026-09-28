@@ -199,21 +199,6 @@ jobs:
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           helm version
 
-      - name: Install prereqs (sshpass)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if command -v sshpass >/dev/null 2>&1; then exit 0; fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y && sudo apt-get install -y sshpass
-          elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y epel-release || true && sudo yum install -y sshpass
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y sshpass
-          else
-            echo "ERROR: Cannot install sshpass" && exit 1
-          fi
-
       # ============================================================
       # IMAGE OVERRIDES
       # ============================================================
@@ -344,7 +329,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -378,7 +363,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -418,7 +403,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -440,7 +425,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -457,19 +442,19 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
           for ip in $STORAGE_PRIVATE_IPS; do
-            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "nohup reboot >/dev/null 2>&1 &" || true
           done
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "Waiting for $ip..."
             for i in {1..60}; do
-              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+              if ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
                 "${SSH_USER}@${ip}" "echo online" >/dev/null 2>&1; then
                 echo "$ip online"; break
@@ -546,7 +531,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p ~/.kube
-          sshpass -p "${SSH_PASSWORD}" scp \
+          scp -i "${KEY_PATH}" \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             "${SSH_USER}@${K3S_MNODES}:/etc/rancher/k3s/k3s.yaml" ~/.kube/config_k3s
           # Replace default server address with the actual master IP

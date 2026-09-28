@@ -150,26 +150,6 @@ jobs:
           python3 --version || true
           git --version
 
-      - name: Install prereqs (sshpass)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if command -v sshpass >/dev/null 2>&1; then
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y sshpass
-          elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y epel-release || true
-            sudo yum install -y sshpass
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y sshpass
-          else
-            echo "ERROR: Cannot install sshpass (unknown package manager)."
-            exit 1
-          fi
-      
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
         run: |
@@ -303,7 +283,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -347,7 +327,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -368,7 +348,7 @@ jobs:
 
           still=0
           for ip in $uniq_targets; do
-            if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+            if ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "mount | grep -q \" ${NFS_MOUNTPOINT} \""; then
               echo "ERROR: ${NFS_MOUNTPOINT} still mounted on $ip"
               still=1
@@ -433,7 +413,7 @@ jobs:
           ALL_IPS=$(echo "${MNODES} ${STORAGE_PRIVATE_IPS} ${CLIENT_IP}" | tr ' ' '\n' | sed '/^$/d' | sort -u)
           for ip in ${ALL_IPS}; do
             echo "---- disable swap: ${ip} ----"
-            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "${SSH_USER}@${ip}" 'bash -s' < "${SWAP_SCRIPT}" || echo "WARN: swap disable failed on ${ip}"
+            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "${SSH_USER}@${ip}" 'bash -s' < "${SWAP_SCRIPT}" || echo "WARN: swap disable failed on ${ip}"
           done
 
       - name: Install Python deps (best-effort)
@@ -492,7 +472,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -887,7 +867,7 @@ jobs:
           echo "Core backtraces -> ${OUT_DIR}/core_backtraces"
           for ip in $(echo "${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
             echo "---- core-dump analysis: ${ip} ----"
-            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "${SSH_USER}@${ip}" 'bash -s' -- "${OUT_DIR}" < "${CORE_SCRIPT}" || echo "WARN: core-dump analysis failed on ${ip}"
+            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 "${SSH_USER}@${ip}" 'bash -s' -- "${OUT_DIR}" < "${CORE_SCRIPT}" || echo "WARN: core-dump analysis failed on ${ip}"
           done
 
       - name: Check post-test step warnings

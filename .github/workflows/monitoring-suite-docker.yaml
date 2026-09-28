@@ -226,21 +226,6 @@ jobs:
         shell: bash
         run: rm -f sbcli/e2e/output.log || true
 
-      - name: Install sshpass
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if command -v sshpass >/dev/null 2>&1; then exit 0; fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y && sudo apt-get install -y sshpass
-          elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y epel-release || true && sudo yum install -y sshpass
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y sshpass
-          else
-            echo "ERROR: Cannot install sshpass" && exit 1
-          fi
-
       - name: Parse CUSTOM_IMAGES overrides
         shell: bash
         run: |
@@ -360,7 +345,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -390,7 +375,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -420,7 +405,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }
@@ -433,7 +418,7 @@ jobs:
           # Verify NFS not mounted
           targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
           for ip in $(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
-            if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            if ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "mount | grep -q \" ${NFS_MOUNTPOINT} \"" 2>/dev/null; then
               echo "WARN: ${NFS_MOUNTPOINT} still mounted on $ip"
             fi
@@ -456,7 +441,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -466,7 +451,7 @@ jobs:
           # reboot storage nodes
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "---- reboot storage: $ip ----"
-            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "nohup reboot >/dev/null 2>&1 &" || true
           done
 
@@ -474,7 +459,7 @@ jobs:
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "Waiting for $ip..."
             for i in {1..60}; do
-              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
+              if ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
                 "echo online" >/dev/null 2>&1; then
                 echo "$ip online"
                 break
@@ -537,7 +522,7 @@ jobs:
           TARGET_PCIE="0000:00:05.0"
 
           echo "Disabling PCIe $TARGET_PCIE on node $TARGET_NODE"
-          sshpass -p "${SSH_PASSWORD}" ssh \
+          ssh -i "${KEY_PATH}" \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             "${SSH_USER}@${TARGET_NODE}" \
             "echo 1 | sudo tee /sys/bus/pci/devices/${TARGET_PCIE}/remove"
@@ -556,7 +541,7 @@ jobs:
           mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
           if [[ "${CLUSTER_SECURITY}" == "backup" ]]; then
             S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            ssh -i "${KEY_PATH}" \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${mgmt_ip}" \
               "echo '${S3_BACKUP_JSON}' > /root/s3-backup.json"
@@ -569,7 +554,7 @@ jobs:
         run: |
           set -euxo pipefail
           run_remote() {
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            timeout 120 ssh -i "${KEY_PATH}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@$1" "bash -s" <<< "$2"
           }

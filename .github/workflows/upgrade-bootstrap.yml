@@ -304,26 +304,6 @@ jobs:
         run: |
           rm -f sbcli/e2e/output.log || true
 
-      - name: Install prereqs (sshpass)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if command -v sshpass >/dev/null 2>&1; then
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y sshpass
-          elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y epel-release || true
-            sudo yum install -y sshpass
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y sshpass
-          else
-            echo "ERROR: Cannot install sshpass (unknown package manager)."
-            exit 1
-          fi
-
       - name: Parse CUSTOM_IMAGES overrides
         shell: bash
         run: |
@@ -469,7 +449,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -512,7 +492,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -554,7 +534,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -573,7 +553,7 @@ jobs:
 
           still=0
           for ip in $uniq_targets; do
-            if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+            if ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "mount | grep -q \" ${NFS_MOUNTPOINT} \""; then
               echo "ERROR: ${NFS_MOUNTPOINT} still mounted on $ip"
               still=1
@@ -599,7 +579,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -614,14 +594,14 @@ jobs:
 
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "---- reboot storage: $ip ----"
-            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "nohup reboot >/dev/null 2>&1 &" || true
           done
 
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "Waiting for $ip..."
             for i in {1..60}; do
-              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
+              if ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
                 "echo online" >/dev/null 2>&1; then
                 echo "$ip online"
                 break
@@ -692,7 +672,7 @@ jobs:
           if [[ "${CLUSTER_SECURITY}" == "backup" ]]; then
             echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
             S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \

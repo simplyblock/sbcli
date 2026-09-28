@@ -343,7 +343,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \

@@ -144,26 +144,6 @@ jobs:
           python3 --version || true
           git --version
 
-      - name: Install prereqs (sshpass)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          if command -v sshpass >/dev/null 2>&1; then
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y sshpass
-          elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y epel-release || true
-            sudo yum install -y sshpass
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y sshpass
-          else
-            echo "ERROR: Cannot install sshpass (unknown package manager)."
-            exit 1
-          fi
-
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
         run: |
@@ -282,7 +262,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          [[ -n "${SSH_PASSWORD}" ]] || (echo "ERROR: secrets.SSH_PASSWORD required" && exit 1)
+          # The key, not the password. Password auth is going away on these
+          # nodes, and this gate would fail every run the moment the secret
+          # is removed -- for a credential nothing uses any more.
+          [[ -n "${KEY_PATH}" && -f "${KEY_PATH}" ]] || \n            (echo "ERROR: no SSH key at KEY_PATH=${KEY_PATH:-<unset>}. Set the LAB_SSH_PRIVATE_KEY secret or the key_path input." && exit 1)
 
       # ============================================================
       # PRE-RUN CLEANUP (remote ops only)
@@ -297,7 +280,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -340,7 +323,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -361,7 +344,7 @@ jobs:
 
           still=0
           for ip in $uniq_targets; do
-            if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+            if ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "mount | grep -q \" ${NFS_MOUNTPOINT} \""; then
               echo "ERROR: ${NFS_MOUNTPOINT} still mounted on $ip"
               still=1
@@ -514,7 +497,7 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 ssh -i "${KEY_PATH}" \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
