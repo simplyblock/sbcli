@@ -333,7 +333,7 @@ jobs:
             exit 0
           fi
           install -d -m 700 "$HOME/.ssh"
-          dest="$HOME/.ssh/ci_lab_key"
+          dest="$HOME/.ssh/ci_lab_key-${{ github.run_id }}"
           # tr -d, because a key pasted from a Windows clipboard carries CRLF and
           # OpenSSH rejects the body outright -- reported as "invalid format",
           # which reads like a wrong key rather than a wrong line ending.
@@ -2402,4 +2402,4 @@ jobs:
           rm -rf ./* || true
           rm -rf ./.??* || true
           rm -f "$HOME/.kube/config-${{ github.run_id }}"
-          rm -f "$HOME/.ssh/ci_lab_key" "$HOME/.ssh/ci_lab_key.pub" || true
+          rm -f "$HOME/.ssh/ci_lab_key-${{ github.run_id }}" "$HOME/.ssh/ci_lab_key-${{ github.run_id }}.pub" || true
