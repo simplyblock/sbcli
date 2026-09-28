@@ -865,7 +865,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                         )
                         continue
             except Exception as e:
-                self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
+                self.logger.warning(f"Snap creation fails with {e!s}. Retrying with different name.")
                 try:
                     snapshot_name = f"snap_{lvol}"
                     temp_name = generate_random_sequence(5)
@@ -875,7 +875,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     else:
                         self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
                 except Exception as exp:
-                    self.logger.warning(f"Retry Snap creation fails with {str(exp)}.")
+                    self.logger.warning(f"Retry Snap creation fails with {exp!s}.")
                     continue
                 
             self.snapshot_names.append(snapshot_name)

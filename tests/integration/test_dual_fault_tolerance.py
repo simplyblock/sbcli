@@ -312,44 +312,35 @@ class TestGetSecondaryNodes(unittest.TestCase):
 # ===========================================================================
 
 class TestDBControllerSecondaryLookup(unittest.TestCase):
+    """The back-reference lookup, against the real store it reads.
+
+    Seeded and read back through a live DBController rather than a mocked
+    kv_store: the lookup is index-backed, so a stand-in store would exercise a
+    second copy of the interface instead of the one production uses.
+    """
+
+    def _seed(self, **kwargs):
+        from simplyblock_core.db_controller import DBController
+
+        db = DBController()
+        primary = _node("primary", **kwargs)
+        primary.lvstore = "lvs_primary"
+        primary.write_to_db(db.kv_store)
+        return db
 
     def test_finds_primary_via_secondary_node_id(self):
-        from simplyblock_core.db_controller import DBController
-        primary = _node("primary", secondary_node_id="sec-1")
-        primary.lvstore = "lvs_primary"
-
-        mock_kv = MagicMock()
-        with patch.object(StorageNode, 'read_from_db', return_value=[primary]):
-            db = DBController.__new__(DBController)
-            db.kv_store = mock_kv
-            result = db.get_primary_storage_nodes_by_secondary_node_id("sec-1")
-        assert len(result) == 1
-        assert result[0].uuid == "primary"
+        db = self._seed(secondary_node_id="sec-1")
+        result = db.get_primary_storage_nodes_by_secondary_node_id("sec-1")
+        assert [node.uuid for node in result] == ["primary"]
 
     def test_finds_primary_via_tertiary_node_id(self):
-        from simplyblock_core.db_controller import DBController
-        primary = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
-        primary.lvstore = "lvs_primary"
-
-        mock_kv = MagicMock()
-        with patch.object(StorageNode, 'read_from_db', return_value=[primary]):
-            db = DBController.__new__(DBController)
-            db.kv_store = mock_kv
-            result = db.get_primary_storage_nodes_by_secondary_node_id("sec-2")
-        assert len(result) == 1
-        assert result[0].uuid == "primary"
+        db = self._seed(secondary_node_id="sec-1", tertiary_node_id="sec-2")
+        result = db.get_primary_storage_nodes_by_secondary_node_id("sec-2")
+        assert [node.uuid for node in result] == ["primary"]
 
     def test_no_match_returns_empty(self):
-        from simplyblock_core.db_controller import DBController
-        primary = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
-        primary.lvstore = "lvs_primary"
-
-        mock_kv = MagicMock()
-        with patch.object(StorageNode, 'read_from_db', return_value=[primary]):
-            db = DBController.__new__(DBController)
-            db.kv_store = mock_kv
-            result = db.get_primary_storage_nodes_by_secondary_node_id("sec-99")
-        assert len(result) == 0
+        db = self._seed(secondary_node_id="sec-1", tertiary_node_id="sec-2")
+        assert db.get_primary_storage_nodes_by_secondary_node_id("sec-99") == []
 
 
 # ===========================================================================

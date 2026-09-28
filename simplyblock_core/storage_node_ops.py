@@ -3557,7 +3557,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         # check for memory
-        if "memory_details" in node_info and node_info['memory_details']:
+        if node_info.get('memory_details'):
             memory_details = node_info['memory_details']
             logger.info("Node Memory info")
             logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -3719,21 +3719,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         fdb_connection = cluster.db_connection
 
-        if cluster.mode == "docker":
-            logger.info("Joining docker swarm...")
-            cluster_docker = utils.get_docker_client(cluster_id)
-            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-            results, err = snode_api.join_swarm(
-                cluster_ip=cluster_ip,
-                join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
-                db_connection=cluster.db_connection,
-                cluster_id=cluster_id)
-
-            if not results:
-                logger.error(f"Failed to Join docker swarm: {err}")
-                return False
+        if cluster.cluster_vip:
+            cluster_ip = cluster.cluster_vip
         else:
-            cluster_ip = utils.get_k8s_node_ip()
+            if cluster.mode == "docker":
+                cluster_docker = utils.get_docker_client(cluster_id)
+                cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+            else:
+                cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_info = utils.get_mgmt_ip(node_info, iface_name)
@@ -3884,9 +3877,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not spdk_proxy_image:
             spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
         # Initial storage-MCP maxUnavailable for the first-time CPU-topology
-        # reboots = the configured parallel-add count (StorageNodeSet
-        # spec.maxParallelNodeAdds), read straight from the CR. cluster_activate
-        # later narrows the pool to the cluster's fault tolerance.
+        # reboots = the configured parallel-add count (StorageCluster
+        # spec.storageNodes.maxParallelNodeAdds), read straight from the CR.
+        # cluster_activate later narrows the pool to the cluster's fault
+        # tolerance.
         mcp_max_unavailable = utils.get_max_parallel_node_adds_from_cr(
             cr_name, cr_namespace, cr_plural)
         try:
@@ -4584,8 +4578,8 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         return False
 
     node_snaps = [
-        sn for sn in db_controller.get_snapshots()
-        if sn.lvol.node_id == node_id and sn.deleted is False
+        sn for sn in db_controller.get_snapshots_by_node_id(node_id)
+        if sn.deleted is False
     ]
     if node_snaps:
         logger.error(
@@ -6733,7 +6727,7 @@ def restart_storage_node(
         # only logs this one line, leaving the actual raise point (e.g. a
         # remote-JM/device connect timing out when a same-failure-domain peer
         # is also down) undiagnosable from the logs.
-        logger.error("restart_storage_node raised unexpectedly", exc_info=True)
+        logger.exception("restart_storage_node raised unexpectedly")
     finally:
         _hb_stop.set()
         # Trust the DB. If the impl raised after the ONLINE write was
@@ -7172,7 +7166,7 @@ def _restart_storage_node_impl(
     minimum_hp_memory = max(minimum_hp_memory, max_prov)
 
     # check for memory
-    if "memory_details" in node_info and node_info['memory_details']:
+    if node_info.get('memory_details'):
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -7205,12 +7199,14 @@ def _restart_storage_node_impl(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
-    if cluster.mode == "docker":
-        cluster_docker = utils.get_docker_client(snode.cluster_id)
-        cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-
+    if cluster.cluster_vip:
+        cluster_ip = cluster.cluster_vip
     else:
-        cluster_ip = utils.get_k8s_node_ip()
+        if cluster.mode == "docker":
+            cluster_docker = utils.get_docker_client(snode.cluster_id)
+            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+        else:
+            cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -13803,7 +13799,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
-        logger.debug(f"online_jms: {str(jm_ids)}")
+        logger.debug(f"online_jms: {jm_ids!s}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
@@ -14618,7 +14614,7 @@ def dump_lvstore(node_id):
 
     rpc_client = snode.rpc_client(timeout=120)
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
-    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
+    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{datetime.datetime.now().isoformat()!s}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
     ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
     if not ret:
@@ -14738,6 +14734,67 @@ def safe_delete_bdev(name, node_id):
             return False
 
 
+#: Lvstore residents that belong to the NODE, not to any volume or snapshot
+#: record, so they are never orphans. Kept in one place because auto_repair and
+#: the lvol monitor's periodic sweep must agree on it.
+NON_OBJECT_LVSTORE_BLOB_NAMES = ("hublvol", "transferhub")
+
+
+def find_orphan_lvstore_blobs(node_id):
+    """Blobs in ``node_id``'s lvstore that no LVol/SnapShot record claims.
+
+    The same comparison ``auto_repair`` performs for its ``diff_list``, lifted
+    out so it can also run unattended. auto_repair is an operator-invoked CLI
+    command that prints to stdout: it is the only thing in the product that
+    ever compared SPDK's inventory against the database, so a record dropped
+    while its blob survived stayed invisible until somebody thought to run it
+    by hand — which is how four such volumes accumulated unnoticed in R26.3.
+
+    Matching is on BLOBID, not name: the blobid is the identity SPDK and the
+    records actually share, and it survives the name-shape differences between
+    them (``snap_bdev`` is stored qualified as ``<lvstore>/<name>`` while the
+    lvstore dump names blobs bare).
+
+    Records are collected cluster-wide rather than per-node on purpose. A
+    record whose ``node_id`` has moved (fail-over, migration) still owns its
+    blob, and reporting a live volume as an orphan is far worse than missing
+    one.
+
+    Returns a list of ``{"blobid", "name", "uuid", "ref"}`` dicts. Raises on
+    RPC or lookup failure — the caller decides how loud that is.
+    """
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+
+    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        raise RPCException(f"Failed to get lvstore info for {snode.lvstore}")
+    lvs_uuid = ret[0].get("uuid")
+    if not lvs_uuid:
+        raise RPCException(f"Failed to get lvstore uuid for {snode.lvstore}")
+
+    dump = snode.rpc_client().bdev_lvs_dump_tree(lvs_uuid)
+    if not dump or "lvols" not in dump:
+        raise RPCException(f"Failed to dump the lvstore tree of {snode.lvstore}")
+
+    claimed = {lv.blobid for lv in db_controller.get_lvols(snode.cluster_id) if lv.blobid}
+    claimed |= {sn.blobid for sn in db_controller.get_snapshots(snode.cluster_id) if sn.blobid}
+
+    orphans = []
+    for entry in dump["lvols"]:
+        if entry.get("name") in NON_OBJECT_LVSTORE_BLOB_NAMES:
+            continue
+        if entry.get("blobid") in claimed:
+            continue
+        orphans.append({
+            "blobid": entry.get("blobid"),
+            "name": entry.get("name"),
+            "uuid": entry.get("uuid"),
+            "ref": entry.get("ref"),
+        })
+    return orphans
+
+
 def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, force_remove_worng_ref=False):
     db_controller = DBController()
     try:
@@ -14760,7 +14817,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")
@@ -14942,7 +14999,7 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")

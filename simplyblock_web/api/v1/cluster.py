@@ -343,7 +343,7 @@ def cluster_allstats(uuid, history):
                 for record in db.get_lvol_stats(lvol, limit=1)
             ],
         }
-        for lvol in db.get_lvols()
+        for lvol in db.get_lvols(uuid)
     ]
 
     return utils.get_response(out)

@@ -1,10 +1,12 @@
 import time
 from datetime import datetime, timedelta, UTC
+from typing import ClassVar
 from uuid import uuid4
 
 from pydantic import SecretStr
 
 from simplyblock_core import utils, constants
+from simplyblock_core.models.indices import Index
 from simplyblock_core.models.base_model import BaseNodeObject, BaseModel, default_factory
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -21,6 +23,30 @@ logger = utils.get_logger(__name__)
 class StorageNode(BaseNodeObject):
 
     _WATCHED = True
+
+    # A JM built on a whole device inherits that device's uuid
+    # (storage_node_ops._create_jm_stack_on_device), so a bare device id does
+    # not say which kind of device it names. The kind is the second segment of
+    # the `device_id` key, which leaves the one-segment prefix meaning "whoever
+    # holds this device, either kind" and the full key meaning one kind only.
+    DEVICE_KIND_NVME = "nvme"
+    DEVICE_KIND_JM = "jm"
+
+    # NVMeDevice and JMDevice are not rows of their own — they live inside this
+    # record — so `device_id` is what makes a device lookup two point reads
+    # instead of a scan of every node and every device on it.
+    _INDEXES: ClassVar[tuple] = (
+        Index('cluster_id'),
+        Index('system_uuid'),
+        Index('hostname'),
+        Index('device_id', arity=2, extract=lambda node: (
+            [(device.get_id(), StorageNode.DEVICE_KIND_NVME) for device in node.nvme_devices]
+            + ([(node.jm_device.get_id(), StorageNode.DEVICE_KIND_JM)] if node.jm_device else [])
+        )),
+        Index('failover_for', arity=1, extract=lambda node: [
+            (peer,) for peer in (node.secondary_node_id, node.tertiary_node_id) if peer
+        ]),
+    )
 
     # Restart phase constants (per-LVS)
     RESTART_PHASE_PRE_BLOCK = "pre_block"

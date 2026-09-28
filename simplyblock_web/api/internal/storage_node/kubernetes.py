@@ -10,7 +10,8 @@ from jinja2 import Environment, PackageLoader
 import yaml
 from pydantic import BaseModel, Field
 
-from simplyblock_core import constants, shell_utils, utils as core_utils
+from simplyblock_core import constants, utils as core_utils
+from simplyblock_core.utils import shell as shell_utils
 from simplyblock_core.settings import Settings
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
@@ -314,8 +315,9 @@ def spdk_process_start(body: SPDKParams):
     # Initial storage-MCP maxUnavailable when it's first created for CPU-topology
     # apply = the configured parallel-add count, so the first-time,
     # pre-activation reboots roll in one wave instead of a one-at-a-time queue.
-    # Source order: the value the control plane read from the StorageNodeSet CR
-    # (spec.maxParallelNodeAdds) and passed in; then the MAX_PARALLEL_NODE_ADDS
+    # Source order: the value the control plane read from the StorageCluster CR
+    # (spec.storageNodes.maxParallelNodeAdds) and passed in; then the
+    # MAX_PARALLEL_NODE_ADDS
     # env (if an operator injects it); then constants.NODE_ADD_MAX_PARALLEL.
     # cluster_activate later narrows the pool to the cluster's fault tolerance.
     mcp_max_unavailable = (

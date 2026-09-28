@@ -805,7 +805,7 @@ def exec_port_allow_task(task):
                 ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
                 if ret:
                     lvs_info = ret[0]
-                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                    if lvs_info.get('lvs leadership'):
                         jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
                         retries = 10
                         while jc_compression_is_active:

@@ -1,0 +1,25 @@
+name: Label PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  target-branch:
+    name: Label by target branch
+    runs-on: ubuntu-latest
+    # `edited` also fires for title/body edits; only a retarget changes the label.
+    if: github.event.action != 'edited' || github.event.changes.base
+
+    steps:
+      - uses: actions/labeler@v7
+        with:
+          sync-labels: true

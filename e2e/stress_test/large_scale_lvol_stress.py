@@ -181,7 +181,7 @@ class _LargeScaleMixin:
     # ── FIO log collection helpers (shared) ──────────────────────────────────
 
     def _save_fio_pod_logs(self, job_name: str, resource_name: str,
-                           pvc_name: str = None):
+                           pvc_name: str | None = None):
         """Save FIO pod logs and performance data to local log directory."""
         try:
             pod_name = self.k8s_utils.get_job_pod_name(job_name)
@@ -206,7 +206,7 @@ class _LargeScaleMixin:
             )
 
     def _list_fio_perf_files(self, pod_name: str, ns: str,
-                              container: str = None) -> list:
+                              container: str | None = None) -> list:
         """List FIO-generated perf files in /spdkvol/ of a running pod."""
         container_flag = f"-c {container} " if container else ""
         try:
@@ -267,7 +267,7 @@ class _LargeScaleMixin:
         )
 
     def _copy_fio_perf_logs(self, pod_name: str, resource_name: str,
-                             pvc_name: str = None):
+                             pvc_name: str | None = None):
         """Copy FIO perf log files from /spdkvol/ in the pod to local dir."""
         ns = self.k8s_utils.namespace
         perf_dir = os.path.join(self.log_path, f"{resource_name}_perf")
@@ -1217,7 +1217,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
 
     def _batch_exec(self, items, task_fn, op_name: str,
                     per_item_timeout: int = 600,
-                    max_workers: int = None,
+                    max_workers: int | None = None,
                     max_failures: int = 10):
         """Execute task_fn(item) for each item using ThreadPoolExecutor.
 
@@ -2202,7 +2202,7 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
 
     def _batch_exec_k8s(self, items, task_fn, op_name: str,
                         per_item_timeout: int = 600,
-                        max_workers: int = None,
+                        max_workers: int | None = None,
                         max_failures: int = 10):
         """Execute task_fn(item) for each item using ThreadPoolExecutor.
 

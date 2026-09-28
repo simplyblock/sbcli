@@ -102,29 +102,32 @@ class TestDeleteFromNodeAbortsOnUnconfirmedRemoval(unittest.TestCase):
         db_mock.get_pool_by_id.return_value.has_qos.return_value = False
 
         remove_stack = MagicMock(return_value=True)
+        exc = None
         with patch.object(lvol_controller, "DBController", return_value=db_mock), \
                 patch.object(lvol_controller, "_remove_lvol_subsys_from_node",
                              return_value=subsys_ok), \
                 patch.object(lvol_controller, "_remove_bdev_stack", remove_stack), \
                 patch("simplyblock_core.storage_node_ops.check_non_leader_for_operation",
                       return_value="proceed"):
-            ret = lvol_controller.delete_lvol_from_node(
-                "lvol-1", "node-1", force=force)
-        return ret, remove_stack
+            try:
+                lvol_controller.delete_lvol_from_node("lvol-1", "node-1", force=force)
+            except Exception as e:
+                exc = e
+        return exc, remove_stack
 
     def test_unconfirmed_removal_aborts_bdev_delete(self):
-        ret, remove_stack = self._run_delete(subsys_ok=False)
-        self.assertFalse(ret)
+        exc, remove_stack = self._run_delete(subsys_ok=False)
+        self.assertIsInstance(exc, RuntimeError)
         remove_stack.assert_not_called()
 
     def test_force_delete_proceeds_despite_unconfirmed_removal(self):
-        ret, remove_stack = self._run_delete(subsys_ok=False, force=True)
-        self.assertTrue(ret)
+        exc, remove_stack = self._run_delete(subsys_ok=False, force=True)
+        self.assertIsNone(exc)
         remove_stack.assert_called_once()
 
     def test_confirmed_removal_proceeds(self):
-        ret, remove_stack = self._run_delete(subsys_ok=True)
-        self.assertTrue(ret)
+        exc, remove_stack = self._run_delete(subsys_ok=True)
+        self.assertIsNone(exc)
         remove_stack.assert_called_once()
 
 

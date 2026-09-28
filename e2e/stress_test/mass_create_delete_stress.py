@@ -361,9 +361,9 @@ class _MassCreateDeleteMixin:
 
     def _batch_exec(self, items, task_fn, op_name: str,
                     per_item_timeout: int = 600,
-                    max_workers: int = None,
-                    max_failures: int = None,
-                    batch_size: int = None,
+                    max_workers: int | None = None,
+                    max_failures: int | None = None,
+                    batch_size: int | None = None,
                     stop_on_max_lvols: bool = False):
         """Execute task_fn(item) for each item using ThreadPoolExecutor.
 
@@ -438,9 +438,9 @@ class _MassCreateDeleteMixin:
 
     def _batch_exec_persistent(self, items, task_fn, op_name: str,
                                per_item_timeout: int = 600,
-                               max_workers: int = None,
-                               batch_size: int = None,
-                               phase_timeout: int = None):
+                               max_workers: int | None = None,
+                               batch_size: int | None = None,
+                               phase_timeout: int | None = None):
         """Retry failed items until all succeed or a terminal error is hit.
 
         Returns (success_count, remaining_count) — compatible with

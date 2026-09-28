@@ -69,9 +69,6 @@ def _run_finish(monkeypatch, nodes, primary):
         def get_storage_node_by_id(self, uuid):
             return nodes[uuid]
 
-        def unindex_snapshot(self, snap):
-            pass
-
         kv_store = None
 
     monkeypatch.setattr(sm, "db", _DB())

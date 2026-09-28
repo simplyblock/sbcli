@@ -47,8 +47,8 @@ in `.github/workflows/docker-image*.yml`). There is deliberately no separate pre
 
 Because the `base` stage pins packages by name only, that cache would otherwise serve the same
 `dnf` resolution forever and never pick up a security update. The `CACHE_KEY` build arg exists to
-break it: every workflow passes `date -u +%G-W%V` (ISO year and week), so the OS-package layers
-are rebuilt from scratch once a week and an upstream fix reaches the image within seven days.
+break it: every workflow passes `date -u +%F` (the UTC date), so the OS-package layers
+are rebuilt from scratch once a day and an upstream fix reaches the image within 24 hours.
 `build_image.sh` passes the same value. To force a refresh out of band, pass any other value:
 
 ```bash
@@ -61,7 +61,7 @@ and the tooling caches out of the build context, so editing any of them does not
 image's source layer. It also excludes virtualenvs, which would otherwise smuggle an outdated
 `pip`/`setuptools` into the image for the scanners to find.
 
-`security.yml` deliberately uses the *same* weekly key rather than a fresh one — the scan has to
+`security.yml` deliberately uses the *same* daily key rather than a fresh one — the scan has to
 report on the packages that are actually shipped. Rebuilding it against fresher packages would
 let the scan go green while the published image still carries the vulnerability.
 

@@ -219,7 +219,7 @@ def get_data():
                                 hc)
 
 
-        for pool in db.get_pools():
+        for pool in db.get_pools(cl.get_id()):
 
             pool_records = db.get_pool_stats(pool, 1)
             if pool_records:

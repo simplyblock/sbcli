@@ -609,6 +609,22 @@ class CLIWrapperBase:
             return False
         return True
 
+    def cluster__build_indices(self, sub_command, args):
+        return cluster_ops.build_indices()
+
+    def cluster__index_state(self, sub_command, args):
+        if args.state:
+            return cluster_ops.switch_index(args.index, args.state)
+
+        data = cluster_ops.list_index_states(args.index)
+        if args.json:
+            return utils.dump_json(data, indent=2)
+        else:
+            return utils.print_table(data)
+
+    def cluster__check_indices(self, sub_command, args):
+        return cluster_ops.check_indices(repair=args.repair)
+
     def cluster__graceful_shutdown(self, sub_command, args):
         cluster_ops.cluster_grace_shutdown(args.cluster_id)
         return True
@@ -1554,6 +1570,7 @@ class CLIWrapperBase:
         atomic_4k = getattr(args, 'atomic_4k', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
+        cluster_vip = getattr(args, 'cluster_vip', '')
 
         backup_config = None
         if args.use_backup:
@@ -1581,6 +1598,7 @@ class CLIWrapperBase:
                 Path(args.alerting_config_path) if args.alerting_config_path else None),
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            cluster_vip=cluster_vip,
         )
 
     def query_yes_no(self, question, default="yes"):

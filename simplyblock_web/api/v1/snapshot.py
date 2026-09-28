@@ -39,11 +39,9 @@ def delete_snapshot(uuid):
 @bp.route('/snapshot', methods=['GET'])
 def list_snapshots():
     cluster_id = utils.get_cluster_id(request)
-    snaps = db.get_snapshots()
+    snaps = db.get_snapshots(cluster_id)
     data = []
     for snap in snaps:
-        if snap.cluster_id != cluster_id:
-            continue
         d = snap.get_clean_dict()
         d["created_at"] = str(snap.created_at)
         data.append(d)

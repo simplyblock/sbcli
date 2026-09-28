@@ -926,16 +926,14 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     # Link into this lvol's snapshot chain using the by-lvol index (a single
     # reverse read for the current tail) instead of scanning every cluster
-    # snapshot. Find the predecessor BEFORE registering the new snap below.
+    # snapshot. The new snap is already in that index (its write maintained
+    # it), hence the exclusion.
     prev = db_controller.get_lvol_latest_snapshot(lvol_id, exclude_uuid=snap.get_id())
     if prev is not None and not prev.next_snap_uuid:
         prev.next_snap_uuid = snap.get_id()
         snap.prev_snap_uuid = prev.get_id()
         prev.write_to_db()
         snap.write_to_db()
-
-    # Register the new snapshot in the name + by-lvol indexes (O(1)).
-    db_controller.index_snapshot(snap)
 
     snapshot_events.snapshot_create(snap)
     if lvol.do_replicate:
@@ -974,12 +972,11 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
 def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False,
                    consistency_group=None):
-    all_snaps = db_controller.get_snapshots()
     if lvol_id:
         try:
             lvol = (db_controller.get_lvol_by_id(lvol_id) if utils.UUID_PATTERN.match(lvol_id) is not None
                     else db_controller.get_lvol_by_name(lvol_id))
-            snaps = [sn for sn in all_snaps if sn.lvol.get_id() == lvol.get_id()]
+            snaps = db_controller.get_snapshots_by_lvol_id(lvol.get_id())
         except KeyError:
             logger.error("Can not find lvol with provided lvol_id_or_name: %s", lvol_id)
             return False
@@ -995,15 +992,13 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             node = (db_controller.get_storage_node_by_id(node_id)
                     if utils.UUID_PATTERN.match(node_id) is not None
                     else db_controller.get_storage_nodes_by_hostname(node_id)[0])
-            snaps = [sn for sn in all_snaps if sn.lvol.node_id == node.get_id()]
+            snaps = db_controller.get_snapshots_by_node_id(node.get_id())
         except KeyError:
             logger.error("Can not find node with provided value: %s", node_id)
             return False
 
-    elif cluster_id:
-        snaps = [sn for sn in all_snaps if sn.cluster_id == cluster_id]
     else:
-        snaps = all_snaps
+        snaps = db_controller.get_snapshots(cluster_id)
 
     if consistency_group:
         # Filter to one group's snapshots without client-side name matching
@@ -1162,7 +1157,6 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
     except KeyError:
         logger.exception(f"Storage node not found {snap.lvol.node_id}")
         if force_delete:
-            db_controller.unindex_snapshot(snap)
             snap.remove(db_controller.kv_store)
             return True
         return False
@@ -1511,8 +1505,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.node_id = snode.get_id()
     lvol.nodes = snap.lvol.nodes
     lvol.cloned_from_snap = snapshot_id
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
+    lvol.place_in_pool(pool)
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.guid = utils.generate_hex_string(16)
@@ -1609,6 +1602,12 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
         if error:
+            # The record was persisted by claim_lvol_ns_slot above. Leaving it
+            # on a failed clone strands an in_creation zombie holding a
+            # namespace slot and pool capacity until the monitor's stale sweep
+            # notices; the guarded rollback releases it, or keeps it when the
+            # attempt left a blob behind.
+            lvol_controller.rollback_create_record(lvol)
             return False, error
         lvol.nodes = [snode.get_id()]
         lvol.lvol_uuid = lvol_bdev['uuid']
@@ -1639,7 +1638,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = (f"No leader available for LVS {lvol.lvs_name} — "
                    f"rejecting clone until leadership is re-established")
             logger.error(msg)
-            db_controller.release_lvol_ns_slot(lvol)
+            lvol_controller.rollback_create_record(lvol)
             return False, msg
 
         # Assign each non-leader a stable index so its subsystem is created
@@ -1665,7 +1664,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             if action == "reject":
                 msg = f"Cannot clone: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
                 logger.error(msg)
-                db_controller.release_lvol_ns_slot(lvol)
+                lvol_controller.rollback_create_record(lvol)
                 return False, msg
             elif action == "proceed":
                 secondary_nodes.append(candidate)
@@ -1693,8 +1692,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
                     if error:
                         logger.error(error)
-                        if lvol.status != LVol.STATUS_IN_DELETION:
-                            db_controller.release_lvol_ns_slot(lvol)
+                        lvol_controller.rollback_create_record(lvol)
                         return False, error
                     lvol.lvol_uuid = lvol_bdev['uuid']
                     lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
@@ -1707,12 +1705,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                             secondary_index=secondary_index_map[sec.get_id()])
                     if error:
                         logger.error(error)
-                        if lvol.status != LVol.STATUS_IN_DELETION:
-                            db_controller.release_lvol_ns_slot(lvol)
+                        lvol_controller.rollback_create_record(lvol)
                         return False, error
         except PreconditionError as e:
-            if lvol.status != LVol.STATUS_IN_DELETION:
-                db_controller.release_lvol_ns_slot(lvol)
+            lvol_controller.rollback_create_record(lvol)
             return False, str(e)
 
     lvol.status = LVol.STATUS_ONLINE

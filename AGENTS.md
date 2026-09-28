@@ -66,6 +66,12 @@ Two front-ends sit on top of the core and **both call it in-process** — the CL
 
 Storage nodes are reached via JSON-RPC (`rpc_client.py`).
 
+Lookups that are not "by primary key" go through declared secondary indices
+(`simplyblock_core/models/indices.py`, maintained in the entity's own FDB transaction) and the
+single `DBController.query()` primitive — not through a table scan. See
+**`simplyblock_core/AGENTS.md`** § Secondary Indices before adding a `get_*_by_*` helper
+or a new model field you intend to look records up by.
+
 ## Coding Conventions
 
 - **Error handling**: Raise specific exceptions — never return `None`/booleans for errors, never bare `except Exception`. See `CONTRIBUTING.md`.
@@ -115,6 +121,7 @@ Key rules:
 - **v2 DTOs**: Use `@field_serializer('field', when_used='json')` to unwrap for JSON wire responses while keeping wrappers in Python-mode `model_dump()`.
 - **CLI arguments**: Declare the argument type as `secret` in `cli-reference.yaml`. The generator produces `SecretStr` as the argparse type converter, so the value is wrapped at parse time.
 - **Logging**: Never log unwrapped secret values. Response-body logging is gated by `Settings().log_response_bodies` (env `SB_LOG_RESPONSE_BODIES`, default `False`). External libraries that log HTTP bodies (`urllib3`, `kubernetes.client.rest`) are silenced to WARNING. The web access log records only `request.url.path`, never the query string.
+- **Downstream of the unwrap**: `services/spdk_http_proxy_server.py` receives JSON-RPC bodies that have already been through `unwrap_secrets_for_send`, so no `SecretStr` survives to mask by. Log those through `redact_rpc_params` from `simplyblock_core/utils/secrets.py`, which masks by parameter name (`SENSITIVE_RPC_PARAMS`). An RPC that carries new key material or a new credential adds its parameter name to that set — masking by type in `rpc_client` alone does not reach the proxy.
 - **Comparison**: Use `hmac.compare_digest(secret.get_secret_value(), other)` for timing-safe comparison.
 - **Testing**: New secret-bearing code needs masking, wire-delivery, and FDB round-trip tests. See `tests/AGENTS.md` § Secret-handling tests for the required assertions and canonical examples.
 
@@ -219,13 +226,3 @@ symlink target directly.
 ### Local overrides
 
 At every level where an `AGENTS.md` exists, also check for a sibling `AGENTS.local.md`. If present, load it in addition to `AGENTS.md` — its contents extend or override the checked-in instructions. `AGENTS.local.md` is gitignored and intended for per-developer notes that should not be committed.
-
-## graphify
-
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

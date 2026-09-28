@@ -29,6 +29,15 @@ class _FakeKV:
     def set(self, key, value):
         self._data[key] = value
 
+    def get(self, key):
+        """Point read, as FDB's Database.get: ``None`` when the key is absent.
+
+        Index state lives at ``index_meta/...``, which this store never holds,
+        so every index reads as still building and the query layer takes its
+        scan fallback -- which is what the rest of this surface serves.
+        """
+        return self._data.get(key)
+
     def clear(self, key):
         self._data.pop(key, None)
 

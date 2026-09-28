@@ -528,7 +528,6 @@ def _make_lvol(lvol_uuid: str, spec: dict, node: StorageNode,
 
     lv = LVol()
     lv.uuid = lvol_uuid
-    lv.cluster_id = cluster_id
     lv.node_id = node.uuid
     lv.pool_uuid = pool_uuid
     lv.status = spec.get('status', LVol.STATUS_ONLINE)

@@ -125,7 +125,7 @@ done
             sn_ssh.close()
 
         except Exception as e:
-            stdout = f"ERROR collecting logs from {node_ip}: {str(e)}\n"
+            stdout = f"ERROR collecting logs from {node_ip}: {e!s}\n"
 
         # Thread-safe write
         with log_lock:

@@ -1,10 +1,20 @@
 import datetime
 from typing import ClassVar
 
+from simplyblock_core.models.indices import Index
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class Backup(BaseModel):
+
+    # get_id() is "<cluster>/<uuid>", so a caller holding only the uuid cannot
+    # point-read the record; `uuid` is the index that lets it.
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+        Index('lvol_id'),
+        Index('snapshot_id'),
+        Index('prev_backup_id'),
+    )
 
     STATUS_PENDING = 'pending'
     STATUS_IN_PROGRESS = 'in_progress'
@@ -66,6 +76,10 @@ class BackupChainLock(BaseModel):
 
 class BackupPolicy(BaseModel):
 
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+    )
+
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
 
@@ -90,6 +104,10 @@ class BackupPolicy(BaseModel):
 
 
 class BackupPolicyAttachment(BaseModel):
+
+    _INDEXES: ClassVar[tuple] = (
+        Index(('target_type', 'target_id')),
+    )
     """Links a BackupPolicy to a pool or lvol."""
 
     cluster_id: str = ""

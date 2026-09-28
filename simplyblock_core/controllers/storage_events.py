@@ -113,6 +113,25 @@ def snode_rpc_timeout(node, timeout_seconds, caused_by=ec.CAUSED_BY_MONITOR):
         node_id=node.get_id())
 
 
+def snode_orphaned_objects(node, orphans, caused_by=ec.CAUSED_BY_MONITOR):
+    """Raised by the lvol monitor's orphan sweep: lvstore objects exist on this
+    node with no record in the database. Detect-only — see
+    ``lvol_monitor.sweep_orphan_objects``. LEVEL_ERROR because the objects hold
+    capacity indefinitely and nothing else will ever surface them.
+    """
+    names = ", ".join(str(o.get("name")) for o in orphans)
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_ERROR,
+        message=(f"{len(orphans)} orphaned lvstore object(s) on {node.lvstore} "
+                 f"have no database record: {names}"),
+        node_id=node.get_id())
+
+
 def jm_repl_tasks_found(node, jm_vuid, caused_by=ec.CAUSED_BY_MONITOR):
     ec.log_event_cluster(
         cluster_id=node.cluster_id,

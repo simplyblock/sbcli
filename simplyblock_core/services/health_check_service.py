@@ -466,15 +466,16 @@ def check_node(snode):
 
                 for jm_id in expected_jm_ids:
                     if jm_id not in connected_jms:
-                        for nd in db.get_storage_nodes():
-                            if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                                if health_controller._peer_connections_relevant(nd):
-                                    node_remote_devices_check = False
-                                else:
-                                    logger.info(
-                                        "JM device %s not connected, but owning node %s is %s — expected",
-                                        jm_id, nd.get_id(), nd.status)
-                                break
+                        try:
+                            nd = db.get_storage_node_by_device_id(jm_id)
+                        except KeyError:
+                            continue
+                        if health_controller._peer_connections_relevant(nd):
+                            node_remote_devices_check = False
+                        else:
+                            logger.info(
+                                "JM device %s not connected, but owning node %s is %s — expected",
+                                jm_id, nd.get_id(), nd.status)
 
                 if not node_remote_devices_check and cluster is not None and cluster.status in [
                     Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
@@ -549,7 +550,7 @@ def check_node(snode):
                                     ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
                                     if ret:
                                         lvs_info = ret[0]
-                                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                        if lvs_info.get('lvs leadership'):
                                             jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
                                                 snode.jm_vuid)
                                             if not jc_compression_is_active:

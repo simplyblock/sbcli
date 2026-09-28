@@ -32,13 +32,14 @@ import tempfile
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from simplyblock_core import constants
-from simplyblock_core import shell_utils
+from . import shell as shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
 from . import pci as pci_utils
 from .helpers import parse_thread_siblings_list
+from ..models.mgmt_node import MgmtNode
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -199,20 +200,18 @@ def generate_string(length):
 def get_docker_client(cluster_id=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes()
+    nodes = db_controller.get_mgmt_nodes(cluster_id)
     if not nodes:
         raise RuntimeError("No mgmt nodes was found in the cluster!")
 
-    docker_ips = [node.docker_ip_port for node in nodes]
-
-    for ip in docker_ips:
-        try:
-            return docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
-        except Exception as e:
-            print(e)
-            raise e
-
-    raise RuntimeError("No docker client found for this IP")
+    for node in nodes:
+        if node.status == MgmtNode.STATUS_ONLINE:
+            try:
+                return docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto")
+            except Exception as e:
+                logger.error(e)
+                continue
+    raise RuntimeError("No docker client found for this cluster")
 
 
 def get_k8s_node_ip():
@@ -790,7 +789,7 @@ def get_logger(name=""):
     try:
         logg.setLevel(log_level.upper() if log_level else constants.LOG_LEVEL)
     except ValueError as e:
-        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {e!s}')
         logg.setLevel(constants.LOG_LEVEL)
 
     if not logg.hasHandlers():
@@ -1760,7 +1759,7 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
         # Check for unmatched addresses
         unmatched = user_pci_set - ssd_pci_set
         if unmatched:
-            logger.warn(f"Invalid PCI addresses: {', '.join(unmatched)}")
+            logger.warning(f"Invalid PCI addresses: {', '.join(unmatched)}")
             pci_addresses = user_pci_set & ssd_pci_set
         else:
             pci_addresses = list(user_pci_set)
@@ -3294,14 +3293,20 @@ def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bo
         return False
 
 
-def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storagenodesets"):
-    """Read spec.maxParallelNodeAdds from the node's StorageNodeSet CR.
+def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storageclusters"):
+    """Read spec.storageNodes.maxParallelNodeAdds from the StorageCluster CR.
 
     This is the operator-facing knob for how many storage nodes are added — and
     thus rebooted for the first-time CPU-topology apply — in parallel. We use it
     to seed the storage MCP's initial maxUnavailable so those reboots roll in
     one wave instead of a serialized, one-at-a-time queue (cluster_activate
     later narrows the pool to the cluster's fault tolerance).
+
+    The knob moved twice in the operator's CRD redesign: off the retired
+    StorageNodeSet and onto StorageCluster, and from the top of the spec into the
+    storageNodes block. Both spellings are read, newest first, so a control plane
+    talking to either generation of operator finds it; reading only the old one
+    returned None everywhere and serialized every node reboot of a fresh cluster.
 
     Read directly from the CR rather than via an operator-injected env, so it
     works without any operator/deployment change. Returns None when the CR
@@ -3314,19 +3319,22 @@ def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storage
         load_kube_config_with_fallback()
         api = client.CustomObjectsApi()
         cr = api.get_namespaced_custom_object(
-            group="storage.simplyblock.io",
-            version="v1alpha1",
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
             namespace=cr_namespace,
-            plural=cr_plural or "storagenodesets",
+            plural=cr_plural or "storageclusters",
             name=cr_name,
         )
-        value = (cr.get("spec") or {}).get("maxParallelNodeAdds")
+        spec = cr.get("spec") or {}
+        value = (spec.get("storageNodes") or {}).get("maxParallelNodeAdds")
+        if value is None:
+            value = spec.get("maxParallelNodeAdds")
         if value is None:
             return None
         return max(int(value), 1)
     except ApiException as e:
         if e.status == 404:
-            logger.info(f"StorageNodeSet {cr_name} not found in {cr_namespace} "
+            logger.info(f"StorageCluster {cr_name} not found in {cr_namespace} "
                         f"(non-OpenShift or CR absent); using default parallel-add")
         else:
             logger.warning(f"Failed to read maxParallelNodeAdds from CR "

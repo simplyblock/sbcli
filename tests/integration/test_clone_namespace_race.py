@@ -58,7 +58,6 @@ def _lvol_for_add(uuid, namespace="", nqn=None):
     lv.top_bdev = f"LVS_100/{lv.lvol_bdev}"
     lv.lvs_name = "LVS_100"
     lv.node_id = "node-1"
-    lv.cluster_id = "cluster-1"
     lv.snapshot_name = "LVS_100/SNAP_parent"
     lv.guid = "0123456789abcdef"
     lv.ha_type = "single"

@@ -9,22 +9,35 @@ logger = logging.getLogger()
 
 def _lvol_event(lvol, message, caused_by, event):
     db_controller = DBController()
+    snode = None
+    cluster = None
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     except Exception as e:
         logger.error(e)
         logger.error(f"Error fetching related objects for lvol event: {message}")
+
+    try:
+        cluster_id = db_controller.get_pool_by_id(lvol.pool_uuid).cluster_id
+    except Exception as e:
+        logger.error(
+            f"No cluster could be resolved for lvol {lvol.get_id()}; "
+            f"event not logged: {e}")
         return
 
     ec.log_event_cluster(
-        cluster_id=snode.cluster_id,
+        cluster_id=cluster_id,
         domain=ec.DOMAIN_CLUSTER,
         event=event,
         db_object=lvol,
         caused_by=caused_by,
         message=message,
         node_id=lvol.get_id())
+
+    if snode is None or cluster is None:
+        return  # the CR bookkeeping below needs both
+
     if cluster.mode == "kubernetes":
         pool = db_controller.get_pool_by_id(lvol.pool_uuid)
         

@@ -41,7 +41,6 @@ class _Snap:
         self.deletion_status = ""
         self.lvol = _LvolRef(node_id)
         self.removed = False
-        self.unindexed = False
 
     def get_id(self):
         return self.uuid
@@ -76,7 +75,7 @@ class _Node:
 @pytest.fixture
 def harness(monkeypatch):
     """Stub everything phase-2 does to the cluster; keep the record bookkeeping."""
-    state: dict[str, Any] = {"handed_off": [], "unindexed": [], "events": []}
+    state: dict[str, Any] = {"handed_off": [], "events": []}
 
     successor = _Snap("SUCCESSOR", node_id="NODE_B")
 
@@ -88,10 +87,6 @@ def harness(monkeypatch):
 
         def get_snapshot_by_id(self, uuid):
             return successor
-
-        def unindex_snapshot(self, snap):
-            state["unindexed"].append(snap.get_id())
-            snap.unindexed = True
 
     class _SnapShotFactory:
         """Callable stand-in that still carries the STATUS_* constants."""
@@ -133,7 +128,6 @@ def test_record_with_instances_is_retired_after_handoff(harness):
 
     assert harness["handed_off"] == ["SUCCESSOR"], "successor must be processed"
     assert snap.removed is True, "the handed-off record must be removed"
-    assert "ORIGINAL" in harness["unindexed"]
 
 
 def test_handoff_emits_no_delete_event(harness):

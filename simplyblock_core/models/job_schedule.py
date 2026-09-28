@@ -1,11 +1,21 @@
 import datetime
+from typing import ClassVar
 
+from simplyblock_core.models.indices import Index
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class JobSchedule(BaseModel):
 
     _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        # get_id() embeds cluster and date, which is what makes a per-cluster
+        # range read cheap; `uuid` is what makes a lookup by the bare task id a
+        # point read instead of a scan of the entire (never-pruned) table.
+        Index('uuid'),
+        Index(('cluster_id', 'function_name', 'status')),
+    )
 
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
