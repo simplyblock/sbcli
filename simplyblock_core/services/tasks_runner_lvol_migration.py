@@ -1105,6 +1105,35 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     }, None
 
 
+def _bdev_is_immutable_snapshot(bdev_info) -> bool:
+    """True if a ``get_bdevs`` answer describes an lvol that is already an
+    immutable snapshot -- one a previous attempt has converted. Anything else
+    (absent, unset sentinel, malformed, writable) is False."""
+    try:
+        lvol = bdev_info[0]["driver_specific"]["lvol"]
+    except (IndexError, KeyError, TypeError):
+        return False
+    return bool(lvol.get("is_snapshot") or lvol.get("snapshot"))
+
+
+def _replica_bdev_state(rpc, composite):
+    """``(present, immutable)`` for the target snapshot bdev on a replica node.
+
+    A replica that never had the bdev registered -- the migration's own
+    source node doubling as the target's replica (overlap), or a replica
+    skipped at registration -- has nothing to link or convert, and asking it
+    to only fails with "No such device". That failure is what forced the
+    retries behind every node flap on 2026-09-28: the retry then re-ran
+    steps SPDK punishes on the leader (a repeated migration flag in run 4, a
+    transfer into an already-converted snapshot in run 5) and the target
+    node fenced itself. A replica with no bdev cannot be in the split state
+    (writable copy beside a converted primary) the convert-on-both-sides
+    rule exists to prevent, so it is skipped rather than failed."""
+    info = rpc.get_bdevs(composite)
+    if not info:
+        return False, False
+    return True, _bdev_is_immutable_snapshot(info)
+
 def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient, migration: LVolMigration,
                        transfer: dict, tgt_sec: Optional[StorageNode] = None, sec_rpc: Optional[RPCClient] = None,
                        tgt_ter: Optional[StorageNode] = None, ter_rpc: Optional[RPCClient] = None):
@@ -1118,6 +1147,27 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
     snap_uuid = snap.uuid
     snap_short = transfer['snap_short']
     tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
+    # What an earlier attempt already did, so a retry resumes where it
+    # stopped instead of repeating steps that are invalid the second time.
+    primary_already_snapshot = _bdev_is_immutable_snapshot(tgt_rpc.get_bdevs(tgt_composite))
+    if primary_already_snapshot:
+        logger.warning(
+            f"{tgt_composite} is already an immutable snapshot on the target primary "
+            f"(converted by an earlier attempt); resuming at the replicas")
+    sec_present, sec_immutable = (False, False)
+    if tgt_sec and sec_rpc:
+        sec_present, sec_immutable = _replica_bdev_state(sec_rpc, tgt_composite)
+        if not sec_present:
+            logger.warning(
+                f"{tgt_composite} is not registered on the target secondary "
+                f"{tgt_sec.get_id()[:8]}; nothing to link or convert there")
+    ter_present, ter_immutable = (False, False)
+    if tgt_ter and ter_rpc:
+        ter_present, ter_immutable = _replica_bdev_state(ter_rpc, tgt_composite)
+        if not ter_present:
+            logger.warning(
+                f"{tgt_composite} is not registered on the target tertiary "
+                f"{tgt_ter.get_id()[:8]}; nothing to link or convert there")
 
     # Link to predecessor snapshot in target's ancestry chain.
     # add_clone must succeed on BOTH primary and secondary before we convert
@@ -1164,14 +1214,15 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
             else:
                 pred_short = _snap_tgt_short_name(pred_snap)
             pred_composite = f"{tgt_node.lvstore}/{pred_short}"
-            ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
-            if not ret:
-                return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
-            if tgt_sec and sec_rpc:
+            if not primary_already_snapshot:
+                ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
+                if not ret:
+                    return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
+            if tgt_sec and sec_rpc and sec_present and not sec_immutable:
                 ret_sec = sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
                 if not ret_sec:
                     return False, f"bdev_lvol_add_clone on secondary failed for {snap_uuid}"
-            if tgt_ter and ter_rpc:
+            if tgt_ter and ter_rpc and ter_present and not ter_immutable:
                 ret_ter = ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
                 if not ret_ter:
                     return False, f"bdev_lvol_add_clone on tertiary failed for {snap_uuid}"
@@ -1184,18 +1235,19 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
     # Leadership gate first: a convert on a non-leader returns success WITHOUT
     # persisting anything (the fork's non-leader branch marks the blob CLEAN
     # only) — a silent conversion error that must fail-and-retry instead.
-    from simplyblock_core.controllers import lvol_controller as _lc
-    if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
-        return False, f"target node not LVS leader for convert of {snap_uuid}, retrying"
-    ret = tgt_rpc.bdev_lvol_convert(tgt_composite)
-    if not ret:
-        return False, f"bdev_lvol_convert failed for {snap_uuid}"
+    if not primary_already_snapshot:
+        from simplyblock_core.controllers import lvol_controller as _lc
+        if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
+            return False, f"target node not LVS leader for convert of {snap_uuid}, retrying"
+        ret = tgt_rpc.bdev_lvol_convert(tgt_composite)
+        if not ret:
+            return False, f"bdev_lvol_convert failed for {snap_uuid}"
 
-    if tgt_sec and sec_rpc:
+    if tgt_sec and sec_rpc and sec_present and not sec_immutable:
         ret_sec = sec_rpc.bdev_lvol_convert(tgt_composite)
         if not ret_sec:
             return False, f"bdev_lvol_convert on secondary failed for {snap_uuid}"
-    if tgt_ter and ter_rpc:
+    if tgt_ter and ter_rpc and ter_present and not ter_immutable:
         ret_ter = ter_rpc.bdev_lvol_convert(tgt_composite)
         if not ret_ter:
             return False, f"bdev_lvol_convert on tertiary failed for {snap_uuid}"
@@ -1677,58 +1729,76 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
                     logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
                     _existing_bdev = _BDEV_INFO_UNSET
 
-        t, err = _setup_snap_transfer(
-            snap, snap_index, src_node, tgt_node,
-            src_rpc, tgt_rpc, trtype,
-            tgt_sec=tgt_sec, sec_rpc=sec_rpc,
-            tgt_ter=tgt_ter, ter_rpc=ter_rpc,
-            lvol_size_mib=_snap_lvol_size_mib,
-            migration=migration,
-            existing_bdev_info=_existing_bdev, primary_src_node=primary_src_node)
-        if t is None:
-            return False, True, err
-
-        logger.info(
-            f"Started intermediate snap transfer: {snap_uuid} "
-            f"({src_composite} -> {tgt_composite})")
-
-        # Busy-poll: spin at _INTERMEDIATE_POLL_INTERVAL_S until done or timeout
-        for _ in range(_INTERMEDIATE_POLL_MAX):
-            result = src_rpc.bdev_lvol_transfer_stat(src_composite)
-            if result is None:
-                try:
-                    _delete_bdev_blocking(tgt_composite, tgt_rpc,
-                                          secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
-                                          all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                                          lvs_name=tgt_node.lvstore)
-                except Exception as e:
-                    logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
-                return False, True, (
-                    f"Transfer stat failed for intermediate snap {snap_uuid}")
-            state = result.get('transfer_state', 'No process')
-            if state == 'Done':
-                break
-            if state in ('Failed', 'No process'):
-                try:
-                    _delete_bdev_blocking(tgt_composite, tgt_rpc,
-                                          secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
-                                          all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                                          lvs_name=tgt_node.lvstore)
-                except Exception as e:
-                    logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
-                return False, True, (
-                    f"Intermediate snap transfer {state} for {snap_uuid}")
-            time.sleep(_INTERMEDIATE_POLL_INTERVAL_S)
+        if _bdev_is_immutable_snapshot(_existing_bdev):
+            # An earlier attempt transferred and converted this snapshot on
+            # the target primary, then failed further on (a replica convert,
+            # say). Transferring into it again is a write into an immutable
+            # snapshot: SPDK fails the IO, drops the lvstore's leadership and
+            # fences the node's ports (x7t5w, 2026-09-28 18:18:48). Resume at
+            # post-processing instead.
+            logger.warning(
+                f"Intermediate snap {snap_uuid}: {tgt_composite} is already an immutable "
+                f"snapshot on the target primary; resuming at post-processing, not transferring")
+            t = {
+                'snap_uuid': snap_uuid,
+                'snap_short': snap_short_tgt,
+                'snap_index': snap_index,
+                'transfer_done': True,
+                'post_done': False,
+            }
         else:
-            try:
-                _delete_bdev_blocking(tgt_composite, tgt_rpc,
-                                      secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
-                                      all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                                      lvs_name=tgt_node.lvstore)
-            except Exception as e:
-                logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
-            return False, True, (
-                f"Intermediate snap transfer timed out for {snap_uuid}")
+            t, err = _setup_snap_transfer(
+                snap, snap_index, src_node, tgt_node,
+                src_rpc, tgt_rpc, trtype,
+                tgt_sec=tgt_sec, sec_rpc=sec_rpc,
+                tgt_ter=tgt_ter, ter_rpc=ter_rpc,
+                lvol_size_mib=_snap_lvol_size_mib,
+                migration=migration,
+                existing_bdev_info=_existing_bdev, primary_src_node=primary_src_node)
+            if t is None:
+                return False, True, err
+
+            logger.info(
+                f"Started intermediate snap transfer: {snap_uuid} "
+                f"({src_composite} -> {tgt_composite})")
+
+            # Busy-poll: spin at _INTERMEDIATE_POLL_INTERVAL_S until done or timeout
+            for _ in range(_INTERMEDIATE_POLL_MAX):
+                result = src_rpc.bdev_lvol_transfer_stat(src_composite)
+                if result is None:
+                    try:
+                        _delete_bdev_blocking(tgt_composite, tgt_rpc,
+                                              secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
+                                              all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
+                                              lvs_name=tgt_node.lvstore)
+                    except Exception as e:
+                        logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
+                    return False, True, (
+                        f"Transfer stat failed for intermediate snap {snap_uuid}")
+                state = result.get('transfer_state', 'No process')
+                if state == 'Done':
+                    break
+                if state in ('Failed', 'No process'):
+                    try:
+                        _delete_bdev_blocking(tgt_composite, tgt_rpc,
+                                              secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
+                                              all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
+                                              lvs_name=tgt_node.lvstore)
+                    except Exception as e:
+                        logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
+                    return False, True, (
+                        f"Intermediate snap transfer {state} for {snap_uuid}")
+                time.sleep(_INTERMEDIATE_POLL_INTERVAL_S)
+            else:
+                try:
+                    _delete_bdev_blocking(tgt_composite, tgt_rpc,
+                                          secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
+                                          all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
+                                          lvs_name=tgt_node.lvstore)
+                except Exception as e:
+                    logger.warning(f"cleanup target snap {tgt_composite} (non-fatal): {e}")
+                return False, True, (
+                    f"Intermediate snap transfer timed out for {snap_uuid}")
 
         ok, err = _post_process_snap(
             snap, tgt_node, tgt_rpc, migration, t,
@@ -3676,16 +3746,30 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc,
                     logger.warning(f"Group intermediate: pre-cleanup of {tgt_composite} failed: {e}")
                     _existing_bdev = _BDEV_INFO_UNSET
 
-        t, err = _setup_snap_transfer(
-            snap, snap_index, src_node, tgt_node,
-            src_rpc, tgt_rpc, trtype,
-            tgt_sec=_g_tgt_sec, sec_rpc=_g_sec_rpc,
-            tgt_ter=_g_tgt_ter, ter_rpc=_g_ter_rpc,
-            lvol_size_mib=_snap_lvol_size_mib,
-            migration=migration,
-            existing_bdev_info=_existing_bdev, primary_src_node=primary_src_node)
-        if t is None:
-            return False, True, err
+        if _bdev_is_immutable_snapshot(_existing_bdev):
+            # Same as the solo path above: already converted on the target
+            # primary by an earlier attempt, so resume at post-processing.
+            logger.warning(
+                f"Group intermediate snap {snap_uuid}: {tgt_composite} is already an immutable "
+                f"snapshot on the target primary; resuming at post-processing, not transferring")
+            t = {
+                'snap_uuid': snap_uuid,
+                'snap_short': snap_short_tgt,
+                'snap_index': snap_index,
+                'transfer_done': True,
+                'post_done': False,
+            }
+        else:
+            t, err = _setup_snap_transfer(
+                snap, snap_index, src_node, tgt_node,
+                src_rpc, tgt_rpc, trtype,
+                tgt_sec=_g_tgt_sec, sec_rpc=_g_sec_rpc,
+                tgt_ter=_g_tgt_ter, ter_rpc=_g_ter_rpc,
+                lvol_size_mib=_snap_lvol_size_mib,
+                migration=migration,
+                existing_bdev_info=_existing_bdev, primary_src_node=primary_src_node)
+            if t is None:
+                return False, True, err
 
         migration.transfer_context = {
             'stage': 'intermediate_transfer',
