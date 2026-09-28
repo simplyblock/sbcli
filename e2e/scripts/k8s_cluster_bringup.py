@@ -56,7 +56,11 @@ Environment variables, all optional unless marked:
     FORCE_DRIVE_FORMAT   true|false; 4K reformat on NVMe, wipefs on block
     DRIVE_SIZE_RANGE     e.g. 1.7T-2T
     PCIE_MODEL           NVMe only
-    BLOCK_DENY_LIST      comma-separated paths, lblk only; keeps the root disk out
+    BLOCK_DENY_LIST      comma-separated paths, lblk only. Unset by default:
+                         the root disk needs no help being excluded (it probes
+                         as Mounted/Busy/Partitioned), and a fixed name like
+                         /dev/sda is a data disk on some workers and the OS
+                         disk on others
     BLOCK_DEVICES        comma-separated paths to use as block devices, e.g.
                          /dev/nvme0n1,/dev/nvme1n1. Setting it SKIPS discovery
                          and authors the document directly, for the case where
@@ -582,6 +586,44 @@ def shape_groups(spec: dict) -> None:
             f"The nodes it describes would hand over nothing. Check what the "
             f"probe refused: kubectl -n {NS} describe operatorops <run>")
     log(f"draft names {devices} device(s) across {groups} group(s)")
+
+    # lblk needs two units per node, and the draft already says whether it has
+    # them. LBLK_MIN_DEVICES_PER_NODE is 2 (constants.py), enforced by
+    # node_configure.py inside the storage-node init container:
+    #
+    #     lblk mode requires at least 2 partitions or SSDs per node;
+    #     only 1 eligible unit(s) selected: ['sdd']
+    #
+    # That container then crash-loops, so the storage-node API never starts,
+    # so every StorageNode sits at CheckingHost reporting HostUnreachable until
+    # its 30-minute deadline expires. The run on 2026-09-28 spent half an hour
+    # arriving at a conclusion the draft above had already stated: one device
+    # per group.
+    #
+    # Checked per group rather than per node because a group is the unit that
+    # carries devices, and every worker in it gets that same list.
+    thin = [(g.get("name") or "?", g.get("workers") or [], blk)
+            for ns_ in spec.get("nodeSets") or []
+            for g in ns_.get("groups") or []
+            if len(blk := ((g.get("devices") or {}).get("block") or [])) == 1]
+    if thin:
+        detail = "\n    ".join(
+            f"{name}: {len(dev)} device {dev} for worker(s) {', '.join(wrk)}"
+            for name, wrk, dev in thin)
+        raise RuntimeError(
+            f"{len(thin)} group(s) name only one block device, and lblk "
+            f"requires two per node:\n    " + detail + "\n"
+            f"    Approving this builds nodes whose init container refuses to "
+            f"configure them, and they fail at CheckingHost 30 minutes later.\n"
+            f"    What the probe refused, and why, is in the node reports:\n"
+            f"      kubectl -n {NS} get cm -l "
+            f"storage.simplyblock.io/component=nodeprobe -o name\n"
+            f"      kubectl -n {NS} get cm <name> -o "
+            f"jsonpath='{{.data.report\\.json}}'"
+            f" | python3 -m json.tool | grep -A3 rejections\n"
+            f"    A disk rejected as NotBlank carries a filesystem or foreign "
+            f"signature; discovery has no override for that, so it has to be "
+            f"wiped before it can be offered.")
 
 
 

@@ -1178,11 +1178,23 @@ jobs:
           # on an NVMe cluster and a wipefs on a block one.
           export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
           export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
-          # On lblk the workers boot from /dev/sda; without this the draft
-          # offers the root disk as storage and the approval gate is the only
-          # thing standing between that and a reformat.
-          if [ "${DEVICE_MODE}" = "lblk" ]; then
-            export BLOCK_DENY_LIST="${LBLK_DENY_LIST:-/dev/sda}"
+          # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
+          # reasoning that the workers boot from it and the draft would
+          # otherwise offer the root disk as storage. Both halves were wrong.
+          #
+          # The root disk defends itself: every OS disk on this lab probes as
+          # Mounted;Busy;Partitioned and is refused before any filter of ours
+          # runs. And sda is not the root disk anyway -- it is the OS disk on
+          # worker-3 and a 1.6T data disk on worker-1, worker-2 and worker-4,
+          # because letters are not stable across these machines. So the deny
+          # list protected nothing and cost a data disk on three of four
+          # workers, which is how the 2026-09-28 run reached discovery with one
+          # eligible device per node and failed the lblk two-device minimum.
+          #
+          # LBLK_DENY_LIST still works for a deliberate exclusion; it is simply
+          # not set by default.
+          if [ -n "${LBLK_DENY_LIST:-}" ]; then
+            export BLOCK_DENY_LIST="${LBLK_DENY_LIST}"
           fi
 
           python3 $GITHUB_WORKSPACE/e2e/scripts/k8s_cluster_bringup.py
