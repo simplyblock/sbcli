@@ -2907,7 +2907,8 @@ def _delete_source_intermediates(migration):
                 f"{snap_uuid} (leaving it; it will block a node removal): {e}")
 
 
-def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=None):
+def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=None,
+                           primary_src_node=None):
     """
     Roll back a failed or cancelled migration: remove any partially-created
     target lvol/subsystem, then delete all snapshots copied to the target.
@@ -2939,7 +2940,10 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
     overlap_ids = set()
     if src_node is not None:
         try:
-            _, _, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+            # SRC paths are the PRIMARY's (its lvstore ports, its replicas);
+            # src_node may be the replica standing in for a stopped primary.
+            _, _, overlap_ids = _build_paths(
+                src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
         except Exception as e:
             logger.warning(
                 f"cleanup_target: could not compute overlap nodes, treating "
@@ -3345,7 +3349,9 @@ def task_runner(task):
             next_phase = LVolMigration.PHASE_COMPLETED
 
         elif phase == LVolMigration.PHASE_CLEANUP_TARGET:
-            done, suspend, error = _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=src_rpc, src_node=src_node)
+            done, suspend, error = _handle_cleanup_target(
+                migration, tgt_node, tgt_rpc, src_rpc=src_rpc, src_node=src_node,
+                primary_src_node=primary_src_node)
             next_phase = ""  # terminal — done-handler always sets STATUS_FAILED/CANCELLED
 
         else:
@@ -4116,7 +4122,8 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
     if phase == LVolMigration.PHASE_CLEANUP_TARGET:
         try:
             done, suspend, error = _handle_cleanup_target(
-                migration, tgt_node, tgt_rpc, src_rpc=src_rpc, src_node=src_node)
+                migration, tgt_node, tgt_rpc, src_rpc=src_rpc, src_node=src_node,
+                primary_src_node=primary_src_node)
         except RPCException as exc:
             return _suspend_task(task, migration, str(exc))
 
