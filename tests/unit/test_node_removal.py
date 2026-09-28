@@ -205,6 +205,18 @@ class TestRemovePreconditions(unittest.TestCase):
         self.assertFalse(ret)
         tc.add_node_removal_task.assert_not_called()
 
+    def test_a_down_node_is_removable(self):
+        """DOWN is the monitor's verdict on a node whose SPDK answers but whose
+        lvol ports it fenced. Removal is how such a node leaves, and its
+        shutdown is allowed (check_node_shutdown_preconditions refuses only
+        RESTARTING and IN_SHUTDOWN), so the removal must not refuse it."""
+        self.assertIn(StorageNode.STATUS_DOWN, storage_node_ops.REMOVABLE_STATUSES)
+        cl = _cluster()
+        nodes = [_node("n1", status=StorageNode.STATUS_DOWN), _node("n2")]
+        ret, tc = self._run(FakeDB(cl, nodes))
+        self.assertEqual(ret, "task-uuid-1")
+        tc.add_node_removal_task.assert_called_once()
+
     def test_removable_statuses_cover_every_departing_status_but_removed(self):
         """The set relationship itself, so a status added to DEPARTING_STATUSES
         is removable by construction rather than by remembering to list it."""

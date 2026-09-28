@@ -4230,11 +4230,23 @@ def delete_storage_node(node_id, force=False):
 #: check, as "already removed" rather than "not removable".
 REMOVABLE_STATUSES = (
     StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+    # DOWN: the SPDK is up, the monitor has fenced its lvol ports. It can be
+    # shut down like an ONLINE node (check_node_shutdown_preconditions refuses
+    # only RESTARTING and IN_SHUTDOWN), and removal is how such a node leaves.
+    StorageNode.STATUS_DOWN,
     StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE,
     # A removal that gave up is re-drivable (REMOVED_FAILED, in the set): the
     # operator fixes whatever blocked it and starts again. The old task is
     # DONE, not active, so the in-flight check above creates a fresh one.
 ) + tuple(s for s in StorageNode.DEPARTING_STATUSES if s != StorageNode.STATUS_REMOVED)
+
+
+#: The statuses in which a node's SPDK is still up when its removal starts,
+#: so phase 1 has something to stop. Everything else is either already
+#: stopped by an earlier step (the departing statuses) or not answering
+#: (OFFLINE, UNREACHABLE), where a shutdown could only fail.
+REMOVAL_SHUTS_DOWN_FROM = (
+    StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN)
 
 
 def advance_removal_status(node_id, status, caused_by="remove", db_controller=None):
@@ -5242,7 +5254,7 @@ def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
             # refuses PENDING_REMOVAL without force in any case, so widening
             # this to the draining statuses -- as it briefly was -- could only
             # ever fail here, and did, on every retry (2026-09-26).
-            if snode.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+            if snode.status in REMOVAL_SHUTS_DOWN_FROM:
                 cursor.enter("shutdown", f"[REMOVAL] {node_id}: phase 1 — shutdown")
                 ret = shutdown_storage_node(node_id, force=force_remove)
                 if isinstance(ret, tuple):

@@ -34,11 +34,24 @@ class ShutdownGateStatusTests(unittest.TestCase):
     STILL_RUNNING = (
         StorageNode.STATUS_ONLINE,
         StorageNode.STATUS_SUSPENDED,
+        # DOWN: the SPDK is up, the monitor fenced its lvol ports. A removal is
+        # how such a node leaves, and it must be stopped first like any other.
+        StorageNode.STATUS_DOWN,
     )
 
     def _gate(self, status):
         """The phase-1 condition, evaluated the way the code evaluates it."""
-        return status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
+        from simplyblock_core import storage_node_ops
+        return status in storage_node_ops.REMOVAL_SHUTS_DOWN_FROM
+
+    def test_the_gate_is_exactly_the_still_running_set(self):
+        from simplyblock_core import storage_node_ops
+        self.assertEqual(set(storage_node_ops.REMOVAL_SHUTS_DOWN_FROM), set(self.STILL_RUNNING))
+
+    def test_a_down_node_is_removable_and_shut_down_first(self):
+        from simplyblock_core import storage_node_ops
+        self.assertIn(StorageNode.STATUS_DOWN, storage_node_ops.REMOVABLE_STATUSES)
+        self.assertTrue(self._gate(StorageNode.STATUS_DOWN))
 
     def test_every_still_running_status_triggers_the_shutdown(self):
         for status in self.STILL_RUNNING:
@@ -68,8 +81,7 @@ class ShutdownGateStatusTests(unittest.TestCase):
     def test_an_unreachable_node_is_left_alone(self):
         """Not an oversight: shutting down a node that cannot be reached fails,
         and those statuses already mean the SPDK is not answering."""
-        for status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_DOWN,
-                       StorageNode.STATUS_UNREACHABLE):
+        for status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE):
             with self.subTest(status=status):
                 self.assertFalse(self._gate(status))
 
