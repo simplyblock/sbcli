@@ -961,6 +961,7 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
     else:
         _bdev_info = existing_bdev_info
+    reused_target_bdev = bool(_bdev_info)
     if _bdev_info:
         logger.info(
             f"[REUSE] snap={snap_uuid[:8]} reusing owned writable bdev {tgt_composite}")
@@ -1045,11 +1046,25 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         except Exception as e:
             logger.warning(f"cleanup target lvol {tgt_composite} (non-fatal): {e}")
 
-    # Step 3: migration flag on primary
-    ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_composite)
-    if not ret:
-        _cleanup()
-        return None, f"bdev_lvol_set_migration_flag failed for snap {snap_uuid}"
+    # Step 3: migration flag on primary -- once, when this call created the
+    # bdev. A reused bdev was flagged by the attempt that created it, and
+    # bdev_lvol_set_migration_flag is not idempotent on the SPDK side: a
+    # second call against the leader queues failed IO, drops leadership and
+    # fences the lvol ports (spdk_lvs_queued_failed_IO), so the monitor
+    # marks the target "down", the migration aborts and its tertiary
+    # follows a hop later (2026-09-28, run 4 first removal: retry after a
+    # convert failure on the overlap tertiary re-flagged LVS_1/SNAP_29m,
+    # nczr5 then 74pjj went down for ~15 s each). Same stopgap as the
+    # batch runner's; the durable fix is SPDK rejecting the repeat cleanly.
+    if reused_target_bdev:
+        logger.info(
+            f"[REUSE] snap={snap_uuid[:8]} migration flag already set when "
+            f"{tgt_composite} was created; not re-asserting it")
+    else:
+        ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_composite)
+        if not ret:
+            _cleanup()
+            return None, f"bdev_lvol_set_migration_flag failed for snap {snap_uuid}"
 
     # Step 4: get map_id of target bdev — used by bdev_lvol_transfer to route
     # data through the hub instead of a per-snap temp NVMe-oF subsystem.
