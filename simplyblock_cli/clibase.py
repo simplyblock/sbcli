@@ -149,7 +149,7 @@ class CLIWrapperBase:
 
     def storage_node__deploy(self, sub_command, args):
         isolate_cores = args.isolate_cores
-        return storage_ops.deploy(args.ifname, isolate_cores)
+        return storage_ops.deploy(args.ifname, isolate_cores, args.cluster_vip)
 
     def storage_node__configure_upgrade(self, sub_command, args):
         storage_ops.upgrade_automated_deployment_config()

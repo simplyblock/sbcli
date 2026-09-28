@@ -7709,7 +7709,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     return True
 
 
-def deploy(ifname, isolate_cores=False):
+def deploy(ifname, isolate_cores=False, cluster_vip=None):
     if not ifname:
         ifname = "eth0"
 
@@ -7742,7 +7742,7 @@ def deploy(ifname, isolate_cores=False):
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)
 
-    start_storage_node_api_container(dev_ip)
+    start_storage_node_api_container(dev_ip, cluster_ip=cluster_vip)
 
     if isolate_cores:
         utils.generate_realtime_variables_file(all_isolated_cores)
@@ -7755,7 +7755,6 @@ def deploy(ifname, isolate_cores=False):
 
 def start_storage_node_api_container(node_ip, cluster_ip=None):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
-    # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
     pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
 
@@ -7765,7 +7764,13 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
     utils.remove_container(node_docker, '/SNodeAPI')
 
     if cluster_ip is not None:
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
+        log_config = LogConfig(
+            type=LogConfig.types.GELF,
+            config={
+                "gelf-address": f"tcp://{cluster_ip}:12202",
+                "mode": "non-blocking",
+                "max-buffer-size": "40m"}
+        )
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
