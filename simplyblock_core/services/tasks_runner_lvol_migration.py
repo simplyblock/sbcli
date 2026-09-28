@@ -2846,7 +2846,11 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
                 # lvstore and silently rejected. See the function's docstring.
                 src_rpc=src_rpc, src_sec_rpc=src_sec_rpc, src_ter_rpc=src_ter_rpc,
                 src_all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
-                src_lvs_name=src_node.lvstore)
+                # The intermediate bdevs are named after the PRIMARY's lvstore;
+                # with a fallback source, src_node.lvstore is the replica's own
+                # and matched nothing, so the record was skipped and left behind
+                # (2026-09-28, run 8: it then blocked the node's removal).
+                src_lvs_name=(primary_src_node or src_node).lvstore)
         _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
                                warnings=_warnings)
     except Exception as e:

@@ -1567,6 +1567,30 @@ def create_migration(lvol_id, target_node_id,
 # Batch (shared-namespace) migration
 # ---------------------------------------------------------------------------
 
+# A batch-migration group written with no members is a reservation of its
+# NQN by a create still in progress (see create_batch_migration). One older
+# than this is a leftover of a crashed create and is dropped.
+_BATCH_RESERVATION_MAX_AGE_S = 600
+
+
+def _batch_reservation_age_s(group):
+    try:
+        return (datetime.now() - datetime.fromisoformat(str(group.create_dt))).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _batch_reservation_in_flight(group):
+    """A pre-created group with no members that a create wrote moments ago."""
+    return (group.phase == LVolMigrationGroup.PHASE_PRE_CREATED and not group.members
+            and _batch_reservation_age_s(group) < _BATCH_RESERVATION_MAX_AGE_S)
+
+
+def _batch_reservation_is_stale(group):
+    return (group.phase == LVolMigrationGroup.PHASE_PRE_CREATED and not group.members
+            and _batch_reservation_age_s(group) >= _BATCH_RESERVATION_MAX_AGE_S)
+
+
 def create_batch_migration(lvol_id, target_node_id,
                            ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                            host_nqn=None):
@@ -1624,24 +1648,68 @@ def create_batch_migration(lvol_id, target_node_id,
                         f"Batch migration group {g.uuid} for NQN {lvol.nqn} is already "
                         f"past pre-create (phase={g.phase}). Use /continue or cancel it."
                     )
+                if _batch_reservation_in_flight(g):
+                    # Worded so the operator treats it as "not accepting yet"
+                    # and retries, rather than as a conflict to cancel.
+                    raise PreconditionError(
+                        f"Batch migration for NQN {lvol.nqn} is being created by another "
+                        f"request (data migration in progress); retry shortly")
+                if _batch_reservation_is_stale(g):
+                    logger.warning(
+                        f"create_batch_migration: dropping stale reservation {g.uuid} for "
+                        f"NQN={lvol.nqn} (older than {_BATCH_RESERVATION_MAX_AGE_S}s, no members)")
+                    g.status = LVolMigrationGroup.STATUS_CANCELLED
+                    g.write_to_db(db_inst.kv_store)
+                    continue
                 existing_group = g
 
     source_node_id = lvol.node_id
+
+    # Reserve the NQN before the members are created. Member creation takes
+    # seconds per volume; a second request for the same subsystem arriving in
+    # that window (the operator re-submitting after its client timeout, to
+    # the other API replica) found no group yet and built its own. Two groups
+    # then shared the same member migrations, and the cleanup of whichever
+    # failed first tore the other's target bdevs down under it ("target bdev
+    # LVOL_29m not found", 2026-09-28, run 8). The reservation is the group
+    # record itself, written with no members; it is filled in below, and
+    # removed if member creation fails.
+    reservation = None
+    if existing_group is None:
+        reservation = LVolMigrationGroup()
+        reservation.uuid = str(uuid.uuid4())
+        reservation.cluster_id = tgt_node.cluster_id
+        reservation.source_node_id = source_node_id
+        reservation.target_node_id = target_node_id
+        reservation.target_nqn = lvol.nqn
+        reservation.members = []
+        reservation.phase = LVolMigrationGroup.PHASE_PRE_CREATED
+        reservation.status = LVolMigrationGroup.STATUS_RUNNING
+        reservation.create_dt = str(datetime.now())
+        reservation.write_to_db(db_inst.kv_store)
 
     # Pre-create individual migration records for each member.
     # connect_strings come from the master (ns_id=1) since the NQN is shared.
     member_records = []   # list of (ns_id, migration_id)
     master_connect_strings = []
-    for member in members:
-        migration_id, connect_strings = create_migration(
-            member.uuid, target_node_id,
-            ctrl_loss_tmo=ctrl_loss_tmo,
-            host_nqn=host_nqn,
-            batch=True,
-        )
-        member_records.append({"ns_id": member.ns_id, "migration_id": migration_id})
-        if member.ns_id == 1:
-            master_connect_strings = connect_strings
+    try:
+        for member in members:
+            migration_id, connect_strings = create_migration(
+                member.uuid, target_node_id,
+                ctrl_loss_tmo=ctrl_loss_tmo,
+                host_nqn=host_nqn,
+                batch=True,
+            )
+            member_records.append({"ns_id": member.ns_id, "migration_id": migration_id})
+            if member.ns_id == 1:
+                master_connect_strings = connect_strings
+    except BaseException:
+        if reservation is not None:
+            try:
+                reservation.remove(db_inst.kv_store)
+            except Exception as _rm_err:  # noqa: BLE001 - best effort, the create already failed
+                logger.warning(f"create_batch_migration: could not drop reservation {reservation.uuid}: {_rm_err}")
+        raise
 
     # The group inherits the source its members already resolved rather than
     # resolving again: every member went through create_migration(), which
@@ -1675,10 +1743,9 @@ def create_batch_migration(lvol_id, target_node_id,
         return existing_group.uuid, master_connect_strings
 
     # Stamp migration_group_id on each worker record.
-    group = LVolMigrationGroup()
-    group.uuid = str(uuid.uuid4())
-    group.cluster_id = tgt_node.cluster_id
-    group.source_node_id = source_node_id
+    # existing_group returned above, so this create owns the reservation.
+    assert reservation is not None
+    group = reservation
     group.active_source_node_id = active_source_node_id
     if active_source_node_id != source_node_id:
         logger.warning(

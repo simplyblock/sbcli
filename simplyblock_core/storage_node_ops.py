@@ -4262,6 +4262,26 @@ def advance_removal_status(node_id, status, caused_by="remove", db_controller=No
     return True
 
 
+def _snapshot_lives_on_node(snap, node_id, db_controller):
+    """Whether a snapshot record still ties ``node_id`` down.
+
+    ``snap.lvol`` is the copy of the volume embedded when the snapshot was
+    taken; it is never updated, so after the volume migrated it still names
+    the old node. The gate used that copy and refused to remove a node whose
+    every volume had already left -- "1 snapshot(s) present" on 2026-09-28,
+    run 8, for a migration-internal intermediate record (``_mig_*``) whose
+    volume was live on another node. The live volume record decides; a
+    migration's own intermediate snapshot is bookkeeping, not user data, and
+    never holds a node."""
+    if str(getattr(snap, "snap_name", "") or "").startswith("_mig_"):
+        return False
+    try:
+        lvol = db_controller.get_lvol_by_id(snap.lvol.uuid)
+    except (KeyError, AttributeError):
+        return snap.lvol.node_id == node_id
+    return lvol.node_id == node_id
+
+
 def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     """Start the online removal of a storage node from its cluster.
 
@@ -4333,7 +4353,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 
     node_snaps = [
         sn for sn in db_controller.get_snapshots()
-        if sn.lvol.node_id == node_id and sn.deleted is False
+        if sn.deleted is False and _snapshot_lives_on_node(sn, node_id, db_controller)
     ]
     if node_snaps:
         logger.error(
