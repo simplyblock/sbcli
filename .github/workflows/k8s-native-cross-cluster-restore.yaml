@@ -235,19 +235,46 @@ jobs:
           fi
           install -d -m 700 "$HOME/.ssh"
           dest="$HOME/.ssh/ci_lab_key"
-          # printf with an explicit newline, not echo: a key pasted into a secret
-          # without its trailing newline is rejected by ssh as "invalid format",
-          # which reads like the wrong key rather than a truncated one.
-          printf '%s' "$LAB_SSH_PRIVATE_KEY" > "$dest"
+          # tr -d, because a key pasted from a Windows clipboard carries CRLF and
+          # OpenSSH rejects the body outright -- reported as "invalid format",
+          # which reads like a wrong key rather than a wrong line ending.
+          # printf with an explicit newline for the other half of the same
+          # problem: a secret saved without its trailing newline is equally
+          # rejected. An extra blank line at EOF is harmless.
+          printf '%s' "$LAB_SSH_PRIVATE_KEY" | tr -d '\r' > "$dest"
           printf '\n' >> "$dest"
           chmod 600 "$dest"
-          # Prove it parses before a ten-hour run depends on it. -y prints the
-          # PUBLIC half, which is safe to log and says which key is in play.
-          if ! ssh-keygen -y -f "$dest" > "$dest.pub" 2>/dev/null; then
-            echo "::error::LAB_SSH_PRIVATE_KEY is not a usable private key. Check it was pasted whole, including the BEGIN/END lines and the trailing newline."
-            rm -f "$dest" "$dest.pub"
+          # -P '' so a passphrase-protected key fails here instead of hanging on
+          # a prompt that has no terminal to read from. -y prints the PUBLIC
+          # half, which is safe to log and says which key is in play.
+          if ! ssh-keygen -y -P '' -f "$dest" > "$dest.pub" 2>/tmp/keyerr; then
+            # Say which of the four usual causes it is. None of this prints key
+            # material: the BEGIN/END lines are structure, and the counts are
+            # counts.
+            first="$(head -1 "$dest")"
+            last="$(grep -v '^[[:space:]]*$' "$dest" | tail -1)"
+            echo "::error::LAB_SSH_PRIVATE_KEY is not a usable private key."
+            echo "  first line : ${first}"
+            echo "  last line  : ${last}"
+            echo "  line count : $(wc -l < "$dest")"
+            echo "  ssh-keygen : $(tr -d '\r' < /tmp/keyerr | head -2 | tr '\n' ' ')"
+            case "$first" in
+              ssh-*|ecdsa-*)
+                echo "  --> that is a PUBLIC key. The secret needs the private half (no .pub)." ;;
+              *"BEGIN"*)
+                case "$last" in
+                  *"END"*)
+                    echo "  --> structure looks complete, so the likely cause is a passphrase." ;;
+                  *)
+                    echo "  --> no END line: the paste was truncated." ;;
+                esac ;;
+              *)
+                echo "  --> no BEGIN line: the paste is missing its header, or has leading blank lines." ;;
+            esac
+            rm -f "$dest" "$dest.pub" /tmp/keyerr
             exit 1
           fi
+          rm -f /tmp/keyerr
           echo "Installed lab key: $(ssh-keygen -lf "$dest.pub")"
           echo "KEY_PATH=$dest" >> "$GITHUB_ENV"
 
