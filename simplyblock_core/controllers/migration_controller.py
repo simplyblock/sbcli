@@ -595,6 +595,13 @@ def resolve_source_node(primary_node):
     """
     if primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
         return primary_node
+    if primary_node.status == StorageNode.STATUS_RESTARTING:
+        # Transient, and the one case where standing a replica in is wrong:
+        # the primary takes its lvstore's leadership back when it returns,
+        # so a migration pinned to the replica would run its source-side
+        # cutover on a node that is no longer the leader. Wait instead.
+        raise PreconditionError(
+            f"Source node {primary_node.get_id()} is restarting; retry once it is back online")
 
     for replica_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
         if not replica_id:
@@ -1098,6 +1105,32 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
     return True, ""
 
 
+def _refuse_restarting_target_replicas(tgt_node, lvol):
+    """Refuse a create whose target has a replica mid-restart, before anything
+    is built.
+
+    The runner already waits for such a replica (its target-replica lookups
+    answer "cannot create on target primary" and the task is suspended and
+    retried), but create_migration kept it in the replica set and RPC'd it:
+    the restart's window is exactly when its SPDK does not answer, the call
+    raised RPCConnectionError deep inside, and the create failed after the
+    target bdev and subsystem were already on the primary. Failing here is
+    the same outcome with nothing to clean up, and the message says what to
+    do. Raises PreconditionError."""
+    roles = [("secondary", tgt_node.secondary_node_id)] if lvol.ha_type != "single" else []
+    roles.append(("tertiary", tgt_node.tertiary_node_id))
+    for role, replica_id in roles:
+        if not replica_id:
+            continue
+        try:
+            replica = db.get_storage_node_by_id(replica_id)
+        except KeyError:
+            continue
+        if replica.status == StorageNode.STATUS_RESTARTING:
+            raise PreconditionError(
+                f"Target {role} {replica.get_id()} is restarting; retry once it is back online")
+
+
 def replica_is_departing(node) -> bool:
     """The one rule for "this replica is leaving the cluster and gets no
     target-side work": its status is one of DEPARTING_STATUSES.
@@ -1169,6 +1202,7 @@ def create_migration(lvol_id, target_node_id,
 
     if not tgt_node.lvstore:
         raise ValueError(f"Target node {target_node_id} has no lvstore")
+    _refuse_restarting_target_replicas(tgt_node, lvol)
 
     # ── Shared-namespace detection ───────────────────────────────────────────
     # _get_shared_subsystem_members includes lvol itself, so a subsystem that
