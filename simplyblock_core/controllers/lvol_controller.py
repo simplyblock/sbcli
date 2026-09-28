@@ -5463,7 +5463,9 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
             target_pool_uuid, source_node.cluster_id, generation=generation,
             pin_snapshot_id=pin_snapshot_id)
         if error:
-            logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
+            # Log only the lvol id (a UUID); the error string is returned to the
+            # caller and logged there, so it never has to be clear-text-logged here.
+            logger.error("Fail-over clone failed for lvol %s", lvol_id)
             return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE

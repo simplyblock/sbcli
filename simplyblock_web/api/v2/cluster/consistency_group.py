@@ -8,6 +8,7 @@ deleting one. Detaching a member closes its epoch while preserving the snapshots
 prior generations depend on (§8.2).
 """
 import builtins
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Response
@@ -32,6 +33,8 @@ from .._dtos import (
     ConsistencyGroupReplicationIntentDTO,
     ConsistencyGroupReplicationStatusDTO,
 )
+
+logger = logging.getLogger(__name__)
 
 api = APIRouter(tags=['consistency-groups'])
 db = DBController()
@@ -223,8 +226,12 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> d
                  'no members to fail over, or a fail-back could not resolve its peer group')
     failed = [m for m in members if m.get("status") == "failed"]
     if failed:
+        # Log the per-member detail server-side; return only a generic reason so an
+        # internal error/stack string never reaches the API caller.
+        logger.error("group fail-over incomplete for %s: %s",
+                     group.get_id(), [m.get("detail") for m in failed])
         raise HTTPException(
-            409, f'group fail-over incomplete: {failed[0].get("detail", "no common generation")}')
+            409, 'group fail-over incomplete; retry while replication converges')
     return {"members": members}
 
 
@@ -238,7 +245,8 @@ def replication_demote(cluster: Cluster, group: ConsistencyGroupResource) -> Res
     """
     result = consistency_group_controller.demote_group(group)
     if result.get("error"):
-        raise HTTPException(500, result["error"])
+        logger.error("group demote failed for %s: %s", group.get_id(), result["error"])
+        raise HTTPException(500, 'group demote failed')
     if result["demoted"]:
         return Response(status_code=204)
     return JSONResponse(status_code=202, content=result)

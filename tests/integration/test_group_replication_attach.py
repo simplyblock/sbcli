@@ -186,6 +186,7 @@ def test_demote_group_completes_only_when_every_member_generation_replicated(db)
         lv.write_to_db(db.kv_store)
         s = SnapShot()
         s.uuid = f"snap-{mid}"
+        s.lvol = lv                       # a snapshot is always OF an lvol; write_to_db derives SnapShotMini from it
         s.target_replicated_snap_uuid = replicated
         s.write_to_db(db.kv_store)
 

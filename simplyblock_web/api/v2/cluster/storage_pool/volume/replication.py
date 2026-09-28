@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -12,6 +13,8 @@ from .... import util
 from ...._dependencies import Cluster, StoragePool, Volume
 from ...._dtos import ReplicationMode, ReplicationRelationshipDTO, ReplicationStatusDTO, TaskDTO
 
+
+logger = logging.getLogger(__name__)
 
 api = APIRouter(tags=['replication'])
 collection_api = APIRouter(tags=['replication'])
@@ -228,7 +231,8 @@ def demote(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     """
     result = lvol_controller.demote_lvol(volume.get_id())
     if isinstance(result, tuple):  # (False, error)
-        raise HTTPException(500, str(result[1]))
+        logger.error("demote of volume %s failed: %s", volume.get_id(), result[1])
+        raise HTTPException(500, 'demote failed')
     if result["demoted"]:
         return Response(status_code=204)
     return JSONResponse(status_code=202, content=result)
