@@ -362,6 +362,52 @@ jobs:
           test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
           chmod 600 "$kp" || true
 
+      # The lab nodes' authorized_keys are managed by infra, which strips any key
+      # it did not provision. The shared automation key this pipeline relied on
+      # (simplyblock-us-east-2.pem) is removed by that process and will keep being
+      # removed, which is what silently broke SSH mid-run on 2026-09-28 and threw
+      # away a passing 10h31m result. Only a key infra provisions for a person
+      # survives on those nodes, so the run carries one in rather than hoping to
+      # find one on the runner.
+      #
+      # KEY_PATH is the single place the rest of the pipeline looks: the next step
+      # resolves it, KEY_NAME derives from it, and ssh_utils._load_keys() reads it
+      # as SSH_KEY_LOCATION. Overriding it here means nothing else has to change.
+      #
+      # Unset secret leaves the key_path input alone, so a runner that still has a
+      # working key on disk behaves exactly as before.
+      #
+      # No `set -x` here, unlike every other step in this file. Tracing a step that
+      # handles key material prints the key; GitHub's log masking is a backstop for
+      # that, not a licence to rely on it.
+      - name: Install lab SSH key from secret
+        shell: bash
+        env:
+          LAB_SSH_PRIVATE_KEY: ${{ secrets.LAB_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LAB_SSH_PRIVATE_KEY:-}" ]; then
+            echo "LAB_SSH_PRIVATE_KEY is not set; falling back to the key_path input"
+            exit 0
+          fi
+          install -d -m 700 "$HOME/.ssh"
+          dest="$HOME/.ssh/ci_lab_key"
+          # printf with an explicit newline, not echo: a key pasted into a secret
+          # without its trailing newline is rejected by ssh as "invalid format",
+          # which reads like the wrong key rather than a truncated one.
+          printf '%s' "$LAB_SSH_PRIVATE_KEY" > "$dest"
+          printf '\n' >> "$dest"
+          chmod 600 "$dest"
+          # Prove it parses before a ten-hour run depends on it. -y prints the
+          # PUBLIC half, which is safe to log and says which key is in play.
+          if ! ssh-keygen -y -f "$dest" > "$dest.pub" 2>/dev/null; then
+            echo "::error::LAB_SSH_PRIVATE_KEY is not a usable private key. Check it was pasted whole, including the BEGIN/END lines and the trailing newline."
+            rm -f "$dest" "$dest.pub"
+            exit 1
+          fi
+          echo "Installed lab key: $(ssh-keygen -lf "$dest.pub")"
+          echo "KEY_PATH=$dest" >> "$GITHUB_ENV"
+
       - name: Export KEY_NAME from KEY_PATH
         shell: bash
         run: |
