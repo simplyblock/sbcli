@@ -1265,7 +1265,8 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
     except KeyError:
         logger.warning(f"Snapshot {snap_uuid} not found in DB for early node update")
 
-    migration.snaps_migrated.append(snap_uuid)
+    if snap_uuid not in migration.snaps_migrated:
+        migration.snaps_migrated.append(snap_uuid)
     if snap_uuid not in migration.snaps_preexisting_on_target:
         tgt_bdev_path = f"{tgt_node.lvstore}/{_snap_tgt_short_name(snap)}"
         if tgt_bdev_path not in migration.target_snap_bdevs:
@@ -1659,10 +1660,18 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
                  f"exceeds {convert_size(_threshold, 'MiB')} MiB threshold"
         )
         logger.info(f"Intermediate snapshot triggered: {_reason}")
+        _plan_len_before = len(migration.snap_migration_plan or [])
         _take_intermediate_snapshot(migration)
         plan = migration.snap_migration_plan
         if not plan:
             return False, True, "Intermediate snapshot failed"
+        if len(plan) == _plan_len_before:
+            # The snapshot was not taken (snapshot limit, say) and
+            # _take_intermediate_snapshot has closed the rounds. plan[-1] is
+            # the last PLANNED snapshot, already migrated: treating it as the
+            # new intermediate re-migrated it and listed it twice.
+            logger.info("No intermediate snapshot taken; proceeding without one")
+            break
         snap_uuid = plan[-1]
         snap_index = len(plan) - 1
 
@@ -3695,10 +3704,18 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc,
 
     # Take the intermediate snapshot if not already in flight.
     if ctx.get('stage') != 'intermediate_transfer':
+        _plan_len_before = len(migration.snap_migration_plan or [])
         _take_intermediate_snapshot(migration)
         plan = migration.snap_migration_plan
         if not plan:
             return False, True, "Group intermediate: _take_intermediate_snapshot failed"
+        if len(plan) == _plan_len_before:
+            # Not taken (see the solo loop): nothing to transfer, and plan[-1]
+            # is an already-migrated planned snapshot, not an intermediate.
+            logger.info("Group intermediate: no snapshot taken; proceeding without one")
+            migration.transfer_context = {'stage': 'intermediate_done'}
+            migration.write_to_db(db.kv_store)
+            return True, False, None
         snap_uuid = plan[-1]
         snap_index = len(plan) - 1
 

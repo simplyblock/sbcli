@@ -187,5 +187,69 @@ class TestRetryResumesAfterThePrimaryConvert(unittest.TestCase):
         self.assertEqual(seen["transfer"]["snap_short"], runner._snap_tgt_short_name(snap))
 
 
+class TestFailedIntermediateSnapshotTakesNothing(unittest.TestCase):
+    """When the intermediate snapshot cannot be taken (snapshot limit, say)
+    the plan is unchanged and its last entry is an already-migrated PLANNED
+    snapshot. Falling back to plan[-1] re-migrated that snapshot and listed
+    it twice (tests/integration/migration/test_scalability.py: 251 of 250).
+    The round is skipped instead."""
+
+    def test_no_transfer_and_no_duplicate_when_the_snapshot_was_not_taken(self):
+        migration = _migration()
+        migration.intermediate_snap_rounds = 0
+        migration.max_intermediate_snap_rounds = 3
+        migration.snap_migration_plan = ["snap-p"]
+        migration.snaps_migrated = ["snap-p"]
+        migration.transfer_context = {}
+        migration.write_to_db = MagicMock()
+        src_node = _node("src", "LVS_1")
+        tgt_node = _node("tgt", "LVS_10")
+        lvol = MagicMock()
+        lvol.lvol_bdev = "LVOL_1"
+        lvol.size = 10 * 1024 ** 3
+        mock_db = MagicMock()
+        mock_db.get_lvol_by_id.return_value = lvol
+        mock_db.get_snapshot_by_id.return_value = _snap("snap-p")
+        tgt_rpc = MagicMock()
+        tgt_rpc.bdev_lvol_get_lvols.return_value = []
+        tgt_rpc.get_bdevs.return_value = IMMUTABLE
+
+        def failed_take(m):
+            m.intermediate_snap_rounds = m.max_intermediate_snap_rounds  # as the real one does
+
+        with patch.object(runner, "db", mock_db), \
+             patch.object(runner, "_get_lvol_delta_bytes", return_value=None), \
+             patch.object(runner, "_take_intermediate_snapshot", side_effect=failed_take), \
+             patch.object(runner, "_setup_snap_transfer") as setup, \
+             patch.object(runner, "_post_process_snap") as post:
+            done, suspend, err = runner._handle_snap_copy(
+                migration, src_node, tgt_node, MagicMock(), tgt_rpc)
+
+        self.assertEqual((done, suspend, err), (True, False, None))
+        setup.assert_not_called()
+        post.assert_not_called()
+        self.assertEqual(migration.snaps_migrated, ["snap-p"])
+
+    def test_listing_a_snapshot_as_migrated_is_idempotent(self):
+        tgt_rpc = MagicMock()
+        tgt_rpc.get_bdevs.return_value = WRITABLE
+        tgt_rpc.bdev_lvol_convert.return_value = True
+        snap = _snap()
+        tgt_node = _node("tgt", "LVS_10")
+        migration = _migration()
+        migration.snaps_migrated = [snap.uuid]
+        transfer = {"snap_uuid": snap.uuid, "snap_short": "SNAP_46m", "snap_index": 0,
+                    "transfer_done": True, "post_done": False}
+        mock_db = MagicMock()
+        mock_db.get_snapshot_by_id.side_effect = KeyError("not in db")
+        with patch.object(runner, "db", mock_db), \
+             patch.object(runner.migration_controller, "get_snapshot_chain", return_value=[snap.uuid]), \
+             patch.object(runner.migration_events, "migration_snap_copied"), \
+             patch("simplyblock_core.controllers.lvol_controller.is_node_leader", return_value=True):
+            ok, err = runner._post_process_snap(snap, tgt_node, tgt_rpc, migration, transfer)
+        self.assertEqual((ok, err), (True, None))
+        self.assertEqual(migration.snaps_migrated, [snap.uuid])
+
+
 if __name__ == "__main__":
     unittest.main()
