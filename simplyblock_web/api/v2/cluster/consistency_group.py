@@ -232,7 +232,16 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> d
                      group.get_id(), len(failed), [m.get("lvol_id") for m in failed])
         raise HTTPException(
             409, 'group fail-over incomplete; retry while replication converges')
-    return {"members": members}
+    safe_members = []
+    for m in members:
+        safe_members.append({
+            "lvol_id": m.get("lvol_id", ""),
+            "status": m.get("status", ""),
+            "target_lvol_id": m.get("target_lvol_id", ""),
+            "connection_strings": m.get("connection_strings", []),
+            "warnings": m.get("warnings", []),
+        })
+    return {"members": safe_members}
 
 
 @instance_api.post('/replication/demote', name='clusters:consistency-groups:replication:demote',
