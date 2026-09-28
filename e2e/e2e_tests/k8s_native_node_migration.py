@@ -431,9 +431,14 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             f"StorageNodeOps verification failed: expected action=migrate, "
             f"got: {ops_spec}"
         )
-        assert ops_spec.get("storageNodeRef") == storage_node_cr, (
+        # nodeRef in v1alpha2; storageNodeRef was the v1alpha1 spelling and is
+        # not served any more, so asserting on it failed every migration that
+        # had in fact been requested correctly. Both are accepted so the
+        # assertion is about what was asked for, not which version answered.
+        node_ref = ops_spec.get("nodeRef") or ops_spec.get("storageNodeRef")
+        assert node_ref == storage_node_cr, (
             f"StorageNodeOps verification failed: expected "
-            f"storageNodeRef={storage_node_cr}, got: {ops_spec}"
+            f"nodeRef={storage_node_cr}, got: {ops_spec}"
         )
 
         # ── Step 5: Wait for migration to complete ────────────────────────

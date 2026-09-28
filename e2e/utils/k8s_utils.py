@@ -27,6 +27,54 @@ from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
 
+#: How a v1alpha1 StoragePool's storageClassParameters key spells itself under
+#: v1alpha2's typed volumeDefaults. storageClassParameters was a free-form map;
+#: volumeDefaults is a struct, so a key with no field here is an error rather
+#: than something to pass through and have the apiserver prune.
+_SCP_TO_VOLUME_DEFAULTS = {
+    "encryption": "enableEncryption",
+    "compression": "enableCompression",
+    "filesystem": "filesystem",
+    "csi.storage.k8s.io/fstype": "filesystem",
+}
+
+#: The fields volumeDefaults actually has, for the error message.
+_VOLUME_DEFAULT_FIELDS = (
+    "iops, throughput, filesystem, enableCompression, enableClientCompression, "
+    "enableClientDeduplication, enableEncryption, enableReplication, "
+    "enableDHCHAP, priorityClass, fabric, maxNamespacesPerSubsystem, "
+    "tune2fsReservedBlocks"
+)
+
+
+def pool_volume_defaults(dhchap=False, storage_class_parameters=None):
+    """The volumeDefaults a pool request maps to, as {field: value}.
+
+    Shared by the writer and by the reuse check that compares an existing
+    StoragePool against what a caller asked for. Those two drifting is how a
+    pool gets reused with the wrong StorageClass: the comparison read
+    spec.storageClassParameters and spec.dhchap, neither of which v1alpha2 has,
+    so it compared two empty dicts and matched any pool at all.
+    """
+    out = {}
+    if dhchap:
+        out["enableDHCHAP"] = True
+    for key, value in (storage_class_parameters or {}).items():
+        field = _SCP_TO_VOLUME_DEFAULTS.get(key)
+        if field is None:
+            raise ValueError(
+                f"storage_class_parameters key '{key}' has no v1alpha2 "
+                f"equivalent; volumeDefaults takes {_VOLUME_DEFAULT_FIELDS}")
+        out[field] = value
+    return out
+
+
+def _as_yaml_scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 class K8sUtils:
     """
     Kubernetes-aware command executor and failover helper.
@@ -3148,33 +3196,49 @@ class K8sUtils:
     def create_storage_backup(self, name: str, pvc_name: str,
                               cluster_name: str = "simplyblock-cluster",
                               namespace: str = None):
-        """Create a StorageBackup CRD that triggers an S3 backup from a PVC."""
-        ns = namespace or self.namespace
-        yaml_content = (
-            # NOTE: still v1alpha1. On an install without the conversion
-            # webhook this fails with
-            #   service "simplyblock-operator-conversion-webhook-service" not found
-            # Left as-is deliberately: v1alpha2's StorageBackup is not a
-            # rename of this one. It takes backupID and clusterRef only,
-            # where this takes clusterName, pvcRef and snapshotName -- so it
-            # references a backup rather than creating one, and taking one
-            # has presumably moved to StorageBackupOps. Porting it is its own
-            # work with its own verification, not a search-and-replace, and
-            # the backup lane is not part of the lblk runs this change is for.
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: StorageBackup\n"
-            f"metadata:\n"
-            f"  name: {name}\n"
-            f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"  clusterName: {cluster_name}\n"
-            f"  pvcRef:\n"
-            f"    name: {pvc_name}\n"
-        )
-        self.logger.info(
-            f"[K8sUtils] Creating StorageBackup '{name}' for PVC '{pvc_name}'"
-        )
-        self.apply_yaml(yaml_content, namespace=ns)
+        """Refuse, because no CR takes a backup any more.
+
+        This wrote a v1alpha1 StorageBackup with clusterName and pvcRef and
+        relied on the operator reading that as "back this PVC up now". Two
+        separate things stop it.
+
+        StorageBackup is served at both versions with v1alpha2 as the storage
+        version and conversion strategy Webhook, and these installs deploy no
+        webhook -- it is the one backup kind in that position, which is why
+        BackupImport, BackupRestore and BackupPolicy still work untouched: each
+        is served at v1alpha1 only, so nothing converts and nothing needs the
+        webhook. So this apply fails with
+
+            service "simplyblock-operator-conversion-webhook-service" not found
+
+        And porting the document does not help, because v1alpha2's StorageBackup
+        is not a renamed version of this one. It is {clusterRef, backupID}, and
+        the CRD describes backupID as "the identifier the store holds the backup
+        under" in "the StorageCluster whose store this backup was found in" --
+        an object describing a backup that already exists, not a request to take
+        one. StorageBackupOps is the only kind that acts, and its action enum is
+        exactly one value, Restore
+        (+kubebuilder:validation:Enum=Restore).
+
+        So taking a backup is no longer a Kubernetes operation at all. What
+        remains is StorageBackupPolicy, which takes them on a schedule against a
+        claimSelector, and sbcli, which the docker lane already drives with
+        `snapshot add --backup` and `snapshot backup <snapshot_id>`.
+
+        Raising beats writing a document that cannot work: the caller gets the
+        reason here instead of a webhook error 300 seconds later, and the choice
+        of replacement stays a decision about the backup lane rather than one
+        made silently in a helper.
+        """
+        raise NotImplementedError(
+            f"cannot take a backup of PVC '{pvc_name}' by creating a "
+            f"StorageBackup: v1alpha2 StorageBackup is {{clusterRef, backupID}} "
+            f"and describes a backup the store already holds. No CR takes one "
+            f"-- StorageBackupOps only does Restore.\n"
+            f"    Use StorageBackupPolicy for scheduled backups, or drive sbcli "
+            f"the way the docker lane does:\n"
+            f"      sbcli snapshot add <lvol_id> <name> --backup\n"
+            f"      sbcli snapshot backup <snapshot_id>")
 
     def wait_storage_backup_done(self, name: str, timeout: int = 300,
                                   namespace: str = None) -> dict:
@@ -3678,13 +3742,35 @@ class K8sUtils:
     def operator_storage_class_name(self, pool_crd_name: str,
                                     cluster_cr_name: str = None,
                                     namespace: str = None) -> str:
-        """Return the StorageClass name the operator generates for a pool.
+        """Return the StorageClass the operator generated for a pool.
 
-        Documented format: ``simplyblock-{namespace}-{clusterName}-{poolName}``
-        where poolName is the StoragePool CRD's metadata.name. Verified on
-        OpenShift 2026-09-04.
+        Read from the pool, not derived. This built
+        ``simplyblock-{namespace}-{clusterName}-{poolName}``, which is one
+        segment longer than what the operator now writes -- DefaultStorageClassName
+        (pool/assignment.go:87) returns ``"simplyblock-" + namespace + "-" +
+        clusterName`` with no pool segment -- so every caller was handed a class
+        that does not exist, and the PVCs, snapshots and clones that referenced
+        it never bound.
+
+        Deriving it at all was the mistake, and the operator says so: the name is
+        derived "only because the operator has to choose one, and nothing reads
+        it back: the pool records what was written in
+        status.defaultStorageClassName". So that is what this reads. An authored
+        class can be called anything, which no derivation could ever have found.
+
+        Falls back to the current derivation only if the pool has no status yet,
+        and says so, rather than returning a name nothing will match.
         """
         ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl -n {ns} get storagepool {pool_crd_name} "
+            f"-o jsonpath='{{.status.defaultStorageClassName}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        sc = (out or "").strip()
+        if sc:
+            return sc
+
         if not cluster_cr_name:
             out, _ = self._exec_kubectl(
                 f"kubectl get storageclusters -n {ns} --no-headers "
@@ -3693,7 +3779,14 @@ class K8sUtils:
             )
             names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
             cluster_cr_name = names[0] if names else "simplyblock-cluster"
-        return f"simplyblock-{ns}-{cluster_cr_name}-{pool_crd_name}"
+        fallback = f"simplyblock-{ns}-{cluster_cr_name}"
+        self.logger.warning(
+            f"[pool] StoragePool '{pool_crd_name}' has no "
+            f"status.defaultStorageClassName yet; guessing '{fallback}'. If the "
+            f"PVC does not bind, the pool had not been reconciled when this was "
+            f"read."
+        )
+        return fallback
 
     def wait_storage_class_exists(self, sc_name: str, timeout: int = 300) -> bool:
         """Wait for the operator to generate *sc_name*."""
@@ -4385,17 +4478,23 @@ class K8sSbcliUtils:
             matched = False
             for crd in crds:
                 spec = crd.get("spec", {})
-                wanted_scp = {
-                    k: ("true" if v is True else "false" if v is False else str(v))
-                    for k, v in (storage_class_parameters or {}).items()
+                # Against volumeDefaults, which is where both dhchap and
+                # storageClassParameters went. Comparing the old names made
+                # this match anything: spec.get("dhchap") and
+                # spec.get("storageClassParameters") are absent on every
+                # v1alpha2 pool, so the test reduced to {} == {} and True ==
+                # True, and a caller asking for an encrypted DHCHAP pool was
+                # handed whichever pool happened to exist.
+                wanted_vd = {
+                    k: _as_yaml_scalar(v) for k, v in
+                    pool_volume_defaults(dhchap, storage_class_parameters).items()
                 }
-                have_scp = {
-                    k: ("true" if v is True else "false" if v is False else str(v))
-                    for k, v in (spec.get("storageClassParameters") or {}).items()
+                have_vd = {
+                    k: _as_yaml_scalar(v)
+                    for k, v in (spec.get("volumeDefaults") or {}).items()
                 }
-                if (bool(spec.get("dhchap")) == bool(dhchap)
-                        and sorted(spec.get("allowedNodes", []) or []) == wanted_nodes
-                        and have_scp == wanted_scp):
+                if (sorted(spec.get("allowedNodes", []) or []) == wanted_nodes
+                        and have_vd == wanted_vd):
                     actual = next(iter(existing))
                     self.logger.info(
                         f"[pool] Existing CRD '{crd['metadata']['name']}' "
@@ -4569,32 +4668,41 @@ class K8sSbcliUtils:
                     f"falling back to cluster_name='{cluster_name}' from sbcli"
                 )
 
+            # v1alpha2. The older version needs the conversion webhook, which
+            # these installs do not deploy, so a v1alpha1 apply fails outright
+            # -- and the failure was invisible here, because existing_crds was
+            # set to the name we had just tried rather than to what the cluster
+            # holds. The run then waited the full 300s for a pool that had
+            # never been created and reported "Operator may not have reconciled
+            # the pool", which pointed at the operator instead of at the apply.
+            #
+            # Three fields moved. clusterName is clusterRef. dhchap and
+            # storageClassParameters are both gone: what they carried is typed
+            # fields under volumeDefaults, which the operator turns into the
+            # pool's StorageClass. allowedNodes stays where it was.
             yaml_content = (
-                f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+                f"apiVersion: storage.simplyblock.io/v1alpha2\n"
                 f"kind: StoragePool\n"
                 f"metadata:\n"
                 f"  name: {k8s_resource_name}\n"
                 f"  namespace: {ns}\n"
                 f"spec:\n"
-                f"  clusterName: {cluster_name}\n"
+                f"  clusterRef: {cluster_name}\n"
             )
-            if dhchap:
-                yaml_content += "  dhchap: true\n"
             if allowed_nodes:
                 yaml_content += "  allowedNodes:\n"
                 for node_name in allowed_nodes:
                     yaml_content += f"    - {node_name}\n"
-            if storage_class_parameters:
-                # The operator builds the pool's StorageClass from these,
-                # including encryption and csi.storage.k8s.io/fstype. They
-                # are IMMUTABLE once the SC exists (the CRD says to create
-                # a new StoragePool to change them), so a caller wanting
-                # both plain and encrypted volumes needs two pools.
-                yaml_content += "  storageClassParameters:\n"
-                for _k, _v in storage_class_parameters.items():
-                    if isinstance(_v, bool):
-                        _v = "true" if _v else "false"
-                    yaml_content += f"    {_k}: {_v}\n"
+
+            # volumeDefaults is immutable once set, because the StorageClass
+            # parameters it produces are immutable in the Kubernetes API. A
+            # caller wanting both plain and encrypted volumes still needs two
+            # pools.
+            defaults = pool_volume_defaults(dhchap, storage_class_parameters)
+            if defaults:
+                yaml_content += "  volumeDefaults:\n"
+                for _k, _v in defaults.items():
+                    yaml_content += f"    {_k}: {_as_yaml_scalar(_v)}\n"
 
             self.logger.info(
                 f"[pool] Creating '{pool_name}' "
@@ -4602,6 +4710,20 @@ class K8sSbcliUtils:
             )
             yaml_escaped = yaml_content.replace("'", "'\\''")
             self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
+
+            # Read back what the cluster holds rather than asserting what we
+            # sent. Setting this to the name we had just tried made a rejected
+            # apply indistinguishable from a slow operator: the wait below
+            # then blamed reconciliation for a CR that did not exist.
+            readback = self.k8s._exec_kubectl(
+                f"kubectl -n {ns} get storagepool {k8s_resource_name} "
+                f"-o jsonpath='{{.metadata.name}}' 2>/dev/null") or ""
+            if k8s_resource_name not in readback:
+                raise RuntimeError(
+                    f"[pool] StoragePool '{k8s_resource_name}' does not exist "
+                    f"after apply, so the apply was rejected. The document "
+                    f"sent was:\n{yaml_content}"
+                    f"    kubectl -n {ns} get storagepool")
             existing_crds = [k8s_resource_name]
         else:
             self.logger.info(
@@ -4764,21 +4886,26 @@ class K8sSbcliUtils:
                 f"[pool] No StorageCluster CRDs found in namespace {ns}; "
                 f"falling back to cluster_name='{cluster_name}' from sbcli"
             )
+        # v1alpha2, for the reason the other pool writer in this file states:
+        # v1alpha1 needs a conversion webhook these installs do not deploy.
+        # storageClassParameters is gone -- encryption is a typed field under
+        # volumeDefaults, which is immutable once set because the StorageClass
+        # it produces is.
         sc_params = ""
         if encryption:
             sc_params = (
-                "  storageClassParameters:\n"
-                "    encryption: true\n"
+                "  volumeDefaults:\n"
+                "    enableEncryption: true\n"
             )
 
         yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"apiVersion: storage.simplyblock.io/v1alpha2\n"
             f"kind: StoragePool\n"
             f"metadata:\n"
             f"  name: {pool_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  clusterName: {cluster_name}\n"
+            f"  clusterRef: {cluster_name}\n"
             f"{sc_params}"
         )
 
