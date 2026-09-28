@@ -28,15 +28,24 @@ from exceptions.custom_exception import NodeUnreachableTimeout
 # from glob import glob
 
 
+# KEY_PATH before KEY_NAME. KEY_NAME is a bare filename this joins onto
+# ~/.ssh, which silently requires the key to live there; the pipelines write it
+# to a path of their own and export that path, so honouring it directly removes
+# an assumption that only holds by coincidence today.
+_key_path = os.environ.get("KEY_PATH")
 _key_name = os.environ.get("KEY_NAME")
-if _key_name:
+if _key_path and os.path.isfile(_key_path):
+    SSH_KEY_LOCATION = _key_path
+elif _key_name:
     SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", _key_name)
 elif os.environ.get("K8S_LOCAL_KUBECTL", "").lower() in ("1", "true", "yes"):
     SSH_KEY_LOCATION = ""
 else:
     raise OSError(
-        "KEY_NAME env var is required for SSH access to nodes. "
-        "Set KEY_NAME or use K8S_LOCAL_KUBECTL=1 for k8s-native tests."
+        "KEY_PATH or KEY_NAME is required for SSH access to nodes. "
+        "The pipelines set KEY_PATH when they install the lab key from the "
+        "LAB_SSH_PRIVATE_KEY secret; set one of them, or use "
+        "K8S_LOCAL_KUBECTL=1 for k8s-native tests."
     )
 
 def generate_random_string(length=6):

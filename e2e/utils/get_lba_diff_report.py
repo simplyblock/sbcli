@@ -230,7 +230,13 @@ def main():
     if not all([remote_host, fio_file_path]):
         raise OSError("One or more required environment variables are missing.")
 
-    ssh_key_path = os.path.join(Path.home(), ".ssh", "simplyblock-us-east-2.pem")
+    # KEY_PATH, then KEY_NAME, then the old name. simplyblock-us-east-2.pem is
+    # not a credential any more: infra strips it from the nodes' authorized_keys,
+    # so naming it directly resolves to a file that exists and does not
+    # authenticate.
+    ssh_key_path = os.environ.get("KEY_PATH") or os.path.join(
+        Path.home(), ".ssh",
+        os.environ.get("KEY_NAME", "simplyblock-us-east-2.pem"))
     ssh = create_ssh_client(remote_host, ssh_key_path)
     scp = SCPClient(ssh.get_transport())
 

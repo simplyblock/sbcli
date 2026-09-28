@@ -59,7 +59,12 @@ transfer_config = TransferConfig(
 
 # SSH & Nodes
 BASTION_IP = os.getenv("BASTION_IP")
-KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
+# KEY_PATH first: the pipelines write the lab key to a path of their own
+# choosing and export it, and simplyblock-us-east-2.pem is no longer a
+# credential -- infra strips it from the nodes' authorized_keys, so the
+# old default resolves to a file that exists and does not authenticate.
+KEY_PATH = os.environ.get("KEY_PATH") or os.path.expanduser(
+    f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
 USER = os.getenv("USER", "root")
 
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
