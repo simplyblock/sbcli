@@ -75,10 +75,23 @@ class _LblkOutageMatrix(_LblkBase):
     OUTAGES = (
         "graceful_shutdown",
         "container_stop",
-        "storage_node_reboot",
         "short_network_interrupt",
         "interface_full_network_interrupt",
         "node_network_isolation",
+        # Last, because it is the one that currently cannot recover. Cordoning
+        # a worker raises a HostMaintenance operation whose Releasing step
+        # waits on a DaemonSet pod that never goes, so it expires after 15
+        # minutes and leaves the node Offline with a stale PDB and label --
+        # and Restart, the documented recovery, then expires too. Both runs of
+        # 2026-09-28 and 2026-09-29 ended here, at cycle 9 of 17, with the four
+        # network types never reached.
+        #
+        # Ordering it last does not make it pass. It means the types that do
+        # work are exercised first, so a run that dies on the reboot still
+        # reports on everything before it instead of reporting on nothing.
+        # Move it back up once the operator can complete a maintenance window:
+        # see k8s_hostmaintenance_releasing_waits_on_daemonset_pod_rca_20260929.
+        "storage_node_reboot",
     )
 
     #: Outage types this platform leaves out.
