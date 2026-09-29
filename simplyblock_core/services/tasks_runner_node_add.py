@@ -20,9 +20,10 @@ db = db_controller.DBController()
 # Node-add tasks for different nodes are processed concurrently. The slow part
 # of add_node (SPDK boot, local device/alceml prep) is node-local with no
 # cross-node shared state; the only part that must be serialized — wiring the
-# node into the cluster mesh — is guarded per cluster by ClusterAddNodeLock
-# inside storage_node_ops.add_node. We cap concurrency so a large
-# cluster-create / expansion fan-out can't exhaust the runner host.
+# node into the cluster mesh — is guarded per cluster by a DbLock named
+# "cluster_add/<cluster_id>" inside storage_node_ops.add_node. We cap
+# concurrency so a large cluster-create / expansion fan-out can't exhaust the
+# runner host.
 MAX_CONCURRENT_NODE_ADDS = constants.NODE_ADD_MAX_PARALLEL
 
 # Applying the CPU topology during add_node makes the node reboot
