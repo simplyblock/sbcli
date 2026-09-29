@@ -176,3 +176,53 @@ def test_detach_is_idempotent(db):
     fresh = db.get_consistency_group_by_id(group.get_id())
     cgc.detach_existing_volume(fresh, "never-a-member")
     assert "never-a-member" not in (fresh.members or {})
+
+
+def test_last_member_detach_resets_generation_to_zero(db):
+    """Regression: 2026-09-29-cg-generation-reset-when-empty — the group's
+    generation counter is bumped for the life of the group and was never reset,
+    so a group that had cycled through N generations and then lost its last live
+    member stayed at generation N. The next member to join inherited that counter
+    (``joined_seq = N + 1``) instead of starting a clean generation 1, and the
+    closed epochs left behind referenced generations the reset counter no longer
+    covered. Emptying the group must reset it to a clean slate."""
+    group = _group_with_member(db)  # founder dyn-lv-1, joined_seq = 1
+    group.last_group_seq = 5        # the group has run through five generations
+    group.write_to_db(db.kv_store)
+    fresh = db.get_consistency_group_by_id(group.get_id())
+
+    cgc.remove_member_from_group(fresh, "dyn-lv-1")  # the last live member leaves
+
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    assert fresh.last_group_seq == 0
+    assert fresh.members == {}  # closed epochs cleared with the counter reset
+
+
+def test_generation_reset_lets_next_member_start_at_generation_one(db):
+    """After the group empties and resets, a new member opens a clean epoch at
+    generation 1, not at the departed cycle's counter + 1."""
+    group = _group_with_member(db)
+    group.last_group_seq = 5
+    group.write_to_db(db.kv_store)
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    cgc.remove_member_from_group(fresh, "dyn-lv-1")
+
+    rejoin = _write_lvol(db, "dyn-lv-2")
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    cgc.add_member_to_group(fresh, rejoin)
+
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    assert fresh.members["dyn-lv-2"] == {"joined_seq": 1, "removed_seq": 0}
+
+
+def test_dropping_a_never_generationed_last_member_leaves_generation_zero(db):
+    """The other removal branch: a member no generation ever contained is dropped
+    outright. When it is the last one out, the group stays a clean generation-0
+    slate rather than carrying a leftover pin or counter."""
+    group = _group_with_member(db)  # founder dyn-lv-1 at generation 0, joined_seq 1
+
+    cgc.remove_member_from_group(group, "dyn-lv-1")
+
+    fresh = db.get_consistency_group_by_id(group.get_id())
+    assert fresh.last_group_seq == 0
+    assert fresh.members == {}

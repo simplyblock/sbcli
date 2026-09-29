@@ -71,20 +71,22 @@ def _tgt_snap():
 class _FakeDB:
     kv_store = "KV"
 
-    def __init__(self, nodes, clusters, existing_lvols=None):
+    def __init__(self, nodes, clusters, existing_lvols=None, existing_reps=None):
         self._nodes = nodes
         self._clusters = clusters
         self._existing_lvols = existing_lvols or []
+        self._reps = existing_reps or []
         self._snaps = {"s1": _src_snap(), "t1": _tgt_snap()}
 
     def get_lvol_by_id(self, lid):
         return _src_lvol()
 
     def get_lvol_replication_objects(self):
-        # Real DBController exposes this; the fail-back retirement asks it
-        # whether this volume is a copy of something. In these fail-OVER
-        # tests it is not, so there is nothing to retire.
-        return []
+        # Real DBController exposes this: the fail-over guard reads it to tell an
+        # already-completed fail-over (relationship recorded -> idempotent return)
+        # apart from a pre-materialized clone with no relationship yet (which must
+        # be completed). Most fail-OVER tests have none, so it defaults to empty.
+        return self._reps
 
     def get_storage_node_by_id(self, nid):
         return self._nodes[nid]
@@ -231,6 +233,12 @@ def test_failover_idempotent_when_target_exists(monkeypatch, patched):
     # A fail-over copy preserves the source's nsid, so the already-failed-over
     # volume this guard recognises carries nsid 7 too -- not the model default.
     existing.ns_id = 7
+    # A COMPLETED fail-over: the relationship is already recorded, so a retry is a
+    # true idempotent no-op -- return the existing id, create nothing.
+    rep = LVolReplication()
+    rep.source_lvol = _src_lvol()          # get_id() == "LV1"
+    rep.target_lvol = existing             # get_id() == "EXISTING"
+    rep.state = LVolReplication.STATE_FAILED_OVER
     nodes = {
         "N_src": _node("N_src", "CL_src"),
         "N_tgt": _node("N_tgt", "CL_tgt", secondary="N_sec", lvstore="lvs_tgt"),
@@ -239,13 +247,48 @@ def test_failover_idempotent_when_target_exists(monkeypatch, patched):
         "CL_src": _cluster("CL_src", target_cluster="CL_tgt", target_pool="POOL_tgt"),
         "CL_tgt": _cluster("CL_tgt"),
     }
-    _install_db(monkeypatch, _FakeDB(nodes, clusters, existing_lvols=[existing]))
+    _install_db(monkeypatch, _FakeDB(nodes, clusters, existing_lvols=[existing],
+                                     existing_reps=[rep]))
 
     result = lvol_controller.replicate_lvol_on_target_cluster("LV1")
 
     # Returns the existing target lvol id; no new volume created.
     assert result == "EXISTING"
     assert patched["add_calls"] == []
+
+
+def test_failover_completes_a_preexisting_clone_that_has_no_relationship(monkeypatch, patched):
+    """Regression (2026-09-27): a clone that already exists on the target but has
+    NO recorded fail-over relationship (a pre-materialized group copy) must be
+    COMPLETED -- write the LVolReplication + connection paths -- not returned bare.
+    A bare return left resolveToLocalReplica nothing to walk, so the group mount
+    fell back to the down source ('connection refused')."""
+    existing = LVol()
+    existing.uuid = "EXISTING"
+    existing.nqn = "nqn.orig:lvol:LV1"
+    existing.ns_id = 7
+    nodes = {
+        "N_src": _node("N_src", "CL_src"),
+        "N_tgt": _node("N_tgt", "CL_tgt", secondary="N_sec", lvstore="lvs_tgt"),
+    }
+    clusters = {
+        "CL_src": _cluster("CL_src", target_cluster="CL_tgt", target_pool="POOL_tgt"),
+        "CL_tgt": _cluster("CL_tgt"),
+    }
+    # No existing_reps: the clone is present but its fail-over was never recorded.
+    _install_db(monkeypatch, _FakeDB(nodes, clusters, existing_lvols=[existing]))
+
+    result = lvol_controller.replicate_lvol_on_target_cluster("LV1")
+
+    # The fail-over is completed ON the existing clone: a relationship is written
+    # (so resolveToLocalReplica can redirect the mount) and connection paths are
+    # returned -- and NO fresh volume is cloned.
+    assert isinstance(result, dict)
+    assert result["lvol_id"] == "EXISTING"
+    rep = patched["rep"]
+    assert rep.target_lvol.get_id() == "EXISTING"
+    assert rep.state == LVolReplication.STATE_FAILED_OVER
+    assert patched["add_calls"] == [], "no fresh clone: the existing copy is reused"
 
 
 def test_failover_does_not_mistake_a_sibling_namespace_for_this_volume(monkeypatch, patched):

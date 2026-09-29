@@ -19,7 +19,7 @@ class _FakeDB:
     kv_store = object()
 
     def __init__(self, clusters=("CL_SRC", "CL_TGT"), pools=(), lvols=(),
-                 snapshots=(), replications=(), groups=(), tasks=()):
+                 snapshots=(), replications=(), groups=(), tasks=(), nodes=()):
         self._clusters = list(clusters)
         self._pools = list(pools)
         self._lvols = list(lvols)
@@ -27,8 +27,19 @@ class _FakeDB:
         self._replications = list(replications)
         self._groups = list(groups)
         self._tasks = list(tasks)
+        self._nodes = list(nodes)
         self.written = []
         self.removed = []
+
+    def get_storage_node_by_id(self, node_id):
+        # Absent by default: the origin-primary guard then treats a member's source
+        # as gone (KeyError) and the fail-over proceeds -- the behaviour every
+        # existing fail-over test asserts. The protect no-op test seeds online
+        # nodes so the members read as the live primary.
+        for n in self._nodes:
+            if getattr(n, "uuid", None) == node_id:
+                return n
+        raise KeyError(f'StorageNode {node_id} not found')
 
     # clusters / pools
     def get_cluster_by_id(self, cluster_id):
@@ -98,8 +109,11 @@ class _FakeDB:
                 return lv
         raise KeyError(f'LVol {lvol_id} not found')
 
-    def get_lvols(self):
-        return self._lvols
+    def get_lvols(self, cluster_id=None):
+        if not cluster_id:
+            return self._lvols
+        return [lv for lv in self._lvols
+                if getattr(lv, "cluster_id", cluster_id) == cluster_id]
 
     def get_mini_lvols(self):
         return self._lvols
@@ -129,6 +143,19 @@ class _FakeDB:
                 return g
         return None
 
+    def get_consistency_group_by_id(self, group_id):
+        wanted = group_id.split('/')[-1] if group_id else ""
+        for g in self._groups:
+            if g.uuid == wanted:
+                return g
+        raise KeyError(f'ConsistencyGroup {group_id} not found')
+
+    def get_consistency_group_by_name(self, cluster_id, name):
+        for g in self._groups:
+            if g.cluster_id == cluster_id and getattr(g, "group_name", "") == name:
+                return g
+        return None
+
     def get_job_tasks(self, cluster_id):
         return self._tasks
 
@@ -154,11 +181,12 @@ def _pool(uuid, cluster_id="CL_TGT", status=Pool.STATUS_ACTIVE):
     return p
 
 
-def _lvol(uuid, policy_id="", status=LVol.STATUS_ONLINE):
+def _lvol(uuid, policy_id="", status=LVol.STATUS_ONLINE, demote_snapshot_id=""):
     lv = LVol()
     lv.uuid = uuid
     lv.status = status
     lv.replication_policy_id = policy_id
+    lv.replication_demote_snapshot_id = demote_snapshot_id
     return lv
 
 
@@ -368,28 +396,60 @@ def test_detach_stops_and_purges_both_sides(monkeypatch):
 # Purge
 # --------------------------------------------------------------------------- #
 
-def _snap(uuid, lvol, snap_type=SnapShot.TYPE_INTERNAL, target=""):
+def _snap(uuid, lvol, snap_type=SnapShot.TYPE_INTERNAL, target="", created_at=0):
     s = SnapShot()
     s.uuid = uuid
     s.lvol = lvol
     s.snap_type = snap_type
     s.target_replicated_snap_uuid = target
+    s.created_at = created_at
     return s
 
 
-def test_purge_deletes_internal_snapshots_on_both_sides(monkeypatch):
+def test_purge_deletes_superseded_internal_snapshots_on_both_sides(monkeypatch):
     lv = _lvol("LV1")
     # The target copy belongs to the REP_ receiving volume on the other cluster,
     # not to the source volume.
     remote = _lvol("REP_LV1")
-    src = _snap("S_SRC", lv, target="S_TGT")
+    older_src = _snap("S_SRC_OLD", lv, target="S_TGT_OLD", created_at=100)
+    older_tgt = _snap("S_TGT_OLD", remote)
+    newest_src = _snap("S_SRC_NEW", lv, target="S_TGT_NEW", created_at=200)
+    newest_tgt = _snap("S_TGT_NEW", remote)
+    db = _FakeDB(lvols=[lv, remote],
+                 snapshots=[older_src, older_tgt, newest_src, newest_tgt])
+    _install(monkeypatch, db)
+    deleted: list[str] = []
+    monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
+    rpc._purge_internal_replication_snapshots("LV1")
+    assert deleted == ["S_TGT_OLD", "S_SRC_OLD"], \
+        "the superseded pair goes, target copy first, then the source snapshot"
+
+
+def test_purge_without_demote_keeps_the_newest_replicated_pair(monkeypatch):
+    """Regression: 2026-09-25-disable-during-failover-purges-the-failover-point
+    — during an UNPLANNED failover, Ramen deletes the source side's
+    VolumeReplication while flipping its VRG to Secondary, which reaches this
+    purge through DisableVolumeReplication -> detach_policy. Nothing was ever
+    demoted (that is the whole premise of an unplanned failover) and the
+    promote has not cloned yet (it races this very teardown), so neither the
+    demote-snapshot guard nor the dependent-clone guard fires -- and the purge
+    deleted the volume's ONLY recoverable point mid-failover (confirmed live
+    2026-09-25 09:34:23: "detached from its replication policy (2 internal
+    replication snapshot(s) removed)", after which the fail-over's clone
+    selector 409-looped forever against a dead source). The newest fully
+    replicated pair is the volume's last recovery point and survives a detach
+    UNCONDITIONALLY; it is released only when the volume itself is deleted."""
+    lv = _lvol("LV1")
+    remote = _lvol("REP_LV1")
+    src = _snap("S_SRC", lv, target="S_TGT", created_at=100)
     tgt = _snap("S_TGT", remote)
     db = _FakeDB(lvols=[lv, remote], snapshots=[src, tgt])
     _install(monkeypatch, db)
     deleted: list[str] = []
     monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
     rpc._purge_internal_replication_snapshots("LV1")
-    assert deleted == ["S_TGT", "S_SRC"], "target copy first, then the source snapshot"
+    assert deleted == [], \
+        "the sole replicated pair is the last recovery point and must survive the detach"
 
 
 def test_purge_never_touches_user_snapshots(monkeypatch):
@@ -401,6 +461,54 @@ def test_purge_never_touches_user_snapshots(monkeypatch):
     monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
     rpc._purge_internal_replication_snapshots("LV1")
     assert deleted == []
+
+
+def test_purge_keeps_the_demoted_volumes_fail_over_point(monkeypatch):
+    """The snapshot a demoted volume is fenced on -- SOURCE copy and TARGET
+    copy alike -- is the current fail-over point a pending PromoteVolume may
+    still need, confirmed live 2026-09-24 (Ramen relocate M-02): detach_policy
+    runs the instant a source demotes to Secondary, well before any fail-over
+    gets a chance to promote the target, and deleting either copy just
+    because nothing has cloned from it YET stranded every subsequent
+    PromoteVolume attempt -- even though the source volume was still fully
+    healthy at the time.
+
+    Both copies matter for different reasons: the target copy is what a clone
+    is actually built from, but last_replicated_target_snapshot resolves its
+    fail-over candidates by first looking up each completed replication
+    task's SOURCE snapshot id (task.function_params["snapshot_id"]) and only
+    THEN reading that record's target_replicated_snap_uuid -- so a deleted
+    source copy makes the whole candidate vanish before the target copy is
+    ever even consulted, regardless of whether the target copy itself
+    survived.
+
+    An older, already-superseded internal snapshot's copies have no such role
+    (a newer one already carries the current state forward) and stay
+    purge-eligible. This demote guard is no longer the only protection: the
+    NEWEST replicated pair now survives every detach unconditionally (see
+    test_purge_without_demote_keeps_the_newest_replicated_pair -- an unplanned
+    failover detaches without any demote), so this test pins the demote guard
+    specifically because a demote may fence the volume on a snapshot that is
+    not the newest by timestamp.
+    """
+    lv = _lvol("LV1", demote_snapshot_id="S_SRC_NEW")
+    remote = _lvol("REP_LV1")
+    older_src = _snap("S_SRC_OLD", lv, target="S_TGT_OLD", created_at=100)
+    older_src.next_snap_uuid = "S_SRC_NEW"  # superseded
+    older_tgt = _snap("S_TGT_OLD", remote)
+    newest_src = _snap("S_SRC_NEW", lv, target="S_TGT_NEW", created_at=200)
+    newest_tgt = _snap("S_TGT_NEW", remote)
+    db = _FakeDB(lvols=[lv, remote],
+                 snapshots=[older_src, older_tgt, newest_src, newest_tgt])
+    _install(monkeypatch, db)
+    deleted: list[str] = []
+    monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
+    rpc._purge_internal_replication_snapshots("LV1")
+    assert "S_TGT_NEW" not in deleted, "the newest target copy is a live fail-over point"
+    assert "S_SRC_NEW" not in deleted, \
+        "the newest SOURCE copy is what the job-task lookup resolves by id first"
+    assert "S_TGT_OLD" in deleted, "a superseded target copy is still purge-eligible"
+    assert "S_SRC_OLD" in deleted, "a superseded source copy is still purge-eligible"
 
 
 def test_purge_keeps_a_snapshot_a_live_clone_depends_on(monkeypatch):
@@ -630,6 +738,373 @@ def test_cg_failover_resume_pins_to_the_incumbent_generation(monkeypatch):
     assert results[1]["status"] == "failed_over"
     assert pins == {"LV2": "S1_LV2"}, \
         "the resumed member must join the incumbent generation 1, not the newer 2"
+
+
+def test_cg_failover_triggers_on_membership_without_the_flag(monkeypatch):
+    """Group fail-over keys off consistency-group MEMBERSHIP, not a policy flag:
+    a plain policy whose volumes carry a group_id still cuts every member at one
+    common generation, resolving the group by the members' group_id."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "plain", target_id)   # no consistency_group flag
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=2)
+    db._groups.append(group)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    lv1.group_id = group.get_id()
+    lv2.group_id = group.get_id()
+    db._lvols.extend([lv1, lv2])
+
+    # Generation 1 fully replicated for both members; generation 2 only for LV2.
+    remote = _lvol("REP")
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"), _snap("T1_LV1", remote),
+        _group_snap("S1_LV2", lv2, group, 1, target="T1_LV2"), _snap("T1_LV2", remote),
+        _group_snap("S2_LV1", lv1, group, 2),
+        _group_snap("S2_LV2", lv2, group, 2, target="T2_LV2"), _snap("T2_LV2", remote),
+    ])
+    db._tasks.extend([_done_replication_task("S1_LV1"),
+                      _done_replication_task("S1_LV2"),
+                      _done_replication_task("S2_LV2")])
+
+    pins: dict[str, str] = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"T_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_policy(policy_id)
+    assert all(r["status"] == "failed_over" for r in results), results
+    assert pins == {"LV1": "S1_LV1", "LV2": "S1_LV2"}, \
+        "membership alone must pin every member to generation 1, the newest COMMON one"
+
+
+def _shared_policy_group_and_standalone(monkeypatch, db):
+    """A policy shared by a 2-member consistency group AND a standalone volume
+    (STD, no group_id) -- the live shape where a single-PVC workload and a VGR
+    group land on one backend replication policy. Returns policy_id."""
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "shared", target_id)
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=2)
+    db._groups.append(group)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    lv1.group_id = group.get_id()
+    lv2.group_id = group.get_id()
+    std = _lvol("STD", policy_id=policy_id)          # no group_id
+    db._lvols.extend([lv1, lv2, std])
+    remote = _lvol("REP")
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"), _snap("T1_LV1", remote),
+        _group_snap("S1_LV2", lv2, group, 1, target="T1_LV2"), _snap("T1_LV2", remote),
+    ])
+    db._tasks.extend([_done_replication_task("S1_LV1"), _done_replication_task("S1_LV2")])
+    return policy_id
+
+
+def test_failover_policy_does_not_demand_a_group_generation_for_a_standalone(monkeypatch):
+    """Regression (2026-09-27): a policy shared by a consistency group and a
+    standalone volume refused the WHOLE fail-over because the group-generation
+    check demanded the standalone be in the group's generation ("generation N
+    lacks STD"). The standalone must fail over per-volume, the members as a
+    group -- not one poisoning the other."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _shared_policy_group_and_standalone(monkeypatch, db)
+    pins: dict = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"T_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_policy(policy_id)
+    by_id = {r["lvol_id"]: r["status"] for r in results}
+    assert by_id == {"LV1": "failed_over", "LV2": "failed_over", "STD": "failed_over"}, results
+    assert pins["LV1"] == "S1_LV1" and pins["LV2"] == "S1_LV2", "members pinned to the group cut"
+    assert pins["STD"] is None, "standalone fails over per-volume, not pinned to the group"
+
+
+def test_failover_group_touches_only_its_members(monkeypatch):
+    """The VGR entry point fails over ONLY the group's members; a standalone
+    volume that merely shares the policy is left alone (it has its own DRPC)."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    _shared_policy_group_and_standalone(monkeypatch, db)
+    group = db._groups[0]
+    touched: list = []
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        touched.append(lvol_id)
+        return {"lvol_id": f"T_{lvol_id}", "connection_strings": []}
+
+    # Source down -> a genuine fail-over (same signal the standalone path reads).
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: False)
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_group(group)
+    assert {r["lvol_id"] for r in results} == {"LV1", "LV2"}
+    assert all(r["status"] == "failed_over" for r in results), results
+    assert "STD" not in touched, "the standalone volume must NOT be failed over by a group fail-over"
+
+
+def test_failover_group_promote_is_a_noop_for_the_live_primary(monkeypatch):
+    """Regression (2026-09-27): csi-addons calls PromoteGroup whenever the VGR is
+    Primary -- including the origin cluster during protect -- and the group path
+    lacks the per-volume endpoint's planned/demote guard. Without this check the
+    protect-promote cloned the still-primary members to the target and stopped
+    their replication (pre-staging hollow clones, breaking protect). When the
+    members are the live primary (source online via the SAME replication_source_online
+    check the standalone path uses, none failed over, none demoted), the promote is
+    a no-op success -- nothing is cloned."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    _shared_policy_group_and_standalone(monkeypatch, db)
+    group = db._groups[0]
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: True)
+    touched: list = []
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        _recording(touched))
+    results = rpc.failover_group(group)
+    assert all(r["status"] == "already_primary" for r in results), results
+    assert {r["lvol_id"] for r in results} == {"LV1", "LV2"}
+    assert touched == [], "an origin-primary promote must NOT clone anything"
+
+
+def test_failover_group_promote_proceeds_when_members_are_demoted(monkeypatch):
+    """A PLANNED relocate demotes the source first and the source stays ONLINE, so
+    source health alone cannot tell it apart from protect -- the demote state must.
+    A demoted member is a real hand-off, not the untouched primary, so the promote
+    must proceed (not no-op) even though the source is online."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    _shared_policy_group_and_standalone(monkeypatch, db)
+    group = db._groups[0]
+    # Source online, but the members are demoted (a relocate) -> not the untouched
+    # primary, so the guard must NOT no-op.
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: True)
+    for lv in db._lvols:
+        if getattr(lv, "group_id", "") == group.get_id():
+            lv.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        lambda lvol_id, **kw: {"lvol_id": f"T_{lvol_id}", "connection_strings": []})
+    results = rpc.failover_group(group)
+    assert all(r["status"] != "already_primary" for r in results), \
+        "a demoted (relocating) member is a hand-off, not the live primary"
+
+
+def _failback_scenario(monkeypatch, db, unshipped=()):
+    """A failed-over consistency group ready to fail BACK: an EMPTY local group on
+    CL_SRC whose members now live in the peer group on CL_TGT, with a demote cut
+    (generation 1) shipped home for every peer member. Returns (local_group,
+    policy_id). ``unshipped`` names member ids whose generation-1 replication task
+    is omitted -- their cut never finished shipping home."""
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+
+    local = ConsistencyGroup()
+    local.uuid, local.cluster_id, local.group_name = "CG_SRC", "CL_SRC", "cg"
+    local.policy_id = policy_id
+    local.members = {}                                 # emptied by the fail-over
+    db._groups.append(local)
+
+    peer = ConsistencyGroup()
+    peer.uuid, peer.cluster_id, peer.group_name = "CG_TGT", "CL_TGT", "cg"
+    peer.members = {"PB1": {"joined_seq": 1, "removed_seq": 0},
+                    "PB2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(peer)
+
+    pb1, pb2 = _lvol("PB1"), _lvol("PB2")
+    for m in (pb1, pb2):
+        m.group_id = peer.get_id()
+        m.cluster_id = "CL_TGT"
+    db._lvols.extend([pb1, pb2])
+
+    # Demote generation 1, shipped home (a home-side copy + a DONE task).
+    home = _lvol("HOME")
+    for src, snap_id, tgt_id in (("PB1", "D1_PB1", "H1_PB1"),
+                                 ("PB2", "D1_PB2", "H1_PB2")):
+        db._snapshots.extend([
+            _group_snap(snap_id, db.get_lvol_by_id(src), peer, 1, target=tgt_id),
+            _snap(tgt_id, home)])
+        if src not in unshipped:
+            db._tasks.append(_done_replication_task(snap_id))
+    return local, policy_id
+
+
+def test_failback_group_clones_peer_members_home_pinned_to_the_demote_cut(monkeypatch):
+    """Regression (2026-09-27): promoting an empty local group on fail-back cloned
+    NOTHING -- the promote reported success while the workload kept writing to the
+    peer's clones. The empty local group must resolve to the peer group and clone
+    EVERY member home, pinned to the one demote generation the peer shipped."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db)
+    pins: dict = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"HOME_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_group(local)
+    assert {r["lvol_id"]: r["status"] for r in results} == \
+        {"PB1": "failed_over", "PB2": "failed_over"}, results
+    assert pins == {"PB1": "D1_PB1", "PB2": "D1_PB2"}, \
+        "every peer member cloned home pinned to the common demote generation 1"
+
+
+def test_failback_group_clones_settled_targets_not_skipped(monkeypatch):
+    """The members to clone home are the failed-over targets, every one settled
+    (STATE_FAILED_OVER). The fail-over path skips settled volumes; the fail-back
+    must NOT -- routing these through it is exactly the silent no-op."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db)
+    for src in ("PB1", "PB2"):
+        rep = LVolReplication()
+        rep.source_lvol = _lvol(f"ORIG_{src}")
+        rep.target_lvol = db.get_lvol_by_id(src)
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+    touched: list = []
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        touched.append(lvol_id)
+        return {"lvol_id": f"HOME_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_group(local)
+    assert sorted(touched) == ["PB1", "PB2"], \
+        "settled failed-over targets must still be cloned home, not skipped"
+    assert all(r["status"] == "failed_over" for r in results), results
+
+
+def test_failback_group_refuses_until_the_demote_cut_finished_shipping(monkeypatch):
+    """A fail-back cut is atomic: if the demote generation has shipped home for one
+    member but not the other, refuse rather than clone a split group -- and clone
+    nothing."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db, unshipped=("PB2",))
+    touched: list = []
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        lambda lvol_id, **kw: touched.append(lvol_id))
+    results = rpc.failover_group(local)
+    assert all(r["status"] == "failed" for r in results), results
+    assert "not finished shipping" in results[0]["detail"]
+    assert touched == [], "a mixed-generation fail-back must clone nothing"
+
+
+def test_resolve_active_peer_group_by_name_on_the_target_cluster(monkeypatch):
+    """The peer group is found by the group's name on the policy's replication
+    TARGET cluster -- the key reconstitute_group_after_handoff formed it under."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, policy_id = _failback_scenario(monkeypatch, db)
+    policy = db.get_replication_policy_by_id(policy_id)
+    peer = rpc._resolve_active_peer_group(local, policy)
+    assert peer is not None and peer.cluster_id == "CL_TGT" and peer.group_name == "cg"
+
+
+def test_group_demote_resolves_to_peer_primary_and_ships_home(monkeypatch):
+    """Regression (2026-09-28): a relocate demote lands on the empty ORIGIN group
+    (the origin-pinned cg: handle always resolves there), where it no-op'd --
+    returning demoted=True with no members and shipping nothing. The fail-back
+    promote then looped forever on 'the demote cut has not finished shipping'
+    because the current primary's clones were never demoted. The demote must
+    resolve to the PEER (current-primary) group and drive ITS clones through the
+    ship-home cut: point each reverse pipe home and seed the one demote generation
+    -- the demote analog of _failback_group / the driver's resolveToLocalReplica."""
+    from simplyblock_core.controllers import consistency_group_controller as cgc
+    from simplyblock_core.controllers import lvol_controller as lc
+    from simplyblock_core.services import replication_final_step as rfs
+
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(cgc, "db", db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    local, _ = _failback_scenario(monkeypatch, db)
+
+    # The peer's clones are settled failed-over TARGETS -- exactly the side a
+    # relocate demote must now ship back the other way.
+    for src in ("PB1", "PB2"):
+        rep = LVolReplication()
+        rep.source_lvol = _lvol(f"ORIG_{src}")
+        rep.target_lvol = db.get_lvol_by_id(src)
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+
+    failed_back: list = []
+    monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
+    monkeypatch.setattr(rfs, "fence_source_paths", lambda *a, **k: None)
+
+    def _group_snap_cut(group, **kw):
+        ids = []
+        for src, sid in (("PB1", "DEMOTE_PB1"), ("PB2", "DEMOTE_PB2")):
+            db._snapshots.append(_snap(sid, db.get_lvol_by_id(src)))
+            ids.append(sid)
+        return ids, None
+    monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _group_snap_cut)
+
+    result = cgc.demote_group(local)
+
+    assert result["demoted"] is False, \
+        "the demote is still shipping the peer's cut home, not a no-op 'done'"
+    assert {m["lvol_id"] for m in result["members"]} == {"PB1", "PB2"}, result
+    assert sorted(failed_back) == ["PB1", "PB2"], \
+        "each peer clone's reverse pipe must be pointed home"
+    for src in ("PB1", "PB2"):
+        m = db.get_lvol_by_id(src)
+        assert m.replication_demote_state == LVol.REPLICATION_DEMOTE_PENDING
+        assert m.replication_demote_snapshot_id == f"DEMOTE_{src}"
+
+
+def test_group_promote_is_idempotent_once_members_failed_home(monkeypatch):
+    """Regression (2026-09-28): after _failback_group clones the peer's members
+    HOME, this group's members are the home-side clones -- the settled TARGET end of
+    the reverse relationship. Ramen re-drives PromoteGroup every reconcile, so the
+    re-promote must report success. The settled check is SOURCE-keyed
+    (_active_relationship), so without recognising the target side these members read
+    as pending, no fail-over generation qualifies, and the promote refuses with a
+    'mixed-generation fail-over' -- leaving the relocate stuck though the data is
+    already home on this cluster."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = "CG_HOME", "CL_SRC", "cg"
+    group.policy_id = policy_id
+    group.members = {"HC1": {"joined_seq": 1, "removed_seq": 0},
+                     "HC2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(group)
+
+    for hc in ("HC1", "HC2"):
+        lv = _lvol(hc, policy_id=policy_id)
+        lv.group_id = group.get_id()
+        lv.cluster_id = "CL_SRC"
+        lv.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+        db._lvols.append(lv)
+        rep = LVolReplication()
+        rep.source_lvol = _lvol(f"PEER_{hc}")       # the peer (current) clone on CL_TGT
+        rep.target_lvol = db.get_lvol_by_id(hc)     # the home clone == this member
+        rep.source_cluster_id = "CL_TGT"
+        rep.target_cluster_id = "CL_SRC"
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+
+    touched: list = []
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        lambda lvol_id, **kw: touched.append(lvol_id))
+    results = rpc.failover_group(group)
+    assert {r["status"] for r in results} == {"failed_over"}, results
+    assert {r["lvol_id"] for r in results} == {"HC1", "HC2"}, results
+    assert touched == [], "an already-home group must clone nothing on re-promote"
 
 
 def test_relationship_resolves_source_to_target_and_back(monkeypatch):

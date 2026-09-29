@@ -16,7 +16,11 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -38,6 +42,7 @@ REPLICATION_POLICY_ID = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
 TARGET_CLUSTER_ID = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
 TARGET_POOL_ID = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
 VOLUME_NQN = 'nqn.2023-02.io.simplyblock:volume-1'
+CONSISTENCY_GROUP_ID = 'c9c9c9c9-c9c9-c9c9-c9c9-c9c9c9c9c9c9'
 
 
 def _apply(model, attrs):
@@ -224,3 +229,14 @@ def make_replication_policy(**attrs) -> ReplicationPolicy:
     policy.keep_replicated = 3
     policy.status = ReplicationPolicy.STATUS_ACTIVE
     return _apply(policy, attrs)
+
+
+def make_consistency_group(**attrs) -> ConsistencyGroup:
+    group = ConsistencyGroup()
+    group.uuid = CONSISTENCY_GROUP_ID
+    group.cluster_id = CLUSTER_ID
+    group.group_name = 'app-group-cg'
+    group.node_id = STORAGE_NODE_ID
+    group.lvs_name = 'lvs-1'
+    group.policy_id = REPLICATION_POLICY_ID
+    return _apply(group, attrs)

@@ -6,7 +6,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import utils, constants
+from simplyblock_core import utils, constants, index_ops
+from simplyblock_core.models.indices import UniqueIndexViolation
 from simplyblock_core.controllers import object_limits, ops_gate
 from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
@@ -26,6 +27,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.services import replication_final_step
 
 logger = utils.get_logger(__name__)
 
@@ -413,6 +415,55 @@ def _sibling_replication_node(lvol, cl, all_lvols=None):
                 and getattr(lv, "replication_node_id", "")):
             return lv.replication_node_id
     return ""
+
+
+def _group_replication_node(lvol, group, member_lvols):
+    """Target node an already-replicating member of ``lvol``'s consistency group
+    uses, or "" when none has one yet.
+
+    Members of one consistency group MUST replicate to the SAME target node, so
+    the destination copies share one node/LVS and the group can be snapshotted
+    (one ``bdev_lvol_snapshot_group``) and failed over as a single
+    crash-consistent unit on the target -- the same co-location the source
+    enforces via CG membership (``add_member_to_group`` pins the node/LVS).
+    Unlike :func:`_sibling_replication_node`, which co-locates the namespaces of
+    ONE shared subsystem, CG members are DISTINCT subsystems, so this keys on
+    group membership instead of the NQN. Splitting a group across target nodes
+    left each member's copy on its own LVS, so the target could neither take a
+    group snapshot nor promote the group atomically (observed live 2026-09-26:
+    ramen-e2e-cg's two members replicated to nodes 55aa5f76 and d9706433).
+
+    Pure: the caller resolves the group and its member lvols from the DB.
+    """
+    if group is None:
+        return ""
+    open_members = group.members or {}
+    for m in member_lvols:
+        if m.get_id() == lvol.get_id() or m.get_id() not in open_members:
+            continue
+        if m.replication_node_id:
+            return m.replication_node_id
+    return ""
+
+
+def _group_replication_node_for(lvol, db_controller):
+    """DB-resolving wrapper over :func:`_group_replication_node`: the target node
+    another member of ``lvol``'s consistency group already replicates to, or "".
+    """
+    gid = getattr(lvol, "group_id", "")
+    if not gid:
+        return ""
+    try:
+        group = db_controller.get_consistency_group_by_id(gid)
+    except KeyError:
+        return ""
+    members = []
+    for member_id in (group.members or {}):
+        try:
+            members.append(db_controller.get_lvol_by_id(member_id))
+        except KeyError:
+            continue
+    return _group_replication_node(lvol, group, members)
 
 
 def _realign_replication_node_after_claim(lvol, cl):
@@ -2927,6 +2978,45 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
     return data
 
 
+def replication_source_online(lvol: LVol) -> bool:
+    """Whether *lvol*'s own storage node is genuinely up right now.
+
+    Distinguishes day-one protection of a volume that has always lived here
+    (its source node is healthy, so a promote is a no-op) from a genuine
+    unplanned fail-over (the source was never demoted BECAUSE it is
+    unreachable -- the premise force=true already accepts). Both leave
+    replication_demote_state empty, so that field alone cannot tell them
+    apart; this mirrors the target-node check replicate_lvol_on_target_cluster
+    already makes for the destination side, applied to the source instead.
+    """
+    db_controller = DBController()
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    return bool(node) and node.status == StorageNode.STATUS_ONLINE
+
+
+def _replication_role(db_controller: DBController, lvol: LVol) -> str:
+    """Which end of its replication relationship *lvol* is.
+
+    The newest relationship record involving the volume decides: failed_over
+    trumps the side, because that is the state a DR orchestrator acts on.
+    Without a record — which is a volume's whole healthy replicated life,
+    since relationships only materialize at cutover or fail-over — the volume
+    is a source as soon as replication is configured, and none otherwise.
+    """
+    lvol_id = lvol.get_id()
+    for rep in reversed(db_controller.get_lvol_replication_objects()):
+        source_id = rep.source_lvol.get_id() if rep.source_lvol else ""
+        target_id = rep.target_lvol.get_id() if rep.target_lvol else ""
+        if lvol_id not in (source_id, target_id):
+            continue
+        if rep.state == LVolReplication.STATE_FAILED_OVER:
+            return "failed_over"
+        return "source" if lvol_id == source_id else "secondary"
+    if lvol.replication_policy_id or lvol.do_replicate:
+        return "source"
+    return "none"
+
+
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
     # Id first, then name — the order the scan this replaces used. Not
@@ -2950,6 +3040,16 @@ def get_replication_info(lvol_id_or_name):
         "last_replication_time": "",
         "last_replication_duration": "",
         "replicated_count": 0,
+        # The typed steady-state status fields. last_replicated_at is the
+        # newest fully replicated snapshot's creation time (the truthful
+        # lastSyncTime source for a DR orchestrator), and the last_cycle
+        # figures describe THAT snapshot's shipping, numerically, where the
+        # display strings above describe the newest task of any state.
+        "last_replicated_at": None,
+        "last_cycle_seconds": None,
+        "last_cycle_bytes": None,
+        "role": "none",                 # source|secondary|failed_over|none
+        "resyncing": False,             # a divergence catch-up is in flight
         # Replication progress monitoring.
         "lag_seconds": None,            # how far the target is behind the source
         "lag": "",                      # human-readable lag
@@ -2976,9 +3076,15 @@ def get_replication_info(lvol_id_or_name):
         "tasks": [],
     }
     node = db_controller.get_storage_node_by_id(lvol.node_id)
+    out["role"] = _replication_role(db_controller, lvol)
     # Each replication task maps 1:1 to a source snapshot for this lvol.
     items = []  # list of (task, snap)
+    final_cutover_active = False
     for task in db_controller.get_job_tasks(node.cluster_id):
+        if (task.function_name == JobSchedule.FN_REPLICATION_FINAL
+                and not task.canceled and task.status != JobSchedule.STATUS_DONE
+                and task.function_params.get("lvol_id") == lvol.get_id()):
+            final_cutover_active = True
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
@@ -2992,110 +3098,253 @@ def get_replication_info(lvol_id_or_name):
             tasks.append(task)
             items.append((task, snap))
 
+    # The final cutover reconciles independently of the snapshot pipeline, so
+    # it flags a resync even when no shipping task is queued.
+    out["resyncing"] = final_cutover_active
+
     if items:
-        now = int(time.time())
-        tasks = sorted(tasks, key=lambda x: x.date)
-        snaps = sorted(snaps, key=lambda x: x.created_at)
-        out["snaps"] = [s.to_dict() for s in snaps]
-        out["tasks"] = [t.to_dict() for t in tasks]
-        # A snapshot is replicated once its task is done or a counterpart exists
-        # on the other side. BOTH directions count: fail-back records the copy
-        # in source_replicated_snap_uuid and never sets the target one, so a
-        # target-only test reported every failing-back volume as 0 replicated
-        # and left lag_seconds None for ever — no gate on lag could ever pass.
-        def _is_replicated(task, snap):
-            return (task.status == JobSchedule.STATUS_DONE
-                    or bool(snap.target_replicated_snap_uuid)
-                    or bool(snap.source_replicated_snap_uuid))
-
-        replicated = [s for (t, s) in items if _is_replicated(t, s)]
-        outstanding = [s for (t, s) in items if not _is_replicated(t, s)]
-
-        # Count what actually replicated, not every snapshot that has a task —
-        # the latter reported healthy replication for volumes where nothing had
-        # reached the target at all.
-        out["replicated_count"] = len(replicated)
-
-        outstanding_bytes = sum(s.used_size for s in outstanding)
-        out["outstanding_count"] = len(outstanding)
-        out["outstanding_bytes"] = outstanding_bytes
-        out["outstanding"] = utils.humanbytes(outstanding_bytes)
-
-        interval_sec = max(1, lvol.replication_interval_min or 1) * 60
-        out["cadence_target_seconds"] = interval_sec
-        if outstanding:
-            oldest_outstanding = max(0, now - min(s.created_at for s in outstanding))
-            out["oldest_outstanding_seconds"] = oldest_outstanding
-            out["oldest_outstanding"] = utils.strfdelta_seconds(oldest_outstanding)
-            # The interval is a target: one snapshot still in flight within its
-            # own interval is the pipeline keeping up. Anything older than that
-            # means the backlog is not being worked off at the requested rate.
-            out["cadence_met"] = oldest_outstanding <= interval_sec
-
-        # Time lag = age of the most recent point-in-time that exists on the
-        # target (the newest successfully-replicated snapshot).
-        if replicated:
-            last_replicated_created = max(s.created_at for s in replicated)
-            lag_seconds = max(0, now - last_replicated_created)
-            out["lag_seconds"] = lag_seconds
-            out["lag"] = utils.strfdelta_seconds(lag_seconds)
-
-        last_task = tasks[-1]
-        last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
-        out["last_snapshot_id"] = last_snap.get_id()
-        out["last_replication_time"] = last_task.updated_at
-        if "end_time" in last_task.function_params and "start_time" in last_task.function_params:
-            duration = utils.strfdelta_seconds(
-                last_task.function_params["end_time"] - last_task.function_params["start_time"])
-        elif "start_time" in last_task.function_params:
-            duration = utils.strfdelta_seconds(now - last_task.function_params["start_time"])
-        else:
-            duration = ""
-        out["last_replication_duration"] = duration
-
-        # --- health verdict -------------------------------------------------
-        # A task that keeps retrying is the ONLY signal that replication is
-        # broken (network partition, node down, no LVS leader). It used to be
-        # buried in task.function_result, so a volume could sit hours behind
-        # while every status view looked normal.
-        failing = [t for t in tasks
-                   if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
-        gave_up = [t for t in tasks
-                   if t.status == JobSchedule.STATUS_DONE
-                   and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
-        out["failing_count"] = len(failing)
-        out["max_retry_reached"] = len(gave_up)
-        if failing:
-            out["last_error"] = str(failing[-1].function_result or "")
-        elif gave_up:
-            out["last_error"] = str(gave_up[-1].function_result or "")
-
-        # Lag budget: three snapshot intervals (one missed cycle is not an
-        # incident), floor 5 min so a tiny interval does not flap the verdict.
-        lag_budget = max(3 * interval_sec, 300)
-        lag = out["lag_seconds"]
-        oldest_outstanding = out["oldest_outstanding_seconds"]
-        if gave_up:
-            out["state"] = "error"
-        elif failing:
-            out["state"] = "degraded"
-        elif lag is not None and lag > lag_budget:
-            out["state"] = "lagging"
-        elif oldest_outstanding is not None and oldest_outstanding > lag_budget:
-            # A backlog older than the budget is lagging even when lag_seconds
-            # says nothing — which is exactly the case that mattered: an initial
-            # sync that never completes has NO replicated snapshot, so lag stays
-            # None and the volume reported "replicating"/healthy indefinitely
-            # while its transfers were stuck (lab 2026-08-20, case 4).
-            out["state"] = "lagging"
-        elif out["outstanding_count"] > 0:
-            out["state"] = "replicating"
-        else:
-            out["state"] = "in_sync"
-        out["healthy"] = out["state"] in ("in_sync", "replicating")
-        out["lag_budget_seconds"] = lag_budget
+        policy = None
+        if lvol.replication_policy_id:
+            try:
+                policy = db_controller.get_replication_policy_by_id(
+                    lvol.replication_policy_id)
+            except KeyError:
+                policy = None
+        cycle_stats = _replication_cycle_stats(db_controller, lvol, items, policy)
+        out["resyncing"] = out["resyncing"] or cycle_stats.pop("resyncing")
+        out.update(cycle_stats)
 
     return out
+
+
+def _replication_cycle_stats(db_controller, lvol, items, policy):
+    """The lag/backlog/state math for a volume with at least one
+    replication-mapped (task, snapshot) pair.
+
+    Split out of get_replication_info so get_replication_info_bulk can supply
+    pre-fetched items and a pre-resolved policy instead of the per-volume
+    get_job_tasks/get_replication_policy_by_id reads this block used to make
+    on its own -- each an unscoped-or-worse full-table scan, safe to pay once
+    per lvol lookup but not once per volume on every metrics scrape.
+    """
+    now = int(time.time())
+    tasks = sorted((t for t, _ in items), key=lambda x: x.date)
+    snaps = sorted((s for _, s in items), key=lambda x: x.created_at)
+    out: dict[str, Any] = {
+        "snaps": [s.to_dict() for s in snaps],
+        "tasks": [t.to_dict() for t in tasks],
+    }
+
+    # A snapshot is replicated once its task is done or a counterpart exists
+    # on the other side. BOTH directions count: fail-back records the copy
+    # in source_replicated_snap_uuid and never sets the target one, so a
+    # target-only test reported every failing-back volume as 0 replicated
+    # and left lag_seconds None for ever — no gate on lag could ever pass.
+    def _is_replicated(task, snap):
+        return (task.status == JobSchedule.STATUS_DONE
+                or bool(snap.target_replicated_snap_uuid)
+                or bool(snap.source_replicated_snap_uuid))
+
+    replicated_pairs = [(t, s) for (t, s) in items if _is_replicated(t, s)]
+    outstanding_pairs = [(t, s) for (t, s) in items if not _is_replicated(t, s)]
+    replicated = [s for (_, s) in replicated_pairs]
+    outstanding = [s for (_, s) in outstanding_pairs]
+
+    # A fail-back ships toward the recovered source under
+    # replicate_to_source tasks; while one is outstanding the volume is
+    # reconciling a divergence.
+    out["resyncing"] = any(
+        t.function_params.get("replicate_to_source")
+        for (t, _) in outstanding_pairs)
+
+    # Count what actually replicated, not every snapshot that has a task —
+    # the latter reported healthy replication for volumes where nothing had
+    # reached the target at all.
+    out["replicated_count"] = len(replicated)
+
+    outstanding_bytes = sum(s.used_size for s in outstanding)
+    out["outstanding_count"] = len(outstanding)
+    out["outstanding_bytes"] = outstanding_bytes
+    out["outstanding"] = utils.humanbytes(outstanding_bytes)
+
+    interval_sec = max(1, lvol.replication_interval_min or 1) * 60
+    out["cadence_target_seconds"] = interval_sec
+    out["oldest_outstanding_seconds"] = None
+    out["oldest_outstanding"] = ""
+    out["cadence_met"] = True
+    if outstanding:
+        oldest_outstanding = max(0, now - min(s.created_at for s in outstanding))
+        out["oldest_outstanding_seconds"] = oldest_outstanding
+        out["oldest_outstanding"] = utils.strfdelta_seconds(oldest_outstanding)
+        # The interval is a target: one snapshot still in flight within its
+        # own interval is the pipeline keeping up. Anything older than that
+        # means the backlog is not being worked off at the requested rate.
+        out["cadence_met"] = oldest_outstanding <= interval_sec
+
+    # Time lag = age of the most recent point-in-time that exists on the
+    # target (the newest successfully-replicated snapshot).
+    out["lag_seconds"] = None
+    out["lag"] = ""
+    out["last_replicated_at"] = None
+    out["last_cycle_bytes"] = None
+    out["last_cycle_seconds"] = None
+    if replicated:
+        last_replicated_created = max(s.created_at for s in replicated)
+        lag_seconds = max(0, now - last_replicated_created)
+        out["lag_seconds"] = lag_seconds
+        out["lag"] = utils.strfdelta_seconds(lag_seconds)
+        out["last_replicated_at"] = last_replicated_created
+
+        # The last COMPLETED cycle: what shipped, and how long it took.
+        # The display fields below describe the newest task of any
+        # state, which may still be in flight.
+        last_done_task, last_done_snap = max(
+            replicated_pairs, key=lambda pair: pair[1].created_at)
+        out["last_cycle_bytes"] = last_done_snap.used_size
+        done_params = last_done_task.function_params
+        if "end_time" in done_params and "start_time" in done_params:
+            out["last_cycle_seconds"] = max(
+                0, int(done_params["end_time"]) - int(done_params["start_time"]))
+
+    last_task = tasks[-1]
+    last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
+    out["last_snapshot_id"] = last_snap.get_id()
+    out["last_replication_time"] = last_task.updated_at
+    if "end_time" in last_task.function_params and "start_time" in last_task.function_params:
+        duration = utils.strfdelta_seconds(
+            last_task.function_params["end_time"] - last_task.function_params["start_time"])
+    elif "start_time" in last_task.function_params:
+        duration = utils.strfdelta_seconds(now - last_task.function_params["start_time"])
+    else:
+        duration = ""
+    out["last_replication_duration"] = duration
+
+    # --- health verdict -------------------------------------------------
+    # A task that keeps retrying is the ONLY signal that replication is
+    # broken (network partition, node down, no LVS leader). It used to be
+    # buried in task.function_result, so a volume could sit hours behind
+    # while every status view looked normal.
+    failing = [t for t in tasks
+               if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
+    gave_up = [t for t in tasks
+               if t.status == JobSchedule.STATUS_DONE
+               and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
+    out["failing_count"] = len(failing)
+    out["max_retry_reached"] = len(gave_up)
+    out["last_error"] = ""
+    if failing:
+        out["last_error"] = str(failing[-1].function_result or "")
+    elif gave_up:
+        out["last_error"] = str(gave_up[-1].function_result or "")
+
+    # Lag budget: three snapshot intervals (one missed cycle is not an
+    # incident), floor 5 min so a tiny interval does not flap the verdict.
+    # A declared RPO objective on the volume's policy replaces the
+    # heuristic: the operator alerts on the target they promised.
+    lag_budget = max(3 * interval_sec, 300)
+    if policy is not None and policy.rpo_target_seconds > 0:
+        lag_budget = policy.rpo_target_seconds
+    lag = out["lag_seconds"]
+    oldest_outstanding = out["oldest_outstanding_seconds"]
+    if gave_up:
+        out["state"] = "error"
+    elif failing:
+        out["state"] = "degraded"
+    elif lag is not None and lag > lag_budget:
+        out["state"] = "lagging"
+    elif oldest_outstanding is not None and oldest_outstanding > lag_budget:
+        # A backlog older than the budget is lagging even when lag_seconds
+        # says nothing — which is exactly the case that mattered: an initial
+        # sync that never completes has NO replicated snapshot, so lag stays
+        # None and the volume reported "replicating"/healthy indefinitely
+        # while its transfers were stuck (lab 2026-08-20, case 4).
+        out["state"] = "lagging"
+    elif out["outstanding_count"] > 0:
+        out["state"] = "replicating"
+    else:
+        out["state"] = "in_sync"
+    out["healthy"] = out["state"] in ("in_sync", "replicating")
+    out["lag_budget_seconds"] = lag_budget
+
+    return out
+
+
+# Fields a not-yet-shipped replicating volume reports -- the same defaults
+# get_replication_info's own `out` dict starts with, for the volumes
+# _replication_cycle_stats never runs on because they have no
+# FN_SNAPSHOT_REPLICATION items yet.
+_REPLICATION_METRICS_DEFAULTS: dict[str, Any] = {
+    "lag_seconds": None,
+    "outstanding_bytes": 0,
+    "last_cycle_bytes": None,
+    "last_cycle_seconds": None,
+    "state": "not_replicating",
+    "failing_count": 0,
+    "max_retry_reached": 0,
+}
+
+
+def get_replication_info_bulk(cluster_id: str, lvols: list[LVol]) -> dict[str, dict]:
+    """The subset of get_replication_info's fields the metrics exporter needs
+    (lag, backlog, last-cycle size/duration, degraded/error state), for every
+    do_replicate volume in *lvols*, computed with ONE get_job_tasks and ONE
+    get_replication_policies/get_replication_targets read for the whole
+    cluster rather than the several per-volume, effectively-global-scan reads
+    get_replication_info makes on its own (get_job_tasks refetched per call,
+    get_replication_policy_by_id's unscoped table scan, and
+    _replication_role's unscoped get_lvol_replication_objects, which this
+    function never calls at all -- none of these metrics need role).
+
+    *lvols* and *cluster_id* are the caller's own already-fetched values
+    (metrics.py's collector loop already holds both), so this never re-reads
+    the lvol list itself.
+    """
+    replicating = [lv for lv in lvols if lv.do_replicate]
+    if not replicating:
+        # No cluster-wide reads for a cluster with nothing to report --
+        # matches take_due_internal_snapshots' own "only load when at least
+        # one volume actually replicates" reasoning (snapshot_monitor.py).
+        return {}
+
+    db_controller = DBController()
+
+    items_by_lvol: dict[str, list[tuple[JobSchedule, SnapShot]]] = {}
+    snapshot_cache: dict[str, SnapShot] = {}
+    for task in db_controller.get_job_tasks(cluster_id):
+        if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+            continue
+        snapshot_id = task.function_params.get("snapshot_id")
+        if not snapshot_id:
+            continue
+        snap = snapshot_cache.get(snapshot_id)
+        if snap is None:
+            try:
+                snap = db_controller.get_snapshot_by_id(snapshot_id)
+            except KeyError:
+                continue
+            snapshot_cache[snapshot_id] = snap
+        items_by_lvol.setdefault(snap.lvol.get_id(), []).append((task, snap))
+
+    policies = {p.get_id(): p for p in db_controller.get_replication_policies(cluster_id)}
+    targets = {t.get_id(): t for t in db_controller.get_replication_targets(cluster_id)}
+
+    result: dict[str, dict] = {}
+    for lvol in replicating:
+        policy = policies.get(lvol.replication_policy_id) if lvol.replication_policy_id else None
+        items = items_by_lvol.get(lvol.get_id(), [])
+        info = dict(_REPLICATION_METRICS_DEFAULTS)
+        if items:
+            info.update(_replication_cycle_stats(db_controller, lvol, items, policy))
+
+        info["policy_id"] = policy.get_id() if policy else ""
+        info["policy_name"] = policy.policy_name if policy else ""
+        info["rpo_target_seconds"] = policy.rpo_target_seconds if policy else 0
+        target = targets.get(policy.target_id) if policy else None
+        info["peer_cluster"] = target.target_cluster_id if target else ""
+
+        result[lvol.get_id()] = info
+
+    return result
 
 
 def get_lvol(lvol_id_or_name):
@@ -3756,6 +4005,161 @@ def replication_trigger(lvol_id):
 
     return out
 
+
+def demote_lvol(lvol_id):
+    """Fence the source and confirm the last write replicated (P0-3).
+
+    The lossless half of a planned swap (design-csi-addons-replication.md
+    §5.2): after this returns {"demoted": True}, the peer's planned promote
+    is guaranteed to lose nothing. Demote never touches a target volume --
+    that is a separate, later call, possibly on a different cluster, once
+    Ramen has rescheduled the workload there.
+
+    Unlike replication_commit's live cutover, there is no in-flight write to
+    race: DemoteVolume is only called once Kubernetes has already unmounted
+    the workload, so there is no freeze window to bound, just fence-then-ship
+    to make durable. Synchronous and idempotent, re-driven by the caller
+    (the driver's DemoteVolume RPC calls this repeatedly) until it reports
+    done; each call does only the work its current state calls for.
+
+    Returns {"demoted": bool} or (False, error).
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    if lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE:
+        return {"demoted": True}
+
+    if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_PENDING:
+        # First call: fence BEFORE triggering the final snapshot, never after --
+        # a write accepted on a still-optimized path after the snapshot is the
+        # delta of record is silently lost (fence_source_paths' own invariant).
+        source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+        replication_final_step.fence_source_paths(
+            source_node, source_node.lvstore, lvol.nqn, lvol.ns_id)
+
+        # Relocating HOME after an unplanned failover demotes the failed-over
+        # clone -- but the failover severed its forward pipe (replication_stop
+        # left do_replicate=False, replication_node_id=""), so the demote
+        # snapshot taken below would have nowhere to replicate and this demote
+        # would wait for its target_replicated_snap_uuid forever (confirmed
+        # live 2026-09-25, DRPC wedged at EnsuringVolumesAreSecondary).
+        # Configure fail-back first -- point reverse replication at the
+        # original source cluster -- so the demote snapshot ships home and the
+        # source's own promote can clone from it. A volume still replicating
+        # forward (the planned-relocate path) already has a live pipe and needs
+        # none of this.
+        if not lvol.do_replicate:
+            rep = _replication_for_lvol(db_controller, lvol_id)
+            if rep is not None and rep.state == LVolReplication.STATE_FAILED_OVER:
+                if rep.target_lvol and rep.target_lvol.get_id() == lvol_id:
+                    replication_failback(lvol_id)
+                    lvol = db_controller.get_lvol_by_id(lvol_id)
+                elif rep.source_lvol and rep.source_lvol.get_id() == lvol_id:
+                    # The SOURCE side of an unplanned failover being demoted: the
+                    # recovered old primary that Ramen is making Secondary before
+                    # a relocate home. It is SUPERSEDED -- the target's clone
+                    # already carries every post-failover write -- so there is
+                    # nothing to ship. Taking a demote snapshot here would wait
+                    # forever for a reverse pipe that does not exist (do_replicate
+                    # is False and this side has no fail-back to configure). Fence
+                    # (done above) and mark demoted at once, the same net effect
+                    # as a standalone recovered source's unprotect. Without this
+                    # the whole group demote never converges ("group demote is
+                    # still converging" indefinitely, live 2026-09-27).
+                    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+                    lvol.write_to_db(db_controller.kv_store)
+                    return {"demoted": True}
+
+        snap_id, err = snapshot_controller.add(
+            lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
+        if err:
+            return False, err
+
+        lvol.replication_demote_snapshot_id = snap_id
+        lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_PENDING
+        lvol.write_to_db(db_controller.kv_store)
+        return {"demoted": False}
+
+    # Already pending: only check whether the snapshot being waited on has
+    # landed. Never re-fence (harmless but pointless) or re-trigger against a
+    # snapshot still genuinely in flight (would orphan its wait and never
+    # converge).
+    try:
+        snap = db_controller.get_snapshot_by_id(lvol.replication_demote_snapshot_id)
+    except KeyError as e:
+        return False, str(e)
+
+    if not snap.target_replicated_snap_uuid:
+        # A snapshot already superseded by a later one in the chain
+        # (next_snap_uuid set) will never itself be individually replicated --
+        # this happens when demote was first requested before replication was
+        # enabled on this lvol, so the tracked snapshot predates any policy
+        # attach. Once replication is enabled (do_replicate), that is proof
+        # the original snapshot is stale rather than still converging, so
+        # retrigger against a fresh one instead of waiting on it forever.
+        if lvol.do_replicate and snap.next_snap_uuid:
+            snap_id, err = snapshot_controller.add(
+                lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
+            if err:
+                return False, err
+
+            lvol.replication_demote_snapshot_id = snap_id
+            lvol.write_to_db(db_controller.kv_store)
+
+        return {"demoted": False}
+
+    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+    lvol.write_to_db(db_controller.kv_store)
+    return {"demoted": True}
+
+
+def is_lvol_removal_deferred_for_pending_failover(db_controller, lvol):
+    """True while *lvol* is demoted and awaiting a fail-over addressed by
+    this same id.
+
+    lvol_monitor's process_lvol_delete_finish reaps a deleted lvol's FDB
+    record right after its physical data is destroyed. replicate_lvol_on_
+    target_cluster (the failover REST handler's implementation) still needs
+    that record's fields -- replication_node_id, nqn/ns_id, cluster ids -- to
+    complete a PromoteVolume call addressed by this SAME source id, since
+    this backend's DR flow has no independent identity for the destination
+    side to be addressed by instead. Reaping the record the instant the data
+    is gone strands every such promote with "LVol not found" (confirmed live
+    2026-09-24, Ramen relocate M-02), even though nothing but a few
+    bookkeeping fields is actually at stake by that point.
+
+    Gives up (returns False) once a fail-over has actually completed for
+    this lvol elsewhere, once its own fail-over point (the snapshot demote
+    fenced it on) is itself already gone, or once the hold has run past
+    LVOL_DEMOTE_FAILOVER_HOLD_SEC with neither -- a promote that was truly
+    coming would have landed well before then.
+    """
+    if not lvol.replication_demote_snapshot_id:
+        return False
+
+    rep = _replication_for_lvol(db_controller, lvol.get_id())
+    if rep is not None and rep.state in (LVolReplication.STATE_FAILED_OVER,
+                                         LVolReplication.STATE_CUTOVER_DONE):
+        return False
+
+    try:
+        snap = db_controller.get_snapshot_by_id(lvol.replication_demote_snapshot_id)
+    except KeyError:
+        return False
+
+    try:
+        age = (datetime.now() - datetime.fromisoformat(snap.create_dt)).total_seconds()
+    except (ValueError, TypeError):
+        return False
+
+    return age <= constants.LVOL_DEMOTE_FAILOVER_HOLD_SEC
+
+
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
                       from_policy=False):
     """Enable replication for a volume and pick its destination node.
@@ -3821,6 +4225,13 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         # cluster; this is the OTHER entry point -- attaching a policy -- which
         # used to pick purely by capacity.
         sibling_node_id = _sibling_replication_node(lvol, cluster)
+        if not sibling_node_id:
+            # Members of one consistency group are DISTINCT subsystems, so the
+            # subsystem check above never co-locates them. Pin them to the same
+            # target node by group membership instead, or the group's copies
+            # scatter across target nodes and cannot be snapshotted or promoted
+            # as one unit (see _group_replication_node).
+            sibling_node_id = _group_replication_node_for(lvol, db_controller)
         if sibling_node_id:
             try:
                 sib_node = db_controller.get_storage_node_by_id(sibling_node_id)
@@ -4253,6 +4664,34 @@ def _subsystem_home_node(db_controller, nqn, cluster_id):
     return ""
 
 
+def _persist_clone_reclaiming_ghost_unique(db_controller, new_lvol):
+    """``write_to_db`` for a fail-over/-back clone, self-healing a stale unique
+    index entry.
+
+    A clone RETURNS a volume into the subsystem/name its origin held, so it
+    reuses that origin's ``(pool_uuid, lvol_name)``. Under the heavy concurrent
+    create/delete of a group fail-over/-back, a unique-index entry can outlive the
+    record it named -- an orphan left when the origin was deleted -- and the
+    clone's write then raises :class:`UniqueIndexViolation` against a holder that
+    no longer exists. That aborts the whole group promote (live 2026-09-29, a
+    5-member fail-back: every member 409'd on ``already held by <deleted lvol>``
+    and the group never reconstituted).
+
+    ``index_ops.check_indices`` clears ONLY confirmed orphans -- it re-reads each
+    holder and leaves a live one's key intact -- so this reclaims a ghost-held
+    value and retries once, while a genuine duplicate re-raises on the retry
+    rather than being masked.
+    """
+    try:
+        new_lvol.write_to_db(db_controller.kv_store)
+    except UniqueIndexViolation:
+        logger.warning(
+            "Clone %s hit a stale unique index entry; repairing orphaned LVol "
+            "index entries and retrying the write once", new_lvol.get_id())
+        index_ops.check_indices([LVol], repair=True)
+        new_lvol.write_to_db(db_controller.kv_store)
+
+
 def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snapshot,
                               for_migration=False):
     """Create a writable clone of *lvol* on *target_node* (primary + online HA
@@ -4325,6 +4764,11 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
     new_lvol.create_dt = str(datetime.now())
     new_lvol.node_id = target_node.get_id()
+    # The clone lives on the target node now, not the source: carry the target's
+    # hostname so listings and lookups report where the volume actually runs.
+    # A deep copy inherits the SOURCE hostname, which is stale on this cluster
+    # (mirrors the normal create path, where node_id and hostname are set together).
+    new_lvol.hostname = target_node.hostname
     new_lvol.nodes = [target_node.get_id()]
     if target_node.secondary_node_id:
         new_lvol.nodes.append(target_node.secondary_node_id)
@@ -4435,7 +4879,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # the CSI which /dev/disk/by-id/nvme-uuid.<id> the device really carries.
     new_lvol.ns_uuid = _src_ns_uuid if _src_ns_uuid != new_lvol.uuid else ""
 
-    new_lvol.write_to_db(db_controller.kv_store)
+    _persist_clone_reclaiming_ghost_unique(db_controller, new_lvol)
 
     _evict_stale_namespace(new_lvol, target_node, superseded=superseded)
 
@@ -4535,7 +4979,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
-def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
+def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
                                      pin_snapshot_id=None):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
@@ -4602,6 +5046,25 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generat
             continue
         return target_snap
     return None
+
+
+def latest_replicated_snapshot(lvol_id: str) -> SnapShot | None:
+    """The newest fully replicated snapshot of *lvol_id*, on the secondary,
+    as a cloneable object.
+
+    Exposes the same selection ``replicate_lvol_on_target_cluster`` applies
+    internally, without cloning: a test-failover drill (design §14) has to
+    know the safe point BEFORE deciding whether to touch anything, and must
+    never trigger a real fail-over just to find out what it is.
+
+    Returns the target-cluster ``SnapShot``, or ``None`` when nothing has
+    replicated yet. Raises ``KeyError`` when the volume itself does not
+    exist.
+    """
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id)
 
 
 def _evict_stale_namespace(new_lvol, target_node, superseded=None):
@@ -4751,7 +5214,7 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
     Returns (new_lvol, snapshot_used, error).
     """
     for _ in range(attempts):
-        snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
+        snapshot = last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
                                                     generation=generation,
                                                     pin_snapshot_id=pin_snapshot_id)
         if not snapshot:
@@ -4821,6 +5284,77 @@ def resolve_replication_destination(db_controller, lvol, target_node, source_nod
         if pool.status == Pool.STATUS_ACTIVE:
             return target_cluster, pool.get_id()
     return target_cluster, ""
+
+
+def _delete_demoted_predecessor(db_controller, lvol):
+    """After a planned fail-back promote, delete the demoted predecessor.
+
+    A fail-back clones the DR copy back onto the recovered cluster and promotes
+    it; the volume it cloned FROM -- the previously-failed-over clone -- was
+    cleanly DEMOTED first and is now superseded. This backend's secondary side
+    keeps no persistent lvol of its own, so that predecessor must be removed,
+    the same way replication_commit --delete-source retires a migrated source
+    (confirmed live 2026-09-25: without this, cluster B's demoted clone lingered
+    online after every M-04 fail-back).
+
+    replication_demote_state is the whole discriminator. A planned hand-off
+    (relocate / fail-back) demotes the source to DONE before the peer promotes,
+    so the source is quiesced and safe to delete. An UNPLANNED fail-over never
+    demotes -- its cluster is presumed down, and its record is still needed to
+    address a later fail-back -- so demote_state stays empty and this is a
+    no-op. Best-effort: a promote that already succeeded must never be undone by
+    a cleanup failure.
+    """
+    if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
+        return
+    try:
+        delete_lvol(lvol)
+        logger.info("Fail-back promote: deleted the demoted predecessor %s",
+                    lvol.get_id())
+    except Exception as e:
+        logger.warning("Could not delete demoted predecessor %s after promote: %s",
+                       lvol.get_id(), e)
+
+
+def _resume_replication_after_failback(db_controller, lvol, new_lvol):
+    """After a planned fail-back promote, resume replication from the new primary.
+
+    A fail-back clones the DR copy back onto the recovered cluster and promotes
+    it, but the clone is created bare -- do_replicate False, no policy -- so it
+    serves IO while replicating nowhere, leaving it unprotected for the next DR
+    event (confirmed live 2026-09-25: cluster A's post-fail-back primary had
+    empty Policy / Replicated On). Re-attach the new primary's own cluster
+    policy so replication resumes toward the peer, exactly as M-01's protect
+    first established it.
+
+    Gated on replication_demote_state == DONE, the same discriminator as
+    _delete_demoted_predecessor: this fires only for the settling fail-back /
+    relocate. An UNPLANNED fail-over's source was never demoted -- its cluster
+    is down, there is nothing to replicate to yet, and attaching a policy then
+    collided with the subsequent fail-back (reverted 2026-09-24). Best-effort:
+    a promote that already succeeded must never be undone by a failure to
+    resume replication. Attaches only when the cluster has exactly one active
+    policy, rather than guess among several.
+    """
+    if lvol.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
+        return
+    try:
+        from simplyblock_core.models.replication import ReplicationPolicy
+        from simplyblock_core.controllers import replication_policy_controller
+        node = db_controller.get_storage_node_by_id(new_lvol.node_id)
+        active = [p for p in db_controller.get_replication_policies(node.cluster_id)
+                  if p.status == ReplicationPolicy.STATUS_ACTIVE]
+        if len(active) != 1:
+            logger.info("Fail-back promote: %d active policies for cluster %s; leaving "
+                        "new primary %s unreplicated rather than guess",
+                        len(active), node.cluster_id, new_lvol.get_id())
+            return
+        replication_policy_controller.attach_policy(new_lvol.get_id(), active[0].get_id())
+        logger.info("Fail-back promote: re-attached policy %s to new primary %s; "
+                    "replication resumed", active[0].get_id(), new_lvol.get_id())
+    except Exception as e:
+        logger.warning("Could not resume replication after fail-back for %s: %s",
+                       new_lvol.get_id(), e)
 
 
 def _retire_source_data_path(db_controller, lvol):
@@ -4915,6 +5449,7 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
         if rep.source_lvol and getattr(rep, "target_lvol", None)
         and rep.source_lvol.get_id() == lvol.get_id()
     }
+    existing_clone = None
     for lv in db_controller.get_lvols(target_cluster.get_id()):
         if lv.nqn != lvol.nqn:
             continue
@@ -4923,19 +5458,60 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
                 continue                       # a sibling's copy, not ours
         elif lv.ns_id != lvol.ns_id:
             continue                           # no record: nsid is all we have
-        logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-        return lv.get_id()
+        existing_clone = lv
+        break
 
-    new_lvol, _snapshot, error = _clone_from_last_replicated(
-        db_controller, lvol_id, lvol, target_node,
-        target_pool_uuid, source_node.cluster_id, generation=generation,
-        pin_snapshot_id=pin_snapshot_id)
-    if error:
-        logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
-        return False, error
+    _snapshot = None
+    if existing_clone is not None:
+        logger.info(f"LVol with same nqn already exists on target cluster: {existing_clone.get_id()}")
+        # If the fail-over RELATIONSHIP is already recorded, the fail-over on this
+        # clone is complete: the driver's resolveToLocalReplica can walk it and the
+        # mount resolves to this copy. Just make sure it is grouped (idempotent)
+        # and return.
+        already_failed_over = any(
+            rep.source_lvol and getattr(rep, "target_lvol", None)
+            and rep.source_lvol.get_id() == lvol.get_id()
+            and rep.target_lvol.get_id() == existing_clone.get_id()
+            and rep.state in (LVolReplication.STATE_FAILED_OVER,
+                              LVolReplication.STATE_CUTOVER_DONE)
+            for rep in db_controller.get_lvol_replication_objects())
+        if already_failed_over:
+            if getattr(lvol, "group_id", ""):
+                try:
+                    from simplyblock_core.controllers import consistency_group_controller
+                    consistency_group_controller.reconstitute_group_after_handoff(
+                        lvol, existing_clone, target_cluster.get_id())
+                except Exception as e:
+                    logger.warning("Group reconstitution of existing clone %s failed: %s",
+                                   existing_clone.get_id(), e)
+            return existing_clone.get_id()
+        # The clone exists but NO fail-over relationship is recorded for it -- it
+        # is a pre-materialized target copy (a running group's members are cloned
+        # to the target before the disaster) or an earlier attempt returned before
+        # writing the relationship. Returning it bare leaves nothing for
+        # resolveToLocalReplica to walk, so the mount falls back to the (now-down)
+        # source and fails with "connection refused" (live 2026-09-27: this is why
+        # a group fail-over's clone would not mount while a standalone one did --
+        # the standalone path always cloned fresh through the completion below).
+        # Complete the fail-over on the existing clone -- write the relationship
+        # and connection paths, the same completion the fresh-clone path runs --
+        # instead of returning a hollow copy.
+        logger.info("Completing the fail-over on the pre-existing clone %s "
+                    "(no relationship recorded yet)", existing_clone.get_id())
+        new_lvol = existing_clone
+    else:
+        new_lvol, _snapshot, error = _clone_from_last_replicated(
+            db_controller, lvol_id, lvol, target_node,
+            target_pool_uuid, source_node.cluster_id, generation=generation,
+            pin_snapshot_id=pin_snapshot_id)
+        if error:
+            # Log only the lvol id (a UUID); the error string is returned to the
+            # caller and logged there, so it never has to be clear-text-logged here.
+            logger.error("Fail-over clone failed for lvol %s", lvol_id)
+            return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
-    new_lvol.write_to_db(db_controller.kv_store)
+    _persist_clone_reclaiming_ghost_unique(db_controller, new_lvol)
 
     # Stop replicating FROM the source we just failed away from, BEFORE the
     # relationship is recorded.
@@ -4977,6 +5553,22 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
 
     lvol_events.lvol_replicated(lvol, new_lvol)
 
+    # Re-form the consistency group on the target so the failed-over members
+    # stay a crash-consistent group there (needed for group snapshots on the new
+    # primary and an atomic fail-back). The clones are co-located on one target
+    # node/LVS (all members share replication_node_id), so the group's single-LVS
+    # pin is satisfied. Best-effort: never undo the promote that already
+    # succeeded. Keyed by group name, so a later fail-back returns to the same
+    # group.
+    if getattr(lvol, "group_id", ""):
+        try:
+            from simplyblock_core.controllers import consistency_group_controller
+            consistency_group_controller.reconstitute_group_after_handoff(
+                lvol, new_lvol, target_cluster.get_id())
+        except Exception as e:
+            logger.warning("Group reconstitution after fail-over of %s failed: %s",
+                           lvol_id, e)
+
     # The relationship is durable and the DR copy is online: retire the
     # source's data path NOW (fence + namespace removal, best-effort) so a
     # still-alive source cannot keep serving superseded data. See
@@ -5009,6 +5601,16 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
             logger.warning("Group-membership warning computation failed: %s", e)
         for w in warnings:
             logger.warning("Fail-over of %s: %s", lvol_id, w)
+
+    # Planned hand-off only (fail-back / relocate): the source we just cloned
+    # away from was cleanly demoted and is now superseded, so retire it, then
+    # resume replication from the new primary back toward the peer so it is
+    # protected again. Both last, after every read of `lvol` above, both
+    # best-effort so they can never undo the promote that already succeeded, and
+    # both gated on the demote state so an unplanned fail-over's still-down
+    # source is neither deleted nor used as a replication target.
+    _delete_demoted_predecessor(db_controller, lvol)
+    _resume_replication_after_failback(db_controller, lvol, new_lvol)
 
     return {
         "lvol_id": new_lvol.uuid,

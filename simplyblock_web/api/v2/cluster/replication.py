@@ -7,13 +7,15 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import replication_policy_controller
+from simplyblock_core.controllers import lvol_controller, replication_policy_controller
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
 
 from .. import util
 from .._dependencies import Cluster, ReplicationPolicy, ReplicationTarget
 from .._dtos import (
     FailoverResultDTO,
+    ReplicatedGenerationDTO,
+    ReplicatedSnapshotDTO,
     ReplicationMode,
     ReplicationPolicyDTO,
     ReplicationRelationshipDTO,
@@ -37,6 +39,10 @@ class PolicyParams(BaseModel):
     interval_min: util.Unsigned = 1
     mode: ReplicationMode | None = None
     keep_replicated: Annotated[int, Field(ge=2)] | None = None
+    #: The declared RPO objective in seconds. RPO compliance is computed
+    #: against this target rather than the derived lag budget. Omitted means
+    #: no declared objective.
+    rpo_target_seconds: util.OptionalUnsigned = None
     #: Group the policy's volumes into ONE crash-consistent unit: snapshots are
     #: taken as atomically frozen generations and the members fail over
     #: together. Decided at creation only — the group record is created with
@@ -66,6 +72,23 @@ def get_relationship_by_lvol(cluster: Cluster, lvol_id: UUID) -> ReplicationRela
     if rel is None:
         raise HTTPException(404, f"No replication relationship found for volume {lvol_id}")
     return ReplicationRelationshipDTO(**rel)
+
+
+@api.get('/relationships/{lvol_id}/latest-snapshot',
+         name='clusters:replication:relationships:latest-snapshot')
+def get_latest_replicated_snapshot(cluster: Cluster, lvol_id: UUID) -> ReplicatedSnapshotDTO:
+    """The volume's newest fully replicated snapshot, on the secondary, as a
+    cloneable object. Exists for the volume's whole replicated life: a
+    test-failover drill (design §14) resolves its test point through this
+    read, without touching the real replication state to find out what it is.
+    """
+    try:
+        snap = lvol_controller.latest_replicated_snapshot(str(lvol_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if snap is None:
+        raise HTTPException(404, f"Volume {lvol_id} has no replicated snapshot yet")
+    return ReplicatedSnapshotDTO.from_model(snap)
 
 
 targets_api = APIRouter()
@@ -155,7 +178,8 @@ def create_policy(request: Request, cluster: Cluster, parameters: PolicyParams,
             cluster.get_id(), parameters.policy_name, str(parameters.target_id),
             interval_min=parameters.interval_min, mode=parameters.mode,
             keep_replicated=parameters.keep_replicated,
-            consistency_group=parameters.consistency_group)
+            consistency_group=parameters.consistency_group,
+            rpo_target_seconds=parameters.rpo_target_seconds)
     except ReplicationConfigError as e:
         raise _config_error(e)
     except KeyError as e:
@@ -195,6 +219,28 @@ def failover_policy(cluster: Cluster, policy: ReplicationPolicy) -> list[Failove
         FailoverResultDTO(**result)
         for result in replication_policy_controller.failover_policy(policy.get_id())
     ]
+
+
+@policy_instance_api.get('/latest-generation',
+                         name='clusters:replication:policies:latest-generation')
+def get_latest_replicated_generation(cluster: Cluster,
+                                     policy: ReplicationPolicy) -> ReplicatedGenerationDTO:
+    """The consistency group's newest fully replicated generation, every
+    member as a cloneable object on the secondary. Refused as a 400 when the
+    policy has no consistency group, when no generation is complete for
+    every current member yet, or when members are already split across
+    generations: the same refusal a real group fail-over applies, so a drill
+    never addresses a mixed-generation cut.
+    """
+    try:
+        seq, members = replication_policy_controller.latest_replicated_generation(
+            policy.get_id())
+    except ReplicationConfigError as e:
+        raise _config_error(e)
+    return ReplicatedGenerationDTO(
+        group_seq=seq,
+        members=[ReplicatedSnapshotDTO.from_model(snap) for snap in members.values()],
+    )
 
 
 targets_api.include_router(target_instance_api)

@@ -3,7 +3,7 @@ test_web_settings.py – unit tests for simplyblock_web.settings.
 """
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from simplyblock_web.settings import Settings, _parse_str_list, _parse_int_list
 
@@ -106,6 +106,31 @@ class TestMetricsServiceAccountsSetting:
         s = Settings()
         assert s.k8s_admin_service_accounts == ["system:serviceaccount:default:op"]
         assert s.k8s_metrics_service_accounts == ["system:serviceaccount:monitoring:prometheus"]
+
+
+class TestAdminTokensSetting:
+    def test_default_is_empty_list(self, monkeypatch):
+        monkeypatch.delenv("SB_ADMIN_TOKENS", raising=False)
+        s = Settings()
+        assert s.admin_tokens == []
+
+    def test_parses_env_var(self, monkeypatch):
+        monkeypatch.setenv("SB_ADMIN_TOKENS", "token-a,token-b")
+        s = Settings()
+        assert [t.get_secret_value() for t in s.admin_tokens] == ["token-a", "token-b"]
+
+    def test_entries_are_secret_str(self, monkeypatch):
+        monkeypatch.setenv("SB_ADMIN_TOKENS", "s3cr3t")
+        s = Settings()
+        assert isinstance(s.admin_tokens[0], SecretStr)
+        assert "s3cr3t" not in repr(s.admin_tokens[0])
+
+    def test_independent_of_admin_service_accounts(self, monkeypatch):
+        monkeypatch.setenv("SB_K8S_ADMIN_SERVICE_ACCOUNTS", "system:serviceaccount:default:op")
+        monkeypatch.setenv("SB_ADMIN_TOKENS", "s3cr3t")
+        s = Settings()
+        assert s.k8s_admin_service_accounts == ["system:serviceaccount:default:op"]
+        assert [t.get_secret_value() for t in s.admin_tokens] == ["s3cr3t"]
 
 
 class TestApiVersionsSetting:

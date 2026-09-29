@@ -711,6 +711,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--mode', help='Replication mode. Default: `failover`.', type=str, dest='mode', choices=['failover','migration',])
         subcommand.add_argument('--keep', help='Replicated internal snapshots to retain on each side. Minimum (and default): `2`.', type=int, dest='keep_replicated')
         subcommand.add_argument('--retention-schedule', help='Tiered retention, e.g. `15m:2h,1h:11h,1d:7d` - one snapshot every 15 minutes for the last 2 hours, then hourly for 11 hours, then daily for 7 days. Snapshots older than the total span are pruned. Empty (default) keeps the flat --keep behaviour.', type=str, dest='retention_schedule')
+        subcommand.add_argument('--rpo-target-sec', help='Declared recovery point objective in seconds. RPO compliance is computed against this target instead of the derived lag budget. Unset means no declared objective.', type=int, dest='rpo_target_seconds')
         subcommand.add_argument('--consistency-group', help='All volumes attached to this policy form ONE consistency group: they must share an LVS (creation pins them to it), cadence snapshots are taken as one frozen group, and fail-over generations resolve group-wide.', dest='consistency_group', action='store_true')
 
     def init_cluster__replication_policy_list(self, subparser):
@@ -1152,6 +1153,7 @@ class CLIWrapper(CLIWrapperBase):
         subparser = self.add_command('consistency-group', 'Consistency Group Commands', aliases=['cg',])
         self.init_consistency_group__list(subparser)
         self.init_consistency_group__members(subparser)
+        self.init_consistency_group__delete(subparser)
         self.init_consistency_group__add_member(subparser)
         self.init_consistency_group__remove_member(subparser)
         self.init_consistency_group__snapshot_take(subparser)
@@ -1169,6 +1171,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'members', 'List the current members of a consistency group.')
         subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
         subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_consistency_group__delete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete', 'Delete an EMPTY consistency group (refused while it still has a current member). Frees the name so the next fail-over/fail-back hand-off mints a fresh, correctly node-pinned group instead of reusing a stale record.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
 
     def init_consistency_group__add_member(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-member', 'Join an EXISTING volume to a consistency group. The volume must live on the group\'s pinned node/LVS and in the members\' storage pool; a volume that once left the group cannot rejoin (membership is one-way).')
@@ -1799,6 +1805,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.consistency_group__list(sub_command, args)
                 elif sub_command in ['members']:
                     ret = self.consistency_group__members(sub_command, args)
+                elif sub_command in ['delete']:
+                    ret = self.consistency_group__delete(sub_command, args)
                 elif sub_command in ['add-member']:
                     ret = self.consistency_group__add_member(sub_command, args)
                 elif sub_command in ['remove-member']:

@@ -29,6 +29,7 @@ import simplyblock_web.api.v2._dependencies as dependencies_module
 import simplyblock_web.api.v2._dtos as dtos_module
 import simplyblock_web.api.v2.cluster as cluster_module
 import simplyblock_web.api.v2.cluster.backup as backup_module
+import simplyblock_web.api.v2.cluster.consistency_group as consistency_group_module
 import simplyblock_web.api.v2.cluster.replication as replication_module
 import simplyblock_web.api.v2.cluster.storage_node as storage_node_module
 import simplyblock_web.api.v2.cluster.storage_node.device as device_module
@@ -79,6 +80,7 @@ def db(monkeypatch):
     for module in (
         cluster_module,
         backup_module,
+        consistency_group_module,
         replication_module,
         storage_node_module,
         device_module,
@@ -186,8 +188,19 @@ def pool_controller(monkeypatch):
 def lvol_controller(monkeypatch):
     mock = MagicMock()
     mock.get_replication_info.return_value = None
+    mock.get_replication_info_bulk.return_value = {}
     monkeypatch.setattr(volume_module, 'lvol_controller', mock)
     monkeypatch.setattr(volume_replication_module, 'lvol_controller', mock)
+    monkeypatch.setattr(replication_module, 'lvol_controller', mock)
+    monkeypatch.setattr(consistency_group_module, 'lvol_controller', mock)
+    monkeypatch.setattr(metrics_module, 'lvol_controller', mock)
+    return mock
+
+
+@pytest.fixture()
+def consistency_group_controller(monkeypatch):
+    mock = MagicMock()
+    monkeypatch.setattr(consistency_group_module, 'consistency_group_controller', mock)
     return mock
 
 
@@ -218,6 +231,7 @@ def replication_policy_controller(monkeypatch):
     mock = MagicMock()
     monkeypatch.setattr(replication_module, 'replication_policy_controller', mock)
     monkeypatch.setattr(volume_replication_module, 'replication_policy_controller', mock)
+    monkeypatch.setattr(consistency_group_module, 'replication_policy_controller', mock)
     return mock
 
 

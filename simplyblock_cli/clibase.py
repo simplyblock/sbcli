@@ -773,7 +773,8 @@ class CLIWrapperBase:
             interval_min=args.interval_min, mode=args.mode,
             keep_replicated=args.keep_replicated,
             retention_schedule=args.retention_schedule,
-            consistency_group=args.consistency_group)
+            consistency_group=args.consistency_group,
+            rpo_target_seconds=args.rpo_target_seconds)
 
     def cluster__replication_policy_snapshot(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller
@@ -792,6 +793,7 @@ class CLIWrapperBase:
             "Mode": p.mode,
             "Keep": p.keep_replicated,
             "Retention": p.retention_schedule or "-",
+            "RPO (sec)": getattr(p, "rpo_target_seconds", 0) or "-",
             "CG": "yes" if getattr(p, "consistency_group", False) else "-",
             "Status": p.status,
         } for p in replication_policy_controller.list_policies(args.cluster_id)]
@@ -1297,6 +1299,15 @@ class CLIWrapperBase:
             "Online": "yes" if m["online"] else "no",
         } for m in cgc.list_members(self._cg_resolve(args.group_id))]
         return _format_result(data, json=args.json)
+
+    def consistency_group__delete(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        group = self._cg_resolve(args.group_id)
+        try:
+            cgc.delete_group(group)
+        except cgc.ConsistencyGroupError as e:
+            return f"Delete refused: {e}"
+        return f"Consistency group {group.get_id()} deleted"
 
     def consistency_group__add_member(self, sub_command, args):
         from simplyblock_core.controllers import consistency_group_controller as cgc
