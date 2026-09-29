@@ -56,16 +56,20 @@ class TestStorageDeployTemplate(unittest.TestCase):
         start through sudo, which fails its PAM account check in the
         container ("Authentication service cannot retrieve authentication
         info"): the SPDK pod exited at once, and node add failed with
-        connection refused on the RPC port."""
+        connection refused on the RPC port. In the SPDK image sudo fails
+        even as root, so the containers run as root without sudo."""
         import yaml
         docs = [d for d in yaml.safe_load_all(_render_storage_deploy("cert-manager")) if d]
         pod = next(d for d in docs if d.get("kind") == "Pod")
-        for c in pod["spec"]["containers"]:
-            if "sudo" in " ".join(c.get("command", [])):
-                self.assertEqual(c["securityContext"].get("runAsUser"), 0, c["name"])
         names = {c["name"] for c in pod["spec"]["containers"]
                  if c.get("securityContext", {}).get("runAsUser") == 0}
         self.assertEqual(names, {"spdk-container", "spdk-proxy-container"})
+        # Even as root, sudo fails in the SPDK image: nothing may use it.
+        for c in pod["spec"]["containers"]:
+            if c["name"] not in names:
+                continue
+            hook = c.get("lifecycle", {}).get("postStart", {}).get("exec", {}).get("command", [])
+            self.assertNotIn("sudo", " ".join(c.get("command", []) + hook), c["name"])
 
     def test_cert_manager_mounts_secret_directly(self):
         rendered = _render_storage_deploy("cert-manager")
