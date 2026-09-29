@@ -627,6 +627,20 @@ def isolate_cores(spdk_cpu_mask):
     return isolated_full
 
 
+def hub_transfer_batch_size(member_count):
+    """cluster_batch for one transfer through a transfer hub shared by
+    member_count lvols (1 for a single-volume migration).
+
+    With constants.LVOL_MIG_SPLIT_TRANSFER_BATCH_BY_MEMBERS on (test-only),
+    LVOL_MIG_TRANSFER_BATCH_SIZE is divided among the members so that the
+    hub's in-flight total stays at LVOL_MIG_TRANSFER_BATCH_SIZE; never below 1.
+    """
+    size = constants.LVOL_MIG_TRANSFER_BATCH_SIZE
+    if not constants.LVOL_MIG_SPLIT_TRANSFER_BATCH_BY_MEMBERS or not member_count or member_count <= 1:
+        return size
+    return max(1, size // member_count)
+
+
 def generate_mask(cores):
     mask = 0
     for core in cores:

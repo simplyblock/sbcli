@@ -779,6 +779,11 @@ LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rou
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
 LVOL_MIG_TRANSFER_BATCH_SIZE = 256
+#: Test-only: a batch (shared-subsystem) migration runs one transfer per member
+#: through the same transfer hub, so the hub sees members x 256 clusters in
+#: flight. When on, each transfer of a group gets 256 // members instead, so
+#: the hub's total stays at 256. See utils.hub_transfer_batch_size.
+LVOL_MIG_SPLIT_TRANSFER_BATCH_BY_MEMBERS = True
 
 #: How long a deferred lvol register task tolerates a missing lvol record
 #: before treating it as obsolete. add_lvol_ha queues the task in its
