@@ -730,10 +730,10 @@ jobs:
           set -euxo pipefail
           mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
           ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SB_IDS})
-          cluster_id="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+          cluster_id="$(${SB_PREFIX} ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
             "${SBCLI_CMD} cluster list" | grep -Eo '[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}' | head -n 1)"
           [[ -z "${cluster_id}" ]] && echo "ERROR: no cluster_id" && exit 1
-          cluster_secret="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+          cluster_secret="$(${SB_PREFIX} ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
             "${SBCLI_CMD} cluster get-secret ${cluster_id}" | tr -d '\r' | tail -n 1 | xargs)"
           [[ -z "${cluster_secret}" ]] && echo "ERROR: no cluster_secret" && exit 1
           echo "CLUSTER_ID=${cluster_id}" >> "$GITHUB_ENV"
@@ -942,12 +942,12 @@ jobs:
           NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
           for NODE in ${NODES}; do
             REMOTE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "sudo mkdir -p '${REMOTE_DIR}' && sudo chmod -R 0777 '${RUN_BASE_DIR}/${NODE}'" || true
-            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a --format '{{.Names}}' || true\"" || true)"
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "sudo mkdir -p '${REMOTE_DIR}' && sudo chmod -R 0777 '${RUN_BASE_DIR}/${NODE}'" || true
+            CONTAINERS="$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a --format '{{.Names}}' || true\"" || true)"
             [[ -z "${CONTAINERS}" ]] && continue
             while IFS= read -r C; do
               C="${C%%$'\r'}"; [[ -z "${C}" ]] && continue
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps '${C}' > '${REMOTE_DIR}/${C}.txt' 2>&1 || true\"" || true
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps '${C}' > '${REMOTE_DIR}/${C}.txt' 2>&1 || true\"" || true
             done <<< "${CONTAINERS}"
           done
 
@@ -1037,7 +1037,7 @@ jobs:
           #
           # So: resolve the interpreter instead of touching the path. Derive it
           # from sbctl's shebang and confirm it can import the module.
-          COLLECT_PY=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" '
+          COLLECT_PY=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" '
             for c in "$(head -1 "$(command -v sbctl 2>/dev/null)" 2>/dev/null | sed "s|^#!||")" \
                      /root/.local/share/uv/tools/sbctl/bin/python \
                      python3; do
@@ -1051,7 +1051,7 @@ jobs:
 
           run_collect() {
             local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
               "${COLLECT_PY} -m simplyblock_core.scripts.collect_logs \
                 '${iso}' '${mins}' \
                 --mode docker \
@@ -1062,7 +1062,7 @@ jobs:
             local rc=$?
             [ $rc -ne 0 ] && return $rc
             local has_content
-            has_content=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+            has_content=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
               "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
             if [ -z "${has_content}" ]; then
               echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
@@ -1113,7 +1113,7 @@ jobs:
             CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
             echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
             REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
             if [ -z "${PREFER_OPENSEARCH}" ]; then
               echo "  Probing OpenSearch availability..."
               if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${REMOTE_OUTPUT_DIR}" "--use-opensearch"; then
@@ -1122,8 +1122,8 @@ jobs:
               else
                 PREFER_OPENSEARCH=false
                 echo "  OpenSearch unavailable — using Graylog for all chunks"
-                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
                 collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || \
                   echo "WARN: Graylog also failed for chunk ${CHUNK}"
               fi
@@ -1138,17 +1138,17 @@ jobs:
                 collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || true
               }
             fi
-            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+            TARBALLS=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
               "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
             if [ -n "${TARBALLS}" ]; then
               for TB in ${TARBALLS}; do
-                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+                ${SB_PREFIX} scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
               done
               for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
                 [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
               done
             fi
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
           done
           echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
 

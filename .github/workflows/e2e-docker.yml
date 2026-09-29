@@ -973,10 +973,10 @@ jobs:
           mkdir -p "${LOCAL_OUT}"
           for ip in $(echo "${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
             echo "---- core-dump analysis: ${ip} ----"
-            ssh "${SSH_OPTS[@]}" "root@${ip}" 'bash -s' -- "${STAGE}" < "${CORE_SCRIPT}" || { echo "WARN: analysis failed on ${ip}"; continue; }
-            if ssh "${SSH_OPTS[@]}" "root@${ip}" "test -d ${STAGE}/core_backtraces" 2>/dev/null; then
-              scp "${SSH_OPTS[@]}" -r "root@${ip}:${STAGE}/core_backtraces/." "${LOCAL_OUT}/" || echo "WARN: scp back failed for ${ip}"
-              ssh "${SSH_OPTS[@]}" "root@${ip}" "sudo rm -rf ${STAGE}" || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${ip}" 'bash -s' -- "${STAGE}" < "${CORE_SCRIPT}" || { echo "WARN: analysis failed on ${ip}"; continue; }
+            if ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${ip}" "test -d ${STAGE}/core_backtraces" 2>/dev/null; then
+              ${SB_PREFIX} scp "${SSH_OPTS[@]}" -r "root@${ip}:${STAGE}/core_backtraces/." "${LOCAL_OUT}/" || echo "WARN: scp back failed for ${ip}"
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${ip}" "sudo rm -rf ${STAGE}" || true
             fi
           done
           find "${LOCAL_OUT}" -mindepth 1 -maxdepth 2 2>/dev/null | head -20 || true
@@ -1034,7 +1034,7 @@ jobs:
           #
           # So: resolve the interpreter instead of touching the path. Derive it
           # from sbctl's shebang and confirm it can import the module.
-          COLLECT_PY=$(ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" '
+          COLLECT_PY=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" '
             for c in "$(head -1 "$(command -v sbctl 2>/dev/null)" 2>/dev/null | sed "s|^#!||")" \
                      /root/.local/share/uv/tools/sbctl/bin/python \
                      python3; do
@@ -1048,7 +1048,7 @@ jobs:
 
           run_collect() {
             local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
-            ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" \
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" \
               "${COLLECT_PY} -m simplyblock_core.scripts.collect_logs \
                 '${iso}' '${mins}' \
                 --mode docker \
@@ -1059,7 +1059,7 @@ jobs:
             local rc=$?
             [ $rc -ne 0 ] && return $rc
             local has_content
-            has_content=$(ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" \
+            has_content=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" \
               "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
             if [ -z "${has_content}" ]; then
               echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
@@ -1110,7 +1110,7 @@ jobs:
             CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
             echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
             REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
-            ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
             if [ -z "${PREFER_OPENSEARCH}" ]; then
               echo "  Probing OpenSearch availability..."
               if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${REMOTE_OUTPUT_DIR}" "--use-opensearch"; then
@@ -1119,8 +1119,8 @@ jobs:
               else
                 PREFER_OPENSEARCH=false
                 echo "  OpenSearch unavailable — using Graylog for all chunks"
-                ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-                ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
                 collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || \
                   echo "WARN: Graylog also failed for chunk ${CHUNK}"
               fi
@@ -1135,17 +1135,17 @@ jobs:
                 collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || true
               }
             fi
-            TARBALLS=$(ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" \
+            TARBALLS=$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" \
               "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
             if [ -n "${TARBALLS}" ]; then
               for TB in ${TARBALLS}; do
-                scp "${SSH_OPTS[@]}" "root@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+                ${SB_PREFIX} scp "${SSH_OPTS[@]}" "root@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
               done
               for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
                 [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
               done
             fi
-            ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
           done
           echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
 

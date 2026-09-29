@@ -767,13 +767,13 @@ jobs:
             echo ">>> Node: ${NODE}"
             REMOTE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
 
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "sudo mkdir -p '${REMOTE_DIR}' && sudo chmod -R 0777 '${RUN_BASE_DIR}/${NODE}'" || true
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a > '${REMOTE_DIR}/docker_ps_a_${NODE}.txt' 2>&1 || true\"" || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "sudo mkdir -p '${REMOTE_DIR}' && sudo chmod -R 0777 '${RUN_BASE_DIR}/${NODE}'" || true
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a > '${REMOTE_DIR}/docker_ps_a_${NODE}.txt' 2>&1 || true\"" || true
 
-            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a --format '{{.Names}}' || true\"" || true)"
+            CONTAINERS="$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a --format '{{.Names}}' || true\"" || true)"
 
             if [[ -z "${CONTAINERS}" ]]; then
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"echo 'No containers found' > '${REMOTE_DIR}/_NO_CONTAINERS_${NODE}.txt'\"" || true
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"echo 'No containers found' > '${REMOTE_DIR}/_NO_CONTAINERS_${NODE}.txt'\"" || true
               continue
             fi
 
@@ -785,8 +785,8 @@ jobs:
               LOG_FILE="${REMOTE_DIR}/${C}.txt"
               INSPECT_FILE="${REMOTE_DIR}/${C}_inspect.json"
 
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps --details '${C}' > '${LOG_FILE}' 2>&1 || true\"" || true
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker inspect '${C}' > '${INSPECT_FILE}' 2>&1 || true\"" || true
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps --details '${C}' > '${LOG_FILE}' 2>&1 || true\"" || true
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker inspect '${C}' > '${INSPECT_FILE}' 2>&1 || true\"" || true
             done <<< "${CONTAINERS}"
             set -e
           done

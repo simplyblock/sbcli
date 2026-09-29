@@ -741,10 +741,10 @@ jobs:
             LOCAL_NODE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
             mkdir -p "${LOCAL_NODE_DIR}"
 
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "docker ps -a 2>&1 || true" \
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "docker ps -a 2>&1 || true" \
               > "${LOCAL_NODE_DIR}/docker_ps_a_${NODE}.txt" || true
 
-            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+            CONTAINERS="$(${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
               "docker ps -a --format '{{.Names}}' 2>/dev/null || true" 2>/dev/null || true)"
 
             if [[ -z "${CONTAINERS}" ]]; then
@@ -757,10 +757,10 @@ jobs:
               C="${C%%$'\r'}"
               [[ -z "${C}" ]] && continue
               echo "    dumping: ${C}"
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
                 "docker logs --timestamps --details '${C}' 2>&1 || true" \
                 > "${LOCAL_NODE_DIR}/${C}.txt" || true
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+              ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
                 "docker inspect '${C}' 2>&1 || true" \
                 > "${LOCAL_NODE_DIR}/${C}_inspect.json" || true
             done <<< "${CONTAINERS}"

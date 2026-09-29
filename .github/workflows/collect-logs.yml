@@ -824,7 +824,7 @@ jobs:
           # path and the key path, and the password path has become the key
           # path. SSH_OPTS already carries -i when KEY_PATH is set.
           remote_cmd() {
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "bash -lc '$1'"
+            ${SB_PREFIX} ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "bash -lc '$1'"
           }
 
           cid="${CLUSTER_ID}"
