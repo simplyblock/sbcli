@@ -22,6 +22,10 @@ from simplyblock_core.models.replication import (
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
+from simplyblock_core.models.backup_config import (
+    BackupConfig, BackupLocation, UnresolvedBackupConfig,
+)
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
@@ -304,7 +308,7 @@ class StoragePoolDTO(BaseModel):
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO | None
     dhchap: bool = False
-    allowed_hosts: list[str] = []
+    allowed_hosts: list[util.NQN] = []
 
     @staticmethod
     def from_model(model: Pool, stat_obj: StatsObject | None = None):
@@ -503,7 +507,7 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: list[str]
+    allowed_hosts: list[util.NQN]
     policy: str
     capacity: CapacityStatDTO
     rep_info: dict | None = None
@@ -597,39 +601,79 @@ class VolumeDTO(BaseModel):
         )
 
 
+#: A resolved backup configuration as the API exchanges it, in both directions:
+#: the response body of the backup-config GET, and the request body of discover.
+#: Both name a bucket -- one reads back what a cluster resolved, and the other
+#: points at somebody else's bucket, which only the caller can name.
+#:
+#: An alias rather than a hand-copied duplicate, because the two shapes are
+#: identical today and a copy would only drift. It is still a name of its own, so
+#: the wire format can diverge from ``BackupConfig`` later by turning this into a
+#: real class, without touching a single route signature.
+BackupConfigDTO = BackupConfig
+
+#: The same configuration as the cluster-create request body takes it, where the
+#: bucket is the one field a caller cannot supply: it is derived from the id of
+#: the cluster the request is asking to create. ``Cluster.set_backup_config``
+#: resolves it, so this shape reaches nothing beyond that call.
+UnresolvedBackupConfigDTO = UnresolvedBackupConfig
+
+#: Where a set of backups lives, without the credentials to reach it. Carried
+#: inside an export rather than named beside one: the manifests describe objects
+#: and not where they are, so the document that collects them says instead.
+BackupLocationDTO = BackupLocation
+
+#: A backup's manifest as the API exchanges it: the response body of
+#: export/discover and the entries of an inline import.
+#:
+#: An alias for the same reason ``BackupConfigDTO`` is one -- except that here the
+#: shapes have a reason to stay locked together, since the wire form of a manifest
+#: is also its form in the bucket. Naming it separately still lets the API grow a
+#: field the stored document does not have.
+BackupManifestDTO = BackupManifest
+
+#: Backups as export and inline import exchange them: manifests grouped by the
+#: bucket they live in. Grouped because one cluster can hold backups in several
+#: -- its own and any it imported -- so a single location cannot describe them.
+BackupExportDTO = BackupExport
+
+
 class BackupDTO(BaseModel):
     id: UUID
     s3_id: int
-    lvol_id: str
+    lvol_id: UUID
     lvol_name: str
-    snapshot_id: str
+    snapshot_id: UUID
     snapshot_name: str
-    node_id: str
+    node_id: UUID
     status: str
-    prev_backup_id: str
+
+    #: Absent for a full backup, which is the root of its chain. The record
+    #: spells that "", as it does every unset id; the wire says null, the way
+    #: ``DeviceDTO`` and ``LVolDTO`` already do for theirs.
+    prev_backup_id: UUID | None = None
+
     size: int
-    allowed_hosts: list[dict]
     created_at: int
     completed_at: int
-    source_cluster_id: str
+    encrypted: bool
 
     @staticmethod
     def from_model(model: Backup):
         return BackupDTO(
             id=UUID(model.uuid),
             s3_id=model.s3_id,
-            lvol_id=model.lvol_id,
+            lvol_id=UUID(model.lvol_id),
             lvol_name=model.lvol_name,
-            snapshot_id=model.snapshot_id,
+            snapshot_id=UUID(model.snapshot_id),
             snapshot_name=model.snapshot_name,
-            node_id=model.node_id,
+            node_id=UUID(model.node_id),
             status=model.status,
-            prev_backup_id=model.prev_backup_id,
+            prev_backup_id=UUID(model.prev_backup_id) if model.prev_backup_id else None,
             size=model.size,
-            allowed_hosts=model.allowed_hosts or [],
             created_at=model.created_at,
             completed_at=model.completed_at,
-            source_cluster_id=model.source_cluster_id or "",
+            encrypted=model.encrypted,
         )
 
 
