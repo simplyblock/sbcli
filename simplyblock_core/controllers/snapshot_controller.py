@@ -216,11 +216,17 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
     delegate to find_leader_with_failover, which owns the leaderless-LVS
     recovery (take-leadership on the configured primary) and the shared
     negative cache, so at most one recovery pass runs per NO_LEADER_TTL_SEC
-    even under a snapshot/clone-only workload."""
+    even under a snapshot/clone-only workload.
+
+    Sync replication: only the members of the LVS's active triplet are
+    probed, whatever the caller passed (storage_node_ops._lvs_leader_candidates,
+    resolved before the negative cache so an abandoned move is reconciled)."""
     from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.storage_node_ops import _lvs_leader_candidates
     from simplyblock_core.utils.ttl_cache import (
         leader_cache, LEADER_TTL_SEC, no_leader_cache, NO_LEADER_TTL_SEC)
 
+    all_nodes = _lvs_leader_candidates(all_nodes, lvs_name).nodes
     key = (cluster_id, lvs_name)
     if no_leader_cache.get(key, NO_LEADER_TTL_SEC):
         logger.warning(

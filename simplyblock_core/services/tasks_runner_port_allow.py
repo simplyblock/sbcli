@@ -922,8 +922,13 @@ def exec_port_allow_task(task):
     # recovery path ever reconciles the ex-leader's state afterwards, its
     # redirect stays broken, and the monitor flips it DOWN, unable to
     # redirect IO to the primary.
+    #
+    # Sync replication: only while the LVS is led from its home triplet. Led
+    # from the other site's triplet, or being moved there, its leadership is
+    # not this node's to take back (storage_node_ops.lvs_active_triplet).
     node = db.get_storage_node_by_id(task.node_id)
     if node.lvstore and node.lvstore_status == "ready" and \
+            storage_node_ops.lvs_led_from_home(node) and \
             not tasks_controller.get_active_node_restart_task(task.cluster_id, task.node_id):
         failback_peers = []
         for sec_id in [node.secondary_node_id, node.tertiary_node_id]:

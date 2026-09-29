@@ -34,7 +34,7 @@ def _mk_node(node_id, leadership=False, delete_status=None,
     rpc.delete_lvol.return_value = (True, None)
     return types.SimpleNamespace(
         get_id=lambda: node_id, status=StorageNode.STATUS_ONLINE,
-        lvstore="LVS_1", secondary_node_id=secondary_node_id,
+        lvstore="LVS_1", site="", secondary_node_id=secondary_node_id,
         tertiary_node_id=tertiary_node_id,
         rpc_client=lambda *a, **k: rpc, _rpc=rpc)
 

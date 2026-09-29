@@ -3558,11 +3558,14 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
             except KeyError:
                 pass
 
-        from simplyblock_core.storage_node_ops import check_non_leader_for_operation
+        from simplyblock_core.storage_node_ops import (
+            check_non_leader_for_operation, _lvs_leader_candidates)
 
-        # Detect current leader via RPC (no status checks)
+        # Detect current leader via RPC (no status checks), among the members
+        # that may lead: on a sync-replication cluster the active triplet.
         all_nodes = [host_node] + all_sec_nodes
-        for candidate in all_nodes:
+        candidates = _lvs_leader_candidates(all_nodes, lvol.lvs_name)
+        for candidate in candidates.nodes:
             try:
                 if is_node_leader(candidate, lvol.lvs_name):
                     primary_node = candidate
@@ -3570,6 +3573,11 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
             except Exception:
                 continue
         if not primary_node:
+            if candidates.owner_id is not None:
+                # Sync replication: never resize "as leader" on a node that is
+                # not confirmed leading - the LVS may be led from the other site.
+                raise RuntimeError(
+                    f"Cannot resize lvol {lvol.get_id()}: no leader of {lvol.lvs_name} found")
             primary_node = host_node
 
         # Check non-leader nodes (no status checks)

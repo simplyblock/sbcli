@@ -18,6 +18,24 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.utils import hublvol_reconnect
 
 
+def _leader_path_src():
+    """Source of the leader rebuild: _recreate_lvstore_impl and the fenced
+    hand-off it runs through (transfer_lvs_leadership and its steps)."""
+    import inspect
+    return "\n".join(inspect.getsource(fn) for fn in (
+        storage_node_ops._recreate_lvstore_impl, storage_node_ops._LvsFence,
+        storage_node_ops._fence_and_demote_leader, storage_node_ops._grant_lvs_leadership,
+        storage_node_ops._wire_taker_hublvol, storage_node_ops.transfer_lvs_leadership))
+
+
+def _impl_sources():
+    """(name, source) of the two recreate impls whose windows are pinned."""
+    import inspect
+    return (("_recreate_lvstore_impl", _leader_path_src()),
+            ("_recreate_lvstore_on_non_leader_impl",
+             inspect.getsource(storage_node_ops._recreate_lvstore_on_non_leader_impl)))
+
+
 # ---------------------------------------------------------------------------
 # Fix 1 — reflection cache
 # ---------------------------------------------------------------------------
@@ -171,14 +189,11 @@ class TestPortBlockWindowGate:
         assert state['max'] == 1, 'port-block windows overlapped'
 
     def test_impls_wire_the_gate(self):
-        import inspect
-        for fn in (storage_node_ops._recreate_lvstore_impl,
-                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
-            src = inspect.getsource(fn)
-            assert '_acquire_block_gate()' in src, fn.__name__
-            assert '_release_block_gate()' in src, fn.__name__
+        for name, src in _impl_sources():
+            assert '_acquire_block_gate()' in src, name
+            assert '_release_block_gate()' in src, name
             # abort paths must release too
-            assert src.count('_release_block_gate()') >= 2, fn.__name__
+            assert src.count('_release_block_gate()') >= 2, name
 
     def test_gate_release_idempotent_pattern(self):
         # mirror of the _gate_state holder used in the impls
@@ -249,36 +264,30 @@ class TestWindowCollapseWiring:
         return inspect.getsource(fn)
 
     def test_prestage_wired_in_both_impls(self):
-        for fn in (storage_node_ops._recreate_lvstore_impl,
-                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
-            assert "prestage_hublvol_subsystem" in self._src(fn), fn.__name__
+        for name, src in _impl_sources():
+            assert "prestage_hublvol_subsystem" in src, name
 
     def test_port_events_deferred_in_both_impls(self):
-        for fn in (storage_node_ops._recreate_lvstore_impl,
-                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
-            src = self._src(fn)
+        for name, src in _impl_sources():
             # no direct event emission from the window paths; the flush
             # helper is the only emitter
-            assert "_deferred_port_events.append" in src, fn.__name__
-            assert "_flush_port_events()" in src, fn.__name__
+            assert "_deferred_port_events.append" in src, name
+            assert "_flush_port_events()" in src, name
             emit_lines = [ln for ln in src.splitlines()
                           if ("tcp_ports_events.port_deny(" in ln
                               or "tcp_ports_events.port_allowed(" in ln)
                           and "_flush" not in ln]
             # only the two lines inside _flush_port_events itself remain
-            assert len(emit_lines) == 2, (fn.__name__, emit_lines)
+            assert len(emit_lines) == 2, (name, emit_lines)
 
     def test_probes_computed_before_block_section(self):
         # anchor on the ### 3 block-section marker (the gate helper's DEF
-        # appears earlier in source than its call site)
-        for fn, marker in (
-                (storage_node_ops._recreate_lvstore_impl,
-                 "### 3- block LVS port"),
-                (storage_node_ops._recreate_lvstore_on_non_leader_impl,
-                 "### 3- block leader port")):
-            src = self._src(fn)
+        # appears earlier in source than its call site). The leader path's
+        # block section is in the hand-off it calls after the probes.
+        for (name, src), marker in zip(_impl_sources(), (
+                "### 3- block LVS port", "### 3- block leader port")):
             assert src.index("raid_already = _rpc_bdev_exists") \
-                < src.index(marker), fn.__name__
+                < src.index(marker), name
 
     def test_stamp_deferred_on_external_lock(self):
         import inspect
@@ -287,9 +296,8 @@ class TestWindowCollapseWiring:
             hr.HublvolReconnectCoordinator._reconcile_under_lock)
         assert "pending_stamp" in src and "externally_managed" in src
         # release helpers in ops pay the deferred stamp
-        for fn in (storage_node_ops._recreate_lvstore_impl,
-                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
-            assert "stamp_attach" in self._src(fn), fn.__name__
+        for name, src in _impl_sources():
+            assert "stamp_attach" in src, name
 
     def test_acquire_lock_marks_external(self):
         from simplyblock_core.utils import hublvol_reconnect as hr
@@ -422,14 +430,10 @@ class TestAttachOnlyPrestage:
         assert calls["get_bdevs"] >= 4  # initial + reconcile-path + polls
 
     def test_preblock_attach_wired_in_both_impls(self):
-        import inspect
-        for fn in (storage_node_ops._recreate_lvstore_impl,
-                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
-            src = inspect.getsource(fn)
-            assert "attach_only=True" in src, fn.__name__
+        for name, src in _impl_sources():
+            assert "attach_only=True" in src, name
             # and the pre-block attach precedes the block section
-            assert src.index("attach_only=True") < src.index("### 3-"), \
-                fn.__name__
+            assert src.index("attach_only=True") < src.index("### 3-"), name
 
 
 # ---------------------------------------------------------------------------
@@ -550,8 +554,7 @@ class TestDeferredHublvolPersist:
         assert wrote["n"] == 1
 
     def test_impl_wires_defer_and_atomic_persist(self):
-        import inspect
-        src = inspect.getsource(storage_node_ops._recreate_lvstore_impl)
+        src = _leader_path_src()
         assert "create_transfer_hublvol(defer_db_write=True)" in src
         assert "_persist_deferred_node_fields()" in src
         assert "atomic_update" in src  # field-only persist, not full write

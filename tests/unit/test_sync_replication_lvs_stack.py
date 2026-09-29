@@ -51,21 +51,29 @@ class TestLvsTripletOf:
 
 
 class TestRebuildCandidates:
+    """The leader candidates of a non-leader rebuild are the LVS's ACTIVE
+    triplet (lvs_active_triplet): home, remote, or both while it moves."""
 
     def test_home_triplet_without_the_rebuilding_node(self):
         owner = _owner()
         assert ops.non_leader_rebuild_candidates(owner, "rs") == ["p", "s", "t"]
         assert ops.non_leader_rebuild_candidates(owner, "s") == ["p", "t"]
 
-    def test_lost_home_site_leads_from_the_remote_triplet(self):
-        owner = _owner()
-        assert ops.non_leader_rebuild_candidates(owner, "s", "site-a") == ["rp", "rs", "rt"]
-        assert ops.non_leader_rebuild_candidates(owner, "p", "site-a") == ["rp", "rs", "rt"]
-        assert ops.non_leader_rebuild_candidates(owner, "rs", "site-a") == ["rp", "rt"]
+    def test_led_from_the_remote_site_leads_from_the_remote_triplet(self):
+        owner = _owner(lvs_active_site="site-b")
+        assert ops.non_leader_rebuild_candidates(owner, "s") == ["rp", "rs", "rt"]
+        assert ops.non_leader_rebuild_candidates(owner, "p") == ["rp", "rs", "rt"]
+        assert ops.non_leader_rebuild_candidates(owner, "rs") == ["rp", "rt"]
 
-    def test_losing_the_other_site_keeps_the_home_triplet(self):
-        owner = _owner()
-        assert ops.non_leader_rebuild_candidates(owner, "rs", "site-b") == ["p", "s", "t"]
+    def test_home_site_named_explicitly_is_the_home_triplet(self):
+        owner = _owner(lvs_active_site="site-a")
+        assert ops.non_leader_rebuild_candidates(owner, "rs") == ["p", "s", "t"]
+
+    def test_moving_offers_both_triplets_source_first(self):
+        owner = _owner(lvs_active_site="moving:site-b")
+        assert ops.non_leader_rebuild_candidates(owner, "t") == ["p", "s", "rp", "rs", "rt"]
+        owner = _owner(lvs_active_site="moving:site-a")
+        assert ops.non_leader_rebuild_candidates(owner, "t") == ["rp", "rs", "rt", "p", "s"]
 
     def test_empty_slots_are_skipped(self):
         owner = _owner(tertiary_node_id="")

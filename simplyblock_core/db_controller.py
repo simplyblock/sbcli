@@ -1036,6 +1036,44 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_lvstore_lock_tx)
         transactional(self, self.kv_store, cluster_id, lvs_name, owner)
 
+    def _lvstore_lock_holder_tx(self, tr, cluster_id, lvs_name, now):
+        """The live holder of the per-lvstore lock ``lvs_name`` read in ``tr``,
+        or "" when it is free (absent, or its heartbeat went stale). Reading it
+        inside a caller's transaction makes that transaction conflict with a
+        concurrent acquire."""
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        raw = tr.get(lock.get_db_id().encode()).wait()
+        if not raw.present():
+            return ""
+        existing = LVStoreMutationLock().from_dict(json.loads(raw))
+        if (now - existing.heartbeat_at) > constants.LVSTORE_MUTATION_LOCK_TTL_SEC:
+            return ""
+        return existing.owner
+
+    def _update_unless_lvstore_locked_tx(self, tr, key, model_cls, mutate_fn, index_list,
+                                         cluster_id, lock_name, now):
+        holder = self._lvstore_lock_holder_tx(tr, cluster_id, lock_name, now)
+        if holder:
+            return None, holder
+        return self._atomic_update_tx(tr, key, model_cls, mutate_fn, index_list), ""
+
+    def update_unless_lvstore_locked(self, obj, mutate_fn, cluster_id, lock_name):
+        """``atomic_update(obj, mutate_fn)`` in a transaction that first checks
+        the per-lvstore lock ``lock_name`` is free, so the write and a
+        concurrent acquire of that lock are serialized by FDB.
+
+        Returns ``(fresh_obj, "")``, or ``(None, holder)`` without writing when
+        a live holder owns the lock. As with atomic_update, ``fresh_obj`` is
+        also returned when ``mutate_fn`` returned False (nothing written)."""
+        if not self.kv_store:
+            return None, "No DB connection"
+        transactional = fdb.transactional(DBController._update_unless_lvstore_locked_tx)
+        return transactional(self, self.kv_store, obj.get_db_id().encode(), type(obj), mutate_fn,
+                             type(obj).active_indexes(self.kv_store), cluster_id, lock_name,
+                             int(time.time()))
+
     def watch_lvstore_lock(self, cluster_id, lvs_name):
         """Return an FDB watch future that fires when the lock key changes
         (release, reclaim, heartbeat), or None when no DB connection exists.

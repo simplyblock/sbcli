@@ -330,10 +330,14 @@ def _one_owner_layout(db, *, lost_site=""):
 
 
 def _two_owner_layout(db, *, ftt=2, lost_site=""):
-    """a0 owns LVS_1 (remote triplet b0 b1 b2), b0 owns LVS_2 (remote a0 a1 a2)."""
+    """a0 owns LVS_1 (remote triplet b0 b1 b2), b0 owns LVS_2 (remote a0 a1 a2).
+    With ``lost_site`` A, LVS_1 has been moved to its remote triplet (the
+    state after a disaster promote: led from site B)."""
     cluster = _seed_cluster(db, ftt=ftt, lost_site=lost_site)
     a, b = _sites(db, cluster)
     owner_a = _make_owner(db, a[0], a, b, lvs_id=1, ftt=ftt)
+    if lost_site == SITE_A:
+        owner_a = _update(db, owner_a, lvs_active_site=SITE_B)
     owner_b = _make_owner(db, b[0], b, a, lvs_id=2, ftt=ftt)
     return cluster, a, b, owner_a, owner_b
 
@@ -450,6 +454,7 @@ class TestRemoteMemberRestart:
     def test_recreate_on_sec_covers_remote_instances(self, db, rpcs, env):
         _, a, b, owner_a, owner_b = _two_owner_layout(db)
         rpcs.lead(owner_a)
+        rpcs.lead(owner_b)
         with patch.object(ops, "recreate_lvstore_on_non_leader", return_value=True) as nl:
             assert ops.recreate_lvstore_on_sec(_fresh(db, b[1])) is True
         pairs = [(c.args[0].get_id(), c.kwargs["leader_node"].get_id(), c.kwargs["primary_node"].get_id())
@@ -507,6 +512,7 @@ class TestLostSiteRestart:
         _, a, b, owner_a, owner_b = _two_owner_layout(db, lost_site=SITE_A)
         # a1 owns LVS_3 on the lost site and is a0's secondary.
         owner_a1 = _make_owner(db, a[1], [a[1], a[2], a[0]], b, lvs_id=3)
+        owner_a1 = _update(db, owner_a1, lvs_active_site=SITE_B)
         rpcs.lead(b[0])       # b0 leads LVS_1 (a0's) and LVS_3 (a1's) from site B
         with patch.object(ops, "recreate_lvstore") as takeover, \
                 patch.object(ops, "recreate_lvstore_on_non_leader", return_value=True) as nl, \

@@ -230,43 +230,46 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
     # Leadership moves mid-cycle are handled by the poll's error codes
     # (-35/4 reset deletion_status and re-resolve next cycle).
     leader_node = None
-    if leader_cache is not None and snode.get_id() in leader_cache:
-        leader_node = leader_cache[snode.get_id()]
+    # Sync replication: the cached leader is only valid for the triplet that
+    # led when it was found - the key carries the owner's lvs_active_site (a
+    # promote in the same cycle changes it), and nothing is cached while the
+    # leadership is being moved.
+    cache_key = snode.get_id()
+    if leader_cache is not None and snode.site:
+        from simplyblock_core.storage_node_ops import LVS_MOVING_PREFIX
+        active_site = db.get_storage_node_by_id(snode.get_id()).lvs_active_site
+        cache_key = None if active_site.startswith(LVS_MOVING_PREFIX) else (snode.get_id(), active_site)
+    if leader_cache is not None and cache_key in leader_cache:
+        leader_node = leader_cache[cache_key]
     if leader_node is None:
-        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                            StorageNode.STATUS_DOWN]:
+        # The members that may lead snode's LVS: its home triplet, or on a
+        # sync-replication cluster the active triplet
+        # (storage_node_ops._lvs_leader_candidates). Every member is asked
+        # about snode's LVS - a peer's own lvstore says nothing about it.
+        from simplyblock_core.storage_node_ops import _lvs_leader_candidates
+        members = [snode]
+        for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+            if not peer_id:
+                continue
             try:
-                ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                members.append(db.get_storage_node_by_id(peer_id))
+            except KeyError:
+                continue
+        for member in _lvs_leader_candidates(members, snode.lvstore).nodes:
+            if member.status not in [StorageNode.STATUS_ONLINE,
+                                     StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                continue
+            try:
+                ret = member.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
             except Exception:
-                ret = None
-            if ret:
-                lvs_info = ret[0]
-                if lvs_info.get('lvs leadership'):
-                    leader_node = snode
-
-        if not leader_node:
-            for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-                if not peer_id:
-                    continue
-                try:
-                    sec_node = db.get_storage_node_by_id(peer_id)
-                except KeyError:
-                    continue
-                if sec_node.status not in [StorageNode.STATUS_ONLINE,
-                                           StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                    continue
-                try:
-                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
-                except Exception:
-                    continue
-                if not ret:
-                    continue
-                lvs_info = ret[0]
-                if lvs_info.get('lvs leadership'):
-                    leader_node = sec_node
-                    break
-        if leader_node is not None and leader_cache is not None:
-            leader_cache[snode.get_id()] = leader_node
+                continue
+            if not ret:
+                continue
+            if ret[0].get('lvs leadership'):
+                leader_node = member
+                break
+        if leader_node is not None and leader_cache is not None and cache_key is not None:
+            leader_cache[cache_key] = leader_node
 
     if all_mini_lvols is None:
         all_mini_lvols = db.get_mini_lvols()

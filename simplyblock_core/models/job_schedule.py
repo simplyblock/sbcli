@@ -50,6 +50,16 @@ class JobSchedule(BaseModel):
     # migration commit and fail-back (fresh or recovered source).
     FN_REPLICATION_FINAL = "replication_final"
     FN_FDB_BACKUP = "fdb_backup"
+    # Sync replication: move the leadership of one or more LVS to the other
+    # site's triplet (promote). ``node_id`` is the owner of the LVS (its home
+    # primary), ``function_params["lvs_names"]`` every LVS the promote moves (a
+    # group promote spans several). While such a task is active with a live
+    # lease it owns the move: no leaderless recovery grants for those LVS, and
+    # an LVS it left at ``moving:<site>`` is reconciled only afterwards
+    # (storage_node_ops.reconcile_lvs_move). Its runner grants only through
+    # storage_node_ops.move_lvs_leadership, and on failure / cancel records the
+    # task DONE / canceled BEFORE calling reconcile_lvs_move.
+    FN_SYNC_PROMOTE = "sync_promote"
 
     canceled: bool = False
     cluster_id: str = ""
