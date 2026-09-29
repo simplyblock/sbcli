@@ -3147,18 +3147,6 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
             f"until deleted by hand.")
 
 
-def merged_poller_cores(poller_cpu_cores, lvol_poller_core):
-    """The union of the nvmf poller cores and the lvol poller cores, sorted.
-
-    Test-only (constants.MERGE_LVOL_POLLER_WITH_POLLER_CORES): the nvmf poll
-    groups and the lvol poller group are both given this one set, to see
-    whether the transfer-hub bdev delays come from the lvol poller sitting on
-    a single core. The allocation itself is unchanged; only what is sent to
-    SPDK is.
-    """
-    return sorted(set(poller_cpu_cores or []) | set(lvol_poller_core or []))
-
-
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -3674,11 +3662,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             compression_core = node_config.get("distribution").get("compression_core")
 
         number_of_distribs = node_config.get("number_of_distribs")
-
-        if constants.MERGE_LVOL_POLLER_WITH_POLLER_CORES:
-            poller_cpu_cores = merged_poller_cores(poller_cpu_cores, lvol_poller_core)
-            lvol_poller_core = poller_cpu_cores
-            lvol_poller_mask = utils.generate_mask(lvol_poller_core)
 
         pollers_mask = utils.generate_mask(poller_cpu_cores)
         app_thread_mask = utils.generate_mask(app_thread_core)
