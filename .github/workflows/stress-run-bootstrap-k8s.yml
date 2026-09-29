@@ -51,9 +51,9 @@ on:
         default: "root"
 
       KEY_PATH:
-        description: "SSH private key path on runner"
+        description: "Fallback SSH key path on the runner. Ignored when the LAB_SSH_PRIVATE_KEY secret is set, which is the normal case. Note simplyblock-us-east-2.pem no longer authenticates: infra strips it from the nodes."
         required: true
-        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+        default: ''
 
       CLIENTNODES:
         description: "Space-separated client node IPs"

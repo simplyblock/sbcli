@@ -40,7 +40,7 @@ on:
         default: "root"
       KEY_PATH:
         type: string
-        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+        default: ''
       CLIENTNODES:
         type: string
         default: "192.168.10.165 192.168.10.166"
@@ -337,24 +337,6 @@ jobs:
             esac
           done
 
-      - name: Resolve KEY_PATH and validate key exists
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          kp="${KEY_PATH}"
-          kp="${kp%\"}"; kp="${kp#\"}"
-          kp="${kp%\'}"; kp="${kp#\'}"
-          if [[ "$kp" == .ssh/* ]]; then kp="${HOME}/${kp}"; fi
-          if [[ "$kp" == ~/* ]]; then kp="${HOME}/${kp#~/}"; fi
-          if [[ "$kp" == "~.ssh/"* ]]; then kp="${HOME}/.${kp#~.}"; fi
-
-          echo "Resolved KEY_PATH=$kp"
-          echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
-
-          test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
-          chmod 600 "$kp" || true
-
       # The lab nodes' authorized_keys are managed by infra, which strips any key
       # it did not provision. The shared automation key this pipeline relied on
       # (simplyblock-us-east-2.pem) is removed by that process and will keep being
@@ -427,6 +409,24 @@ jobs:
           rm -f /tmp/keyerr
           echo "Installed lab key: $(ssh-keygen -lf "$dest.pub")"
           echo "KEY_PATH=$dest" >> "$GITHUB_ENV"
+
+      - name: Resolve KEY_PATH and validate key exists
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          kp="${KEY_PATH}"
+          kp="${kp%\"}"; kp="${kp#\"}"
+          kp="${kp%\'}"; kp="${kp#\'}"
+          if [[ "$kp" == .ssh/* ]]; then kp="${HOME}/${kp}"; fi
+          if [[ "$kp" == ~/* ]]; then kp="${HOME}/${kp#~/}"; fi
+          if [[ "$kp" == "~.ssh/"* ]]; then kp="${HOME}/.${kp#~.}"; fi
+
+          echo "Resolved KEY_PATH=$kp"
+          echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
+
+          test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
+          chmod 600 "$kp" || true
 
       - name: Export KEY_NAME from KEY_PATH
         shell: bash
