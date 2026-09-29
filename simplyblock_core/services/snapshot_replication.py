@@ -1387,7 +1387,13 @@ def process_snap_replicate_finish(task, snapshot):
 
 
 def task_runner(task: JobSchedule):
-    snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+    # get_snapshot_by_id raises for a snapshot that is gone; it never returns
+    # None. Without the catch the runner failed on every attempt and the task
+    # stayed open for good, where replication_stop tripped over it.
+    try:
+        snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+    except KeyError:
+        snapshot = None
     if not snapshot:
         task.function_result = "snapshot not found"
         task.status = JobSchedule.STATUS_DONE
