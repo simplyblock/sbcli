@@ -47,6 +47,8 @@ class LVol(BaseModel):
     base_bdev: str = ""
     bdev_stack: list = default_factory(list)
     blobid: int = 0
+    #: The snapshot this volume's blob was created over, or empty when the blob
+    #: stands alone. Inflating folds every ancestor in and clears it.
     cloned_from_snap: str = ""
     comp_bdev: str = ""
     crypto_bdev: str = ""
