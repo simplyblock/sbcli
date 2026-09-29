@@ -682,7 +682,7 @@ class SshUtils:
                 for key in keys:
                     try:
                         cli = self._try_connect(address, user, key, None, timeout=30)
-                        self.logger.info(f"Connected directly to {address} as '{user}'.")
+                        self.logger.info(f"Connected directly to {address} as '{user}' (key {key.get_fingerprint().hex()[:16]}).")
                         _store(address, cli)
                         return
                     except Exception as e:
@@ -743,7 +743,7 @@ class SshUtils:
             for key in keys:
                 try:
                     cli = self._try_connect(address, user, key, None, sock=chan, timeout=30)
-                    self.logger.info(f"Connected to {address} as '{user}' via bastion.")
+                    self.logger.info(f"Connected to {address} as '{user}' via bastion (key {key.get_fingerprint().hex()[:16]}).")
                     _store(address, cli)
                     return
                 except Exception as e:

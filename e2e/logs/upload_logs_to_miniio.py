@@ -69,15 +69,18 @@ def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5):
             if bastion_ip:
                 bastion = paramiko.SSHClient()
                 bastion.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh_auth.connect(bastion, bastion_ip, USER, timeout=30)
+                used = ssh_auth.connect(bastion, bastion_ip, USER, timeout=30)
+                print(f"[ssh] bastion {bastion_ip}: {used}")
 
                 transport = bastion.get_transport()
                 channel = transport.open_channel("direct-tcpip", (target_ip, 22), ("localhost", 0))
 
-                ssh_auth.connect(ssh, target_ip, USER, sock=channel, timeout=30)
+                used = ssh_auth.connect(ssh, target_ip, USER, sock=channel, timeout=30)
+                print(f"[ssh] {target_ip} via bastion: {used}")
                 return ssh
             else:
-                ssh_auth.connect(ssh, target_ip, USER, timeout=30)
+                used = ssh_auth.connect(ssh, target_ip, USER, timeout=30)
+                print(f"[ssh] {target_ip}: {used}")
                 return ssh
 
         except Exception as e:
