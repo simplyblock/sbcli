@@ -605,14 +605,9 @@ class SbcliUtils:
                 default 15-minute per-lvol timeout when set by callers like
                 delete_all_lvols that enforce a shared global timeout.
         """
-        try:
-            lvol_id = self.get_lvol_id(lvol_name=lvol_name)
-        except:
-            if skip_error:
-                self.logger.info(f"Lvol {lvol_name} not not found!! Continuing without Delete!!")
-                return True
-            raise Exception(f"No such Lvol {lvol_name} found!!")
-
+        # get_lvol_id reports absence as None; a failed lookup raises and must
+        # not be mistaken for an lvol that is already gone.
+        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         if not lvol_id:
             if skip_error:
                 self.logger.info(f"Lvol {lvol_name} does not exist. Exiting!!")
@@ -874,7 +869,7 @@ class SbcliUtils:
                 connect_lines.append(entry["connect"])
             else:
                 # Fallback: support both hyphenated and underscored keys
-                def _g(key):
+                def _g(key, entry=entry):
                     return entry.get(key) or entry.get(key.replace("-", "_"))
 
                 connect_line = (
@@ -1338,7 +1333,7 @@ class SbcliUtils:
         """
         return self.list_snapshots().get(snap_name)
 
-    def delete_snapshot(self, snap_name: str = None, snap_id: str = None,
+    def delete_snapshot(self, snap_name: str | None = None, snap_id: str | None = None,
                         max_attempt: int = 60, skip_error: bool = False,
                         wait: bool = True):
         """
