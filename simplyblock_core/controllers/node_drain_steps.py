@@ -10,9 +10,12 @@ as separate, restartable steps with something to poll.
 Both steps are the same phase functions ``remove_storage_node`` already calls,
 driven here to completion in a worker thread:
 
-* ``_decommission_node_devices`` fails every data device and waits for the
+* ``_fail_and_migrate_node_devices`` fails every data device and waits for the
   rebuild onto peers. It skips devices already ``failed_and_migrated``, so
   re-driving it is how it makes progress rather than something to guard against.
+  It leaves the journal alone: taking this node's JM out of its peers' JC groups
+  is phase 2 of the removal, and it is only correct after phase 3a has torn down
+  this node's own replicas. The drain runs before either.
 * ``_relocate_replicas_hosted_on`` reallocates the lvstore replica roles that
   other nodes keep on this one.
 
@@ -152,9 +155,17 @@ def start_device_decommission(node_id: str) -> bool:
             node_id, StorageNode.STATUS_MIGRATING_DEVICES, caused_by="drain")
         logger.info(f"[DRAIN] {node_id}: marked migrating_devices")
 
+    # Devices only, never the journal. _decommission_node_devices would also
+    # run _decommission_node_jm, here, before phase 3a and without the peers
+    # that host this node's own replica. On those peers jc_replace_jm then
+    # refuses the whole batch (-17, "the replacements do not cover all jm_vuids
+    # that use name_old"), the JM is marked removed anyway, and the removal's
+    # own phase 2 -- the one call with the right ordering -- finds nothing left
+    # to do. Every CRD removal left its two replica peers retrying a dead JM for
+    # good (2026-09-29, runs 15-17 on vm12).
     def drive():
         node = DBController().get_storage_node_by_id(node_id)
-        return storage_node_ops._decommission_node_devices(node)
+        return storage_node_ops._fail_and_migrate_node_devices(node)
 
     return _spawn(node_id, 'devices', drive)
 

@@ -75,7 +75,7 @@ class DeviceDecommissionTests(unittest.TestCase):
 
         node = _node(devices=[_device(NVMeDevice.STATUS_ONLINE)])
         with self._with_db(node), self._stamping_suppressed(), \
-                patch('simplyblock_core.storage_node_ops._decommission_node_devices', slow):
+                patch('simplyblock_core.storage_node_ops._fail_and_migrate_node_devices', slow):
             self.assertTrue(node_drain_steps.start_device_decommission("n1"),
                             "the first call should have started the rebuild")
             for _ in range(50):
@@ -124,7 +124,7 @@ class DeviceDecommissionTests(unittest.TestCase):
             raise RuntimeError("rebuild exploded")
 
         with self._with_db(node), self._stamping_suppressed(), \
-                patch('simplyblock_core.storage_node_ops._decommission_node_devices', boom):
+                patch('simplyblock_core.storage_node_ops._fail_and_migrate_node_devices', boom):
             node_drain_steps.start_device_decommission("n1")
             for _ in range(50):
                 if node_drain_steps._last_error.get(("n1", 'devices')):
@@ -185,7 +185,7 @@ class ShutdownBeforeDrainTests(unittest.TestCase):
              patch.multiple('simplyblock_core.storage_node_ops',
                             shutdown_storage_node=shutdown,
                             set_node_status=stamp,
-                            _decommission_node_devices=decommission):
+                            _fail_and_migrate_node_devices=decommission):
             started = node_drain_steps.start_device_decommission("n1")
             for _ in range(50):
                 if 'devices' in calls or not started:
@@ -211,3 +211,42 @@ class ShutdownBeforeDrainTests(unittest.TestCase):
         _, calls = self._run(StorageNode.STATUS_MIGRATING_DEVICES)
         self.assertNotIn('shutdown', calls,
                          "re-POSTing the step tried to stop an already-stopped node")
+
+
+class DrainLeavesTheJournalAloneTests(unittest.TestCase):
+    """The drain's device step must not decommission the node's JM.
+
+    That is phase 2 of the removal and is only correct after phase 3a. Run from
+    the drain, before 3a and without the replica peers, jc_replace_jm was
+    refused on both of the node's replica peers, the JM was marked removed
+    anyway, and phase 2 then skipped it: the peers kept a dead JM in their JC
+    groups for good (2026-09-29).
+    """
+
+    def setUp(self):
+        node_drain_steps._reset_for_test()
+        self.addCleanup(node_drain_steps._reset_for_test)
+
+    def test_the_device_step_never_touches_the_journal(self):
+        node = _node(status=StorageNode.STATUS_MIGRATING_DEVICES,
+                     devices=[_device(NVMeDevice.STATUS_ONLINE)])
+        db = MagicMock()
+        db.get_storage_node_by_id = MagicMock(return_value=node)
+        devices = MagicMock(return_value=True)
+        jm = MagicMock()
+        wrapper = MagicMock(return_value=True)
+        with patch.object(node_drain_steps, 'DBController', MagicMock(return_value=db)),              patch.multiple('simplyblock_core.storage_node_ops',
+                            set_node_status=MagicMock(),
+                            shutdown_storage_node=MagicMock(return_value=True),
+                            _fail_and_migrate_node_devices=devices,
+                            _decommission_node_jm=jm,
+                            _decommission_node_devices=wrapper):
+            self.assertTrue(node_drain_steps.start_device_decommission("n1"))
+            for _ in range(100):
+                if devices.called:
+                    break
+                time.sleep(0.02)
+
+        self.assertTrue(devices.called, "the device step never rebuilt the devices")
+        jm.assert_not_called()
+        wrapper.assert_not_called()
