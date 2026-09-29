@@ -3,6 +3,9 @@ requires = ['setuptools>70']
 build-backend = 'setuptools.build_meta'
 
 [tool.ruff]
+# The release branches run 3.9; without this ruff infers a newer target and both
+# misses 3.10+ syntax and offers fixes (datetime.UTC) that break on 3.9.
+target-version = 'py39'
 extend-exclude = ['simplyblock_cli/cli.py']
 
 [tool.ruff.lint]

@@ -15,6 +15,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import (
     BackupConfig, BackupLocation, S3Credentials)
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.kms import (
     KMSException, backup_dek_path, backup_kek_name, create_kms_connection,
@@ -355,36 +356,53 @@ def delete_manifest(backup: Backup) -> None:
     backup_manifest.delete(_config_for(backup), UUID(backup.uuid))
 
 
-def _get_snapshot_chain(snapshot):
-    """Build the snapshot chain ending at this snapshot, oldest first.
+def _blob_parent_id(snapshot: SnapShot) -> Optional[str]:
+    """The snapshot this one's blob is a delta against, or ``None`` at a root.
 
-    For cloned volumes, walks snap_ref_id upward.  For regular volumes
-    (no snap_ref_id), collects all snapshots of the same lvol that were
-    created at or before this snapshot, ordered by created_at.
+    See ``SnapShot.prev_snap_uuid`` and ``SnapShot.snap_ref_id`` for which
+    pointer carries blob ancestry and which only looks like it does.
     """
-    if snapshot.snap_ref_id:
-        # Clone-based chain: walk snap_ref_id
-        chain = [snapshot]
-        current = snapshot
-        while current.snap_ref_id:
-            try:
-                parent = db_controller.get_snapshot_by_id(current.snap_ref_id)
-                chain.append(parent)
-                current = parent
-            except KeyError:
-                break
-        chain.reverse()  # oldest first
-        return chain
+    if snapshot.prev_snap_uuid:
+        return snapshot.prev_snap_uuid
 
-    # Regular volume: all snapshots of the same lvol up to this one
-    lvol_id = snapshot.lvol.get_id() if snapshot.lvol else None
-    if not lvol_id:
-        return [snapshot]
+    if snapshot.lvol and snapshot.lvol.cloned_from_snap:
+        return snapshot.lvol.cloned_from_snap
 
-    all_snaps = db_controller.get_snapshots_by_lvol_id(lvol_id)
-    # Filter to snapshots created at or before this one, sort oldest first
-    chain = [s for s in all_snaps if s.created_at <= snapshot.created_at]
-    chain.sort(key=lambda s: s.created_at)
+    return None
+
+
+def _get_snapshot_chain(snapshot: SnapShot) -> List[SnapShot]:
+    """Every snapshot a restore of this one needs, oldest first.
+
+    One backup uploads one snapshot's blob, which holds only the clusters
+    written since that snapshot's own parent, so the chain has to reach back
+    to a snapshot whose blob stands alone.
+
+    Raises:
+        PreconditionError: an ancestor cannot be reached, so no restorable
+            chain exists. Reported rather than truncated: a short chain
+            restores a volume with holes in it and reports success.
+    """
+    chain = [snapshot]
+    seen = {snapshot.get_id()}
+
+    while (parent_id := _blob_parent_id(chain[-1])) is not None:
+        if parent_id in seen:
+            raise PreconditionError(
+                f"Snapshot {snapshot.get_id()} has a cyclic ancestry at {parent_id}")
+
+        try:
+            parent = db_controller.get_snapshot_by_id(parent_id)
+        except KeyError as e:
+            raise PreconditionError(
+                f"Snapshot {chain[-1].get_id()} is a delta against {parent_id}, "
+                "which no longer exists, so its ancestry cannot be backed up as "
+                "a restorable chain.") from e
+
+        seen.add(parent_id)
+        chain.append(parent)
+
+    chain.reverse()
     return chain
 
 
@@ -496,12 +514,11 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     if not cluster_id:
         cluster_id = snode.cluster_id
 
-    snap_chain = _get_snapshot_chain(snapshot)
-
     # Everything that could make this backup unrestorable is checked here,
     # before the chain lock is taken, before any KMS key is created and before
     # any task is enqueued. A backup either is restorable or was never created.
     try:
+        snap_chain = _get_snapshot_chain(snapshot)
         location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
         BackupChain.assemble(
             location, bool(lvol.crypto_bdev), _existing_chain_backups(snap_chain),
