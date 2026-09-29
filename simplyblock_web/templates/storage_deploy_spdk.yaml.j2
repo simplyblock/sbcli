@@ -113,6 +113,9 @@ spec:
             command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
       securityContext:
         privileged: true
+        # The image runs as a non-root user; sudo from it fails its PAM
+        # account check in a container, so the container runs as root.
+        runAsUser: 0
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk
@@ -149,6 +152,7 @@ spec:
       command: ["sudo", "-E", "python3", "simplyblock_core/services/spdk_http_proxy_server.py"]
       securityContext:
         privileged: true
+        runAsUser: 0
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk
