@@ -307,8 +307,14 @@ jobs:
           LAB_SSH_PRIVATE_KEY: ${{ secrets.LAB_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          install -d -m 700 "$HOME/.ssh"
-          dest="$HOME/.ssh/ci_lab_key-${{ github.run_id }}"
+          # $RUNNER_TEMP, not $HOME/.ssh. Concurrent jobs on this runner share
+          # $HOME, and .ssh carries ssh-specific SELinux labelling that
+          # ssh-keygen -- alone among the tools here -- can be confined against.
+          # $RUNNER_TEMP is job-private, owned by the runner user, and cleaned
+          # up for us.
+          keydir="${RUNNER_TEMP:-$HOME}/sshkeys"
+          install -d -m 700 "$keydir"
+          dest="$keydir/ci_lab_key-${{ github.run_id }}"
           if [ -z "${LAB_SSH_PRIVATE_KEY:-}" ]; then
             echo "LAB_SSH_PRIVATE_KEY is not set; the chain below falls through to"
             echo "the key_path input and then to the password."
@@ -324,65 +330,54 @@ jobs:
             printf '%s' "$LAB_SSH_PRIVATE_KEY" | tr -d '\r' > "$dest"
             printf '\n' >> "$dest"
             chmod 600 "$dest"
-            # -P '' so a passphrase-protected key fails here instead of hanging on
-            # a prompt that has no terminal to read from. -y prints the PUBLIC
-            # half, which is safe to log and says which key is in play.
-            # Retried, because this has failed once on a read that was fine
-            # moments later: run 36527477514 reported "Permission denied" on a
-            # file that was ec2-user-owned at 0600 and validated cleanly
-            # afterwards, and the rerun passed with nothing changed. A
-            # ten-hour run should not be lost to that.
-            keyok=""
-            for attempt in 1 2 3; do
-              if ssh-keygen -y -P '' -f "$dest" > "$dest.pub" 2>/tmp/keyerr; then
-                keyok=1
-                break
-              fi
-              [ "$attempt" -lt 3 ] && sleep 2
-            done
-            if [ -z "$keyok" ]; then
-              # ssh-keygen's own words first. The structural guesses below are
-              # for when it has said nothing that identifies the cause -- the
-              # first version of this jumped straight to them and blamed a
-              # passphrase while ssh-keygen was plainly saying the file could
-              # not be read. None of this prints key material: BEGIN/END lines
-              # are structure and the counts are counts.
-              kerr="$(tr -d '\r' < /tmp/keyerr | head -2 | tr '\n' ' ')"
-              first="$(head -1 "$dest" 2>/dev/null)"
-              last="$(grep -v '^[[:space:]]*$' "$dest" 2>/dev/null | tail -1)"
-              echo "::error::LAB_SSH_PRIVATE_KEY could not be validated after 3 attempts."
-              echo "  first line : ${first}"
-              echo "  last line  : ${last}"
-              echo "  line count : $(wc -l < "$dest" 2>/dev/null)"
-              echo "  ssh-keygen : ${kerr}"
-              case "$kerr" in
-                *"Permission denied"*|*"No such file"*)
-                  echo "  --> ssh-keygen could not READ the file, which is not a problem with"
-                  echo "      the key. Check ownership and mode of $HOME/.ssh and the file,"
-                  echo "      and whether another job is writing the same path." ;;
-                *passphrase*|*"incorrect passphrase"*|*"load failed"*)
-                  echo "  --> the key is passphrase-protected. CI needs a copy without one:"
-                  echo "      cp key key_ci && ssh-keygen -p -N '' -f key_ci" ;;
-                *)
-                  case "$first" in
-                    ssh-*|ecdsa-*)
-                      echo "  --> that is a PUBLIC key. The secret needs the private half (no .pub)." ;;
-                    *"BEGIN"*)
-                      case "$last" in
-                        *"END"*)
-                          echo "  --> structure looks complete; suspect a passphrase or a damaged body." ;;
-                        *)
-                          echo "  --> no END line: the paste was truncated." ;;
-                      esac ;;
-                    *)
-                      echo "  --> no BEGIN line: the paste is missing its header, or has leading blank lines." ;;
-                  esac ;;
-              esac
-              rm -f "$dest" "$dest.pub" /tmp/keyerr
-              exit 1
+
+            # The only checks allowed to stop the run are the ones we make by
+            # reading the file ourselves. A secret that is plainly not a private
+            # key can never work, whatever ssh thinks of it later, so fail here
+            # and name the mistake. None of this prints key material: the
+            # BEGIN/END lines are structure.
+            first="$(head -1 "$dest")"
+            last="$(grep -v '^[[:space:]]*$' "$dest" | tail -1)"
+            case "$first" in
+              ssh-*|ecdsa-*)
+                echo "::error::LAB_SSH_PRIVATE_KEY is a PUBLIC key. The secret needs the private half (no .pub)."
+                rm -f "$dest"; exit 1 ;;
+              *BEGIN*) : ;;
+              *)
+                echo "::error::LAB_SSH_PRIVATE_KEY has no BEGIN line: the paste lost its header, or starts with a blank line."
+                rm -f "$dest"; exit 1 ;;
+            esac
+            case "$last" in
+              *END*) : ;;
+              *)
+                echo "::error::LAB_SSH_PRIVATE_KEY has no END line: the paste was truncated."
+                rm -f "$dest"; exit 1 ;;
+            esac
+
+            # ssh-keygen -y is a convenience, not a gate. It prints the public
+            # half, worth having in the log to say which key is in play, and
+            # -P '' keeps a passphrase-protected key from hanging on a prompt
+            # with no terminal. But ssh, not ssh-keygen, is what consumes this
+            # file. Run 36624968635 lost a whole run to ssh-keygen reporting
+            # "Permission denied" on a key that head and wc read fine two lines
+            # later, so a failure here warns and carries on, and the chain
+            # below -- key, then pem, then password -- settles it at the first
+            # real connection. The detail printed is what would have identified
+            # that run in one look.
+            kerr="$keydir/keyerr-$$"
+            if ssh-keygen -y -P '' -f "$dest" > "$dest.pub" 2>"$kerr"; then
+              echo "Installed lab key: $(ssh-keygen -lf "$dest.pub")"
+            else
+              echo "::warning::ssh-keygen could not read the installed key. Continuing: the key may still work for ssh."
+              echo "  ssh-keygen : $(tr -d '\r' < "$kerr" | head -2 | tr '\n' ' ')"
+              echo "  line count : $(wc -l < "$dest")"
+              echo "  key file   : $(ls -ln "$dest" 2>/dev/null)"
+              echo "  key dir    : $(ls -lnd "$keydir" 2>/dev/null)"
+              echo "  selinux    : $(ls -Zd "$dest" 2>/dev/null || echo 'no labels')"
+              echo "  enforcing  : $(getenforce 2>/dev/null || echo 'n/a')"
+              rm -f "$dest.pub"
             fi
-            rm -f /tmp/keyerr
-            echo "Installed lab key: $(ssh-keygen -lf "$dest.pub")"
+            rm -f "$kerr"
           fi
 
           # One chain, decided here, used by every ssh and scp in this workflow.
@@ -2517,4 +2512,4 @@ jobs:
           rm -rf ./* || true
           rm -rf ./.??* || true
           rm -f "$HOME/.kube/config-${{ github.run_id }}"
-          rm -f "$HOME/.ssh/ci_lab_key-${{ github.run_id }}" "$HOME/.ssh/ci_lab_key-${{ github.run_id }}.pub" || true
+          rm -f "${RUNNER_TEMP:-$HOME}/sshkeys/ci_lab_key-${{ github.run_id }}" "${RUNNER_TEMP:-$HOME}/sshkeys/ci_lab_key-${{ github.run_id }}.pub" || true
