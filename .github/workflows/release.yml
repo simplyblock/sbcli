@@ -56,8 +56,8 @@ jobs:
           echo "Replacing SIMPLY_BLOCK_DOCKER_IMAGE with $version"
           sed -i "s|^SIMPLY_BLOCK_DOCKER_IMAGE=.*|SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:${version}|" simplyblock_core/env_var
 
-          #echo "Replacing SIMPLY_BLOCK_SPDK_ULTRA_IMAGE with R25.6-Hotfix-$spdk_tag"
-          #sed -i "s|^SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=.*|SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-${spdk_tag}|" simplyblock_core/env_var
+          echo "Replacing SIMPLY_BLOCK_SPDK_ULTRA_IMAGE with simplyblock/spdk:${version}"
+          sed -i "s|^SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=.*|SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:${version}|" simplyblock_core/env_var
 
           echo "----- Updated env_var -----"
           cat simplyblock_core/env_var
