@@ -1019,6 +1019,8 @@ class TestRecreateOnNonLeaderReconnectsRegardlessOfActivationMode(unittest.TestC
         db = MagicMock()
         db.get_storage_node_by_id = MagicMock(return_value=snode)
         db.get_lvols_by_node_id = MagicMock(return_value=[])
+        # The prelude writes its fields through atomic_update: apply them.
+        db.atomic_update = MagicMock(side_effect=lambda node, fn: fn(node))
 
         primary_node = MagicMock()
         primary_node.get_id = MagicMock(return_value="primary-1")

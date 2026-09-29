@@ -1664,18 +1664,19 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
 
     if pass1_create_ids:
         # Lock set per create = the records create_lvstore writes: the node
-        # itself plus its secondary/tertiary. Locks are acquired in sorted-id
-        # order so two creates with intersecting sets serialize deadlock-free
-        # while disjoint pairs run concurrently.
+        # itself plus its secondary/tertiary (and on a sync cluster the members
+        # of its remote triplet). Locks are acquired in sorted-id order so two
+        # creates with intersecting sets serialize deadlock-free while disjoint
+        # pairs run concurrently.
         pass1_create_lock_ids: dict[str, builtins.list[str]] = {}
         pass1_create_locks: dict[str, threading.Lock] = {}
         for nid in pass1_create_ids:
             n = db_controller.get_storage_node_by_id(nid)
             touched = {nid}
-            if n.secondary_node_id:
-                touched.add(n.secondary_node_id)
-            if n.tertiary_node_id:
-                touched.add(n.tertiary_node_id)
+            for peer_id in (n.secondary_node_id, n.tertiary_node_id,
+                            *storage_node_ops.remote_triplet_refs(n)):
+                if peer_id:
+                    touched.add(peer_id)
             pass1_create_lock_ids[nid] = sorted(touched)
             for lid in pass1_create_lock_ids[nid]:
                 pass1_create_locks.setdefault(lid, threading.Lock())
@@ -1715,13 +1716,14 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
     # 6 nodes) every node is both a primary AND a secondary/tertiary — the old
     # is_secondary_node filter only matched dedicated secondary-only nodes,
-    # skipping the ring participants entirely.
+    # skipping the ring participants entirely. On a sync-replication cluster
+    # that includes the remote-triplet instances.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     pass2_ids: builtins.list[str] = []
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
-        if db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
+        if storage_node_ops.hosted_lvs_owners(snode, db_controller):
             pass2_ids.append(snode.get_id())
 
     # Workers fan out per non-leader node, but work on the SAME primary must
@@ -1731,12 +1733,13 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Pre-created per-primary locks serialize exactly that, nothing more.
     pass2_primary_locks: dict[str, threading.Lock] = {}
     for node_id in pass2_ids:
-        for p in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+        for p in storage_node_ops.hosted_lvs_owners(
+                db_controller.get_storage_node_by_id(node_id), db_controller):
             pass2_primary_locks.setdefault(p.get_id(), threading.Lock())
 
     def _recreate_non_leader_lvs(node_id) -> bool:
         snode = db_controller.get_storage_node_by_id(node_id)
-        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+        primary_nodes = storage_node_ops.hosted_lvs_owners(snode, db_controller)
         logger.info(f"recreating secondary/tertiary LVS on node {node_id}")
         ret = True
         for primary_node in primary_nodes:

@@ -523,6 +523,14 @@ class TestExpansion:
 
 class TestRemoval:
 
+    @pytest.fixture(autouse=True)
+    def _no_instance_builds(self):
+        # Phase 3d also builds the LVS instance on every pending remote-triplet
+        # member (covered in test_sync_replication_lvs_stack.py); these tests
+        # are about the refs.
+        with patch.object(storage_node_ops, "_rebuild_remote_instance", return_value=True):
+            yield
+
     def test_remote_roles_of_a_removed_node_move_to_its_site(self, db):
         cluster, a, b = _active_cluster(db, per_site=4)
         removed = b[0]

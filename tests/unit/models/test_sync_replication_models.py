@@ -16,6 +16,7 @@ def test_new_fields_default_to_non_sync():
     assert node.remote_primary_node_id == ""
     assert node.remote_secondary_node_id == ""
     assert node.remote_tertiary_node_id == ""
+    assert node.remote_instances_pending == []
     assert node.lvs_active_site == ""
 
     lvol = LVol()
@@ -34,6 +35,7 @@ def test_old_records_without_the_keys_load_with_defaults():
     assert node.site == ""
     assert node.remote_primary_node_id == ""
     assert node.lvs_active_site == ""
+    assert node.remote_instances_pending == []
     assert node.failure_domain == 2
 
     lvol = LVol().from_dict({"uuid": "l1", "lvol_name": "vol"})
@@ -57,10 +59,12 @@ def test_round_trip_keeps_the_values():
     node.remote_secondary_node_id = "rs"
     node.remote_tertiary_node_id = "rt"
     node.lvs_active_site = "site-b"
+    node.remote_instances_pending = ["rs"]
     restored_node = StorageNode().from_dict(node.to_dict())
     assert (restored_node.site, restored_node.remote_primary_node_id,
             restored_node.remote_secondary_node_id, restored_node.remote_tertiary_node_id,
             restored_node.lvs_active_site) == ("site-a", "rp", "rs", "rt", "site-b")
+    assert restored_node.remote_instances_pending == ["rs"]
 
     lvol = LVol()
     lvol.sync_active_site = "site-a"
@@ -74,6 +78,12 @@ def test_demoted_sites_are_not_shared_between_instances():
     first, second = LVol(), LVol()
     first.sync_demoted_sites.append("site-a")
     assert second.sync_demoted_sites == []
+
+
+def test_pending_remote_instances_are_not_shared_between_instances():
+    first, second = StorageNode(), StorageNode()
+    first.remote_instances_pending.append("rp")
+    assert second.remote_instances_pending == []
 
 
 def test_lost_site_states():

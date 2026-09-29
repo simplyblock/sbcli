@@ -7,6 +7,7 @@ from simplyblock_core import utils
 from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger()
 
@@ -518,6 +519,23 @@ def _sync_replication(node: StorageNode) -> bool:
     return DBController().get_cluster_by_id(node.cluster_id).sync_replication
 
 
+def _distrib_not_built(rpc_client, node: StorageNode, distr_name: str) -> bool:
+    """After a failed named push: whether ``distr_name`` simply does not exist
+    on ``node`` yet. The roles naming an instance are recorded before its
+    distribs are built (activation, a member that was offline, a removal
+    re-selecting a remote-triplet member); such a distrib gets its full map
+    when it is created (send_cluster_map_to_distr), so the push is skipped,
+    not failed. Only an explicit "no such device" counts: an unreachable node
+    keeps the failure."""
+    try:
+        if rpc_client.bdev_get(distr_name) is not None:
+            return False
+    except RPCException:
+        return False
+    logger.info("Distrib %s is not built on node %s yet; skipping it", distr_name, node.get_id())
+    return True
+
+
 def send_cluster_map_to_node(node: StorageNode):
     """Push the full cluster map to every distrib on ``node``.
 
@@ -543,11 +561,12 @@ def send_cluster_map_to_node(node: StorageNode):
         if home_site not in maps_by_site:
             maps_by_site[home_site] = get_distr_cluster_map(snodes, node, home_site=home_site)
         cluster_map_data = {**maps_by_site[home_site], "name": distr_name}
+        rpc_client = node.rpc_client(timeout=10)
         try:
-            ret = node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)
+            ret = rpc_client.distr_send_cluster_map(cluster_map_data)
         except Exception:
             ret = None
-        if not ret:
+        if not ret and not _distrib_not_built(rpc_client, node, distr_name):
             # An exception, or a JSON-RPC error handed back as an empty result.
             logger.error("Failed to send cluster map to distrib %s", distr_name)
             logger.info(cluster_map_data)
@@ -609,11 +628,12 @@ def send_cluster_map_add_node(snode, target_node):
         cl_map = {
             "map_cluster": cluster_map_data['map_cluster'],
             "map_prob": cluster_map_data['map_prob']}
+        rpc_client = target_node.rpc_client(timeout=10)
         try:
-            ret = target_node.rpc_client(timeout=10).distr_add_nodes(cl_map, name=distr_name)
+            ret = rpc_client.distr_add_nodes(cl_map, name=distr_name)
         except Exception:
             ret = None
-        if not ret:
+        if not ret and not _distrib_not_built(rpc_client, target_node, distr_name):
             logger.error("Failed to add node %s to distrib %s", snode.get_id(), distr_name)
             all_ok = False
     return all_ok
@@ -689,7 +709,7 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
                 ret = rpc_client.distr_add_devices(cl_map, name=distr_name)
             except Exception:
                 ret = None
-            if not ret:
+            if not ret and not _distrib_not_built(rpc_client, target_node, distr_name):
                 logger.error("Failed to add device %s to distrib %s", device.get_id(), distr_name)
                 all_ok = False
         return all_ok
