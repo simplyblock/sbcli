@@ -332,6 +332,9 @@ class StorageNodeDTO(BaseModel):
     id: UUID
     cluster_id: UUID
     secondary_node_id: Optional[UUID]
+    # The node's second HA replica. A drain prefers migration targets whose
+    # replica set does not include the node being removed.
+    tertiary_node_id: Optional[UUID] = None
     status: StorageNodeStatus
     uptime: Optional[timedelta]
     hostname: str
@@ -363,6 +366,7 @@ class StorageNodeDTO(BaseModel):
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
             secondary_node_id=UUID(model.secondary_node_id) if model.secondary_node_id else None,
+            tertiary_node_id=UUID(model.tertiary_node_id) if model.tertiary_node_id else None,
             status=cast(StorageNodeStatus, model.status),
             uptime=model.uptime(),
             hostname=model.hostname,
