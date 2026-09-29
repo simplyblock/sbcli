@@ -30,10 +30,12 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     ROLE_SECONDARY,
     ROLE_TERTIARY,
     RoleMove,
+    apply_role_moves,
     compute_fd_layout_violations,
     compute_role_diff,
     compute_role_diff_topology,
     is_expand_in_progress,
+    move_from_dict,
     pending_moves,
 )
 from simplyblock_core.controllers.cluster_expansion.preconditions import (
@@ -430,6 +432,28 @@ def _plan_moves_with_failure_domains(cluster, db_controller,
         + "; ".join(last_violations or ["<no candidates>"]))
 
 
+def _assign_newcomer_remote_triplet(cluster, db_controller, new_node_id, moves):
+    """Sync replication: select and persist the remote triplet of the
+    newcomer's LVS on the other site.
+
+    Runs BEFORE any move, so a refusal (too few nodes on the other site, the
+    JC-context cap) leaves the topology untouched, and a crash at any later
+    point finds the refs already stored -- a retry keeps them. The cap is
+    judged against the local layout the WHOLE plan ends in (``moves`` is the
+    full plan, also on resume: applying a move is idempotent). Existing
+    owners' remote triplets are not moved by an expansion.
+    """
+    from simplyblock_core import storage_node_ops
+    layout = {
+        n.get_id(): (n.secondary_node_id, n.tertiary_node_id)
+        for n in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id())
+        if n.status != StorageNode.STATUS_REMOVED and (n.lvstore or n.secondary_node_id)
+    }
+    storage_node_ops.assign_remote_triplets(
+        cluster, [new_node_id], local_layout=apply_role_moves(layout, moves),
+        db_controller=db_controller)
+
+
 def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
                                     db_controller=None,
                                     manage_cluster_status=False):
@@ -494,6 +518,10 @@ def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
                           if n.lvstore
                           and n.status == StorageNode.STATUS_ONLINE
                           and n.get_id() != new_snode.get_id()]
+        if cluster.sync_replication:
+            # Local roles stay on the home site: the newcomer joins the
+            # rotation of its own site, the other site is not touched.
+            existing_nodes = [n for n in existing_nodes if n.site == new_snode.site]
 
         if getattr(cluster, "enable_failure_domain", False):
             # Re-check the +/-1 balance with the newcomer now in the DB
@@ -530,6 +558,15 @@ def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
     if not ok:
         raise RuntimeError(
             f"expansion preconditions not met: {reason}")
+
+    if cluster.sync_replication:
+        if resume:
+            _assign_newcomer_remote_triplet(
+                cluster, db_controller, cluster.expand_state["new_node_id"],
+                [move_from_dict(d) for d in cluster.expand_state["moves"]])
+        else:
+            _assign_newcomer_remote_triplet(
+                cluster, db_controller, new_snode.get_id(), planned_moves or [])
 
     old_status = cluster.status
     if manage_cluster_status:

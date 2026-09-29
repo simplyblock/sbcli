@@ -40,8 +40,9 @@ Two entry points:
   caller needs to express the host topology explicitly.
 """
 
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from typing import NamedTuple
-from collections.abc import Sequence
 
 
 # Role names match the wire protocol used by bdev_lvol_set_lvs_opts.
@@ -542,6 +543,164 @@ def fd_activation_domain_count_violation(
             f"{distinct_domain_count}. Add hosts in additional domains, or "
             f"disable failure domains, then activate.")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Sync replication: remote triplets (pure).
+#
+# On a sync-replication cluster every LVS keeps its local primary /
+# secondary[ / tertiary] on its home site and, in addition, a remote triplet
+# (remote primary / secondary / tertiary) on the other site. The remote
+# triplet always has three members, whatever the FTT. It is picked from the
+# other site's nodes with the anti-affinity of the local roles -- members
+# host-disjoint (hard), then failure domain and physical label diverse
+# (best-effort, relaxed in that order) -- and, inside a tier, from the node
+# carrying the fewest remote roles, so remote roles spread evenly per node.
+# ---------------------------------------------------------------------------
+
+#: Remote-triplet slots, in the order the owner stores its refs
+#: (``remote_primary_node_id``, ``remote_secondary_node_id``,
+#: ``remote_tertiary_node_id``).
+REMOTE_ROLES = (ROLE_PRIMARY, ROLE_SECONDARY, ROLE_TERTIARY)
+
+#: A storage node runs one JC context per LVS instance it hosts (its own LVS,
+#: the ones it hosts as secondary / tertiary and, on a sync cluster, as a
+#: remote-triplet member). Replacing a JM re-points all of them in ONE
+#: jc_replace_jm call, which takes at most c_jc_nmax_replace_jm_pairs of them.
+JC_MAX_CONTEXTS_PER_NODE = 16
+
+
+class SiteNode(NamedTuple):
+    """The placement-relevant facts of a storage node on the remote site."""
+
+    node_id: str
+    host: str
+    failure_domain: int = -1
+    physical_label: int = 0
+
+
+class RemoteTripletPlacementError(ValueError):
+    """An LVS cannot get a valid remote triplet: too few nodes on the other
+    site, or a node would carry more JC contexts than the data plane can
+    re-point in one jc_replace_jm call."""
+
+
+def pick_remote_triplet(
+    candidates: Sequence[SiteNode],
+    load: dict[str, list[int]],
+    *,
+    keep: Sequence[SiteNode | None] = (None, None, None),
+    fd_on: bool = False,
+) -> tuple[str, str, str]:
+    """Pick the remote triplet ``(primary, secondary, tertiary)`` of one LVS.
+
+    ``candidates`` are the nodes of the other site that may take a new role,
+    in a deterministic order. ``keep`` holds the members to keep per slot (a
+    member being kept need not be a candidate: an offline member stays).
+    Empty slots are filled from ``candidates``: host-disjoint from every
+    member chosen so far, preferring a failure domain (when ``fd_on``) and a
+    physical label no member uses yet; inside a tier the node with the fewest
+    remote roles of this slot, then of all slots, wins.
+
+    ``load`` maps node id -> ``[primary, secondary, tertiary]`` remote-role
+    counts and is updated in place with the result (kept members included),
+    so a caller iterating over several LVS spreads their roles.
+
+    Raises RemoteTripletPlacementError when a slot has no host-disjoint
+    candidate left.
+    """
+    if len(keep) != len(REMOTE_ROLES):
+        raise ValueError(f"keep must have {len(REMOTE_ROLES)} slots, got {len(keep)}")
+    chosen: list[SiteNode | None] = list(keep)
+
+    def _members() -> list[SiteNode]:
+        return [m for m in chosen if m is not None]
+
+    def _tiers():
+        members = _members()
+        fds = {m.failure_domain for m in members if m.failure_domain >= 0} if fd_on else set()
+        labels = {m.physical_label for m in members if m.physical_label > 0}
+        return ((fds, labels), (fds, set()), (set(), labels), (set(), set()))
+
+    rotation = sum(load.get(c.node_id, [0, 0, 0])[0] for c in candidates)
+    for slot, role in enumerate(REMOTE_ROLES):
+        if chosen[slot] is not None:
+            continue
+        members = _members()
+        taken_ids = {m.node_id for m in members}
+        taken_hosts = {m.host for m in members}
+        eligible = [(i, c) for i, c in enumerate(candidates)
+                    if c.node_id not in taken_ids and c.host not in taken_hosts]
+        for avoid_fds, avoid_labels in _tiers():
+            tier = [(i, c) for i, c in eligible
+                    if not (c.failure_domain >= 0 and c.failure_domain in avoid_fds)
+                    and not (c.physical_label > 0 and c.physical_label in avoid_labels)]
+            if tier:
+                def _key(item, slot=slot):
+                    # Fewest roles of this slot, then overall; ties go round
+                    # the candidate list, one step further per triplet already
+                    # placed on it, so consecutive triplets rotate like the
+                    # local host rotation does.
+                    counts = load.get(item[1].node_id, [0, 0, 0])
+                    return counts[slot], sum(counts), (item[0] - rotation) % len(candidates)
+                chosen[slot] = min(tier, key=_key)[1]
+                break
+        else:
+            raise RemoteTripletPlacementError(
+                f"no node left for the remote {role}: every candidate shares a host "
+                f"with the members chosen so far ({sorted(taken_hosts) or 'none'}); "
+                f"{len(candidates)} candidate(s) on the other site")
+
+    result = []
+    for slot, member in enumerate(chosen):
+        assert member is not None
+        load.setdefault(member.node_id, [0, 0, 0])[slot] += 1
+        result.append(member.node_id)
+    return result[0], result[1], result[2]
+
+
+def jc_contexts_per_node(instances: Mapping[str, Sequence[str]]) -> Counter:
+    """Number of JC contexts (LVS instances) each node would run.
+
+    ``instances`` maps every LVS owner to the other nodes its LVS runs on (its
+    secondary / tertiary and remote-triplet members); the owner counts once
+    for its own LVS, every distinct non-empty member once for it.
+    """
+    counts: Counter = Counter()
+    for owner_id, members in instances.items():
+        for node_id in {owner_id, *members}:
+            if node_id:
+                counts[node_id] += 1
+    return counts
+
+
+def jc_context_violation(counts: Mapping[str, int],
+                         limit: int = JC_MAX_CONTEXTS_PER_NODE) -> str | None:
+    """Reason when a node would run more JC contexts than ``limit``, else None."""
+    over = sorted((node_id, n) for node_id, n in counts.items() if n > limit)
+    if not over:
+        return None
+    return (f"node(s) would host more LVS instances (JC contexts) than the data plane "
+            f"can re-point in one jc_replace_jm call ({limit}): "
+            + ", ".join(f"{node_id} ({n})" for node_id, n in over))
+
+
+def apply_role_moves(layout: dict[str, tuple[str, str]],
+                     moves: Sequence[RoleMove]) -> dict[str, tuple[str, str]]:
+    """The ``primary -> (secondary, tertiary)`` layout once ``moves`` ran.
+
+    Setting a role to its move target is idempotent, so applying a whole plan
+    to a layout on which part of it already ran gives the same final layout.
+    """
+    result = {primary: (sec, tert) for primary, (sec, tert) in layout.items()}
+    for move in moves:
+        sec, tert = result.get(move.lvs_primary_node_id, ("", ""))
+        if move.role == ROLE_SECONDARY:
+            sec = move.to_node_id
+        elif move.role == ROLE_TERTIARY:
+            tert = move.to_node_id
+        result[move.lvs_primary_node_id] = (sec, tert)
+    return result
 
 
 # ---------------------------------------------------------------------------

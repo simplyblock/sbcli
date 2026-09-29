@@ -109,10 +109,10 @@ def _task_is_open(task) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def failure_domain_host_map(cluster, db_controller, exclude_node_ids=frozenset()):
+def failure_domain_host_map(cluster, db_controller, exclude_node_ids=frozenset(), site=None):
     """Map ``mgmt_ip -> failure_domain`` over the cluster's non-removed,
     non-dedicated-secondary storage nodes. Hosts whose nodes carry an unset
-    domain (< 0) are skipped."""
+    domain (< 0) are skipped. With ``site``, only that site's nodes count."""
     host_fd = {}
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id()):
         if node.get_id() in exclude_node_ids:
@@ -121,8 +121,21 @@ def failure_domain_host_map(cluster, db_controller, exclude_node_ids=frozenset()
             continue
         if node.failure_domain < 0 or not node.mgmt_ip:
             continue
+        if site is not None and node.site != site:
+            continue
         host_fd[node.mgmt_ip] = node.failure_domain
     return host_fd
+
+
+# Sync replication: local roles never leave their site, so the balance rule
+# holds per site -- opposite imbalances on the two sites must not cancel out
+# in cluster-wide counts. ``None`` (every node) on any other cluster.
+def _balance_site(cluster, site):
+    return site if cluster.sync_replication else None
+
+
+def _on_site(cluster, site, reason):
+    return f"site {site}: {reason}" if cluster.sync_replication else reason
 
 
 def _fd_counts(host_fd):
@@ -130,7 +143,7 @@ def _fd_counts(host_fd):
 
 
 def check_fd_admission_for_add(cluster, db_controller,
-                               new_failure_domain, new_mgmt_ip=None):
+                               new_failure_domain, new_mgmt_ip=None, new_site=""):
     """Admission for adding a node: the resulting per-domain host split must
     stay within the +/-1 balance rule.
 
@@ -145,7 +158,8 @@ def check_fd_admission_for_add(cluster, db_controller,
     if new_failure_domain is None or new_failure_domain < 0:
         return False, ("failure-domain id is required on this cluster; "
                        "pass --failure-domain <id>")
-    host_fd = failure_domain_host_map(cluster, db_controller)
+    host_fd = failure_domain_host_map(cluster, db_controller,
+                                      site=_balance_site(cluster, new_site))
     if new_mgmt_ip and new_mgmt_ip in host_fd:
         if host_fd[new_mgmt_ip] != new_failure_domain:
             return False, (
@@ -158,7 +172,8 @@ def check_fd_admission_for_add(cluster, db_controller,
     counts[new_failure_domain] = counts.get(new_failure_domain, 0) + 1
     reason = fd_balance_violation(counts, max_delta=1)
     if reason:
-        return False, f"cannot add node to failure domain {new_failure_domain}: {reason}"
+        return False, (f"cannot add node to failure domain {new_failure_domain}: "
+                       f"{_on_site(cluster, new_site, reason)}")
     return True, ""
 
 
@@ -188,13 +203,14 @@ def check_fd_admission_for_remove(cluster, db_controller, snode):
                 and not n.is_secondary_node
                 and n.mgmt_ip == snode.mgmt_ip):
             return True, ""
-    host_fd = failure_domain_host_map(cluster, db_controller)
+    host_fd = failure_domain_host_map(cluster, db_controller,
+                                      site=_balance_site(cluster, snode.site))
     host_fd.pop(snode.mgmt_ip, None)
     reason = fd_balance_violation(
         _fd_counts(host_fd), max_delta=1,
         min_hosts_per_fd=FD_MIN_HOSTS_PER_DOMAIN)
     if reason:
-        return False, f"cannot remove node {snode.get_id()}: {reason}"
+        return False, f"cannot remove node {snode.get_id()}: {_on_site(cluster, snode.site, reason)}"
     return True, ""
 
 
@@ -204,10 +220,15 @@ def check_fd_balance_current(cluster, db_controller):
     newcomer is in the DB by then). Returns ``(ok: bool, reason: str)``."""
     if not getattr(cluster, "enable_failure_domain", False):
         return True, ""
-    counts = _fd_counts(failure_domain_host_map(cluster, db_controller))
-    reason = fd_balance_violation(counts, max_delta=1)
-    if reason:
-        return False, reason
+    sites: list = [None]
+    if cluster.sync_replication:
+        sites = sorted({n.site for n in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id())
+                        if n.status != StorageNode.STATUS_REMOVED and not n.is_secondary_node})
+    for site in sites:
+        counts = _fd_counts(failure_domain_host_map(cluster, db_controller, site=site))
+        reason = fd_balance_violation(counts, max_delta=1)
+        if reason:
+            return False, _on_site(cluster, site, reason)
     return True, ""
 
 

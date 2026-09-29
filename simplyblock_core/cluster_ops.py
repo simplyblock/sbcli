@@ -26,6 +26,7 @@ from pydantic import SecretStr
 from simplyblock_core import (utils, scripts, constants, index_ops, mgmt_node_ops, release_upgrades,
                               storage_node_ops)
 from simplyblock_core.utils import port_block
+from simplyblock_core.controllers.cluster_expansion.planner import RemoteTripletPlacementError
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import jm_raid
@@ -1200,6 +1201,28 @@ def sync_topology_violation(cluster, nodes) -> str | None:
     return None
 
 
+def sync_role_site_violations(cluster, nodes) -> builtins.list[str]:
+    """Local role pointers of a sync cluster that cross a site.
+
+    The secondary / tertiary of an LVS live on its home site (the other site
+    holds its remote triplet). A pointer across sites is not a state an
+    activation can repair -- moving a replica is a relocation -- so it is
+    reported, one entry per pointer. Always empty on a non-sync cluster.
+    """
+    if not cluster.sync_replication:
+        return []
+    by_id = {n.get_id(): n for n in nodes}
+    problems = []
+    for owner in _sync_configured_nodes(nodes):
+        for role, holder_id in (("secondary", owner.secondary_node_id),
+                                ("tertiary", owner.tertiary_node_id)):
+            holder = by_id.get(holder_id) if holder_id else None
+            if holder is not None and holder.site != owner.site:
+                problems.append(f"{role} of node {owner.get_id()} (site {owner.site}) is "
+                                f"node {holder_id} on site {holder.site}")
+    return problems
+
+
 def sync_capacity_violation(cluster, nodes, online_nodes) -> str | None:
     """Whether each configured site has enough ONLINE nodes to build its LVS stacks.
 
@@ -1315,6 +1338,11 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     if topology_violation:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster: {topology_violation}")
+    cross_site_roles = sync_role_site_violations(cluster, snodes)
+    if cross_site_roles:
+        set_cluster_status(cl_id, ols_status)
+        raise ValueError("Failed to activate cluster: local roles must stay on the home site: "
+                         + "; ".join(cross_site_roles))
     capacity_violation = sync_capacity_violation(cluster, snodes, online_nodes)
     if capacity_violation:
         if is_fresh_activation:
@@ -1380,38 +1408,48 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                              f"{host_fd[node.mgmt_ip]} and {node.failure_domain}; "
                              f"a host must sit entirely in one domain")
 
-            fd_host_counts = Counter(host_fd.values())
-            # See fd_activation_domain_count_violation's docstring: npcs+2
-            # domains, not just the bare rotation-correctness minimum, so a
-            # later single add/remove has a spare candidate instead of
-            # stranding another node's secondary/tertiary with none at all.
-            # This also subsumes the plain "at least two domains" floor.
-            domain_count_violation = fd_planner.fd_activation_domain_count_violation(
-                cluster.distr_npcs, len(fd_host_counts))
-            if domain_count_violation:
-                _fd_fail(domain_count_violation)
-            if len(set(fd_host_counts.values())) != 1:
-                _fd_fail(
-                    f"failure domains must hold an EQUAL number of hosts at "
-                    f"activation; current split: "
-                    f"{ {fd: fd_host_counts[fd] for fd in sorted(fd_host_counts)} }. "
-                    f"Add or remove hosts to balance the domains, then activate.")
-            if cluster.ha_type == "ha":
-                host_order = fd_planner.fd_interleaved_host_order(
-                    [(ip, host_fd[ip]) for ip in hosts])
-                topology = [[n.get_id() for n in hosts[ip]] for ip in host_order]
-                try:
-                    fd_desired_layout = fd_planner.rotation_layout(
-                        topology, cluster.max_fault_tolerance)
-                except ValueError as e:
-                    _fd_fail(f"cannot build the failure-domain rotation: {e}")
-                violations = fd_planner.compute_fd_layout_violations(
-                    topology, cluster.max_fault_tolerance,
-                    {n.get_id(): n.failure_domain for n in online_nodes},
-                    layout=fd_desired_layout)
-                if violations:
-                    _fd_fail("failure-domain layout invariant violated: "
-                             + "; ".join(violations))
+            # Sync replication: local roles never cross a site, so the domain
+            # rules and the rotation hold per site (one group elsewhere).
+            site_of_host = {n.mgmt_ip: n.site if cluster.sync_replication else ""
+                            for n in online_nodes}
+            for site in sorted(set(site_of_host.values())):
+                def _on_site(msg: str, site=site) -> str:
+                    return f"site {site}: {msg}" if site else msg
+
+                site_hosts = [ip for ip in hosts if site_of_host[ip] == site]
+                fd_host_counts = Counter(host_fd[ip] for ip in site_hosts)
+                # See fd_activation_domain_count_violation's docstring: npcs+2
+                # domains, not just the bare rotation-correctness minimum, so a
+                # later single add/remove has a spare candidate instead of
+                # stranding another node's secondary/tertiary with none at all.
+                # This also subsumes the plain "at least two domains" floor.
+                domain_count_violation = fd_planner.fd_activation_domain_count_violation(
+                    cluster.distr_npcs, len(fd_host_counts))
+                if domain_count_violation:
+                    _fd_fail(_on_site(domain_count_violation))
+                if len(set(fd_host_counts.values())) != 1:
+                    _fd_fail(_on_site(
+                        f"failure domains must hold an EQUAL number of hosts at "
+                        f"activation; current split: "
+                        f"{ {fd: fd_host_counts[fd] for fd in sorted(fd_host_counts)} }. "
+                        f"Add or remove hosts to balance the domains, then activate."))
+                if cluster.ha_type == "ha":
+                    host_order = fd_planner.fd_interleaved_host_order(
+                        [(ip, host_fd[ip]) for ip in site_hosts])
+                    topology = [[n.get_id() for n in hosts[ip]] for ip in host_order]
+                    try:
+                        site_layout = fd_planner.rotation_layout(
+                            topology, cluster.max_fault_tolerance)
+                    except ValueError as e:
+                        _fd_fail(_on_site(f"cannot build the failure-domain rotation: {e}"))
+                    violations = fd_planner.compute_fd_layout_violations(
+                        topology, cluster.max_fault_tolerance,
+                        {n.get_id(): n.failure_domain for n in online_nodes},
+                        layout=site_layout)
+                    if violations:
+                        _fd_fail(_on_site("failure-domain layout invariant violated: "
+                                          + "; ".join(violations)))
+                    fd_desired_layout.update(site_layout)
 
     for node in online_nodes:
         if cluster.is_single_node or len(online_nodes) <= 2:
@@ -1527,6 +1565,18 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
+
+        # Sync replication: every LVS also gets its remote triplet on the other
+        # site. Refs a re-activation finds are kept; missing ones are picked.
+        if cluster.sync_replication:
+            owner_ids = [n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)
+                         if n.status != StorageNode.STATUS_REMOVED and not n.is_secondary_node
+                         and n.secondary_node_id]
+            try:
+                storage_node_ops.assign_remote_triplets(cluster, owner_ids)
+            except RemoteTripletPlacementError as e:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(f"Failed to activate cluster: {e}") from e
 
     # Pass 1: bring up the primary LVS on every online primary node.
     #
@@ -2056,6 +2106,14 @@ def cluster_expand(cl_id) -> None:
             sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
             sec_node_2.lvstore_stack_tertiary = snode.get_id()
             sec_node_2.write_to_db()
+
+        if cluster.ha_type == "ha" and cluster.sync_replication:
+            try:
+                storage_node_ops.assign_remote_triplets(cluster, [snode.get_id()])
+            except RemoteTripletPlacementError as e:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(f"Failed to expand cluster: {e}") from e
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
 
         ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)

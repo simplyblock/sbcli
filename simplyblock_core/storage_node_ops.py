@@ -35,6 +35,7 @@ from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINU
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.controllers.cluster_expansion import planner as role_planner
 from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.iface import IFace
@@ -3837,7 +3838,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             # the newcomer in the DB by integrate_new_node_into_cluster.
             ok, reason = check_fd_admission_for_add(
                 cluster, db_controller, failure_domain_id,
-                new_mgmt_ip=mgmt_ip)
+                new_mgmt_ip=mgmt_ip, new_site=site or "")
             if not ok:
                 logger.error(f"Cannot start expansion node-add: {reason}")
                 return False
@@ -4780,6 +4781,19 @@ def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller)
     the fallback for clusters the planner declines."""
     from simplyblock_core.controllers import replica_placement
 
+    # Sync replication: the remote-triplet roles this node holds for owners
+    # on the other site must have a replacement there too (refs re-selected
+    # by _reselect_remote_roles_held_by after phase 3b).
+    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
+    if cluster.sync_replication:
+        nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+        owners = owners_with_remote_role_on(removed_node.get_id(), nodes)
+        if owners:
+            try:
+                plan_remote_triplets(cluster, nodes, owners, exclude_ids=[removed_node.get_id()])
+            except role_planner.RemoteTripletPlacementError as e:
+                return False, f"no replacement for the remote-triplet roles it holds: {e}"
+
     inputs = _relocation_planner_inputs(removed_node, db_controller, allow_without_fd=True)
     if inputs is not None:
         surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt = inputs
@@ -5031,7 +5045,9 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     Returns ``(p_id, x_id)`` or ``None`` if no valid edge exists.
     """
     field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_primary.cluster_id)
+    all_nodes = _same_site_nodes(
+        db_controller.get_cluster_by_id(stranded_primary.cluster_id), stranded_primary,
+        db_controller.get_storage_nodes_by_cluster_id(stranded_primary.cluster_id))
     all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
     by_id = {n.get_id(): n for n in all_nodes}
     exclude = set(exclude_ids) | {stranded_primary.get_id()}
@@ -5284,6 +5300,14 @@ def node_removal_orchestrate(node_id, force_remove=False):
             _verify_replica_stacks(snode.cluster_id, db_controller,
                                    context=f" after removing {node_id}")
 
+            # Phase 3d — sync replication: re-select the remote-triplet roles
+            # this node holds for owners on the other site. Before phase 4 on
+            # purpose: a failure retries the whole block, and once rewritten no
+            # ref names this node any more, so a retry has nothing left to do.
+            logger.info(f"[REMOVAL] {node_id}: phase 3d — re-select remote-triplet roles")
+            if not _reselect_remote_roles_held_by(snode):
+                return False
+
             # Phase 4 — finalize (swarm leave, gpt cleanup) and flip to removed.
             logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
             _finalize_node_removal(snode)
@@ -5302,6 +5326,33 @@ def node_removal_orchestrate(node_id, force_remove=False):
         logger.info(f"[REMOVAL] {node_id}: done")
     finally:
         cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
+    return True
+
+
+def _reselect_remote_roles_held_by(removed_node: StorageNode) -> bool:
+    """Point every remote triplet that names ``removed_node`` at a
+    replacement on the same site (sync-replication clusters only).
+
+    Only the refs move here. ``removed_node``'s OWN refs are left as they
+    are: its LVS is being torn down, and removed owners are skipped by every
+    reader of the refs (distr_controller.lvs_owners_on_node). Returns False
+    when no replacement exists (the removal is retried).
+    """
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
+    if not cluster.sync_replication:
+        return True
+    nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+    owners = owners_with_remote_role_on(removed_node.get_id(), nodes)
+    if not owners:
+        return True
+    try:
+        assign_remote_triplets(cluster, owners, exclude_ids=[removed_node.get_id()],
+                               db_controller=db_controller)
+    except role_planner.RemoteTripletPlacementError as e:
+        logger.error(f"[REMOVAL] {removed_node.get_id()}: cannot re-select the remote-triplet "
+                     f"roles it holds: {e}")
+        return False
     return True
 
 
@@ -5652,7 +5703,11 @@ def _relocation_planner_inputs(removed_node: StorageNode, db_controller,
         return None
     ftt = cluster.max_fault_tolerance if cluster.max_fault_tolerance in (1, 2) else 1
 
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+    # Sync replication: local roles never leave the home site, so the removed
+    # node's site is a closed permutation of its own -- the other site's
+    # primaries never point into it.
+    all_nodes = _same_site_nodes(
+        cluster, removed_node, db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id))
     survivors = [
         n for n in all_nodes
         if n.get_id() != removed_node.get_id() and n.status != StorageNode.STATUS_REMOVED
@@ -13732,12 +13787,143 @@ def get_node_jm_names(current_node: StorageNode, remote_node=None) -> JMNames:
                    sum(1 for _, site in jm_list if site == builder.site))
 
 
+def _same_site_nodes(cluster, anchor: StorageNode, nodes) -> list[StorageNode]:
+    """The nodes that may hold a LOCAL role (secondary / tertiary) of
+    ``anchor``'s LVS, or share a role graph with it.
+
+    On a sync-replication cluster the local roles of an LVS stay on its home
+    site -- the other site holds its remote triplet instead -- so only the
+    nodes of ``anchor``'s site qualify. Every node on any other cluster.
+    """
+    if not cluster.sync_replication:
+        return list(nodes)
+    return [n for n in nodes if n.site == anchor.site]
+
+
+def remote_triplet_refs(node: StorageNode) -> tuple[str, str, str]:
+    """``node``'s remote-triplet refs, in ``role_planner.REMOTE_ROLES`` order."""
+    return (node.remote_primary_node_id, node.remote_secondary_node_id,
+            node.remote_tertiary_node_id)
+
+
+def _set_remote_triplet_refs(node: StorageNode, triplet) -> None:
+    (node.remote_primary_node_id, node.remote_secondary_node_id,
+     node.remote_tertiary_node_id) = triplet
+
+
+def _site_node(node: StorageNode) -> role_planner.SiteNode:
+    return role_planner.SiteNode(node.get_id(), node.mgmt_ip, node.failure_domain,
+                                 node.physical_label)
+
+
+def plan_remote_triplets(cluster, nodes, owner_ids, *, exclude_ids=(), local_layout=None):
+    """The remote triplet each owner in ``owner_ids`` should have. No writes.
+
+    Sync-replication clusters only. An owner keeps every current ref that
+    names a non-removed node on the other site outside ``exclude_ids`` --
+    whatever that node's status: an outage never moves a remote role. Every
+    other slot is picked by ``role_planner.pick_remote_triplet`` from the
+    ONLINE nodes of the other site (dedicated secondary nodes excluded),
+    balanced against the remote roles all other owners already hold. Owners
+    are processed in the given order; an owner that is removed or excluded is
+    skipped.
+
+    The result is then checked against the JC-context cap over the whole
+    cluster: every owner's local roles (``local_layout``, owner ->
+    ``(secondary, tertiary)``, overrides the DB pointers -- e.g. the layout an
+    expansion plan will end in) plus every remote triplet.
+
+    Returns ``{owner_id: (remote_primary, remote_secondary, remote_tertiary)}``.
+    Raises role_planner.RemoteTripletPlacementError.
+    """
+    exclude = set(exclude_ids)
+    live = [n for n in nodes
+            if n.status != StorageNode.STATUS_REMOVED and n.get_id() not in exclude]
+    by_id = {n.get_id(): n for n in live}
+    owners = [by_id[oid] for oid in dict.fromkeys(owner_ids) if oid in by_id]
+    owner_set = {o.get_id() for o in owners}
+
+    load: dict[str, list[int]] = {}
+    for node in live:
+        if node.get_id() in owner_set:
+            continue
+        for slot, ref in enumerate(remote_triplet_refs(node)):
+            if ref in by_id:
+                load.setdefault(ref, [0, 0, 0])[slot] += 1
+
+    result = {}
+    for owner in owners:
+        other_site = [n for n in live
+                      if n.site and n.site != owner.site and not n.is_secondary_node]
+        other_by_id = {n.get_id(): n for n in other_site}
+        keep = tuple(_site_node(other_by_id[ref]) if ref in other_by_id else None
+                     for ref in remote_triplet_refs(owner))
+        candidates = [_site_node(n) for n in other_site if n.status == StorageNode.STATUS_ONLINE]
+        try:
+            result[owner.get_id()] = role_planner.pick_remote_triplet(
+                candidates, load, keep=keep, fd_on=bool(cluster.enable_failure_domain))
+        except role_planner.RemoteTripletPlacementError as e:
+            raise role_planner.RemoteTripletPlacementError(
+                f"remote triplet of node {owner.get_id()} (site {owner.site}): {e}") from e
+
+    instances = {}
+    local_layout = local_layout or {}
+    for node in live:
+        node_id = node.get_id()
+        is_owner = (node_id in local_layout or node_id in result or bool(node.lvstore)
+                    or bool(node.secondary_node_id))
+        if not is_owner:
+            continue
+        local = local_layout.get(node_id, (node.secondary_node_id, node.tertiary_node_id))
+        remote = result.get(node_id, remote_triplet_refs(node))
+        instances[node_id] = [*local, *remote]
+    violation = role_planner.jc_context_violation(role_planner.jc_contexts_per_node(instances))
+    if violation:
+        raise role_planner.RemoteTripletPlacementError(violation)
+    return result
+
+
+def assign_remote_triplets(cluster, owner_ids, *, exclude_ids=(), local_layout=None,
+                           db_controller=None) -> dict[str, tuple[str, str, str]]:
+    """Select and persist the remote triplets of ``owner_ids`` (see
+    plan_remote_triplets). Idempotent: an owner whose triplet is unchanged
+    is not written. A no-op on a non-sync cluster.
+
+    Returns the triplets that were written. Raises
+    role_planner.RemoteTripletPlacementError before writing anything.
+    """
+    if not cluster.sync_replication:
+        return {}
+    db = db_controller or DBController()
+    nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+    plan = plan_remote_triplets(cluster, nodes, owner_ids, exclude_ids=exclude_ids,
+                                local_layout=local_layout)
+    by_id = {n.get_id(): n for n in nodes}
+    written = {}
+    for owner_id, triplet in plan.items():
+        if remote_triplet_refs(by_id[owner_id]) == triplet:
+            continue
+        db.atomic_update(by_id[owner_id], lambda n, t=triplet: _set_remote_triplet_refs(n, t))
+        logger.info("Remote triplet of node %s (site %s): primary %s, secondary %s, tertiary %s",
+                    owner_id, by_id[owner_id].site, *triplet)
+        written[owner_id] = triplet
+    return written
+
+
+def owners_with_remote_role_on(node_id, nodes) -> list[str]:
+    """Ids of the non-removed owners whose remote triplet names ``node_id``."""
+    return [n.get_id() for n in nodes
+            if n.status != StorageNode.STATUS_REMOVED and n.get_id() != node_id
+            and node_id in remote_triplet_refs(n)]
+
+
 def get_secondary_nodes(current_node: StorageNode, exclude_ids=None, removed_node=None):
     if exclude_ids is None:
         exclude_ids = []
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    all_nodes = _same_site_nodes(
+        cluster, current_node, db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id))
     # Group by failure domain (stable sort, preserves DB order within each
     # domain) before scanning candidates. The "first valid candidate after my
     # own position" logic below skips same-domain nodes as forbidden, so on an
@@ -13832,10 +14018,13 @@ def splice_stranded_secondary(stranded_node) -> bool:
     own anti-affinity tiering.
     """
     db_controller = DBController()
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    cluster = db_controller.get_cluster_by_id(stranded_node.cluster_id)
+    all_nodes = _same_site_nodes(
+        cluster, stranded_node, db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id))
     # Deterministic tie-breaking among equally domain-scored edges -- see
     # get_secondary_nodes for why this sort matters.
     all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
+    site_ids = {n.get_id() for n in all_nodes}
     edges = [n for n in all_nodes if n.secondary_node_id and n.get_id() != stranded_node.get_id()]
 
     def _host_disjoint(p, x):
@@ -13849,6 +14038,8 @@ def splice_stranded_secondary(stranded_node) -> bool:
     best = None
     best_score = -1
     for p in edges:
+        if p.secondary_node_id not in site_ids:
+            continue
         x = db_controller.get_storage_node_by_id(p.secondary_node_id)
         if not x or x.get_id() == stranded_node.get_id() or not _host_disjoint(p, x):
             continue
@@ -13907,7 +14098,8 @@ def get_secondary_nodes_2(current_node: StorageNode, exclude_ids=None, exclude_m
         forbidden_ips.update(exclude_mgmt_ips)
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    all_nodes = _same_site_nodes(
+        cluster, current_node, db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id))
     # See get_secondary_nodes for why this sort matters: it removes the
     # pairing algorithm's sensitivity to arbitrary/interleaved node order.
     all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
@@ -13994,7 +14186,9 @@ def splice_stranded_tertiary(stranded_node) -> bool:
     not just against each other.
     """
     db_controller = DBController()
-    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    cluster = db_controller.get_cluster_by_id(stranded_node.cluster_id)
+    all_nodes = _same_site_nodes(
+        cluster, stranded_node, db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id))
     # Deterministic tie-breaking among equally domain-scored edges -- see
     # get_secondary_nodes for why this sort matters.
     all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
