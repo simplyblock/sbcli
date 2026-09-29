@@ -156,16 +156,27 @@ FIO Corruption Analysis Script
 """
 
 import paramiko
+import ssh_auth
 from scp import SCPClient
 import os
 from pathlib import Path
 import posixpath
 
-def create_ssh_client(host, key_path):
-    k = paramiko.Ed25519Key.from_private_key_file(key_path)
+def create_ssh_client(host, key_path=None):
+    """Connect, trying every credential rather than one named key.
+
+    key_path is kept in the signature so existing callers still work, and is
+    honoured first when given; ssh_auth then falls through to the CI key, the
+    old pem, the developer keys and finally SSH_PASSWORD. Insisting on a single
+    Ed25519 file is what made this raise on a lab where that key is no longer
+    authorised.
+    """
+    if key_path:
+        os.environ.setdefault("KEY_PATH", key_path)
     c = paramiko.SSHClient()
     c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    c.connect(hostname=host, username='root', pkey=k)
+    used = ssh_auth.connect(c, host, "root")
+    print(f"Connected to {host} using {used}")
     return c
 
 def exec_command(ssh, cmd):

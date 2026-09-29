@@ -19,6 +19,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import paramiko
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from utils import ssh_auth  # noqa: E402
+
 import boto3
 from boto3.s3.transfer import TransferConfig
 
@@ -125,29 +129,23 @@ def compute_total_bytes(pairs):
     return sum(safe_filesize(p) for p, _ in pairs)
 
 # -------------------- SSH helpers --------------------
-def _load_private_key(path: str):
-    try:
-        return paramiko.Ed25519Key(filename=path)
-    except Exception:
-        return paramiko.RSAKey.from_private_key_file(path)
-
 def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5) -> paramiko.SSHClient:
     for attempt in range(retries):
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            if not os.path.exists(KEY_PATH):
-                raise FileNotFoundError(f"SSH private key not found at {KEY_PATH}")
-            key = _load_private_key(KEY_PATH)
+            # No pre-flight key check: ssh_auth tries every candidate and
+            # reports what it tried. Demanding one named file here would
+            # fail before the chain that exists to survive its absence.
             if bastion_ip:
                 bastion = paramiko.SSHClient()
                 bastion.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                bastion.connect(hostname=bastion_ip, username=USER, pkey=key, timeout=30)
+                ssh_auth.connect(bastion, bastion_ip, USER, timeout=30)
                 transport = bastion.get_transport()
                 channel = transport.open_channel("direct-tcpip", (target_ip, 22), ("localhost", 0))
-                ssh.connect(target_ip, username=USER, sock=channel, pkey=key, timeout=30)
+                ssh_auth.connect(ssh, target_ip, USER, sock=channel, timeout=30)
             else:
-                ssh.connect(target_ip, username=USER, pkey=key, timeout=30)
+                ssh_auth.connect(ssh, target_ip, USER, timeout=30)
             return ssh
         except Exception as e:
             print(f"[ERROR] SSH connection failed ({attempt+1}/{retries}): {e}")

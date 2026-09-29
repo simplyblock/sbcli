@@ -1,5 +1,9 @@
 import os
 import paramiko
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from utils import ssh_auth  # noqa: E402
+
 import boto3
 import argparse
 import time
@@ -58,23 +62,22 @@ def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5):
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            if not os.path.exists(KEY_PATH):
-                raise FileNotFoundError(f"SSH private key not found at {KEY_PATH}")
-
-            private_key = paramiko.Ed25519Key(filename=KEY_PATH)
+            # No pre-flight key check: ssh_auth tries every candidate and
+            # reports what it tried. Demanding one named file here would
+            # fail before the chain that exists to survive its absence.
 
             if bastion_ip:
                 bastion = paramiko.SSHClient()
                 bastion.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                bastion.connect(hostname=bastion_ip, username=USER, pkey=private_key, timeout=30)
+                ssh_auth.connect(bastion, bastion_ip, USER, timeout=30)
 
                 transport = bastion.get_transport()
                 channel = transport.open_channel("direct-tcpip", (target_ip, 22), ("localhost", 0))
 
-                ssh.connect(target_ip, username=USER, sock=channel, pkey=private_key, timeout=30)
+                ssh_auth.connect(ssh, target_ip, USER, sock=channel, timeout=30)
                 return ssh
             else:
-                ssh.connect(target_ip, username=USER, pkey=private_key, timeout=30)
+                ssh_auth.connect(ssh, target_ip, USER, timeout=30)
                 return ssh
 
         except Exception as e:
