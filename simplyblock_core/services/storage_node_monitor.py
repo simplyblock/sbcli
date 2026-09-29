@@ -1195,7 +1195,8 @@ def _count_data_plane_votes(node):
     """Query all other online storage nodes for *node*'s JM connectivity.
 
     For each online peer, check the state of its NVMe controller that points
-    at *node*'s JM subsystem (controller name = ``remote_jm_{node_id}``).
+    at *node*'s JM subsystem (controller name = ``remote_jm_{node_id}``, or
+    ``remote_xs_jm_{node_id}`` from a peer on the other site of a sync cluster).
     A peer reports "connected" only if the controller exists AND is in the
     ``enabled`` SPDK state (``deleting``/``failed``/``resetting``/
     ``reconnect_is_delayed``/``disabled`` all count as disconnected).
@@ -1247,12 +1248,14 @@ def _count_data_plane_votes_uncached(node):
         logger.debug("No online peers to verify data plane for %s", node_id)
         return 0, 0
 
-    ctrl_name = f"remote_jm_{node_id}"
-    bdev_name = f"{ctrl_name}n1"
     # Vote per peer: True = disconnected, False = connected, None = abstain.
     votes: dict = {}
 
     def _vote_one_peer(peer):
+        # The peer's own name for node's JM: on a sync-replication cluster it
+        # depends on whether the two share a site.
+        ctrl_name = storage_node_ops.remote_jm_controller_name(peer.site, node.site, f"jm_{node_id}")
+        bdev_name = f"{ctrl_name}n1"
         # A liveness vote must not outlive its usefulness: a timeout here IS
         # a failure to answer, and the caller treats a missing vote as an
         # abstain. See constants.DP_VOTE_RPC_TIMEOUT_SEC.

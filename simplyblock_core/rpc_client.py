@@ -1763,11 +1763,17 @@ class RPCClient:
         A single storage node can run more than one local JC instance
         against the SAME ``name_old`` bdev at once -- its own redundancy
         set, plus one instance per primary it hosts as secondary/tertiary
-        (each such role uses a distinct ``jm_vuid``, up to 3 total per
-        node). This call covers ALL of them in one shot:
+        and, on a sync-replication cluster, as a member of a remote triplet
+        (each such role uses a distinct ``jm_vuid``). This call covers ALL of
+        them in one shot -- never split it: a call that leaves out one of
+        them is rejected (-17).
 
-        ``replacements``: 1..3 dicts, each ``{"jm_vuid": int, "name_new":
-        str}`` -- ``jm_vuid`` identifies which local JC instance to patch
+        The new JM keeps the position, and so the site locality, of the old
+        one in each journal (``jm_n_local`` of bdev_distrib_create), so on a
+        sync-replication cluster ``name_new`` must be on ``name_old``'s site.
+
+        ``replacements``: 1..16 dicts (c_jc_nmax_replace_jm_pairs), each
+        ``{"jm_vuid": int, "name_new": str}`` -- ``jm_vuid`` identifies which local JC instance to patch
         (must currently use ``name_old``), ``name_new`` is the bdev to use
         instead (must already exist as a bdev; the caller connects it
         first). The SAME ``name_new`` may cover multiple ``jm_vuid``
@@ -1784,7 +1790,7 @@ class RPCClient:
             -13 name_old is not used by JC
             -14 this jm_vuid uses name_new already
             -15 the JM of name_old is being removed
-            -16 invalid number of replacements (0, or more than 3)
+            -16 invalid number of replacements (0, or more than 16)
             -17 the replacements do not cover all jm_vuids that use name_old
             -18 the same jm_vuid is given twice
             -19 unknown jm_vuid

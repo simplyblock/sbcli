@@ -71,6 +71,11 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     n.lvstore_stack_secondary = stack_secondary
     n.lvstore_stack_tertiary = stack_tertiary
     n.failure_domain = failure_domain
+    # Non-sync-replication defaults (no site, no remote triplet).
+    n.site = ""
+    n.remote_primary_node_id = ""
+    n.remote_secondary_node_id = ""
+    n.remote_tertiary_node_id = ""
     n.mgmt_ip = mgmt_ip or unique_ip(node_id)
     n.write_to_db = MagicMock()
     n.rpc_client = MagicMock(return_value=MagicMock())
@@ -2678,12 +2683,15 @@ class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
         owner_node.get_id = MagicMock(return_value="owner-node")
         owner_node.status = StorageNode.STATUS_ONLINE
         owner_node.jm_device = jm_dev
+        owner_node.site = ""
 
         this_node = MagicMock(spec=StorageNode)
         this_node.get_id = MagicMock(return_value=this_node_id)
         this_node.jm_ids = []
+        this_node.lvstore_stack = []
         this_node.lvstore_stack_secondary = ""
         this_node.lvstore_stack_tertiary = ""
+        this_node.site = ""
         this_node.remote_jm_devices = []
         rpc_client = MagicMock()
         this_node.rpc_client = MagicMock(return_value=rpc_client)
@@ -2783,12 +2791,15 @@ class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
         owner_node.get_id = MagicMock(return_value="owner-node")
         owner_node.status = StorageNode.STATUS_ONLINE
         owner_node.jm_device = jm_dev
+        owner_node.site = ""
 
         this_node = MagicMock(spec=StorageNode)
         this_node.get_id = MagicMock(return_value=this_node_id)
         this_node.jm_ids = []
+        this_node.lvstore_stack = []
         this_node.lvstore_stack_secondary = ""
         this_node.lvstore_stack_tertiary = ""
+        this_node.site = ""
         this_node.remote_jm_devices = []
         rpc_client = MagicMock()
         this_node.rpc_client = MagicMock(return_value=rpc_client)

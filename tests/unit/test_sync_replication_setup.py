@@ -164,3 +164,34 @@ def test_a_site_with_no_online_node_is_reported():
     online = [n for n in nodes if n.site == "site-a"]
     violation = cluster_ops.sync_capacity_violation(_cluster(), nodes, online)
     assert violation == "site site-b has 0 online node(s) on 0 host(s), needs 3 node(s) on 3 host(s)"
+
+
+# -- activation: journal hosts per site ---------------------------------------------
+
+def test_every_site_needs_a_host_per_copy_of_the_largest_journal():
+    # site b has four hosts, site a three; one node journals 4 + 4, so every
+    # node places four copies on site a as well.
+    nodes = _two_sites(per_site=3) + [_node("104", "site-b")]
+    for node in nodes:
+        node.ha_jm_count = 6
+    nodes[-1].ha_jm_count = 8
+    violation = cluster_ops.sync_capacity_violation(_cluster(ndcs=1, npcs=1), nodes, nodes)
+    assert violation == "site site-a has 3 online node(s) on 3 host(s), needs 2 node(s) on 4 host(s)"
+
+
+def test_the_cluster_journal_rule_needs_four_hosts_per_site_with_failure_domains():
+    cluster = _cluster(ndcs=1, npcs=1)
+    cluster.enable_failure_domain = True   # per-site journal share of 4
+    nodes = _two_sites(per_site=3)
+    violation = cluster_ops.sync_capacity_violation(cluster, nodes, nodes)
+    assert "site site-a has 3 online node(s) on 3 host(s), needs 2 node(s) on 4 host(s)" in violation
+    assert "site site-b" in violation
+    assert cluster_ops.sync_capacity_violation(cluster, _two_sites(per_site=4),
+                                               _two_sites(per_site=4)) is None
+
+
+def test_journal_hosts_with_no_online_node_at_all():
+    nodes = _two_sites()
+    violation = cluster_ops.sync_capacity_violation(_cluster(), nodes, [])
+    assert violation == ("site site-a has 0 online node(s) on 0 host(s), needs 3 node(s) on 3 host(s); "
+                         "site site-b has 0 online node(s) on 0 host(s), needs 3 node(s) on 3 host(s)")

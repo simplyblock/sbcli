@@ -151,8 +151,8 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--enable-test-device', help='Enable creation of test device.', dest='enable_test_device', action='store_true')
         if self.developer_mode:
-            subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`.', dest='enable_ha_jm', action='store_false')
-        subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3.', type=int, dest='ha_jm_count')
+            subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`. Ignored on sync-replication clusters, which always use HA JM.', dest='enable_ha_jm', action='store_false')
+        subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters or with failure domains, otherwise 3. On sync-replication clusters the count covers both sites: an even number up to 8, default 8 for FT=2 clusters or with failure domains, otherwise 6.', type=int, dest='ha_jm_count')
         subcommand.add_argument('--failure-domain', help='The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise.', type=int, dest='failure_domain')
         subcommand.add_argument('--site', help='The sync-replication site this node belongs to (1-63 characters from [A-Za-z0-9._-]). Required when the cluster was created with --sync-replication; must be omitted otherwise. All nodes of one host belong to the same site.', type=str, dest='site')
         subcommand.add_argument('--namespace', help='The Kubernetes namespace to deploy on.', type=str, dest='namespace')

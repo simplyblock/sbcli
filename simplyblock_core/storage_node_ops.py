@@ -11,7 +11,7 @@ import subprocess
 
 import psutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, NamedTuple
 
 import threading
 
@@ -25,6 +25,7 @@ from pydantic import SecretStr
 from tenacity import RetryError, Retrying, before_sleep_log, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
+from simplyblock_core.distr_controller import DistribHomeSiteError
 from simplyblock_core import utils
 from simplyblock_core import jm_raid
 from simplyblock_core.utils import port_block
@@ -2405,11 +2406,16 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node: StorageNode, peer_p
     one or more peers and none of them report the target reachable, treat it
     as data-plane unreachable and skip the attach. If we can't probe any
     peer, default to True (don't block on missing information).
+
+    The key is the peer's own name for the target's JM, which on a
+    sync-replication cluster depends on whether the two share a site.
     """
     db_controller = DBController()
-    remote_key = f"remote_jm_{target_node_id}n1"
+    nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
+    target_site = next((n.site for n in nodes if n.get_id() == target_node_id), "")
     probed = False
-    for peer in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+    for peer in nodes:
+        remote_key = remote_jm_controller_name(peer.site, target_site, f"jm_{target_node_id}") + "n1"
         if peer.get_id() in (target_node_id, this_node.get_id()):
             continue
         if peer.status != StorageNode.STATUS_ONLINE:
@@ -2520,6 +2526,11 @@ def verify_jm_mesh_coverage(cluster_id, repair=True):
     return problems
 
 
+#: A remote JM is attached only while its owner is in one of these states.
+_JM_OWNER_ATTACHABLE_STATUSES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                                 StorageNode.STATUS_RESTARTING)
+
+
 def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None):
     """Connect ``this_node`` to remote JM devices and return the refreshed
     remote-JM records.
@@ -2560,31 +2571,27 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
             if jm_dev and jm_dev not in remote_devices:
                 remote_devices.append(jm_dev)
 
-    for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
-        sec_primary_id = getattr(this_node, sec_attr, None)
-        if sec_primary_id:
-            # A dangling peer linkage (primary removed, or a legacy record
-            # value StorageNode.from_dict could not repair) must degrade to
-            # "skip this peer's JMs", never abort the whole restart: the JM
-            # mesh verifier re-establishes missing links once both sides are
-            # up (verify_jm_mesh_coverage).
-            try:
-                org_node = db_controller.get_storage_node_by_id(sec_primary_id)
-            except KeyError:
-                logger.warning(
-                    "Node %s %s references unknown primary %r; skipping its "
-                    "JM devices", this_node.get_id()[:8], sec_attr,
-                    sec_primary_id)
-                continue
-            if org_node.jm_device and org_node.jm_device not in remote_devices:
-                remote_devices.append(org_node.jm_device)
-            for jm_id in org_node.jm_ids:
-                jm_dev = db_controller.get_jm_device_by_id(jm_id)
-                if jm_dev and jm_dev not in remote_devices:
-                    remote_devices.append(jm_dev)
+    all_nodes = db_controller.get_storage_nodes()
+    # Every LVS hosted here (as secondary / tertiary, or on a sync cluster in
+    # a remote triplet) runs a JC instance over its owner's journal, so this
+    # node reaches that owner's JM and jm_ids too. A dangling peer linkage
+    # (primary removed, or a legacy record value StorageNode.from_dict could
+    # not repair) degrades to "skip this peer's JMs" inside
+    # lvs_owners_on_node, never aborting the whole restart: the JM mesh
+    # verifier re-establishes missing links once both sides are up
+    # (verify_jm_mesh_coverage).
+    for org_node in distr_controller.lvs_owners_on_node(this_node, all_nodes):
+        if org_node.get_id() == this_node.get_id():
+            continue
+        if org_node.jm_device and org_node.jm_device not in remote_devices:
+            remote_devices.append(org_node.jm_device)
+        for jm_id in org_node.jm_ids:
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            if jm_dev and jm_dev not in remote_devices:
+                remote_devices.append(jm_dev)
 
     logger.debug(f"remote_devices: {remote_devices}")
-    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING]
+    allowed_node_statuses = _JM_OWNER_ATTACHABLE_STATUSES
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE]
 
     new_devs = []
@@ -2593,7 +2600,7 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
     # scan cost O(JMs x nodes) FDB reads per call (called several times per
     # restart / create).
     jm_owner_by_id = {}
-    for node in db_controller.get_storage_nodes():
+    for node in all_nodes:
         if node.jm_device:
             jm_owner_by_id[node.jm_device.get_id()] = node
     for jm_dev in remote_devices:
@@ -2603,7 +2610,8 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         org_dev_node = jm_owner_by_id.get(jm_dev.get_id())
         org_dev = org_dev_node.jm_device if org_dev_node is not None else None
 
-        if not org_dev or org_dev in new_devs or org_dev_node and org_dev_node.get_id() == this_node.get_id():
+        if (org_dev_node is None or not org_dev or org_dev in new_devs
+                or org_dev_node.get_id() == this_node.get_id()):
             continue
 
         if only_node_id and org_dev_node is not None and org_dev_node.get_id() != only_node_id:
@@ -2641,8 +2649,8 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         remote_device.jm_bdev = resolved_name
         remote_device.status = NVMeDevice.STATUS_ONLINE
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
-        expected_bdev = f"remote_{resolved_name}n1"
-        controller_name = f"remote_{resolved_name}"
+        controller_name = remote_jm_controller_name(this_node.site, org_dev_node.site, resolved_name)
+        expected_bdev = f"{controller_name}n1"
         connect_failed = False
         try:
             remote_device.remote_bdev = str(connect_device(
@@ -2859,7 +2867,12 @@ def ifc_is_roce(nic):
     return False
 
 
-def get_required_ha_jm_count(cluster) -> int:
+#: JC accepts at most this many journal names per jm_vuid (ultra
+#: c_jc_nmax_working_copies); a sync-replication journal is 4 + 4 at most.
+MAX_HA_JM_COUNT = 8
+
+
+def _required_ha_jm_count_per_site(cluster) -> int:
     # FTT>=2 always needs 4 HA journals (can lose 2, keep >=2 quorum).
     if cluster.max_fault_tolerance >= 2:
         return 4
@@ -2874,11 +2887,31 @@ def get_required_ha_jm_count(cluster) -> int:
     return 3
 
 
+def get_required_ha_jm_count(cluster) -> int:
+    """The minimum HA journal size of a node of ``cluster``.
+
+    A sync-replication cluster applies the rule to each of its two sites: the
+    journal holds that many copies on the node's own site and as many on the
+    other one (a node's per-site count is ``ha_jm_count // 2``).
+    """
+    per_site = _required_ha_jm_count_per_site(cluster)
+    return 2 * per_site if cluster.sync_replication else per_site
+
+
 def resolve_enable_ha_jm(cluster, enable_ha_jm) -> bool:
     """Single-node clusters run without HA journaling: one local journal
     (deterministic jm_vuid=1 / LVS_1), no fabric export, no remote JMs. This
     is a deployment-time property of the cluster, overriding the CLI/API
-    default of enable_ha_jm=True."""
+    default of enable_ha_jm=True.
+
+    Sync-replication clusters always journal across both sites -- a journal
+    without remote copies loses acknowledged writes with its site -- so the
+    same override forces HA journaling on there."""
+    if cluster.sync_replication:
+        if not enable_ha_jm:
+            logger.warning("Sync-replication cluster: HA journaling cannot be disabled; "
+                           "enabling it for this node")
+        return True
     if cluster.is_single_node and enable_ha_jm:
         logger.info("Single-node cluster: disabling HA journaling for this node "
                     "(single local journal)")
@@ -2898,7 +2931,30 @@ def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
             f"{cluster.max_fault_tolerance}; minimum required is {required_ha_jm_count}"
         )
 
+    if cluster.sync_replication and (ha_jm_count % 2 or ha_jm_count > MAX_HA_JM_COUNT):
+        raise ValueError(
+            f"ha_jm_count={ha_jm_count} is invalid on a sync-replication cluster: it must be "
+            f"even (the same number of journal copies on each site) and at most "
+            f"{MAX_HA_JM_COUNT}")
+
     return ha_jm_count
+
+
+#: Prefix of the bdev through which a node reaches a JM on the OTHER site of a
+#: sync-replication cluster. JC sorts the journal names and counts the first
+#: ``jm_n_local`` as local, so the names must sort own JM < same-site remote JM
+#: < other-site remote JM: "jm_<id>" < "remote_jm_<id>n1" < "remote_xs_jm_<id>n1".
+_CROSS_SITE_JM_PREFIX = "remote_xs_"
+
+
+def remote_jm_controller_name(this_site: str, owner_site: str, jm_bdev: str) -> str:
+    """Name of the NVMe controller a node on ``this_site`` attaches for the JM
+    bdev ``jm_bdev`` of a node on ``owner_site``; its namespace bdev is this
+    name + "n1". Sites are empty outside sync replication: always "remote_<jm_bdev>".
+    """
+    if this_site != owner_site:
+        return f"{_CROSS_SITE_JM_PREFIX}{jm_bdev}"
+    return f"remote_{jm_bdev}"
 
 
 def _acquire_cluster_add_lock_blocking(db_controller, cluster_id, owner, timeout=300, poll=2):
@@ -6197,6 +6253,11 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
     entirely, so this function never has to account for it (found live
     2026-08-25, the very next removal after the phase-2/3b fix above:
     removed_node's own hosted-replica peer failed this way).
+
+    Sync replication: the replacement comes from the removed node's site (JC
+    keeps the slot's position and so its locality, see
+    _pick_site_replacement_jm), and every LVS also runs on its remote triplet,
+    so up to six instances of one jm_vuid take the same decision.
     """
     db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
@@ -6233,12 +6294,22 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         # have issued jc_replace_jm at the dead pod this filter exists to
         # avoid. IN_REMOVAL is listed too, on the same grounds as REMOVED:
         # such a node is down and its rpc_client cannot resolve.
-        live_nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+        cluster_nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+        live_nodes = [n for n in cluster_nodes
                       if n.status not in (StorageNode.STATUS_REMOVED,
                                           StorageNode.STATUS_IN_REMOVAL)
                       and n.get_id() != removed_node.get_id()]
+        # Sync replication (only there does a node have a site): the
+        # replacement comes from the removed JM's site, see
+        # _pick_site_replacement_jm.
+        removed_site = removed_node.site
+        fd_enabled = (db_controller.get_cluster_by_id(removed_node.cluster_id).enable_failure_domain
+                      if removed_site else False)
 
         def _pick_replacement(primary):
+            if removed_site:
+                return _pick_site_replacement_jm(
+                    primary, removed_jm_id, removed_site, cluster_nodes, fd_enabled)
             # get_sorted_ha_jms ranks candidates by host-disjoint (hard) +
             # failure-domain balance (best-effort) -- it has no notion of
             # "primary already holds this candidate", so filter that here.
@@ -6304,12 +6375,24 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         # local jm_vuid using name_old to be covered in ONE call (-17
         # otherwise), so for each node, gather every jm_vuid it needs to
         # patch and issue exactly one call.
+        live_by_id = {n.get_id(): n for n in live_nodes}
         for node in live_nodes:
             targets = []  # (jm_vuid, owner_primary, replacement_jm_id)
             if node.get_id() in decisions:
                 targets.append((node.jm_vuid, node, decisions[node.get_id()]))
-            for backref in (node.lvstore_stack_secondary, node.lvstore_stack_tertiary):
-                if backref and backref in decisions:
+            hosted_ids = [backref for backref in (node.lvstore_stack_secondary, node.lvstore_stack_tertiary)
+                          if backref]
+            # Sync replication: an LVS also runs on the three nodes of its
+            # remote triplet, each a JC instance of the owner's jm_vuid -- all
+            # six instances take the SAME decision, and jc_replace_jm must see
+            # every one hosted here in its single call.
+            hosted_ids += [primary_id for primary_id in decisions
+                           if primary_id in live_by_id and node.get_id() in (
+                               live_by_id[primary_id].remote_primary_node_id,
+                               live_by_id[primary_id].remote_secondary_node_id,
+                               live_by_id[primary_id].remote_tertiary_node_id)]
+            for backref in dict.fromkeys(hosted_ids):
+                if backref in decisions:
                     hosted_primary = db_controller.get_storage_node_by_id(backref)
                     targets.append((hosted_primary.jm_vuid, hosted_primary, decisions[backref]))
             # Replace and remove are MUTUALLY EXCLUSIVE on a node -- per the
@@ -6426,7 +6509,11 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                         replacements.append({"jm_vuid": jm_vuid, "name_new": d.jm_bdev})
                         continue
 
-                    controller_name = f"remote_{d.jm_bdev}"
+                    if removed_site:
+                        controller_name = remote_jm_controller_name(
+                            node.site, db_controller.get_storage_node_by_id(d.node_id).site, d.jm_bdev)
+                    else:
+                        controller_name = f"remote_{d.jm_bdev}"
                     expected_bdev = f"{controller_name}n1"
                     # Recorded BEFORE our own connect call below, so a
                     # failure's cleanup only ever detaches a connection THIS
@@ -13338,6 +13425,164 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
 
+class SiteJournalPlacementError(RuntimeError):
+    """A sync-replication node's journal cannot get its copies on one of the
+    two sites: too few online JMs on distinct hosts there."""
+
+
+class _JMCandidate(NamedTuple):
+    ip: str
+    fd: int
+    label: int
+    site: str
+
+
+def _ha_jm_candidates(current_node: StorageNode, nodes, attachable_only=False):
+    """The online JMs of the nodes other than ``current_node``, by JM id, and
+    how many other nodes' journals already use each (least-used first).
+
+    ``attachable_only``: only JMs whose owner can be attached right now
+    (_JM_OWNER_ATTACHABLE_STATUSES) -- a forced shutdown leaves an offline
+    node's JM status ONLINE, and a sync journal must not count such a copy.
+    """
+    candidates: dict[str, _JMCandidate] = {}
+    for node in nodes:
+        if node.get_id() == current_node.get_id():  # pass
+            continue
+        if attachable_only and node.status not in _JM_OWNER_ATTACHABLE_STATUSES:
+            continue
+
+        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
+            candidates[node.jm_device.get_id()] = _JMCandidate(
+                node.mgmt_ip, node.failure_domain, node.physical_label, node.site)
+
+    jm_count = dict.fromkeys(candidates, 0)
+    for node in nodes:
+        if node.get_id() == current_node.get_id():  # pass
+            continue
+        if not node.jm_ids:
+            continue
+        for rem_jm_id in node.jm_ids:
+            if rem_jm_id in jm_count:
+                jm_count[rem_jm_id] += 1
+
+    # Least-used JMs first (load balancing); ties broken in the greedy pick.
+    return candidates, dict(sorted(jm_count.items(), key=lambda x: x[1]))
+
+
+def _pick_ha_jms(candidates, jm_count, total_jms, target, taken, fd_enabled, local_fd, node_id):
+    """Greedy pick of ``target`` JMs out of ``candidates`` for a journal of
+    ``total_jms`` copies (the selection rules are listed in get_sorted_ha_jms).
+
+    ``taken``: ``(mgmt_ip, failure_domain, physical_label)`` of the copies the
+    journal already holds within this pool (the node's own JM, surviving
+    members); they count toward host, label and domain usage. ``local_fd``:
+    the domain of the node's own JM when that JM is in this pool, else -1.
+    """
+    pool = [(jm_id, cnt) for jm_id, cnt in jm_count.items() if jm_id in candidates]
+
+    # Per-domain cap so that losing any single domain keeps >= 2 journals.
+    # Distinct domains across the candidate JMs plus the copies already taken.
+    all_fds = {c.fd for c in candidates.values() if c.fd >= 0}
+    all_fds.update(fd for _, fd, _ in taken if fd >= 0)
+    num_fds = len(all_fds)
+    if fd_enabled and num_fds > 1:
+        even_cap = math.ceil(total_jms / num_fds)   # spread as evenly as possible
+        quorum_cap = total_jms - 2                   # keep >= 2 after losing one domain
+        per_fd_cap = max(1, min(even_cap, quorum_cap))
+    else:
+        per_fd_cap = total_jms  # no domain constraint
+
+    selected: list[str] = []
+    used_ips = set()
+    used_labels = set()
+    fd_count: dict[int, int] = {}
+    for ip, fd, label in taken:
+        used_ips.add(ip)
+        if label > 0:
+            used_labels.add(label)
+        if fd >= 0:
+            fd_count[fd] = fd_count.get(fd, 0) + 1  # the local JM occupies its domain
+
+    def _pick_same_fd_as_local(enforce_label):
+        # One-shot reservation (not a loop): take the least-used JM in the
+        # local node's own domain, if the cap leaves room for a second
+        # member there and nothing has claimed that reservation yet.
+        if (local_fd < 0 or per_fd_cap < 2
+                or len(selected) >= target
+                or fd_count.get(local_fd, 0) >= 2):
+            return
+        best = None
+        for jm_id, cnt in pool:
+            if not jm_id or jm_id in selected:
+                continue
+            ip = candidates[jm_id].ip
+            if ip in used_ips:                            # host-disjoint (hard)
+                continue
+            if candidates[jm_id].fd != local_fd:
+                continue
+            label = candidates[jm_id].label
+            if enforce_label and label > 0 and label in used_labels:
+                continue
+            if best is None or cnt < best[0]:
+                best = (cnt, jm_id, ip, label)
+        if best is None:
+            return
+        _, jm_id, ip, label = best
+        selected.append(jm_id)
+        used_ips.add(ip)
+        fd_count[local_fd] = fd_count.get(local_fd, 0) + 1
+        if label > 0:
+            used_labels.add(label)
+
+    def _pick(enforce_fd_cap, enforce_label):
+        # Greedy: repeatedly take the eligible JM that lands in the currently
+        # emptiest domain (maximizes spread), breaking ties by least usage.
+        while len(selected) < target:
+            best = None
+            for jm_id, cnt in pool:
+                if not jm_id or jm_id in selected:
+                    continue
+                ip = candidates[jm_id].ip
+                if ip in used_ips:                       # host-disjoint (hard)
+                    continue
+                fd = candidates[jm_id].fd
+                label = candidates[jm_id].label
+                if fd_enabled and enforce_fd_cap and fd >= 0 and fd_count.get(fd, 0) >= per_fd_cap:
+                    continue
+                if enforce_label and label > 0 and label in used_labels:
+                    continue
+                score = (fd_count.get(fd, 0) if fd >= 0 else 0, cnt)
+                if best is None or score < best[0]:
+                    best = (score, jm_id, ip, fd, label)
+            if best is None:
+                return
+            _, jm_id, ip, fd, label = best
+            selected.append(jm_id)
+            used_ips.add(ip)
+            if fd >= 0:
+                fd_count[fd] = fd_count.get(fd, 0) + 1
+            if label > 0:
+                used_labels.add(label)
+
+    if fd_enabled:
+        _pick_same_fd_as_local(enforce_label=True)
+        _pick_same_fd_as_local(enforce_label=False)
+        _pick(enforce_fd_cap=True, enforce_label=True)
+        _pick(enforce_fd_cap=True, enforce_label=False)   # relax label, keep domain cap
+        if len(selected) < target:
+            logger.warning(
+                "Could only place %d/%d HA journal copies within the failure-"
+                "domain quorum cap for node %s; relaxing to host-disjoint "
+                "placement for the remaining copies.", len(selected), target,
+                node_id)
+            _pick(enforce_fd_cap=False, enforce_label=False)  # last resort
+    else:
+        _pick(enforce_fd_cap=False, enforce_label=True)       # still honor labels
+        _pick(enforce_fd_cap=False, enforce_label=False)
+    return selected[:target]
+
+
 def get_sorted_ha_jms(current_node: StorageNode):
     """Select the remote HA journal members for ``current_node``.
 
@@ -13366,147 +13611,106 @@ def get_sorted_ha_jms(current_node: StorageNode):
 
     Best-effort means each constraint is relaxed in turn only when it cannot be
     satisfied, rather than failing placement.
+
+    Sync replication: the journal holds ``ha_jm_count // 2`` copies on each
+    site. The rules above apply to each site on its own (failure domains are
+    balanced inside the site): ``per_site - 1`` JMs of the node's own site,
+    then ``per_site`` of the other site, in that order.
+
+    Raises:
+        SiteJournalPlacementError: sync replication, and a site cannot supply
+            its copies.
     """
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
-    jm_count = {}
-    jm_dev_to_mgmt_ip = {}
-    jm_dev_to_fd = {}
-    jm_dev_to_label = {}
-
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if node.get_id() == current_node.get_id():  # pass
-            continue
-
-        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
-            jm_count[node.jm_device.get_id()] = 0
-            jm_dev_to_mgmt_ip[node.jm_device.get_id()] = node.mgmt_ip
-            jm_dev_to_fd[node.jm_device.get_id()] = node.failure_domain  # int, -1 if unset
-            jm_dev_to_label[node.jm_device.get_id()] = node.physical_label
-
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if node.get_id() == current_node.get_id():  # pass
-            continue
-        if not node.jm_ids:
-            continue
-        for rem_jm_id in node.jm_ids:
-            if rem_jm_id in jm_count:
-                jm_count[rem_jm_id] += 1
-
-    # Least-used JMs first (load balancing); ties broken in the greedy pick.
-    jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
-    total_jms = current_node.ha_jm_count
-    target = total_jms - 1
+    nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    candidates, jm_count = _ha_jm_candidates(current_node, nodes,
+                                             attachable_only=cluster.sync_replication)
     fd_enabled = cluster.enable_failure_domain
+    local = (current_node.mgmt_ip, current_node.failure_domain, current_node.physical_label)
+    node_id = current_node.get_id()
 
-    # Per-domain cap so that losing any single domain keeps >= 2 journals.
-    # Distinct domains across the candidate JMs plus the current node's own.
-    all_fds = {fd for fd in jm_dev_to_fd.values() if fd >= 0}
-    if current_node.failure_domain >= 0:
-        all_fds.add(current_node.failure_domain)
-    num_fds = len(all_fds)
-    if fd_enabled and num_fds > 1:
-        even_cap = math.ceil(total_jms / num_fds)   # spread as evenly as possible
-        quorum_cap = total_jms - 2                   # keep >= 2 after losing one domain
-        per_fd_cap = max(1, min(even_cap, quorum_cap))
-    else:
-        per_fd_cap = total_jms  # no domain constraint
+    if not cluster.sync_replication:
+        total_jms = current_node.ha_jm_count
+        return _pick_ha_jms(candidates, jm_count, total_jms, total_jms - 1, [local],
+                            fd_enabled, current_node.failure_domain, node_id)
 
-    selected: list[str] = []
-    used_ips = {current_node.mgmt_ip}
-    used_labels = {current_node.physical_label} if current_node.physical_label > 0 else set()
-    fd_count = {}
-    if current_node.failure_domain >= 0:
-        fd_count[current_node.failure_domain] = 1  # the local JM occupies its domain
-
-    def _pick_same_fd_as_local(enforce_label):
-        # One-shot reservation (not a loop): take the least-used JM in the
-        # local node's own domain, if the cap leaves room for a second
-        # member there and nothing has claimed that reservation yet.
-        if (current_node.failure_domain < 0 or per_fd_cap < 2
-                or len(selected) >= target
-                or fd_count.get(current_node.failure_domain, 0) >= 2):
-            return
-        best = None
-        for jm_id, cnt in jm_count.items():
-            if not jm_id or jm_id in selected:
-                continue
-            ip = jm_dev_to_mgmt_ip[jm_id]
-            if ip in used_ips:                            # host-disjoint (hard)
-                continue
-            if jm_dev_to_fd.get(jm_id, -1) != current_node.failure_domain:
-                continue
-            label = jm_dev_to_label.get(jm_id, 0)
-            if enforce_label and label > 0 and label in used_labels:
-                continue
-            if best is None or cnt < best[0]:
-                best = (cnt, jm_id, ip, label)
-        if best is None:
-            return
-        _, jm_id, ip, label = best
-        selected.append(jm_id)
-        used_ips.add(ip)
-        fd_count[current_node.failure_domain] = fd_count.get(current_node.failure_domain, 0) + 1
-        if label > 0:
-            used_labels.add(label)
-
-    def _pick(enforce_fd_cap, enforce_label):
-        # Greedy: repeatedly take the eligible JM that lands in the currently
-        # emptiest domain (maximizes spread), breaking ties by least usage.
-        while len(selected) < target:
-            best = None
-            for jm_id, cnt in jm_count.items():
-                if not jm_id or jm_id in selected:
-                    continue
-                ip = jm_dev_to_mgmt_ip[jm_id]
-                if ip in used_ips:                       # host-disjoint (hard)
-                    continue
-                fd = jm_dev_to_fd.get(jm_id, -1)
-                label = jm_dev_to_label.get(jm_id, 0)
-                if fd_enabled and enforce_fd_cap and fd >= 0 and fd_count.get(fd, 0) >= per_fd_cap:
-                    continue
-                if enforce_label and label > 0 and label in used_labels:
-                    continue
-                score = (fd_count.get(fd, 0) if fd >= 0 else 0, cnt)
-                if best is None or score < best[0]:
-                    best = (score, jm_id, ip, fd, label)
-            if best is None:
-                return
-            _, jm_id, ip, fd, label = best
-            selected.append(jm_id)
-            used_ips.add(ip)
-            if fd >= 0:
-                fd_count[fd] = fd_count.get(fd, 0) + 1
-            if label > 0:
-                used_labels.add(label)
-
-    if fd_enabled:
-        _pick_same_fd_as_local(enforce_label=True)
-        _pick_same_fd_as_local(enforce_label=False)
-        _pick(enforce_fd_cap=True, enforce_label=True)
-        _pick(enforce_fd_cap=True, enforce_label=False)   # relax label, keep domain cap
-        if len(selected) < target:
-            logger.warning(
-                "Could only place %d/%d HA journal copies within the failure-"
-                "domain quorum cap for node %s; relaxing to host-disjoint "
-                "placement for the remaining copies.", len(selected), target,
-                current_node.get_id())
-            _pick(enforce_fd_cap=False, enforce_label=False)  # last resort
-    else:
-        _pick(enforce_fd_cap=False, enforce_label=True)       # still honor labels
-        _pick(enforce_fd_cap=False, enforce_label=False)
-    return selected[:target]
+    per_site = current_node.ha_jm_count // 2
+    own_site = {k: c for k, c in candidates.items() if c.site == current_node.site}
+    other_site = {k: c for k, c in candidates.items() if c.site != current_node.site}
+    selected_own = _pick_ha_jms(own_site, jm_count, per_site, per_site - 1, [local],
+                                fd_enabled, current_node.failure_domain, node_id)
+    selected_other = _pick_ha_jms(other_site, jm_count, per_site, per_site, [],
+                                  fd_enabled, -1, node_id)
+    if len(selected_own) < per_site - 1 or len(selected_other) < per_site:
+        other_sites = sorted({n.site for n in nodes if n.site and n.site != current_node.site})
+        raise SiteJournalPlacementError(
+            f"node {node_id}: a sync-replication journal needs {per_site} JM copies per site on "
+            f"distinct hosts of attachable nodes; site {current_node.site!r} offers "
+            f"{len(selected_own) + 1} (incl. the node's own JM), site "
+            f"{', '.join(repr(site) for site in other_sites) or '(none)'} {len(selected_other)}")
+    return selected_own + selected_other
 
 
-def get_node_jm_names(current_node: StorageNode, remote_node=None):
-    jm_list = []
+def _pick_site_replacement_jm(primary: StorageNode, removed_jm_id, removed_site, nodes, fd_enabled):
+    """Sync replication: the JM that takes over the removed JM's slot in
+    ``primary``'s journal, or None.
+
+    Only a JM of ``removed_site`` qualifies -- JC keeps the slot's position,
+    so the replacement must keep its locality too -- and never one the journal
+    already holds. The journal's surviving copies on that site (and the
+    primary's own JM when it is there) seed the host / domain / label usage,
+    so the pick stays host-disjoint from them and balances the site's domains.
+    """
+    candidates, jm_count = _ha_jm_candidates(primary, nodes, attachable_only=True)
+    members = set(primary.jm_ids) - {removed_jm_id}
+    pool = {k: c for k, c in candidates.items()
+            if c.site == removed_site and k != removed_jm_id and k not in members}
+    taken = [(n.mgmt_ip, n.failure_domain, n.physical_label) for n in nodes
+             if n.site == removed_site and n.jm_device and n.jm_device.get_id() in members]
+    local_fd = -1
+    if primary.site == removed_site:
+        taken.append((primary.mgmt_ip, primary.failure_domain, primary.physical_label))
+        local_fd = primary.failure_domain
+    picked = _pick_ha_jms(pool, jm_count, primary.ha_jm_count // 2, 1, taken,
+                          fd_enabled, local_fd, primary.get_id())
+    return picked[0] if picked else None
+
+
+class JMNames(NamedTuple):
+    """The journal names a distrib is created with (``jm_names``)."""
+    names: list[str]
+    #: Sync replication: how many of ``names`` are on the site of the node
+    #: running the distrib (``jm_n_local`` of bdev_distrib_create); JC's name
+    #: sort puts exactly those first. None outside sync replication.
+    n_local: int | None
+
+
+def get_node_jm_names(current_node: StorageNode, remote_node=None) -> JMNames:
+    """The journal of ``current_node``'s LVS, named as the node that runs the
+    distrib sees it: ``remote_node`` (a node hosting that LVS) or
+    ``current_node`` itself. Its own JM keeps its plain name, every other one
+    is reached through a remote bdev (remote_jm_controller_name).
+
+    Outside sync replication at most ``ha_jm_count`` names. On a
+    sync-replication cluster -- recognised by the node's site, which exists
+    only there -- the full list, with ``n_local``.
+    """
+    builder = remote_node or current_node
+    sync = bool(builder.site)
+    db_controller = DBController()
+
+    def _name(owner_id, owner_site, jm_bdev):
+        if owner_id == builder.get_id():
+            return jm_bdev
+        return remote_jm_controller_name(builder.site, owner_site, jm_bdev) + "n1"
+
+    jm_list = []   # (name, owner site)
     if current_node.jm_device:
-        if remote_node:
-            jm_list.append(f"remote_{current_node.jm_device.jm_bdev}n1")
-        else:
-            jm_list.append(current_node.jm_device.jm_bdev)
+        jm_list.append((_name(current_node.get_id(), current_node.site, current_node.jm_device.jm_bdev),
+                        current_node.site))
     else:
-        jm_list.append("JM_LOCAL")
+        jm_list.append(("JM_LOCAL", current_node.site))
 
     if current_node.enable_ha_jm:
         for jm_id in current_node.jm_ids:
@@ -13514,14 +13718,18 @@ def get_node_jm_names(current_node: StorageNode, remote_node=None):
                 continue
 
             if remote_node:
-                if remote_node.jm_device.get_id() == jm_id:
-                    jm_list.append(remote_node.jm_device.jm_bdev)
+                if remote_node.jm_device and remote_node.jm_device.get_id() == jm_id:
+                    jm_list.append((remote_node.jm_device.jm_bdev, remote_node.site))
                     continue
 
-            jm_dev = DBController().get_jm_device_by_id(jm_id)
-            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            owner_site = db_controller.get_storage_node_by_id(jm_dev.node_id).site if sync else ""
+            jm_list.append((_name(jm_dev.node_id, owner_site, jm_dev.jm_bdev), owner_site))
 
-    return jm_list[:current_node.ha_jm_count]
+    if not sync:
+        return JMNames([name for name, _ in jm_list][:current_node.ha_jm_count], None)
+    return JMNames([name for name, _ in jm_list],
+                   sum(1 for _, site in jm_list if site == builder.site))
 
 
 def get_secondary_nodes(current_node: StorageNode, exclude_ids=None, removed_node=None):
@@ -14098,6 +14306,10 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
 # so the rebuilt cluster map no longer references its devices as online.
 _DISTR_RECREATE_RETRY_DELAY_SEC = 5
 
+
+class _DistribMapPushError(RuntimeError):
+    """The cluster-map push to a freshly created distrib failed (retried once)."""
+
 #: Bound on waiting for a node's distrib pipeline to empty before its
 #: leadership is changed. Applied to the acting leader (### 4) and to every
 #: other port-blocked peer (### 5b). Held inside the port fence, so it is
@@ -14137,7 +14349,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
     # key (distinct keys -> GIL-safe), the main loop reads after join.
     distr_results: dict = {}
 
-    def _create_distr(snode: StorageNode, name, params):
+    def _create_distr(snode: StorageNode, name, params, home_site):
         # If a peer node goes offline at the exact moment a distrib is
         # (re)created, the cluster map can be briefly stale -- it still flags
         # that peer's devices as online -- and bdev_distrib_create (or the
@@ -14147,28 +14359,39 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
         # current DB view each call) before giving up. A failure that survives
         # the retry is recorded so the caller aborts the restart -- the standard
         # unrecoverable-error path -- instead of completing on a broken distrib.
-        for attempt in range(2):
-            if attempt > 0:
-                # Give the control plane a moment to reconcile the departed
-                # node, then clear any half-created distrib before retrying.
-                time.sleep(_DISTR_RECREATE_RETRY_DELAY_SEC)
-                try:
-                    rpc_client.bdev_distrib_delete(name)
-                except Exception:
-                    pass
+        def _attempt():
+            rpc_client.bdev_distrib_create(**params)
+            if not distr_controller.send_cluster_map_to_distr(snode, name, home_site=home_site):
+                raise _DistribMapPushError(f"failed to send cluster map to distrib {name}")
+
+        log_retry = before_sleep_log(logger, logging.WARNING)
+
+        def _before_retry(retry_state):
+            # Clear the half-created distrib; the wait that follows gives the
+            # control plane a moment to reconcile the departed node.
+            log_retry(retry_state)
             try:
-                rpc_client.bdev_distrib_create(**params)
-                if distr_controller.send_cluster_map_to_distr(snode, name):
-                    distr_results[name] = True
-                    return
-                logger.error(
-                    "Failed to send cluster map to distrib %s (attempt %d/2)",
-                    name, attempt + 1)
-            except Exception as e:
-                logger.error(
-                    "Failed to create bdev distrib %s (attempt %d/2): %s",
-                    name, attempt + 1, e)
-        distr_results[name] = False
+                rpc_client.bdev_distrib_delete(name)
+            except RPCException as e:
+                logger.warning("Failed to delete distrib %s before its retry: %s", name, e)
+
+        try:
+            Retrying(
+                stop=stop_after_attempt(2),
+                wait=wait_fixed(_DISTR_RECREATE_RETRY_DELAY_SEC),
+                retry=retry_if_exception_type((RPCException, _DistribMapPushError)),
+                before_sleep=_before_retry,
+            )(_attempt)
+            distr_results[name] = True
+        except RetryError as e:
+            logger.error("Failed to create bdev distrib %s after 2 attempts: %s",
+                         name, e.last_attempt.exception())
+        except DistribHomeSiteError as e:
+            logger.error("Failed to create bdev distrib %s: %s", name, e)
+        finally:
+            # Recorded on every exit, an unexpected exception included: a
+            # distrib without a result would not count as failed below.
+            distr_results.setdefault(name, False)
 
     def _distr_failures():
         return [n for n, ok in distr_results.items() if not ok]
@@ -14182,6 +14405,9 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
         stack = snode.lvstore_stack
     else:
         stack = lvstore_stack
+    # Sync replication: the site of the LVS owner, whose nodes form the
+    # primary zone of every distrib of this stack.
+    home_site = primary_node.site if primary_node else snode.site
 
     # Per-name filtered probes instead of one unfiltered bdev_get_bdevs dump:
     # the stack holds ~10 names while the full dump is O(cluster size) and
@@ -14202,9 +14428,22 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
 
         elif type == "bdev_distr":
             if primary_node:
-                params['jm_names'] = get_node_jm_names(primary_node, remote_node=snode)
+                jm_names = get_node_jm_names(primary_node, remote_node=snode)
             else:
-                params['jm_names'] = get_node_jm_names(snode)
+                jm_names = get_node_jm_names(snode)
+            params['jm_names'] = jm_names.names
+            if cluster.sync_replication:
+                # A journal whose copies are all on one site (no HA
+                # journaling, or no other-site member) would open as a legacy
+                # all-local journal and lose acknowledged writes with the site.
+                if not (jm_names.n_local and 0 < jm_names.n_local < len(jm_names.names)):
+                    if created_bdevs:
+                        _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+                    return False, (f"{name}: the journal is not site-aware on a sync-replication "
+                                   f"cluster (jm_n_local={jm_names.n_local}, "
+                                   f"jm_names={jm_names.names})")
+                params['synchronous_replication_mode'] = 1
+                params['jm_n_local'] = jm_names.n_local
 
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
@@ -14216,7 +14455,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
             # write-protection generation; replay it under whichever key the
             # cluster is on now, never the one that happens to be stored.
             apply_write_protection_mode(params, cluster.write_protection_v2)
-            t = threading.Thread(target=_create_distr, args=(snode, name, params,))
+            t = threading.Thread(target=_create_distr, args=(snode, name, params, home_site))
             thread_list.append(t)
             t.start()
             ret = True

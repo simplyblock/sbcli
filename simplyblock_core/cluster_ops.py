@@ -1204,23 +1204,29 @@ def sync_capacity_violation(cluster, nodes, online_nodes) -> str | None:
     """Whether each configured site has enough ONLINE nodes to build its LVS stacks.
 
     Each site holds a full zone of every LVS (``ndcs + npcs`` nodes for a
-    stripe) and a full host-disjoint triplet (``SYNC_MIN_HOSTS_PER_SITE``
-    hosts). The sites come from the configured records (``nodes``), so a site
-    with no online node at all is reported rather than overlooked. Always
-    None on a non-sync cluster.
+    stripe), a full host-disjoint triplet (``SYNC_MIN_HOSTS_PER_SITE``
+    hosts) and its half of every node's journal, one copy per host: as many
+    hosts as the largest per-site journal share (``ha_jm_count // 2``) of any
+    node, since every node places that many copies on both sites. The sites
+    come from the configured records (``nodes``), so a site with no online
+    node at all is reported rather than overlooked. Always None on a non-sync
+    cluster.
     """
     if not cluster.sync_replication:
         return None
     sites = {n.site for n in _sync_configured_nodes(nodes) if n.site}
     min_nodes = cluster.distr_ndcs + cluster.distr_npcs
+    min_hosts = max(SYNC_MIN_HOSTS_PER_SITE,
+                    storage_node_ops.get_required_ha_jm_count(cluster) // 2,
+                    max((n.ha_jm_count // 2 for n in online_nodes), default=0))
     problems = []
     for site in sorted(sites):
         on_site = [n for n in online_nodes if n.site == site]
         hosts = {n.mgmt_ip for n in on_site}
-        if len(on_site) < min_nodes or len(hosts) < SYNC_MIN_HOSTS_PER_SITE:
+        if len(on_site) < min_nodes or len(hosts) < min_hosts:
             problems.append(
                 f"site {site} has {len(on_site)} online node(s) on {len(hosts)} host(s), "
-                f"needs {min_nodes} node(s) on {SYNC_MIN_HOSTS_PER_SITE} host(s)")
+                f"needs {min_nodes} node(s) on {min_hosts} host(s)")
     return "; ".join(problems) or None
 
 

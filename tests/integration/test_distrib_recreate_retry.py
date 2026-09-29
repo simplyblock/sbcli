@@ -24,6 +24,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 
 def _stack():
@@ -54,7 +55,7 @@ class TestDistribRecreateRetry(unittest.TestCase):
     def _wire(self, MockDB, mock_distr, *, create_effects, map_effects=None):
         import simplyblock_core.storage_node_ops as ops
         self.ops = ops
-        cluster = MagicMock(full_page_unmap=False)
+        cluster = MagicMock(full_page_unmap=False, sync_replication=False)
         MockDB.return_value.get_cluster_by_id.return_value = cluster
         rpc = MagicMock()
         rpc.get_bdevs.return_value = []
@@ -69,7 +70,7 @@ class TestDistribRecreateRetry(unittest.TestCase):
     def test_retry_succeeds_after_stale_map_failure(self, MockDB, mock_distr, _sleep):
         # First create raises (stale map), second succeeds.
         ops, snode, rpc = self._wire(
-            MockDB, mock_distr, create_effects=[Exception("stale map"), None])
+            MockDB, mock_distr, create_effects=[RPCException("stale map"), None])
         ok, err = ops._create_bdev_stack(snode)
         assert ok is True and err is None, (ok, err)
         assert rpc.bdev_distrib_create.call_count == 2      # initial + retry
@@ -89,7 +90,7 @@ class TestDistribRecreateRetry(unittest.TestCase):
         # Both attempts raise -> propagate failure, no raid, rollback.
         ops, snode, rpc = self._wire(
             MockDB, mock_distr,
-            create_effects=[Exception("stale map"), Exception("still stale")])
+            create_effects=[RPCException("stale map"), RPCException("still stale")])
         ok, err = ops._create_bdev_stack(snode)
         assert ok is False
         assert "distrib" in err.lower(), err

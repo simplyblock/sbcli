@@ -255,14 +255,14 @@ commands:
             action: store_true
             private: true
           - name: "--disable-ha-jm"
-            help: "Disable HA JM for distrib creation. Default: `true`."
+            help: "Disable HA JM for distrib creation. Default: `true`. Ignored on sync-replication clusters, which always use HA JM."
             dest: enable_ha_jm
             type: bool
             default: true
             action: store_false
             private: true
           - name: "--ha-jm-count"
-            help: "HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3."
+            help: "HA JM count. Defaults to 4 for FT=2 clusters or with failure domains, otherwise 3. On sync-replication clusters the count covers both sites: an even number up to 8, default 8 for FT=2 clusters or with failure domains, otherwise 6."
             dest: ha_jm_count
             type: int
           - name: "--failure-domain"

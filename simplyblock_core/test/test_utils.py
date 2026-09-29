@@ -205,6 +205,6 @@ def test_get_node_jm_names(db_controller_get_jm_device_by_id):
         RemoteJMDevice({"uuid": node_3_jm.uuid, "remote_bdev": f"rem_{node_3_jm.jm_bdev}"}),
         RemoteJMDevice({"uuid": node_4_jm.uuid, "remote_bdev": f"rem_{node_4_jm.jm_bdev}"})]
 
-    jm_names = storage_node_ops.get_node_jm_names(node_1, remote_node=remote_node)
+    jm_names = storage_node_ops.get_node_jm_names(node_1, remote_node=remote_node).names
     print(f"jm_names: {len(jm_names)}", jm_names)
 

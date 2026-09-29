@@ -34,6 +34,7 @@ def _peer(uuid, status=StorageNode.STATUS_ONLINE, jm_vuid=999):
     n.status = status
     n.jm_vuid = jm_vuid
     n.cluster_id = "cluster-1"
+    n.site = ""  # not a sync-replication cluster
 
     n._rpc = MagicMock()
     n.rpc_client = MagicMock(return_value=n._rpc)
@@ -44,6 +45,7 @@ def _target(uuid="target-node"):
     n = MagicMock(spec=StorageNode)
     n.get_id.return_value = uuid
     n.cluster_id = "cluster-1"
+    n.site = ""  # not a sync-replication cluster
     return n
 
 

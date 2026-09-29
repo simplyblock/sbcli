@@ -753,9 +753,9 @@ def _check_node_lvstore(
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info("Checking distr JM names:")
             if distr in node_distribs_list:
-                jm_names = storage_node_ops.get_node_jm_names(node)
+                jm_names = storage_node_ops.get_node_jm_names(node).names
             elif stack_src_node:
-                jm_names = storage_node_ops.get_node_jm_names(stack_src_node, remote_node=node)
+                jm_names = storage_node_ops.get_node_jm_names(stack_src_node, remote_node=node).names
             else:
                 jm_names = node.jm_ids
             for jm in jm_names:
@@ -1022,7 +1022,9 @@ def check_node(node_id, with_devices=True):
                 node_remote_devices_check &= bool(bdev_info)
                 connected_jms.append(remote_device.get_id())
 
-                controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
+                # The controller behind the recorded bdev -- its name depends on the
+                # owner's site on a sync-replication cluster, so it is never rebuilt.
+                controller_info = rpc_client.bdev_nvme_controller_list(name.removesuffix("n1"))
                 if controller_info:
                     addr = controller_info[0]['ctrlrs'][0]['trid']['traddr']
                     port = controller_info[0]['ctrlrs'][0]['trid']['trsvcid']

@@ -11,6 +11,60 @@ from simplyblock_core.db_controller import DBController
 logger = logging.getLogger()
 
 
+class DistribHomeSiteError(LookupError):
+    """A sync-replication cluster map was asked for without the home site of
+    its distrib. Such a map cannot be built: without the replica flags every
+    node would land in the primary zone of the distrib."""
+
+
+def lvs_owners_on_node(node: StorageNode, nodes) -> list[StorageNode]:
+    """The owner (primary) nodes whose LVS has an instance on ``node``.
+
+    That is ``node`` itself when it owns an LVS, the owners it hosts as
+    secondary / tertiary (its back-references), and on a sync-replication
+    cluster the owners whose remote triplet contains it. Owners are looked up
+    in ``nodes`` by id; a reference to a node missing there is skipped with a
+    warning, removed owners are skipped. Deduplicated, in that order.
+    """
+    by_id = {n.get_id(): n for n in nodes}
+    node_id = node.get_id()
+    owner_ids = []
+    if node.lvstore_stack:
+        owner_ids.append(node_id)
+    for backref in (node.lvstore_stack_secondary, node.lvstore_stack_tertiary):
+        if not backref:
+            continue
+        if backref not in by_id:
+            logger.warning("Node %s references unknown primary %r; skipping it",
+                           node_id, backref)
+            continue
+        owner_ids.append(backref)
+    for owner in nodes:
+        if node_id in (owner.remote_primary_node_id, owner.remote_secondary_node_id,
+                       owner.remote_tertiary_node_id):
+            owner_ids.append(owner.get_id())
+    owners = []
+    for owner_id in dict.fromkeys(owner_ids):
+        owner = by_id.get(owner_id)
+        if owner is not None and owner.status != StorageNode.STATUS_REMOVED:
+            owners.append(owner)
+    return owners
+
+
+def distribs_on_node(node: StorageNode, nodes) -> list[tuple[str, str]]:
+    """``(distrib name, home site)`` of every distrib instance on ``node``.
+
+    The home site of a distrib is the site of the owner of its LVS (see
+    lvs_owners_on_node); names are deduplicated.
+    """
+    result: dict[str, str] = {}
+    for owner in lvs_owners_on_node(node, nodes):
+        for bdev in owner.lvstore_stack or []:
+            if bdev.get("type") == "bdev_distr":
+                result.setdefault(bdev["name"], owner.site)
+    return list(result.items())
+
+
 def _remote_device_from_device(device, status, remote_bdev=None):
     remote_device = RemoteDevice()
     remote_device.uuid = device.uuid
@@ -227,12 +281,29 @@ def disconnect_device(device, detach_controllers=True):
         node.write_to_db(db_controller.kv_store)
 
 
-def get_distr_cluster_map(snodes, target_node, distr_name=""):
+def get_distr_cluster_map(snodes, target_node, distr_name="", home_site=None):
+    """Build the cluster map of ``distr_name`` on ``target_node``.
+
+    On a sync-replication cluster the map belongs to ONE distrib, whose LVS
+    has its home on ``home_site``: nodes of the other site form its replica
+    zone ("replica": true on the node and on its map_prob bucket).
+
+    Raises:
+        DistribHomeSiteError: sync-replication cluster and no ``home_site``.
+    """
     map_cluster = {}
     map_prob = {}
     local_node_index = 0
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
+    sync = cluster.sync_replication
+    if sync and home_site is None:
+        raise DistribHomeSiteError(
+            f"cluster map of distrib {distr_name!r} on node {target_node.get_id()}: "
+            f"a sync-replication map needs the home site of its LVS")
+    # Sync only: the target's position among the EMITTED map_cluster entries,
+    # the index ppln1 / replica_ppln1 refer to (None: the target is not in it).
+    sync_target_index = None
     # Index the target's remote-device records once: the per-device linear
     # scan below made every map build O(D²) in total cluster devices — and a
     # map is built per target per push (n pushes per recovering node).
@@ -295,6 +366,14 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         map_prob[snode.get_id()] = {
             "weight": node_w,
             "items": [d for k, d in dev_w_map.items()]}
+        if sync:
+            if snode.get_id() == target_node.get_id():
+                sync_target_index = len(map_cluster) - 1
+            # The zone flag of a node and of its bucket must agree, or the
+            # data plane rejects the whole map; the primary zone omits it.
+            if snode.site != home_site:
+                map_cluster[snode.get_id()]["replica"] = True
+                map_prob[snode.get_id()]["replica"] = True
     cl_map = {
         "name": distr_name,
         "UUID_node_target": target_node.get_id(),
@@ -302,7 +381,13 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         "map_cluster": map_cluster,
         "map_prob": [d for k, d in map_prob.items()]
     }
-    if cluster.enable_node_affinity:
+    if sync:
+        # One preferred column-0 node per zone: the target is a valid
+        # preference only for its own zone, and only by its emitted position.
+        if cluster.enable_node_affinity and sync_target_index is not None:
+            key = "replica_ppln1" if target_node.site != home_site else "ppln1"
+            cl_map[key] = sync_target_index
+    elif cluster.enable_node_affinity:
         # if target_node.is_secondary_node and distr_name:
         #     for index, snode in enumerate(snodes):
         #         for bdev in snode.lvstore_stack:
@@ -429,46 +514,109 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
     return results, passed
 
 
+def _sync_replication(node: StorageNode) -> bool:
+    return DBController().get_cluster_by_id(node.cluster_id).sync_replication
+
+
 def send_cluster_map_to_node(node: StorageNode):
+    """Push the full cluster map to every distrib on ``node``.
+
+    One broadcast without a name, except on a sync-replication cluster: there
+    each distrib has its own zones, so every distrib gets its own map (all are
+    attempted; the result is False if any push failed).
+    """
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
-    cluster_map_data = get_distr_cluster_map(snodes, node)
+    if not _sync_replication(node):
+        cluster_map_data = get_distr_cluster_map(snodes, node)
+        try:
+            node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)
+        except Exception:
+            logger.error("Failed to send cluster map")
+            logger.info(cluster_map_data)
+            return False
+        return True
+
+    maps_by_site: dict = {}
+    all_ok = True
+    for distr_name, home_site in distribs_on_node(node, snodes):
+        if home_site not in maps_by_site:
+            maps_by_site[home_site] = get_distr_cluster_map(snodes, node, home_site=home_site)
+        cluster_map_data = {**maps_by_site[home_site], "name": distr_name}
+        try:
+            ret = node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)
+        except Exception:
+            ret = None
+        if not ret:
+            # An exception, or a JSON-RPC error handed back as an empty result.
+            logger.error("Failed to send cluster map to distrib %s", distr_name)
+            logger.info(cluster_map_data)
+            all_ok = False
+    return all_ok
+
+
+def send_cluster_map_to_distr(node: StorageNode, distr_name: str, home_site=None):
+    """Push the full cluster map to one distrib on ``node``.
+
+    ``home_site``: sync replication only, the site of the distrib's LVS owner;
+    looked up from the node's hosted LVS when not given.
+    """
+    db_controller = DBController()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
+    if home_site is None and _sync_replication(node):
+        home_site = dict(distribs_on_node(node, snodes)).get(distr_name)
+    cluster_map_data = get_distr_cluster_map(snodes, node, distr_name, home_site=home_site)
     try:
-        node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)
+        ret = node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)
     except Exception:
         logger.error("Failed to send cluster map")
         logger.info(cluster_map_data)
         return False
-    return True
-
-
-def send_cluster_map_to_distr(node: StorageNode, distr_name: str):
-    db_controller = DBController()
-    snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
-    cluster_map_data = get_distr_cluster_map(snodes, node, distr_name)
-    try:
-        node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)
-    except Exception:
-        logger.error("Failed to send cluster map")
+    if not ret:
+        # The RPC client hands a JSON-RPC error back as an empty result.
+        logger.error("Distrib %s on node %s rejected its cluster map", distr_name, node.get_id())
         logger.info(cluster_map_data)
         return False
     return True
 
 
 def send_cluster_map_add_node(snode, target_node):
+    """Add ``snode`` to the cluster maps of the distribs on ``target_node``.
+
+    One call for all distribs, except on a sync-replication cluster: there
+    ``snode`` is in the primary zone of some distribs and in the replica zone
+    of others, so each distrib gets its own call (all are attempted).
+    """
     if target_node.status != StorageNode.STATUS_ONLINE:
         return False
     logger.info(f"Sending to: {target_node.get_id()}")
-    cluster_map_data = get_distr_cluster_map([snode], target_node)
-    cl_map = {
-        "map_cluster": cluster_map_data['map_cluster'],
-        "map_prob": cluster_map_data['map_prob']}
-    try:
-        target_node.rpc_client(timeout=10).distr_add_nodes(cl_map)
-    except Exception:
-        logger.error("Failed to send cluster map")
-        return False
-    return True
+    if not _sync_replication(target_node):
+        cluster_map_data = get_distr_cluster_map([snode], target_node)
+        cl_map = {
+            "map_cluster": cluster_map_data['map_cluster'],
+            "map_prob": cluster_map_data['map_prob']}
+        try:
+            target_node.rpc_client(timeout=10).distr_add_nodes(cl_map)
+        except Exception:
+            logger.error("Failed to send cluster map")
+            return False
+        return True
+
+    snodes = DBController().get_storage_nodes_by_cluster_id(target_node.cluster_id)
+    all_ok = True
+    for distr_name, home_site in distribs_on_node(target_node, snodes):
+        cluster_map_data = get_distr_cluster_map([snode], target_node, home_site=home_site)
+        cl_map = {
+            "map_cluster": cluster_map_data['map_cluster'],
+            "map_prob": cluster_map_data['map_prob']}
+        try:
+            ret = target_node.rpc_client(timeout=10).distr_add_nodes(cl_map, name=distr_name)
+        except Exception:
+            ret = None
+        if not ret:
+            logger.error("Failed to add node %s to distrib %s", snode.get_id(), distr_name)
+            all_ok = False
+    return all_ok
 
 
 """
@@ -494,6 +642,13 @@ def send_cluster_map_add_node(snode, target_node):
 }
 """
 def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
+    """Add ``device`` to the cluster maps of the distribs on ``target_node``.
+
+    One call for all distribs, except on a sync-replication cluster, where
+    every distrib is addressed by name, like the other senders (all are
+    attempted). The payload carries no zone flag: the distrib already knows
+    the zone of the device's node.
+    """
     db_controller = DBController()
     try:
         dnode = db_controller.get_storage_node_by_id(device.node_id)
@@ -519,11 +674,25 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
                 "physical_label":  device.physical_label if device.physical_label > 0 else -1,
             }}
         }
-        try:
-            rpc_client.distr_add_devices(cl_map)
-        except Exception:
-            logger.error("Failed to send cluster map")
-            return False
+        if not _sync_replication(target_node):
+            try:
+                rpc_client.distr_add_devices(cl_map)
+            except Exception:
+                logger.error("Failed to send cluster map")
+                return False
+            return True
+
+        snodes = db_controller.get_storage_nodes_by_cluster_id(target_node.cluster_id)
+        all_ok = True
+        for distr_name, _home_site in distribs_on_node(target_node, snodes):
+            try:
+                ret = rpc_client.distr_add_devices(cl_map, name=distr_name)
+            except Exception:
+                ret = None
+            if not ret:
+                logger.error("Failed to add device %s to distrib %s", device.get_id(), distr_name)
+                all_ok = False
+        return all_ok
     return True
 
 

@@ -64,6 +64,7 @@ class TestClusterMapParentWeightInvariant(unittest.TestCase):
             cluster = MagicMock()
             cluster.enable_node_affinity = False
             cluster.enable_failure_domain = False
+            cluster.sync_replication = False
             DBCtor.return_value.get_cluster_by_id.return_value = cluster
             return distr_controller.get_distr_cluster_map([node], node, "distr-1")
 
