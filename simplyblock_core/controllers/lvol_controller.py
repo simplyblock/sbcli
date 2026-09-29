@@ -4488,7 +4488,15 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
 
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
-            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            # A task whose snapshot is gone replicates nothing and belongs to
+            # no volume any more; it must not fail the stop, which a fail-over
+            # (replicate_lvol_on_target_cluster) runs first.
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                logger.warning("replication task %s names snapshot %s, which no longer exists; skipped",
+                               task.uuid, task.function_params.get("snapshot_id"))
+                continue
             if snap.lvol.uuid == lvol.uuid:
                 tasks_controller.cancel_task(task.uuid)
 
