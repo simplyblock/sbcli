@@ -135,6 +135,9 @@ class ClusterDTO(BaseModel):
     nqn: str
     status: ClusterStatus
     is_re_balancing: bool
+    # Device/balancing tasks only; is_re_balancing also counts volume migrations.
+    is_data_rebalancing: bool = False
+    active_lvol_migrations: int = 0
     block_size: util.Unsigned
     distr_ndcs: int
     distr_npcs: int
@@ -164,6 +167,8 @@ class ClusterDTO(BaseModel):
             nqn=model.nqn,
             status=cast(ClusterStatus, model.status),
             is_re_balancing=model.is_re_balancing,
+            is_data_rebalancing=model.is_data_rebalancing,
+            active_lvol_migrations=model.active_lvol_migrations,
             block_size=model.blk_size,
             distr_ndcs=model.distr_ndcs,
             distr_npcs=model.distr_npcs,

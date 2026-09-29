@@ -913,6 +913,38 @@ def _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status):
             "Auto write-protection switch raised for cluster %s", cluster_id)
 
 
+_DATA_REBALANCING_TASKS = frozenset({
+    JobSchedule.FN_DEV_MIG,
+    JobSchedule.FN_NEW_DEV_MIG,
+    JobSchedule.FN_FAILED_DEV_MIG,
+    JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+    JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+    JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
+})
+_LVOL_MIGRATION_TASKS = frozenset({JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG})
+
+
+def _rebalancing_flags(tasks):
+    """``(is_re_balancing, is_data_rebalancing, active_lvol_migrations)`` for
+    the cluster's tasks.
+
+    is_re_balancing keeps its meaning -- any data-moving task, volume
+    migrations included -- for the guards that must wait on those too
+    (shared-placement toggle, write-protection switch, shutdown headroom).
+    is_data_rebalancing is the device and balancing tasks alone: a node drain
+    migrates volumes itself and must not pause on its own migrations, which
+    it did for the whole of every removal (2026-09-29)."""
+    data = lvol = 0
+    for task in tasks:
+        if task.canceled or task.status == JobSchedule.STATUS_DONE:
+            continue
+        if task.function_name in _DATA_REBALANCING_TASKS:
+            data += 1
+        elif task.function_name in _LVOL_MIGRATION_TASKS:
+            lvol += 1
+    return (data + lvol) > 0, data > 0, lvol
+
+
 def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -926,33 +958,18 @@ def _update_cluster_status_impl(cluster_id):
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
-    rebalancing_task_names = {
-        JobSchedule.FN_DEV_MIG,
-        JobSchedule.FN_NEW_DEV_MIG,
-        JobSchedule.FN_FAILED_DEV_MIG,
-        JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
-        JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
-        JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
-        JobSchedule.FN_LVOL_MIG,
-        JobSchedule.FN_LVOL_BATCH_MIG,
-    }
-    active_rebalancing_tasks = 0
-    cluster_tasks = db.get_job_tasks(cluster_id)
-    for task in cluster_tasks:
-        if task.canceled:
-            continue
-        if task.status == JobSchedule.STATUS_DONE:
-            continue
-        if task.function_name in rebalancing_task_names:
-            active_rebalancing_tasks += 1
-
+    is_re_balancing, is_data_rebalancing, active_lvol_migrations = _rebalancing_flags(
+        db.get_job_tasks(cluster_id))
     cluster = db.get_cluster_by_id(cluster_id)
     # Atomic: a full write here would clobber a concurrent cluster.status change
     # committed by set_cluster_status (same lost-update class as incident
     # 2026-06-18). Mutate only is_re_balancing on the freshly-read row.
-    is_re_balancing = active_rebalancing_tasks > 0
-    cluster = db.atomic_update(
-        cluster, lambda c, v=is_re_balancing: setattr(c, "is_re_balancing", v))
+    def _set_rebalancing_flags(c, rb=is_re_balancing, drb=is_data_rebalancing, lm=active_lvol_migrations):
+        c.is_re_balancing = rb
+        c.is_data_rebalancing = drb
+        c.active_lvol_migrations = lm
+
+    cluster = db.atomic_update(cluster, _set_rebalancing_flags)
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
