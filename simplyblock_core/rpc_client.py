@@ -989,8 +989,16 @@ class RPCClient:
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
                             full_page_unmap=True, shared_placement=False,
-                            write_protection_v2=False):
+                            write_protection_v2=False, synchronous_replication_mode=None,
+                            jm_n_local=None):
         """"
+            // Optional, sync replication only: 0 disabled, 1 full. Not sent when None.
+          "synchronous_replication_mode": 1
+
+            // Optional, sync replication only: the number of local JMs among jm_names
+            //  (the first N after JC's name sort). Not sent when None.
+          "jm_n_local": 3
+
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
             // Number of addresses in the list is exactly the number of nodes in HA group,
@@ -1042,6 +1050,10 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
+        if synchronous_replication_mode is not None:
+            params["synchronous_replication_mode"] = synchronous_replication_mode
+        if jm_n_local is not None:
+            params["jm_n_local"] = jm_n_local
         return self._request("bdev_distrib_create", params)
 
     def distr_shared_placement(self, name=None, enable=True):
@@ -1194,11 +1206,25 @@ class RPCClient:
         params = {"name": name}
         return self._request("distr_dump_cluster_map", params)
 
-    def distr_add_nodes(self, params):
+    def distr_add_nodes(self, params, name=None):
+        """``name`` targets one distrib; without it every distrib of the node is updated."""
+        if name:
+            params = {**params, "name": name}
         return self._request("distr_add_nodes", params)
 
-    def distr_add_devices(self, params):
+    def distr_add_devices(self, params, name=None):
+        """``name`` targets one distrib; without it every distrib of the node is updated."""
+        if name:
+            params = {**params, "name": name}
         return self._request("distr_add_devices", params)
+
+    def distr_sync_replication_status(self, name=None):
+        """Sync-replication state of one distrib (``name``) or of every distrib of the node.
+
+        Returns the list of per-distrib elements; an unknown name yields [].
+        """
+        params = {"name": name} if name else {}
+        return self._request("distr_sync_replication_status", params)
 
     def distr_status_events_update(self, params):
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27

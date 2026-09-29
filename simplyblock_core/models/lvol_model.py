@@ -104,6 +104,11 @@ class LVol(BaseModel):
     # sync delete — a repeat walks the replica blob tree again and errors on
     # every entry the first pass cleaned.
     sync_deleted_nodes: list[str] = default_factory(list)
+    # Sync replication: the site this volume is served from (set at creation
+    # to the LVS's active site) and the sites it has been demoted on. Empty /
+    # [] on non-sync clusters.
+    sync_active_site: str = ""
+    sync_demoted_sites: list[str] = default_factory(list)
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""

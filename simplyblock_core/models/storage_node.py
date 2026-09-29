@@ -189,6 +189,18 @@ class StorageNode(BaseNodeObject):
     # placement and emitted verbatim into the distrib cluster map for the data
     # plane.
     failure_domain: int = -1
+    # Sync-replication site of the node (operator-supplied at add-node).
+    # Mandatory on a cluster with sync_replication, empty everywhere else.
+    site: str = ""
+    # Sync replication: the remote triplet of the LVS this node owns (the
+    # primary of an LVS stores them, like secondary_node_id /
+    # tertiary_node_id for the home triplet). Empty on non-sync clusters.
+    remote_primary_node_id: str = ""
+    remote_secondary_node_id: str = ""
+    remote_tertiary_node_id: str = ""
+    # Sync replication, on the owner node of an LVS: the site whose triplet
+    # currently leads the LVS. Empty means the home site (this node's site).
+    lvs_active_site: str = ""
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False

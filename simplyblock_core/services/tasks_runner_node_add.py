@@ -79,6 +79,14 @@ def process_task(task, cl):
             task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
         return True
+    except storage_node_ops.NodeSiteError as e:
+        # Invalid input, not a transient failure: no retry can succeed, so the
+        # task ends here with the reason recorded.
+        logger.error(f"Node add refused: {e}")
+        task.function_result = f"invalid input: {e}"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
     except Exception as e:
         logger.error(e)
         return False

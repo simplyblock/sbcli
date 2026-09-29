@@ -71,6 +71,7 @@ class TestCreateStorageNode:
             'spdk_proxy_image': None,
             'spdk_sys_mem': None,
             'failure_domain': None,
+            'site': None,
             'expansion': False,
             'force_format': False,
         })

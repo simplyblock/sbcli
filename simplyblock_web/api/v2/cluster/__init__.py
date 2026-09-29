@@ -65,7 +65,7 @@ class HashicorpVaultSettings(BaseModel):
 class ClusterParams(BaseModel):
     name: str = ""
     blk_size: Literal[512, 4096] = 512
-    page_size_in_blocks: int = Field(2097152, gt=0)
+    page_size_in_blocks: Annotated[int, Field(gt=0)] = 2097152
     cap_warn: util.Percent = 0
     cap_crit: util.Percent = 0
     prov_cap_warn: util.Unsigned = 0
@@ -92,6 +92,7 @@ class ClusterParams(BaseModel):
     backup_config: BackupConfigParams | None = None
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
     enable_failure_domain: bool = False
+    sync_replication: bool = False
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
     # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at

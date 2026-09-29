@@ -33,6 +33,9 @@ class Cluster(BaseModel):
     #: clear out from under a live rebuild.
     STATUS_IN_SHRINK = "in_shrink"
 
+    LOST_SITE_FENCING = "fencing"
+    LOST_SITE_DONE = "done"
+
     STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 1,
         STATUS_INACTIVE: 2,
@@ -246,6 +249,17 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # Site-level synchronous replication (two sites, one cluster). Deploy-time
+    # only, like enable_failure_domain: set at cluster create, never toggled.
+    # Every storage node then carries a `site`, and every LVS is replicated to
+    # the other site.
+    sync_replication: bool = False
+    # The site declared lost by a disaster fail-over ("" = both sites in
+    # service), and how far the site-level fencing of that fail-over got:
+    # LOST_SITE_FENCING while its steps run (a retry redoes them, they are
+    # idempotent), LOST_SITE_DONE once they completed.
+    lost_site: str = ""
+    lost_site_state: str = ""
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
     # controllers auto-detected and attached through the SPDK nvme bdev.
     # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one

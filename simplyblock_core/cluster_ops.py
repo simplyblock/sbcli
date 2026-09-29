@@ -314,6 +314,20 @@ def _validated_device_mode(device_mode) -> str:
     return mode
 
 
+def _validate_sync_replication(sync_replication, ha_type, is_single_node) -> None:
+    """Sync replication runs a full HA triplet per LVS on each of two sites.
+
+    Raises:
+        ValueError: sync replication was asked for on a non-HA or single-node cluster.
+    """
+    if not sync_replication:
+        return
+    if ha_type != "ha":
+        raise ValueError("sync replication requires ha_type='ha'")
+    if is_single_node:
+        raise ValueError("sync replication cannot be used on a single-node cluster")
+
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
@@ -330,9 +344,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    inline_checksum=False,
                    atomic_4k=False,
                    cluster_vip=None,
+                   sync_replication=False,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
+
+    _validate_sync_replication(sync_replication, ha_type, is_single_node)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -470,6 +487,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.sync_replication = bool(sync_replication)
     validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
@@ -594,6 +612,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                sync_replication=False,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a ClusterCreateLock.
@@ -623,6 +642,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
+        sync_replication=sync_replication,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -650,6 +670,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                sync_replication=False,
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -660,6 +681,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
 
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
+
+    _validate_sync_replication(sync_replication, ha_type, is_single_node)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -696,6 +719,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.sync_replication = bool(sync_replication)
     cluster.device_mode = _validated_device_mode(device_mode)
 
     if clusters:
@@ -1138,6 +1162,68 @@ def activation_minimum_devices(cluster, single_node_cluster) -> int:
     return cluster.distr_ndcs + cluster.distr_npcs + (0 if single_node_cluster else 1)
 
 
+#: Sites of a sync-replication cluster: one simplyblock cluster spans exactly two.
+SYNC_SITE_COUNT = 2
+#: Distinct hosts a site needs for a host-disjoint primary/secondary/tertiary triplet.
+SYNC_MIN_HOSTS_PER_SITE = 3
+
+
+def _sync_configured_nodes(nodes) -> builtins.list[StorageNode]:
+    """The node records that make up the configured site layout."""
+    return [n for n in nodes
+            if n.status != StorageNode.STATUS_REMOVED and not n.is_secondary_node]
+
+
+def sync_topology_violation(cluster, nodes) -> str | None:
+    """What is wrong with the CONFIGURED site layout of a sync cluster, or None.
+
+    Judged over every non-removed primary node record, whatever its status: an
+    offline node on a third site is as much a misconfiguration as an online
+    one. Every node needs a site, the nodes span exactly two sites, and a host
+    never spans two sites. Always None on a non-sync cluster.
+    """
+    if not cluster.sync_replication:
+        return None
+    configured = _sync_configured_nodes(nodes)
+    unsited = sorted(n.get_id() for n in configured if not n.site)
+    if unsited:
+        return f"node(s) without a site: {', '.join(unsited)}"
+    sites = sorted({n.site for n in configured})
+    if len(sites) != SYNC_SITE_COUNT:
+        return (f"a sync-replication cluster spans exactly {SYNC_SITE_COUNT} sites, "
+                f"the nodes are on {len(sites)}: {sites}")
+    host_site: dict[str, str] = {}
+    for node in configured:
+        if host_site.setdefault(node.mgmt_ip, node.site) != node.site:
+            return (f"host {node.mgmt_ip} spans sites {host_site[node.mgmt_ip]} and {node.site}; "
+                    f"a host must sit entirely on one site")
+    return None
+
+
+def sync_capacity_violation(cluster, nodes, online_nodes) -> str | None:
+    """Whether each configured site has enough ONLINE nodes to build its LVS stacks.
+
+    Each site holds a full zone of every LVS (``ndcs + npcs`` nodes for a
+    stripe) and a full host-disjoint triplet (``SYNC_MIN_HOSTS_PER_SITE``
+    hosts). The sites come from the configured records (``nodes``), so a site
+    with no online node at all is reported rather than overlooked. Always
+    None on a non-sync cluster.
+    """
+    if not cluster.sync_replication:
+        return None
+    sites = {n.site for n in _sync_configured_nodes(nodes) if n.site}
+    min_nodes = cluster.distr_ndcs + cluster.distr_npcs
+    problems = []
+    for site in sorted(sites):
+        on_site = [n for n in online_nodes if n.site == site]
+        hosts = {n.mgmt_ip for n in on_site}
+        if len(on_site) < min_nodes or len(hosts) < SYNC_MIN_HOSTS_PER_SITE:
+            problems.append(
+                f"site {site} has {len(on_site)} online node(s) on {len(hosts)} host(s), "
+                f"needs {min_nodes} node(s) on {SYNC_MIN_HOSTS_PER_SITE} host(s)")
+    return "; ".join(problems) or None
+
+
 def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
 
@@ -1214,6 +1300,22 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     if dev_count < minimum_devices:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+
+    # Sync replication: the configured two-site layout is enforced on every
+    # activation (force included) -- a third site or an unsited node is never
+    # a state to recover into. The online capacity per site is only enforced on
+    # a fresh activation: a re-activation after a site loss sees one site.
+    topology_violation = sync_topology_violation(cluster, snodes)
+    if topology_violation:
+        set_cluster_status(cl_id, ols_status)
+        raise ValueError(f"Failed to activate cluster: {topology_violation}")
+    capacity_violation = sync_capacity_violation(cluster, snodes, online_nodes)
+    if capacity_violation:
+        if is_fresh_activation:
+            set_cluster_status(cl_id, ols_status)
+            raise ValueError(f"Failed to activate cluster: {capacity_violation}")
+        logger.warning("Re-activating a sync-replication cluster with reduced site capacity: %s",
+                       capacity_violation)
 
     # The distribs created below span every online device — require the full
     # cross-node connectivity mesh before building on top of it (see

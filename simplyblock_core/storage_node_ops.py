@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import platform
+import re
 import socket
 import subprocess
 
@@ -3355,6 +3356,59 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
             f"until deleted by hand.")
 
 
+class NodeSiteError(ValueError):
+    """A node's sync-replication site is missing, malformed, not allowed on
+    this cluster, or conflicts with the site of its host. Permanent: retrying
+    the same add cannot succeed."""
+
+
+#: A site name ends up inside other state values (e.g. an LVS moving to a
+#: site is recorded as "moving:<site>"), so separators are never allowed.
+_SITE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+
+
+def validate_node_site(cluster, site) -> str:
+    """The site a new node of ``cluster`` gets: ``site`` on a sync-replication
+    cluster, "" on any other.
+
+    Raises:
+        NodeSiteError: the site is missing / malformed on a sync cluster, or
+            given on a cluster without sync replication.
+    """
+    if not cluster.sync_replication:
+        if site:
+            raise NodeSiteError(
+                "--site was given but this cluster was not created with "
+                "--sync-replication; sites exist only on sync-replication clusters")
+        return ""
+    if not site:
+        raise NodeSiteError(
+            "this cluster was created with --sync-replication; --site is required "
+            "when adding a node")
+    if not _SITE_PATTERN.fullmatch(site):
+        raise NodeSiteError(
+            f"invalid site {site!r}: use 1-63 characters from [A-Za-z0-9._-], "
+            f"starting with a letter or digit")
+    return site
+
+
+def _check_host_site(db_controller, cluster_id, mgmt_ip, site) -> None:
+    """A host sits entirely on one site: refuse a node whose host already
+    carries a node on another site.
+
+    Raises:
+        NodeSiteError: a non-removed node on ``mgmt_ip`` has a different site.
+    """
+    if not site or not mgmt_ip:
+        return
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if (node.status != StorageNode.STATUS_REMOVED
+                and node.mgmt_ip == mgmt_ip and node.site != site):
+            raise NodeSiteError(
+                f"host {mgmt_ip} already belongs to site {node.site!r} "
+                f"(node {node.get_id()}); a host cannot span two sites")
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -3362,7 +3416,16 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
              spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None,
-             force_format=False):
+             force_format=False, site=None):
+    """Add the storage node(s) configured on ``node_addr`` to the cluster.
+
+    Returns a truthy value on success and False on the legacy failure paths.
+
+    Raises:
+        NodeSiteError: the sync-replication ``site`` is missing, malformed, not
+            allowed on this cluster, or conflicts with the host's site. Checked
+            before anything on the host is changed.
+    """
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -3395,6 +3458,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             "while the cluster is ACTIVE so roles are rotated and data is "
             "rebalanced", cluster_id)
         return False
+
+    # Sync-replication site: validated before anything on the host changes
+    # (the vcpu resize and hugepage reservation below can reboot it).
+    site = validate_node_site(_cluster, site)
+    _site_ip_iface = utils.get_mgmt_ip(node_info, iface_name)
+    _check_host_site(db_controller, cluster_id, _site_ip_iface[0] if _site_ip_iface else None, site)
 
     # Resize this host's core layout to the cluster's vcpu_count once, before
     # any node_config entry is consumed below, so every entry in the loop
@@ -4027,6 +4096,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.rpc_username = rpc_user
         snode.rpc_password = rpc_pass
         snode.cluster_id = cluster_id
+        snode.site = site
         snode.api_endpoint = node_addr
         snode.host_secret = SecretStr(utils.generate_string(20))
         snode.ctrl_secret = SecretStr(utils.generate_string(20))

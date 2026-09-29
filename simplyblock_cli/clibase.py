@@ -249,6 +249,7 @@ class CLIWrapperBase:
                 expansion=expansion,
                 failure_domain=failure_domain,
                 force_format=getattr(args, 'force_format', False),
+                site=getattr(args, 'site', None),
             )
         except Exception as e:
             print(e)
@@ -1526,6 +1527,7 @@ class CLIWrapperBase:
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            sync_replication=getattr(args, 'sync_replication', False),
         )
 
     def cluster_create(self, args):
@@ -1599,6 +1601,7 @@ class CLIWrapperBase:
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
             cluster_vip=cluster_vip,
+            sync_replication=getattr(args, 'sync_replication', False),
         )
 
     def query_yes_no(self, question, default="yes"):

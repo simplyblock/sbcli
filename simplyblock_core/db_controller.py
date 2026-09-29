@@ -30,6 +30,7 @@ from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
+from simplyblock_core.models.sync_replication import SyncReplicationEvent
 from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
 from simplyblock_core.utils.helpers import single, single_or_none
 
@@ -654,6 +655,14 @@ class DBController(metaclass=Singleton):
 
     def get_events(self, event_id: str = " ", limit: int = 0, reverse: bool = False) -> list[EventObj]:
         return EventObj().read_from_db(self.kv_store, id=event_id, limit=limit, reverse=reverse)
+
+    def get_sync_replication_events(self, cluster_id: str, lvs_name: str) -> list[SyncReplicationEvent]:
+        """Every recorded sync-replication event of one LVS, in no particular order."""
+        return self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved', cluster_id, lvs_name)
+
+    def get_unresolved_sync_replication_events(self, cluster_id: str, lvs_name: str) -> list[SyncReplicationEvent]:
+        """The not-yet-resolved sync-replication events of one LVS, in no particular order."""
+        return self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved', cluster_id, lvs_name, False)
 
     def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0, *, source=None) -> list[JobSchedule]:
         if source is not None:

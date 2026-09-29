@@ -269,6 +269,10 @@ commands:
             help: "The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise."
             dest: failure_domain
             type: int
+          - name: "--site"
+            help: "The sync-replication site this node belongs to (1-63 characters from [A-Za-z0-9._-]). Required when the cluster was created with --sync-replication; must be omitted otherwise. All nodes of one host belong to the same site."
+            dest: site
+            type: str
           - name: "--namespace"
             help: "The Kubernetes namespace to deploy on."
             dest: namespace
@@ -1020,6 +1024,11 @@ commands:
             dest: enable_failure_domain
             type: bool
             action: store_true
+          - name: "--sync-replication"
+            help: "Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
+            dest: sync_replication
+            type: bool
+            action: store_true
           - name: "--device-mode"
             help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
             dest: device_mode
@@ -1264,6 +1273,11 @@ commands:
           - name: "--enable-failure-domain"
             help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: enable_failure_domain
+            type: bool
+            action: store_true
+          - name: "--sync-replication"
+            help: "Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
+            dest: sync_replication
             type: bool
             action: store_true
           - name: "--device-mode"
