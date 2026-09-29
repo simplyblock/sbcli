@@ -147,6 +147,181 @@ jobs:
       MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
 
     steps:
+      # The lab nodes' authorized_keys are managed by infra, which strips any key
+      # it did not provision. The shared automation key this pipeline relied on
+      # (simplyblock-us-east-2.pem) is removed by that process and will keep being
+      # removed, which is what silently broke SSH mid-run on 2026-09-28 and threw
+      # away a passing 10h31m result. Only a key infra provisions for a person
+      # survives on those nodes, so the run carries one in rather than hoping to
+      # find one on the runner.
+      #
+      # KEY_PATH is the single place the rest of the pipeline looks: the next step
+      # resolves it, KEY_NAME derives from it, and ssh_utils._load_keys() reads it
+      # as SSH_KEY_LOCATION. Overriding it here means nothing else has to change.
+      #
+      # Unset secret leaves the key_path input alone, so a runner that still has a
+      # working key on disk behaves exactly as before.
+      #
+      # No `set -x` here, unlike every other step in this file. Tracing a step that
+      # handles key material prints the key; GitHub's log masking is a backstop for
+      # that, not a licence to rely on it.
+      - name: Install lab SSH key from secret
+        shell: bash
+        env:
+          LAB_SSH_PRIVATE_KEY: ${{ secrets.LAB_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          dest="$HOME/.ssh/ci_lab_key-${{ github.run_id }}"
+          if [ -z "${LAB_SSH_PRIVATE_KEY:-}" ]; then
+            echo "LAB_SSH_PRIVATE_KEY is not set; the chain below falls through to"
+            echo "the key_path input and then to the password."
+            dest=""
+          fi
+          if [ -n "$dest" ]; then
+            # tr -d, because a key pasted from a Windows clipboard carries CRLF and
+            # OpenSSH rejects the body outright -- reported as "invalid format",
+            # which reads like a wrong key rather than a wrong line ending.
+            # printf with an explicit newline for the other half of the same
+            # problem: a secret saved without its trailing newline is equally
+            # rejected. An extra blank line at EOF is harmless.
+            printf '%s' "$LAB_SSH_PRIVATE_KEY" | tr -d '\r' > "$dest"
+            printf '\n' >> "$dest"
+            chmod 600 "$dest"
+            # -P '' so a passphrase-protected key fails here instead of hanging on
+            # a prompt that has no terminal to read from. -y prints the PUBLIC
+            # half, which is safe to log and says which key is in play.
+            # Retried, because this has failed once on a read that was fine
+            # moments later: run 36527477514 reported "Permission denied" on a
+            # file that was ec2-user-owned at 0600 and validated cleanly
+            # afterwards, and the rerun passed with nothing changed. A
+            # ten-hour run should not be lost to that.
+            keyok=""
+            for attempt in 1 2 3; do
+              if ssh-keygen -y -P '' -f "$dest" > "$dest.pub" 2>/tmp/keyerr; then
+                keyok=1
+                break
+              fi
+              [ "$attempt" -lt 3 ] && sleep 2
+            done
+            if [ -z "$keyok" ]; then
+              # ssh-keygen's own words first. The structural guesses below are
+              # for when it has said nothing that identifies the cause -- the
+              # first version of this jumped straight to them and blamed a
+              # passphrase while ssh-keygen was plainly saying the file could
+              # not be read. None of this prints key material: BEGIN/END lines
+              # are structure and the counts are counts.
+              kerr="$(tr -d '\r' < /tmp/keyerr | head -2 | tr '\n' ' ')"
+              first="$(head -1 "$dest" 2>/dev/null)"
+              last="$(grep -v '^[[:space:]]*$' "$dest" 2>/dev/null | tail -1)"
+              echo "::error::LAB_SSH_PRIVATE_KEY could not be validated after 3 attempts."
+              echo "  first line : ${first}"
+              echo "  last line  : ${last}"
+              echo "  line count : $(wc -l < "$dest" 2>/dev/null)"
+              echo "  ssh-keygen : ${kerr}"
+              case "$kerr" in
+                *"Permission denied"*|*"No such file"*)
+                  echo "  --> ssh-keygen could not READ the file, which is not a problem with"
+                  echo "      the key. Check ownership and mode of $HOME/.ssh and the file,"
+                  echo "      and whether another job is writing the same path." ;;
+                *passphrase*|*"incorrect passphrase"*|*"load failed"*)
+                  echo "  --> the key is passphrase-protected. CI needs a copy without one:"
+                  echo "      cp key key_ci && ssh-keygen -p -N '' -f key_ci" ;;
+                *)
+                  case "$first" in
+                    ssh-*|ecdsa-*)
+                      echo "  --> that is a PUBLIC key. The secret needs the private half (no .pub)." ;;
+                    *"BEGIN"*)
+                      case "$last" in
+                        *"END"*)
+                          echo "  --> structure looks complete; suspect a passphrase or a damaged body." ;;
+                        *)
+                          echo "  --> no END line: the paste was truncated." ;;
+                      esac ;;
+                    *)
+                      echo "  --> no BEGIN line: the paste is missing its header, or has leading blank lines." ;;
+                  esac ;;
+              esac
+              rm -f "$dest" "$dest.pub" /tmp/keyerr
+              exit 1
+            fi
+            rm -f /tmp/keyerr
+            echo "Installed lab key: $(ssh-keygen -lf "$dest.pub")"
+          fi
+
+          # One chain, decided here, used by every ssh and scp in this workflow.
+          #
+          # ssh tries each -i identity in turn, so listing both is the fallback
+          # rather than something the call sites have to branch on. sshpass only
+          # supplies a password when one is actually prompted for, so wrapping a
+          # command whose key works costs nothing -- it is a passthrough.
+          #
+          # -e rather than -p: -p puts the password in the process arguments,
+          # where it is visible to anyone who can read /proc on the runner. -e
+          # takes it from SSHPASS in the environment instead.
+          #
+          # Order is deliberate. The CI key is the credential that is supposed to
+          # work; simplyblock-us-east-2.pem is kept while some nodes may still
+          # authorise it; the password is last because it is the one being
+          # withdrawn. Whatever answers, the log says which, so a green run does
+          # not hide that the key has stopped working.
+          ids=""
+          [ -n "$dest" ] && [ -f "$dest" ] && ids="$ids -i $dest"
+          legacy="$HOME/.ssh/simplyblock-us-east-2.pem"
+          [ -f "$legacy" ] && ids="$ids -i $legacy"
+          if [ -n "${KEY_PATH:-}" ] && [ -f "${KEY_PATH}" ] \
+               && [ "${KEY_PATH}" != "$dest" ] && [ "${KEY_PATH}" != "$legacy" ]; then
+            ids="$ids -i ${KEY_PATH}"
+          fi
+
+          # sshpass, only because the password is the last resort. Best effort:
+          # a runner without it simply has no password stage, which the line
+          # below reports rather than failing over. It is not installed at all
+          # unless SSH_PASSWORD is set, so the common case pays nothing.
+          if [ -n "${SSH_PASSWORD:-}" ] && ! command -v sshpass >/dev/null 2>&1; then
+            if command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y sshpass >/dev/null 2>&1 || true
+            elif command -v yum >/dev/null 2>&1; then
+              { sudo yum install -y epel-release; sudo yum install -y sshpass; } >/dev/null 2>&1 || true
+            elif command -v apt-get >/dev/null 2>&1; then
+              { sudo apt-get update -y; sudo apt-get install -y sshpass; } >/dev/null 2>&1 || true
+            fi
+          fi
+
+          sb_ssh="ssh${ids}"
+          sb_scp="scp${ids}"
+          if [ -n "${SSH_PASSWORD:-}" ] && command -v sshpass >/dev/null 2>&1; then
+            sb_ssh="sshpass -e $sb_ssh"
+            sb_scp="sshpass -e $sb_scp"
+            echo "SSHPASS=${SSH_PASSWORD}" >> "$GITHUB_ENV"
+            echo "  password fallback: available"
+          else
+            echo "  password fallback: not available (no SSH_PASSWORD, or sshpass missing)"
+          fi
+
+          if [ -z "$ids" ] && [ -z "${SSH_PASSWORD:-}" ]; then
+            echo "::error::No SSH credential at all: no LAB_SSH_PRIVATE_KEY, no key on disk, no SSH_PASSWORD."
+            exit 1
+          fi
+
+          echo "  identities:${ids:- none}"
+          echo "SB_SSH=$sb_ssh" >> "$GITHUB_ENV"
+          echo "SB_SCP=$sb_scp" >> "$GITHUB_ENV"
+          # The flags on their own, for the call sites that build an options
+          # array -- SSH_OPTS=(...) cannot take a whole command, only its
+          # arguments. Unquoted expansion is intended: it has to split into
+          # separate -i elements.
+          echo "SB_IDS=$ids" >> "$GITHUB_ENV"
+          # And the wrapper for those sites, empty unless a password is armed.
+          echo "SB_PREFIX=${sb_ssh%%ssh*}" >> "$GITHUB_ENV"
+          # KEY_PATH stays the first identity, because ssh_utils and KEY_NAME
+          # read it. Python runs its own chain over the same candidates.
+          if [ -n "$dest" ] && [ -f "$dest" ]; then
+            echo "KEY_PATH=$dest" >> "$GITHUB_ENV"
+          elif [ -f "$legacy" ] && [ -z "${KEY_PATH:-}" ]; then
+            echo "KEY_PATH=$legacy" >> "$GITHUB_ENV"
+          fi
+
       - name: Runner diagnostics
         shell: bash
         run: |
@@ -642,7 +817,7 @@ jobs:
 
           SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
           if [[ -n "${KEY_PATH}" && -f "${KEY_PATH}" ]]; then
-            SSH_OPTS+=(-i "${KEY_PATH}")
+            SSH_OPTS+=(${SB_IDS})
           fi
 
           # One branch now: both sides of the old if/else were the password

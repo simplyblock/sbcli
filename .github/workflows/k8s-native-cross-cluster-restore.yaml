@@ -352,6 +352,13 @@ jobs:
           echo "  identities:${ids:- none}"
           echo "SB_SSH=$sb_ssh" >> "$GITHUB_ENV"
           echo "SB_SCP=$sb_scp" >> "$GITHUB_ENV"
+          # The flags on their own, for the call sites that build an options
+          # array -- SSH_OPTS=(...) cannot take a whole command, only its
+          # arguments. Unquoted expansion is intended: it has to split into
+          # separate -i elements.
+          echo "SB_IDS=$ids" >> "$GITHUB_ENV"
+          # And the wrapper for those sites, empty unless a password is armed.
+          echo "SB_PREFIX=${sb_ssh%%ssh*}" >> "$GITHUB_ENV"
           # KEY_PATH stays the first identity, because ssh_utils and KEY_NAME
           # read it. Python runs its own chain over the same candidates.
           if [ -n "$dest" ] && [ -f "$dest" ]; then

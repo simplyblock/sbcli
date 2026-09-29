@@ -411,6 +411,13 @@ jobs:
           echo "  identities:${ids:- none}"
           echo "SB_SSH=$sb_ssh" >> "$GITHUB_ENV"
           echo "SB_SCP=$sb_scp" >> "$GITHUB_ENV"
+          # The flags on their own, for the call sites that build an options
+          # array -- SSH_OPTS=(...) cannot take a whole command, only its
+          # arguments. Unquoted expansion is intended: it has to split into
+          # separate -i elements.
+          echo "SB_IDS=$ids" >> "$GITHUB_ENV"
+          # And the wrapper for those sites, empty unless a password is armed.
+          echo "SB_PREFIX=${sb_ssh%%ssh*}" >> "$GITHUB_ENV"
           # KEY_PATH stays the first identity, because ssh_utils and KEY_NAME
           # read it. Python runs its own chain over the same candidates.
           if [ -n "$dest" ] && [ -f "$dest" ]; then
@@ -722,7 +729,7 @@ jobs:
         run: |
           set -euxo pipefail
           mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
-          ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "${KEY_PATH}")
+          ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SB_IDS})
           cluster_id="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
             "${SBCLI_CMD} cluster list" | grep -Eo '[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}' | head -n 1)"
           [[ -z "${cluster_id}" ]] && echo "ERROR: no cluster_id" && exit 1
@@ -931,7 +938,7 @@ jobs:
           set -euxo pipefail
           [[ -n "${RUN_BASE_DIR:-}" ]] || exit 0
           TAG="containers-final-$(date +%Y%m%d_%H%M%S)"
-          SSH_OPTS=(-i "${KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
+          SSH_OPTS=(${SB_IDS} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
           NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
           for NODE in ${NODES}; do
             REMOTE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
@@ -989,7 +996,7 @@ jobs:
           WINDOW_END=$((TEST_END_EPOCH + 3600))
 
           MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
-          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+          SSH_OPTS=(${SB_IDS} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
 
           OUTPUT_DIR=""
           if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
