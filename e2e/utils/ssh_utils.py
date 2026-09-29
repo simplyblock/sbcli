@@ -104,7 +104,11 @@ class SshUtils:
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
         self._bastion_client = None
         self._reconnect_locks = defaultdict(threading.Lock)
-        self.ssh_pass = None
+        # Last resort, after every key has been refused. The pipelines pass
+        # SSH_PASSWORD through for exactly this, and _try_connect only sends it
+        # when it has no key left to offer. None when unset, which is what
+        # makes the key-only path unchanged.
+        self.ssh_pass = os.environ.get("SSH_PASSWORD") or None
         self.distrib_dump_paths = {}
 
         # Per-node SSH health, so a node that never comes back fails the run
@@ -234,12 +238,18 @@ class SshUtils:
         Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
         Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
         """
+        # The same chain the pipelines build, in the same order: the CI key
+        # first because it is the one that is supposed to work, then
+        # simplyblock-us-east-2.pem while some nodes may still authorise it,
+        # then the generic developer keys. Paramiko is handed every candidate
+        # and tries them in turn, so an unusable one costs an attempt rather
+        # than the connection.
         paths = []
-        # explicit single file via KEY_NAME → SSH_KEY_LOCATION
+        # explicit single file via KEY_PATH / KEY_NAME → SSH_KEY_LOCATION
         if SSH_KEY_LOCATION and os.path.isfile(SSH_KEY_LOCATION):
             paths.append(SSH_KEY_LOCATION)
-        # defaults
         home = os.path.join(Path.home(), ".ssh")
+        paths.append(os.path.join(home, "simplyblock-us-east-2.pem"))
         paths.extend([os.path.join(home, "id_ed25519"), os.path.join(home, "id_rsa")])
 
         keys = []
@@ -425,7 +435,11 @@ class SshUtils:
     #     )
         self._bastion_client = None
         self._reconnect_locks = defaultdict(threading.Lock)   
-        self.ssh_pass = None
+        # Last resort, after every key has been refused. The pipelines pass
+        # SSH_PASSWORD through for exactly this, and _try_connect only sends it
+        # when it has no key left to offer. None when unset, which is what
+        # makes the key-only path unchanged.
+        self.ssh_pass = os.environ.get("SSH_PASSWORD") or None
         self.distrib_dump_paths = {}
 
     def _candidate_usernames(self, explicit_user) -> list[str]:
@@ -440,12 +454,18 @@ class SshUtils:
         Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
         Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
         """
+        # The same chain the pipelines build, in the same order: the CI key
+        # first because it is the one that is supposed to work, then
+        # simplyblock-us-east-2.pem while some nodes may still authorise it,
+        # then the generic developer keys. Paramiko is handed every candidate
+        # and tries them in turn, so an unusable one costs an attempt rather
+        # than the connection.
         paths = []
-        # explicit single file via KEY_NAME → SSH_KEY_LOCATION
+        # explicit single file via KEY_PATH / KEY_NAME → SSH_KEY_LOCATION
         if SSH_KEY_LOCATION and os.path.isfile(SSH_KEY_LOCATION):
             paths.append(SSH_KEY_LOCATION)
-        # defaults
         home = os.path.join(Path.home(), ".ssh")
+        paths.append(os.path.join(home, "simplyblock-us-east-2.pem"))
         paths.extend([os.path.join(home, "id_ed25519"), os.path.join(home, "id_rsa")])
 
         keys = []
