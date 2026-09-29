@@ -84,7 +84,7 @@ class SPDKParams(BaseModel):
     timeout: Optional[int] = Field(5 * 60)
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-    cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
+    cluster_ip: Optional[str] = Field(default=None)
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
     firewall_port: int = Field(constants.FW_PORT_START)

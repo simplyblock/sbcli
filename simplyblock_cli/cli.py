@@ -95,6 +95,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Prepares a host to be used as a storage node.')
         subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0.', type=str, dest='ifname')
         subcommand.add_argument('--isolate-cores', help='Isolates cores in kernel args for the provided CPU mask. Default: `false`.', default=False, dest='isolate_cores', action='store_true')
+        subcommand.add_argument('--cluster-vip', help='Virtual IP address of the cluster, e.g. 192.168.1.100.', type=str, dest='cluster_vip')
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')

@@ -26,6 +26,12 @@ commands:
             type: bool
             default: false
             action: store_true
+          - name: "--cluster-vip"
+            help: "Virtual IP address of the cluster, e.g. 192.168.1.100."
+            description: >
+              This address will be used for the containers gelf driver address on port 12202
+            dest: cluster_vip
+            type: str
       - name: configure
         help: "Prepare a configuration file to be used when adding the storage node."
         description: >
