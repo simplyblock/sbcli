@@ -428,16 +428,24 @@ class _LblkBase(TestClusterBase):
             # A Running pod is not enough, and `test -b` is not either. The
             # device inside the pod is a bind of a host device node; when the
             # host's NVMe-oF controller goes away the node stays behind and
-            # `test -b` keeps saying yes, while every open gets ENXIO. That is
-            # what a long isolation leaves: run 20260930-032853 cut
-            # 192.168.10.247 for 420s, the pod rode it out Running, and the
-            # verify came back
-            #   fio: failed opening blockdev /dev/rawlblk for size check
-            #   error=No such device or address
-            # Kubernetes does not re-stage a device into a pod that never
-            # restarted, so the pod has to go and come back for CSI to attach
-            # it again. The PVC is untouched, so the data under test survives
-            # -- which is why this recreates rather than re-stamps.
+            # `test -b` keeps saying yes, while every open gets ENXIO.
+            #
+            # An outage does not have to touch this pod's node to do that.
+            # In run 20260930-032853 the cut was on 192.168.10.247 and this
+            # pod was on worker-3, which never went NotReady -- what it lost
+            # was the TARGET. worker-3's kernel log gives the whole sequence:
+            #
+            #   04:31:57  nvme13: starting error recovery
+            #   04:32:02  nvme13: Failed reconnect attempt 1/30
+            #   04:34:30  nvme13: Removing ctrl: NQN ...:lvol:df2f242b...
+            #
+            # Thirty attempts, then the controller is deleted -- about 150s,
+            # well inside a 420s isolation, and it never comes back on its
+            # own. The device was still ENXIO hours later with the pod still
+            # Running. Kubernetes does not re-stage a device into a pod that
+            # never restarted, so the pod has to go and come back for CSI to
+            # attach it again. The PVC is untouched, so the data under test
+            # survives -- which is why this recreates rather than re-stamps.
             why = f"Running but {dev} will not open (stale device node)"
 
         if why is None:
