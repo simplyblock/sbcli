@@ -70,6 +70,15 @@ def remove(cluster: Cluster, storage_node: StorageNode, device: Device, force: b
 
     return Response(status_code=204)
 
+
+@instance_api.post('/fail', name='clusters:storage_nodes:devices:fail', status_code=204, responses={204: {"content": None}})
+def fail(cluster: Cluster, storage_node: StorageNode, device: Device) -> Response:
+    if not device_controller.device_set_failed(device.get_id()):
+        raise ValueError('Failed to set device state to failed')
+
+    return Response(status_code=204)
+
+
 @instance_api.post('/restart', name='clusters:storage_nodes:devices:restart', status_code=204, responses={204: {"content": None}})
 def restart(cluster: Cluster, storage_node: StorageNode, device: Device, force: bool = False) -> Response:
     if not device_controller.restart_device(device.get_id(), force):
@@ -106,6 +115,7 @@ def reset(cluster: Cluster, storage_node: StorageNode, device: Device) -> Respon
         raise ValueError('Failed to reset device')
 
     return Response(status_code=204)
+
 
 @instance_api.get('/health-info', name='clusters:storage_nodes:devices:get-device-health-info')
 def health_info(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceHealthInfoDTO:
