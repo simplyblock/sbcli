@@ -2265,6 +2265,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
         collected = 0
         fio_errors = 0
+        copied = {}   # client -> remote paths safely on NFS
         for client in self.fio_node:
             # List FIO log files on the client
             try:
@@ -2304,6 +2305,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                         with open(local_path, "w") as f:
                             f.write(file_data)
                         collected += 1
+                        copied.setdefault(client, []).append(remote_path)
                         # Check for FIO errors in the log
                         lower = file_data.lower()
                         if "error" in lower or "fail" in lower:
@@ -2317,6 +2319,35 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                         f"[{label}] Failed to collect {remote_path} "
                         f"from {client}: {exc}"
                     )
+
+        # Now that the copies are safely on NFS, take the originals away.
+        #
+        # Nothing has ever done this. The only rm for these paths anywhere in
+        # the repo -- python or workflow -- is the purge added alongside this,
+        # so every FIO log written by every run has been accumulating in the
+        # clients' /tmp since the machines were built. That is what let a
+        # corruption from 10:30 still be sitting there at 20:32 to fail the
+        # next run.
+        #
+        # -mmin +2 because a join can time out and leave FIO running: deleting
+        # a log still being appended to would cost us the tail of exactly the
+        # job that overran. Anything younger stays, and the purge at the start
+        # of the next run takes it.
+        for client, paths in copied.items():
+            try:
+                quoted = " ".join(f"'{p}'" for p in paths)
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command=(f"find {quoted} -maxdepth 0 -mmin +2 -delete "
+                             f"2>/dev/null || true"),
+                    supress_logs=True,
+                )
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    f"[{label}] Copied {len(paths)} log(s) from {client} but "
+                    f"could not remove the originals: {exc}. Harmless -- "
+                    f"collection filters by mtime and the next run purges."
+                )
 
         self.logger.info(
             f"[{label}] Collected {collected} FIO log files to "
