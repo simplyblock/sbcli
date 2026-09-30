@@ -89,7 +89,11 @@ def main():
             time.sleep(args.interval)
             now = datetime.now().strftime("%H:%M:%S")
             for bdev in args.bdevs:
-                result = rpc.bdev_get_histogram(bdev)
+                try:
+                    result = rpc.bdev_get_histogram(bdev)
+                except Exception as exc:
+                    print(f"{now} {bdev}: bdev_get_histogram failed: {exc}")
+                    continue
                 if not result:
                     print(f"{now} {bdev}: bdev_get_histogram failed")
                     continue

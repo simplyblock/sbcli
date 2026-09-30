@@ -6,6 +6,7 @@ from prometheus_client import CollectorRegistry, Gauge, generate_latest
 from simplyblock_core import db_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,14 @@ def get_data():
             
             rpc_client = node.rpc_client(timeout=3*60, retry=10)
 
-            reactor_data = rpc_client.framework_get_reactors()
+            # A scrape must not fail wholesale over one node's reactor stats:
+            # degrade to missing reactor metrics for this node rather than a
+            # 500 for the whole cluster.
+            try:
+                reactor_data = rpc_client.framework_get_reactors()
+            except RPCException as e:
+                logger.error("Failed to get reactor stats for node %s: %s", node.get_id(), e)
+                reactor_data = None
             thread_data = rpc_client.thread_get_stats()
 
             thread_busy_map = {t["id"]: t["busy"] for t in thread_data.get("threads", [])}    
