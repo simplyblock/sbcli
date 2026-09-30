@@ -863,8 +863,3 @@ BACKUP_MAX_CHAIN_LENGTH = 40
 BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
-
-# Test-only: send the union of poller_cpu_cores and lvol_poller_core as both
-# the nvmf pollers mask and the lvol poller-group mask at add-node, instead of
-# giving the lvol poller group its own core(s). Restart reuses the stored masks.
-MERGE_LVOL_POLLER_WITH_POLLER_CORES = True
