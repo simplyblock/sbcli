@@ -128,20 +128,27 @@ class TestRpcClientPolicyParams(unittest.TestCase):
     def _rpc(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
+        client._request3 = MagicMock(return_value=True)
         return client
+
+    @staticmethod
+    def _params(client):
+        # request_timeout is a transport-level override, not an RPC param.
+        params = dict(client._request3.call_args.kwargs)
+        params.pop("request_timeout", None)
+        return params
 
     def test_omits_unset_optional_params(self):
         client = self._rpc()
         client.bdev_nvme_set_multipath_policy(BDEV, "active_active")
-        params = client._request.call_args.args[1]
+        params = self._params(client)
         self.assertEqual(params, {"name": BDEV, "policy": "active_active"})
 
     def test_passes_selector_and_rr_min_io(self):
         client = self._rpc()
         client.bdev_nvme_set_multipath_policy(
             BDEV, "active_active", selector="queue_depth", rr_min_io=4)
-        params = client._request.call_args.args[1]
+        params = self._params(client)
         self.assertEqual(params["selector"], "queue_depth")
         self.assertEqual(params["rr_min_io"], 4)
 
@@ -150,7 +157,7 @@ class TestRpcClientPolicyParams(unittest.TestCase):
         being swallowed by a falsy check into a silent default."""
         client = self._rpc()
         client.bdev_nvme_set_multipath_policy(BDEV, "active_active", rr_min_io=0)
-        params = client._request.call_args.args[1]
+        params = self._params(client)
         self.assertEqual(params["rr_min_io"], 0)
 
 
