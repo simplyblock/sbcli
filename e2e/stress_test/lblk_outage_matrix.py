@@ -1040,6 +1040,10 @@ class _LblkOutageMatrix(_LblkBase):
         if not self.RAW_VERIFY:
             return
         for name, (client, dev) in self._lblk_devices.items():
+            # _stamp_all and _verify_all both do this and this one did not,
+            # which is how the gate that runs after every outage was the one
+            # path with no pod check on it at all.
+            client = self._ensure_raw_pod(name, client)
             self._verifier.verify(client, dev,
                                   region_size=self.VERIFY_REGION,
                                   context=f"{context} [{name}]")

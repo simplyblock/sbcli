@@ -419,12 +419,34 @@ class _LblkBase(TestClusterBase):
             return pod
         k8s = self._ensure_k8s_utils()
         phase = (k8s.get_pod_status_detail(pod) or {}).get("phase")
-        if phase == "Running":
+        dev = (self._lblk_devices.get(name) or (None, None))[1]
+
+        why = None
+        if phase != "Running":
+            why = f"{phase or 'gone'}, not Running"
+        elif dev and not self._raw_device_opens(pod, dev):
+            # A Running pod is not enough, and `test -b` is not either. The
+            # device inside the pod is a bind of a host device node; when the
+            # host's NVMe-oF controller goes away the node stays behind and
+            # `test -b` keeps saying yes, while every open gets ENXIO. That is
+            # what a long isolation leaves: run 20260930-032853 cut
+            # 192.168.10.247 for 420s, the pod rode it out Running, and the
+            # verify came back
+            #   fio: failed opening blockdev /dev/rawlblk for size check
+            #   error=No such device or address
+            # Kubernetes does not re-stage a device into a pod that never
+            # restarted, so the pod has to go and come back for CSI to attach
+            # it again. The PVC is untouched, so the data under test survives
+            # -- which is why this recreates rather than re-stamps.
+            why = f"Running but {dev} will not open (stale device node)"
+
+        if why is None:
             return pod
+
         self.logger.warning(
-            "[lblk] raw pod %s is %s, not Running -- recreating it before "
-            "touching %s. The volume is fine; the pod that reads it is not.",
-            pod, phase or "gone", name)
+            "[lblk] raw pod %s is %s -- recreating it before touching %s. "
+            "The volume is fine; the pod that reads it is not.",
+            pod, why, name)
         try:
             k8s.delete_pod(pod)
         except Exception:                             # noqa: BLE001
@@ -433,7 +455,36 @@ class _LblkBase(TestClusterBase):
         k8s.create_raw_device_pod(pod, pvc)
         if pod not in self._k8s_raw_pods:
             self._k8s_raw_pods.append(pod)
+
+        # If it still will not open, the volume did not come back -- which is
+        # a finding about the storage, not about the pod, and must not be
+        # retried away silently.
+        if dev and not self._raw_device_opens(pod, dev):
+            raise LblkPreconditionError(
+                f"[lblk] {dev} still will not open in a freshly created "
+                f"{pod} for {name}. A recreated pod gets CSI to stage the "
+                f"volume again, so this is no longer a stale device node: "
+                f"the volume itself did not come back.")
         return pod
+
+    def _raw_device_opens(self, pod, device):
+        """Whether *device* can actually be READ inside *pod*.
+
+        Deliberately an open, not a `test -b`. The whole point is the case
+        where the device node exists and opening it fails.
+        """
+        k8s = self._ensure_k8s_utils()
+        try:
+            out, _err = k8s.exec_in_pod(
+                pod,
+                f"dd if={device} of=/dev/null bs=4096 count=1 "
+                f">/dev/null 2>&1 && echo OPENOK || echo OPENFAIL",
+                timeout=120)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[lblk] could not probe %s in %s: %s",
+                                device, pod, str(exc)[:120])
+            return False
+        return "OPENOK" in (out or "")
 
     def _stamp_all(self):
         if not self.RAW_VERIFY:
