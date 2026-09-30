@@ -974,9 +974,12 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             sec_registered = True
             logger.info(f"Secondary already has {tgt_composite}; skipping registration")
         else:
-            ret_sec = sec_rpc.bdev_lvol_register(
-                snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
-                _priority_class)
+            try:
+                ret_sec = sec_rpc.bdev_lvol_register(
+                    snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
+                    _priority_class)
+            except RPCException:
+                ret_sec = None
             if not ret_sec:
                 try:
                     _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc,
@@ -990,9 +993,12 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             if ter_rpc.bdev_get(tgt_composite):
                 ter_registered = True
             else:
-                ret_ter = ter_rpc.bdev_lvol_register(
-                    snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
-                    _priority_class)
+                try:
+                    ret_ter = ter_rpc.bdev_lvol_register(
+                        snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
+                        _priority_class)
+                except RPCException:
+                    ret_ter = None
                 if not ret_ter:
                     try:
                         _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc, ter_rpc,

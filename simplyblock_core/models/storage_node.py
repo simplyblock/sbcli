@@ -833,13 +833,19 @@ class StorageNode(BaseNodeObject):
                     "proceeding — connect_hublvol will verify",
                     remote_bdev, self.get_id())
 
-        if not rpc_client.bdev_lvol_set_lvs_opts(
-                lvs_node.lvstore,
-                groupid=lvs_node.jm_vuid,
-                subsystem_port=lvs_node.get_lvol_subsys_port(lvs_node.lvstore),
-                hublvol_port=lvs_node.get_hublvol_port(lvs_node.lvstore),
-                role=role,
-        ):
+        try:
+            lvs_opts_ok = rpc_client.bdev_lvol_set_lvs_opts(
+                    lvs_node.lvstore,
+                    groupid=lvs_node.jm_vuid,
+                    subsystem_port=lvs_node.get_lvol_subsys_port(lvs_node.lvstore),
+                    hublvol_port=lvs_node.get_hublvol_port(lvs_node.lvstore),
+                    role=role,
+            )
+        except RPCException as e:
+            logger.error("bdev_lvol_set_lvs_opts failed for %s on %s: %s",
+                         lvs_node.lvstore, self.get_id(), e)
+            return False
+        if not lvs_opts_ok:
             logger.error("bdev_lvol_set_lvs_opts failed for %s on %s",
                          lvs_node.lvstore, self.get_id())
             return False

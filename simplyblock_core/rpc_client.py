@@ -1430,17 +1430,16 @@ class RPCClient:
         """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
         queue_depth/io_time — the hung-IO watchdog's signal for AIO base
         bdevs (period 0 disables)."""
-        params = {"name": name, "period": period_us}
-        return self._request("bdev_set_qd_sampling_period", params)
+        return self._request3("bdev_set_qd_sampling_period", name=name, period=period_us)
 
     def bdev_enable_histogram(self, name, enable=True, opc=None):
         # opc filters to a single I/O type (e.g. "read"/"write"); requires
         # SPDK >= 24.01. Toggling disable->enable clears the collected data,
         # which is the only way to reset the (cumulative) histogram.
-        params = {"name": name, "enable": enable}
+        kwargs = {"name": name, "enable": enable}
         if opc:
-            params["opc"] = opc
-        return self._request("bdev_enable_histogram", params)
+            kwargs["opc"] = opc
+        return self._request3("bdev_enable_histogram", **kwargs)
 
     def bdev_get_histogram(self, name):
         # Returns {"histogram": <base64 of uint64 buckets>, "bucket_shift",
@@ -1473,7 +1472,7 @@ class RPCClient:
 
 
     def thread_get_stats(self):
-        return self._request("thread_get_stats")
+        return self._request3("thread_get_stats")
 
     def framework_get_reactors(self):
         return self._request3("framework_get_reactors")
@@ -1492,8 +1491,7 @@ class RPCClient:
         return self._request3("distr_migration_to_primary_start", **params)
 
     def distr_migration_status(self, name):
-        params = {"name": name}
-        return self._request("distr_migration_status", params)
+        return self._request3("distr_migration_status", name=name)
 
     def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
         params = {
@@ -1528,18 +1526,13 @@ class RPCClient:
         return self._request3("bdev_raid_remove_base_bdev", name=base_bdev)
 
     def bdev_lvol_get_lvstores(self, name):
-        params = {"lvs_name": name}
-        return self._request("bdev_lvol_get_lvstores", params)
+        return self._request3("bdev_lvol_get_lvstores", lvs_name=name)
 
     def bdev_lvol_rename(self, old_name, new_name):
         return self._request3("bdev_lvol_rename", old_name=old_name, new_name=new_name)
 
     def bdev_lvol_resize(self, name, size_in_mib):
-        params = {
-            "name": name,
-            "size_in_mib": size_in_mib
-        }
-        return self._request("bdev_lvol_resize", params)
+        return self._request3("bdev_lvol_resize", name=name, size_in_mib=size_in_mib)
 
     def bdev_lvol_inflate(self, name):
         return self._request3("bdev_lvol_inflate", name=name)
@@ -1622,7 +1615,7 @@ class RPCClient:
             }
         }
 
-        return self._request("nvmf_subsystem_remove_listener", params)
+        return self._request3("nvmf_subsystem_remove_listener", **params)
 
 
     def bdev_distrib_force_to_non_leader(self, jm_vuid=0):
@@ -1630,7 +1623,7 @@ class RPCClient:
         return self._request3("bdev_distrib_force_to_non_leader", **kwargs)
 
     def bdev_lvol_set_leader(self, lvs, *, leader=False, bs_nonleadership=False):
-        return self._request("bdev_lvol_set_leader_all", {
+        return self._request3("bdev_lvol_set_leader_all", **{
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "lvs_leadership": leader,
             "bs_nonleadership": bs_nonleadership,
@@ -1669,7 +1662,7 @@ class RPCClient:
         }
         if priority_class:
             params["lvol_priority_class"] = priority_class
-        return self._request("bdev_lvol_register", params)
+        return self._request3("bdev_lvol_register", **params)
 
     def nvmf_subsystem_get_controllers(self, nqn):
         return self._request3("nvmf_subsystem_get_controllers", nqn=nqn)
@@ -1684,7 +1677,7 @@ class RPCClient:
             "blobid": blobid,
             "registered_uuid": registered_uuid,
         }
-        return self._request("bdev_lvol_snapshot_register", params)
+        return self._request3("bdev_lvol_snapshot_register", **params)
 
     def bdev_lvol_clone_register(self, clone_name, snapshot_name, registered_uuid, blobid):
         return self._request3("bdev_lvol_clone_register",
@@ -1707,7 +1700,7 @@ class RPCClient:
         (per-LVS, distinct from `subsystem_port` which serves lvols).
         """
 
-        return self._request('bdev_lvol_set_lvs_opts', {
+        return self._request3('bdev_lvol_set_lvs_opts', **{
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
             "subsystem_port": subsystem_port,
@@ -1719,10 +1712,7 @@ class RPCClient:
         """
             https://docs.google.com/spreadsheets/d/1cQ1MkCRVRJUTXeO35erFaQc7CF0mV5t52jTIzZsARyY/edit?gid=0#gid=0
         """
-        params = {
-            "name": name
-        }
-        return self._request("bdev_lvol_get_lvol_delete_status", params)
+        return self._request3("bdev_lvol_get_lvol_delete_status", name=name)
 
     def bdev_lvol_set_lvs_read_only(self, lvs_name, read_only=False):
         return self._request3("bdev_lvol_set_lvs_read_only",

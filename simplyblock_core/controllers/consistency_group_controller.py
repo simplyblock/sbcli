@@ -41,6 +41,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -544,9 +545,12 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
                     continue
                 with lvstore_op_lock(pool.cluster_id, group.lvs_name,
                                      node_id=sec.get_id(), enabled=lock):
-                    reg = sec.rpc_client().bdev_lvol_snapshot_register(
-                        f"{group.lvs_name}/{lvol.lvol_bdev}", p["snap_bdev_name"],
-                        p["snap_uuid"], p["blobid"])
+                    try:
+                        reg = sec.rpc_client().bdev_lvol_snapshot_register(
+                            f"{group.lvs_name}/{lvol.lvol_bdev}", p["snap_bdev_name"],
+                            p["snap_uuid"], p["blobid"])
+                    except RPCException:
+                        reg = None
                 if not reg:
                     logger.error("Group snapshot register of %s failed on %s; "
                                  "rolling the WHOLE generation back",
