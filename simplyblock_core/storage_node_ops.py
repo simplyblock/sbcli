@@ -9159,10 +9159,12 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     logger.info("Setting node status to offline")
     if (not set_node_status(node_id, StorageNode.STATUS_OFFLINE)
             and db_controller.get_storage_node_by_id(node_id).status
-            not in StorageNode.REMOVAL_SHUT_DOWN_STATUSES):
-        # A removal status that took over while this shutdown ran is kept, and
-        # counts as the shutdown landing: the node is down either way, and the
-        # ANA failover below must still run. Any other refusal fails it.
+            not in StorageNode.DEPARTING_STATUSES):
+        # A removal status -- the one the removal's own shutdown started from
+        # (pending_removal), or one that took over while this shutdown ran --
+        # is kept, and counts as the shutdown landing: the node is down either
+        # way, and the ANA failover below must still run. Any other refusal
+        # fails it.
         #
         # The FSM refused the flip — typically the record reads RESTARTING,
         # i.e. a restart transition owns this node. SPDK is already killed at
@@ -9750,15 +9752,22 @@ def set_node_status(node_id, status, caused_by="monitor"):
             outcome["verdict"] = "reject_online"
             outcome["from"] = n.status
             return False
-        if (status == StorageNode.STATUS_OFFLINE
-                and n.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES):
-            # A removal status after the shutdown already says the node is
-            # down, and it says more: which half of the removal owns it.
-            # OFFLINE would undo that. The shutdown's own final write did
-            # exactly this when a drain stamped MIGRATING_DEVICES while the
-            # shutdown was still running: the node fell back to OFFLINE, the
-            # rebuild of its own distribs was queued on the node itself, and
-            # the removal waited for ever (2026-09-30, runs 19 and 24).
+        if (status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_SHUTDOWN)
+                and n.status in StorageNode.DEPARTING_STATUSES):
+            # Once a removal is triggered there is no way back from its
+            # status: pending_removal onwards only moves forward. OFFLINE or
+            # IN_SHUTDOWN would undo that and say less -- the node is down
+            # either way, but the removal status also says which half of the
+            # removal owns it. Two writes did exactly this:
+            # * the shutdown's final OFFLINE, when a drain stamped
+            #   MIGRATING_DEVICES while the shutdown was still running: the
+            #   rebuild of the node's own distribs was queued on the node
+            #   itself and the removal waited for ever (2026-09-30, runs 19
+            #   and 24);
+            # * the removal's own shutdown, run by prepare-removal after
+            #   PENDING_REMOVAL is stamped: for ~10s the node read as a plain
+            #   offline node -- auto-restart material, and not shrinking
+            #   (2026-09-30, run 43).
             outcome["verdict"] = "reject_offline_departing"
             outcome["from"] = n.status
             return False
@@ -9835,9 +9844,8 @@ def set_node_status(node_id, status, caused_by="monitor"):
         return False
     if verdict == "reject_offline_departing":
         logger.warning(
-            f"Keeping {node_id} at {outcome['from']}: the removal owns this node "
-            f"and it is already down; OFFLINE from caused_by={caused_by!r} would "
-            f"undo the removal's status.")
+            f"Keeping {node_id} at {outcome['from']}: the removal owns this node; "
+            f"{status} from caused_by={caused_by!r} would undo the removal's status.")
         return False
 
     storage_events.snode_status_change(snode, snode.status, outcome["old_status"], caused_by=caused_by)
