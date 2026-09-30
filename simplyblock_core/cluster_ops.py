@@ -64,6 +64,7 @@ from simplyblock_core.models.stats import (
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.release_upgrades import jc_compression_upgrade
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils import port_block, pull_docker_image_with_retry
 
@@ -1813,7 +1814,10 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 logger.info(f"Setting Alcemls QOS weights on node {node.get_id()}")
-                ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+                try:
+                    ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+                except RPCException:
+                    ret = False
                 if not ret:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 

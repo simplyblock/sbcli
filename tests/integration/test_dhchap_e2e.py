@@ -378,18 +378,18 @@ class TestDHCHAPE2E(unittest.TestCase):
 
     def test_subsystem_add_host_fails_without_keyring_registration(self):
         """SPDK rejects add_host when dhchap_key name is not in the keyring."""
-        from simplyblock_core.rpc_client import RPCClient
+        from simplyblock_core.rpc_client import RPCClient, RPCRemoteError
         rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", SecretStr(""))
 
         subsys_nqn = "nqn:test:subsys2"
-        rpc_client._request("nvmf_create_subsystem", {"nqn": subsys_nqn})
+        rpc_client._request3("nvmf_create_subsystem", nqn=subsys_nqn)
 
         # Try to add host with unregistered key name
-        ret = rpc_client.subsystem_add_host(
-            subsys_nqn, "nqn:host",
-            dhchap_key="nonexistent_key",
-        )
-        self.assertFalse(ret)
+        with self.assertRaises(RPCRemoteError):
+            rpc_client.subsystem_add_host(
+                subsys_nqn, "nqn:host",
+                dhchap_key="nonexistent_key",
+            )
 
     # -- _register_dhchap_keys_on_node helper --
 

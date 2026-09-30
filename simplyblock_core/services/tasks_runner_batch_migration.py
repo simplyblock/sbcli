@@ -855,7 +855,11 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                     m_tgt_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(m_lvol.lvol_bdev)}"
                 except KeyError:
                     continue
-                if not tgt_rpc.bdev_lvol_set_migration_flag(m_tgt_composite):
+                try:
+                    flag_ok = tgt_rpc.bdev_lvol_set_migration_flag(m_tgt_composite)
+                except RPCException:
+                    flag_ok = False
+                if not flag_ok:
                     logger.warning(
                         f"Group {group.uuid[:8]}: re-assert migration flag on primary "
                         f"failed for {m_tgt_composite} (may already be flagged)")

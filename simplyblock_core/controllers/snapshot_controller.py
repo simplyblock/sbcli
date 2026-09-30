@@ -30,6 +30,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = lg.getLogger()
 
@@ -880,8 +881,11 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
                 with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
                                      node_id=sec.get_id(), enabled=lock):
-                    ret = sec_rpc_client.bdev_lvol_snapshot_register(
-                        f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+                    try:
+                        ret = sec_rpc_client.bdev_lvol_snapshot_register(
+                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+                    except RPCException:
+                        ret = None
                 if not ret:
                     msg = f"Failed to register snapshot on node: {sec.get_id()}"
                     logger.error(msg)
