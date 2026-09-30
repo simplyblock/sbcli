@@ -133,7 +133,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
         """Run FIO workloads on all lvols and clones."""
         self.logger.info("Running FIO workloads on lvols and clones.")
 
-        for _, lvol_details in self.lvol_mount_details.items():
+        for lvol_details in self.lvol_mount_details.values():
             client = lvol_details.get("Client", self.node)
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -150,7 +150,7 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
             fio_thread.start()
             self.fio_threads.append(fio_thread)
 
-        for _, clone_details in self.clone_mount_details.items():
+        for clone_details in self.clone_mount_details.values():
             client = clone_details.get("Client", self.node)
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -265,11 +265,11 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
 
         sleep_n_sec(60)
 
-        for _, lvol_details in self.lvol_mount_details.items():
+        for lvol_details in self.lvol_mount_details.values():
             client = lvol_details.get("Client", self.node)
             self.common_utils.validate_fio_test(client, lvol_details["Log"])
 
-        for _, clone_details in self.clone_mount_details.items():
+        for clone_details in self.clone_mount_details.values():
             client = clone_details.get("Client", self.node)
             self.common_utils.validate_fio_test(client, clone_details["Log"])
 

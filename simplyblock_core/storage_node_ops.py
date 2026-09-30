@@ -13975,7 +13975,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
         # (2026-08-31: unblock landed at 13:33:29.13, one second after the
         # client had already failed IO at 13:33:28). Killing our own SPDK
         # can wait; a fenced healthy peer cannot.
-        for peer in list(blocked_peers):
+        for peer in blocked_peers:
             _unblock_peer_port(peer)
         _persist_deferred_node_fields()
         _release_hub_locks()
