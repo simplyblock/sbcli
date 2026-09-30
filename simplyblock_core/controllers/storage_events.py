@@ -101,6 +101,34 @@ def snode_restart_failed(node):
         node_id=node.get_id())
 
 
+def sync_site_leader_elected(node, lvs_name, caused_by=ec.CAUSED_BY_MONITOR):
+    """Sync replication: the returning lost site's ``node`` was elected leader
+    of ``lvs_name``, an LVS that was still led from that site."""
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_WARN,
+        message=f"Site {node.site} returned: {lvs_name} leader elected on this node",
+        node_id=node.get_id())
+
+
+def sync_site_return_lvols_missing(node, lvs_name, lvol_ids, caused_by=ec.CAUSED_BY_MONITOR):
+    """Sync replication: the leader of ``lvs_name`` on the returning site does
+    not hold every expected volume; the site return waits."""
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_ERROR,
+        message=f"Site {node.site} return held: {lvs_name} leader misses volumes {sorted(lvol_ids)}",
+        node_id=node.get_id())
+
+
 def snode_rpc_timeout(node, timeout_seconds, caused_by=ec.CAUSED_BY_MONITOR):
     ec.log_event_cluster(
         cluster_id=node.cluster_id,

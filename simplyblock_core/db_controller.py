@@ -988,6 +988,42 @@ class DBController(metaclass=Singleton):
             target_site, check, StorageNode.active_indexes(self.kv_store),
             JobSchedule.active_indexes(self.kv_store), int(time.time()))
 
+    def _clear_lost_site_tx(self, tr, cluster_id, lost_site, allowed_states, node_ids, check,
+                            cluster_indexes):
+        cluster_key = Cluster().get_db_id(cluster_id).encode()
+        cluster = BaseModel._read_record(tr, cluster_key, Cluster)
+        if cluster is None:
+            return [f"cluster {cluster_id} not found"]
+        if cluster.lost_site != lost_site or cluster.lost_site_state not in allowed_states:
+            return [f"lost site is {cluster.lost_site!r} ({cluster.lost_site_state!r}), expected "
+                    f"{lost_site!r} in {sorted(allowed_states)}"]
+        nodes = []
+        for node_id in node_ids:
+            node = BaseModel._read_record(tr, StorageNode().get_db_id(node_id).encode(), StorageNode)
+            if node is not None:
+                nodes.append(node)
+        problems = check(cluster, nodes)
+        if problems:
+            return problems
+
+        def _clear(c):
+            c.lost_site = ""
+            c.lost_site_state = ""
+        self._atomic_update_tx(tr, cluster_key, Cluster, _clear, cluster_indexes)
+        return []
+
+    def clear_lost_site(self, cluster_id: str, lost_site: str, allowed_states, node_ids, check) -> list[str]:
+        """The last step of a sync-replication site return, in ONE transaction:
+        the cluster still records ``lost_site`` in one of ``allowed_states``,
+        and ``check(cluster, nodes)`` - a pure function over the records of
+        ``node_ids`` read in the same transaction - finds nothing; then
+        ``lost_site`` / ``lost_site_state`` are cleared. A node or device that
+        failed since the caller's own checks makes it refuse. Returns the
+        problems; nothing is written when there are any."""
+        return fdb.transactional(DBController._clear_lost_site_tx)(
+            self, self.kv_store, cluster_id, lost_site, tuple(allowed_states), list(node_ids), check,
+            Cluster.active_indexes(self.kv_store))
+
     def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0, *, source=None) -> list[JobSchedule]:
         if source is not None:
             ret = [t for t in source if t.cluster_id == cluster_id]

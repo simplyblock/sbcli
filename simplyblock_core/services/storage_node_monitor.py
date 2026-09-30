@@ -5,6 +5,7 @@ from datetime import datetime, UTC
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
+from simplyblock_core.controllers import sync_replication_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -276,6 +277,69 @@ def get_next_cluster_status(cluster_id):
     # NOW, not as it was when a slow probe pass started.
     snodes = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
 
+    # One task-table fetch for the whole verdict: is_new_migrated_node runs
+    # once per ONLINE node below and used to re-fetch the full per-cluster
+    # task list each time (O(n·T) per verdict).
+    cluster_tasks = db.get_job_tasks(cluster_id)
+
+    if cluster.sync_replication is True:
+        return _sync_cluster_status(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_tasks)
+    return _status_verdict(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_tasks)
+
+
+_STATUS_RANK = {Cluster.STATUS_ACTIVE: 0, Cluster.STATUS_DEGRADED: 1, Cluster.STATUS_SUSPENDED: 2}
+
+
+def _sync_cluster_status(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_tasks):
+    """The status of a sync-replication cluster, judged per site: every LVS
+    keeps one zone per site, so each site's nodes are judged on their own
+    (_status_verdict). A LOST site (_site_lost: every node of it gone) no
+    longer suspends: its zone is lost as a whole, which ultra's lost-zone rule
+    serves from the other zone; the cluster is then at least DEGRADED. Both
+    sites lost -> SUSPENDED. A site damaged beyond its FTT without being lost
+    still suspends (its zone is neither readable nor lost)."""
+    sites = sorted({n.site for n in snodes if n.site})
+    verdicts = {site: _status_verdict(cluster, [n for n in snodes if n.site == site],
+                                      jm_repl_by_node, dp_quorum_by_node, cluster_tasks)
+                for site in sites}
+    lost = [site for site in sites
+            if _site_lost([n for n in snodes if n.site == site], dp_quorum_by_node)]
+    live = [status for site, status in verdicts.items() if site not in lost]
+    if not live:
+        return Cluster.STATUS_SUSPENDED
+    worst = max(live, key=lambda st: _STATUS_RANK.get(st, 2))
+    if lost:
+        logger.warning("Sync replication: site(s) %s lost as a whole — not suspending", lost)
+        return worst if _STATUS_RANK.get(worst, 2) >= 1 else Cluster.STATUS_DEGRADED
+    return worst
+
+
+def _site_lost(site_nodes, dp_quorum_by_node) -> bool:
+    """Whether a site is lost as a whole: it has counted nodes (not in
+    creation / suspended / removed) and every one of them is gone - OFFLINE
+    (a terminal escalation), or in a transient state (UNREACHABLE,
+    SCHEDULABLE, IN_SHUTDOWN, RESTARTING) with a peer majority reporting its
+    data plane gone (``dp_quorum_by_node``, _collect_status_probes). A node
+    that is ONLINE or DOWN (SPDK alive) keeps its site, and device failures
+    never count: they are the per-site verdict's business."""
+    counted = [n for n in site_nodes
+               if n.status not in (StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED,
+                                   StorageNode.STATUS_REMOVED)]
+
+    def _gone(node):
+        if node.status == StorageNode.STATUS_OFFLINE:
+            return True
+        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+            return False
+        return bool(dp_quorum_by_node.get(node.get_id()))
+    return bool(counted) and all(_gone(n) for n in counted)
+
+
+def _status_verdict(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_tasks) -> str:
+    """The cluster status over ``snodes`` (all nodes, or one site's on a
+    sync-replication cluster) from DB state and the precomputed probes."""
+    cluster_id = cluster.get_id()
+
     online_nodes = 0
     offline_nodes = 0
     affected_nodes = 0
@@ -284,11 +348,6 @@ def get_next_cluster_status(cluster_id):
     jm_replication_tasks = False
 
     affected_physical_nodes = []
-
-    # One task-table fetch for the whole verdict: is_new_migrated_node runs
-    # once per ONLINE node below and used to re-fetch the full per-cluster
-    # task list each time (O(n·T) per verdict).
-    cluster_tasks = db.get_job_tasks(cluster_id)
 
     for node in snodes:
 
@@ -927,6 +986,13 @@ def _update_cluster_status_impl(cluster_id):
     # Same reasoning for stranded devices: sweep before the status decision so
     # a re-admitted device stops counting toward affected_nodes on this tick.
     _readmit_stranded_devices(cluster_id)
+    # Sync replication: a lost site that is back as a whole gets the leaders
+    # of the LVS still led from it and its record cleared (DB-only early-out
+    # otherwise). Best-effort like the recovery drive below: retried next pass.
+    try:
+        sync_replication_controller.settle_site_return(cluster_id)
+    except Exception:
+        logger.exception("Sync-replication site return failed for cluster %s", cluster_id)
 
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
@@ -1173,12 +1239,20 @@ def set_node_unreachable(node):
         logger.error("Data-plane check for unreachable node %s failed: %s", node.get_id(), e)
 
 
-def is_node_data_plane_disconnected(node):
+def is_node_data_plane_disconnected(node, *, fresh=False):
     """Return True if all other online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
+    ``fresh`` bypasses the vote cache (and refreshes it): a decision that
+    fences a site on the answer must not reuse a vote up to
+    _DP_QUORUM_PROBE_TTL_SEC old.
     """
-    disconnected, total = _count_data_plane_votes(node)
+    if fresh:
+        votes = _count_data_plane_votes_uncached(node)
+        _status_probe_cache.put(("dp_votes", node.get_id()), votes)
+        disconnected, total = votes
+    else:
+        disconnected, total = _count_data_plane_votes(node)
     return total > 0 and disconnected == total
 
 

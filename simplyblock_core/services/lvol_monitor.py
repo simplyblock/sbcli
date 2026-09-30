@@ -508,6 +508,10 @@ def _subsys_sweep_due() -> bool:
     return True
 
 
+#: Cluster states in which the sync ANA-drift repair runs (check_node).
+_ANA_REPAIR_CLUSTER_STATES = (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY)
+
+
 def check_node(cluster, snode, all_lvols, subsys_check=False):
     # Number of in-deletion lvols acted on this pass — the main loop uses it
     # to shorten the inter-cycle sleep while a mass delete is draining.
@@ -827,9 +831,14 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
             continue
 
         from simplyblock_core import storage_node_ops
-        # Sync replication: the site-rule context, read once per volume.
+        # Sync replication: the site-rule context, read once per volume. No
+        # ANA-drift repair on a cluster that is not serving (a suspended one,
+        # e.g. after a failed re-activation): opening paths is the
+        # activation's Pass 4 there (the precedent of _check_node_lvstore's
+        # auto_fix outside ACTIVE / DEGRADED / READONLY).
         sync_ctx = (storage_node_ops.sync_ana_context(lvol)
-                    if lvol.ha_type == "ha" and storage_node_ops._sync_site(snode) else None)
+                    if lvol.ha_type == "ha" and storage_node_ops._sync_site(snode)
+                    and cluster.status in _ANA_REPAIR_CLUSTER_STATES else None)
         passed = True
         try:
             # Verify against the WIRE identity: after a fail-back the record

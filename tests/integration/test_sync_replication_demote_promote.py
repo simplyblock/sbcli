@@ -28,7 +28,7 @@ from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
     SyncAnaError, SyncGateError, SyncGroupMemberError, SyncLeadershipMovingError, SyncPromoteRefusedError,
-    SyncReplicationUnsupportedError, SyncSiteOfflineError,
+    SyncSiteOfflineError,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -255,14 +255,17 @@ class TestPromoteApi:
             src.sync_promote_lvol(vol.get_id(), SITE_B)
         assert exc.value.volumes == [other.get_id()]
 
-    def test_t_offline_is_412_and_forced_is_not_available_yet(self, db, spdk, gate):
+    def test_t_offline_is_412_and_forced_is_a_disaster_fail_over(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         for node in a:
             _update(db, node, status=StorageNode.STATUS_OFFLINE)
         with pytest.raises(SyncSiteOfflineError):
             src.sync_promote_lvol(vol.get_id(), SITE_B)
-        with pytest.raises(SyncReplicationUnsupportedError, match="disaster"):
-            src.sync_promote_lvol(vol.get_id(), SITE_B, force=True)
+        # judged by the disaster gate, not the planned one (test_sync_replication_disaster.py)
+        result = src.sync_promote_lvol(vol.get_id(), SITE_B, force=True)
+        assert result.in_progress
+        assert _task(db, result.task_id).function_params["lost_site"] == SITE_A
+        gate.assert_not_called()
 
     def test_forced_while_t_is_online_is_refused(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)

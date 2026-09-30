@@ -233,6 +233,34 @@ def send_dev_status_event(device, status, target_node=None):
     return all(results) if results else False
 
 
+def send_dev_statuses_to_node(node, statuses) -> bool:
+    """Deliver the ``(device, status)`` pairs of ``statuses`` to ``node`` in ONE
+    ``distr_status_events_update`` - posted to every distrib of that SPDK
+    process, so to every LVS instance it hosts - and record them in the node's
+    view of the devices. Unlike send_dev_status_event this is strict: the
+    answer is whether the node acknowledged (an RPC error or a false answer
+    is False), for a caller that must know every distrib applied it."""
+    statuses = list(statuses)
+    if not statuses:
+        return True
+    now = datetime.datetime.now().isoformat("T", "seconds") + 'Z'
+    events = {"events": [{"timestamp": now, "event_type": "device_status",
+                          "storage_ID": dev.cluster_device_order, "status": status}
+                         for dev, status in statuses]}
+    try:
+        acked = node.rpc_client(timeout=10, retry=1).distr_status_events_update(events)
+    except Exception as e:
+        logger.warning("Device statuses for %d device(s) not delivered to %s: %s",
+                       len(statuses), node.get_id(), e)
+        return False
+    if not acked:
+        logger.warning("Device statuses for %d device(s) refused by %s", len(statuses), node.get_id())
+        return False
+    for dev, status in statuses:
+        _persist_target_device_event(dev, status, node)
+    return True
+
+
 def disconnect_device(device, detach_controllers=True):
     """Drop the peers' remote controllers for ``device``.
 

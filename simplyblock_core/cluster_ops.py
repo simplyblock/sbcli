@@ -1141,8 +1141,8 @@ def _activation_open_node_ana(node_id) -> None:
     # site rule (a volume demoted on, or not active on, a site stays fenced
     # there), read under the LVS's site-rule lock by the setter.
     sync = bool(storage_node_ops._sync_site(snode))
-    # primary path -> optimized
-    for lv in node_lvols:
+    # primary path -> optimized (an offline owner of a remote-led LVS has none)
+    for lv in node_lvols if snode.status == StorageNode.STATUS_ONLINE else []:
         try:
             storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
         except Exception as e:
@@ -1632,19 +1632,28 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Port allocation inside create_lvstore is separately serialized by
     # storage_node_ops._lvstore_port_alloc_lock.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    snode_status = {n.get_id(): n.status for n in snodes}
     pass1_recreate_ids: builtins.list[str] = []
     pass1_create_ids: builtins.list[str] = []
+    # Owner -> the node that builds its LVS leader (the owner itself, or on a
+    # sync-replication cluster the primary of its remote triplet when the LVS
+    # is led from there: storage_node_ops.activation_leader_builder_id).
+    pass1_builders: dict[str, str] = {}
     for snode in snodes:
         if snode.is_secondary_node:  # pass
             continue
-        if snode.status != StorageNode.STATUS_ONLINE:
+        if snode.status == StorageNode.STATUS_REMOVED:
             continue
         # Re-read node fresh before lvstore creation to avoid writing stale fields
         # (previous create_lvstore calls may have modified this node as a secondary)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if snode.lvstore and force_lvstore_create is False:
+            builder_id = storage_node_ops.activation_leader_builder_id(snode)
+            if snode_status.get(builder_id) != StorageNode.STATUS_ONLINE:
+                continue
             pass1_recreate_ids.append(snode.get_id())
-        else:
+            pass1_builders[snode.get_id()] = builder_id
+        elif snode.status == StorageNode.STATUS_ONLINE:
             pass1_create_ids.append(snode.get_id())
 
     def _set_lvstore_status(node_id, value) -> None:
@@ -1660,10 +1669,12 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if ret:
             _set_lvstore_status(node_id, "ready")
 
-            # Create S3 bdev for backup support (only if backup is configured)
+            # Create S3 bdev for backup support (only if backup is configured;
+            # a remote-led LVS's owner may be offline)
             if cluster.backup_config:
                 snode = db_controller.get_storage_node_by_id(node_id)
-                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+                if snode.status == StorageNode.STATUS_ONLINE:
+                    backup_controller.create_s3_bdev(snode, cluster.backup_config)
 
         else:
             _set_lvstore_status(node_id, "failed")
@@ -1671,30 +1682,56 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
 
-    def _recreate_primary_lvs(node_id):
-        snode = db_controller.get_storage_node_by_id(node_id)
-        logger.warning(f"Node {node_id} already has lvstore {snode.lvstore}")
-        return storage_node_ops.recreate_lvstore(snode, activation_mode=True)
+    def _recreate_primary_lvs(owner_id):
+        snode = db_controller.get_storage_node_by_id(owner_id)
+        builder_id = pass1_builders[owner_id]
+        if builder_id == owner_id:
+            logger.warning(f"Node {owner_id} already has lvstore {snode.lvstore}")
+            return storage_node_ops.recreate_lvstore(snode, activation_mode=True)
+        # Sync replication: led from its remote triplet - the leader is built
+        # on that triplet's primary, every other instance (the owner included)
+        # comes back non-leader in Pass 2.
+        builder = db_controller.get_storage_node_by_id(builder_id)
+        logger.warning("LVS %s is led from site %s: leader rebuilt on %s", snode.lvstore,
+                       builder.site, builder_id)
+        return storage_node_ops.recreate_lvstore(builder, lvs_primary=snode, activation_mode=True)
+
+    # One worker per builder node: the leader rebuilds one SPDK hosts (its
+    # own LVS, and the remote-led LVS whose active primary it is) run one
+    # after the other; different nodes stay parallel.
+    pass1_groups: dict[str, builtins.list[str]] = {}
+    for owner_id in pass1_recreate_ids:
+        pass1_groups.setdefault(pass1_builders[owner_id], []).append(owner_id)
+
+    def _recreate_builder_group(builder_id):
+        out: dict[str, t.Any] = {}
+        for owner_id in pass1_groups[builder_id]:
+            try:
+                out[owner_id] = (_recreate_primary_lvs(owner_id), None)
+            except Exception as e:
+                out[owner_id] = (None, e)
+                break
+        return out
 
     if pass1_recreate_ids:
         pass1_results: dict[str, t.Any] = {}
         pass1_errors: builtins.list[ValueError] = []
-        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_recreate_ids))
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_groups))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1") as pool:
-            futures = {pool.submit(_recreate_primary_lvs, nid): nid for nid in pass1_recreate_ids}
-            for future in as_completed(futures):
-                node_id = futures[future]
-                try:
-                    pass1_results[node_id] = future.result()
-                except storage_node_ops.LVSRestartRequiredError as e:
-                    logger.error(e)
-                    pass1_errors.append(ValueError(
-                        f"Failed to activate cluster: node {e.node_id} holds "
-                        f"partial state for LVS {e.lvs_name} that examine could "
-                        f"not recover. Restart node {e.node_id} before activating."))
-                except Exception as e:
-                    logger.error(e)
-                    pass1_errors.append(ValueError("Failed to activate cluster"))
+            group_futures = [pool.submit(_recreate_builder_group, bid) for bid in pass1_groups]
+            for group_future in as_completed(group_futures):
+                for owner_id, (result, error) in group_future.result().items():
+                    if error is None:
+                        pass1_results[owner_id] = result
+                    elif isinstance(error, storage_node_ops.LVSRestartRequiredError):
+                        logger.error(error)
+                        pass1_errors.append(ValueError(
+                            f"Failed to activate cluster: node {error.node_id} holds "
+                            f"partial state for LVS {error.lvs_name} that examine could "
+                            f"not recover. Restart node {error.node_id} before activating."))
+                    else:
+                        logger.error(error)
+                        pass1_errors.append(ValueError("Failed to activate cluster"))
         if pass1_errors:
             set_cluster_status(cl_id, ols_status)
             raise pass1_errors[0]
@@ -1758,11 +1795,23 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # skipping the ring participants entirely. On a sync-replication cluster
     # that includes the remote-triplet instances.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+
+    def _pass2_owners(snode) -> builtins.list[StorageNode]:
+        """The LVS ``snode`` rebuilds as a non-leader: the ones it hosts as a
+        secondary / tertiary / remote-triplet member, and - sync replication -
+        its own when that is led from its remote triplet; never one whose
+        leader Pass 1 built on ``snode`` itself."""
+        owners = storage_node_ops.hosted_lvs_owners(snode, db_controller)
+        if snode.lvstore and not snode.is_secondary_node and \
+                storage_node_ops.activation_leader_builder_id(snode) != snode.get_id():
+            owners = [snode, *owners]
+        return [o for o in owners if storage_node_ops.activation_leader_builder_id(o) != snode.get_id()]
+
     pass2_ids: builtins.list[str] = []
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
-        if storage_node_ops.hosted_lvs_owners(snode, db_controller):
+        if _pass2_owners(snode):
             pass2_ids.append(snode.get_id())
 
     # Workers fan out per non-leader node, but work on the SAME primary must
@@ -1772,13 +1821,12 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Pre-created per-primary locks serialize exactly that, nothing more.
     pass2_primary_locks: dict[str, threading.Lock] = {}
     for node_id in pass2_ids:
-        for p in storage_node_ops.hosted_lvs_owners(
-                db_controller.get_storage_node_by_id(node_id), db_controller):
+        for p in _pass2_owners(db_controller.get_storage_node_by_id(node_id)):
             pass2_primary_locks.setdefault(p.get_id(), threading.Lock())
 
     def _recreate_non_leader_lvs(node_id) -> bool:
         snode = db_controller.get_storage_node_by_id(node_id)
-        primary_nodes = storage_node_ops.hosted_lvs_owners(snode, db_controller)
+        primary_nodes = _pass2_owners(snode)
         logger.info(f"recreating secondary/tertiary LVS on node {node_id}")
         ret = True
         for primary_node in primary_nodes:
@@ -1804,25 +1852,29 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 # examine. We deliberately do NOT switch the helper out of
                 # activation_mode here: that would enable peer leader/distrib/
                 # lvstore/hublvol RPCs which presume the peer's full stack is up.
+                # The leader Pass 1 built: the owner, or the active remote
+                # primary of a remote-led LVS (sync replication).
+                leader_node = db_controller.get_storage_node_by_id(
+                    storage_node_ops.activation_leader_builder_id(primary_node))
                 leader_blocked = False
                 leader_port = None
-                if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
+                if not is_fresh_activation and leader_node.status == StorageNode.STATUS_ONLINE:
                     try:
-                        leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
-                        port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
-                        tcp_ports_events.port_deny(primary_node, leader_port)
+                        leader_port = leader_node.get_lvol_subsys_port(primary_node.lvstore)
+                        port_block.set_port(leader_node, leader_port, block=True, timeout=3, retry=1)
+                        tcp_ports_events.port_deny(leader_node, leader_port)
                         leader_blocked = True
                         time.sleep(0.5)
                     except Exception as e:
                         logger.warning(
                             "Re-activation: port-block on leader %s for %s failed: %s — "
                             "proceeding without block (secondary examine may race live leader writes)",
-                            primary_node.get_id(), primary_node.lvstore, e)
+                            leader_node.get_id(), primary_node.lvstore, e)
 
                 try:
                     try:
                         r = storage_node_ops.recreate_lvstore_on_non_leader(
-                            snode, primary_node, primary_node, activation_mode=True)
+                            snode, leader_node, primary_node, activation_mode=True)
                     except storage_node_ops.LVSRestartRequiredError as e:
                         logger.error(e)
                         raise ValueError(
@@ -1832,15 +1884,15 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 finally:
                     if leader_blocked:
                         try:
-                            port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
-                            tcp_ports_events.port_allowed(primary_node, leader_port)
+                            port_block.set_port(leader_node, leader_port, block=False, timeout=3, retry=1)
+                            tcp_ports_events.port_allowed(leader_node, leader_port)
                         except Exception as ue:
                             logger.error(
                                 "Failed to unblock leader %s:%s after non-leader recreate: %s — scheduling port_allow",
-                                primary_node.get_id(), leader_port, ue)
+                                leader_node.get_id(), leader_port, ue)
                             try:
                                 tasks_controller.add_port_allow_task(
-                                    primary_node.cluster_id, primary_node.get_id(), leader_port)
+                                    leader_node.cluster_id, leader_node.get_id(), leader_port)
                             except Exception as se:
                                 logger.error("Failed to schedule port_allow fallback: %s", se)
             if not r:
@@ -1877,7 +1929,13 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # lines 5350-5379 and must tolerate offline nodes (FTT=1 or FTT=2).
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     pass3_ids = [n.get_id() for n in snodes
-                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE
+                 and storage_node_ops.activation_leader_builder_id(n) == n.get_id()]
+    # Sync replication: an LVS led from its remote triplet gets its hublvol on
+    # that triplet's primary (the leader Pass 1 built), whatever the owner's
+    # own status.
+    pass3_remote_ids = [owner_id for owner_id, builder_id in pass1_builders.items()
+                        if builder_id != owner_id]
 
     # Workers fan out per primary, but a node may serve as secondary/tertiary
     # for several primaries: hublvol create/connect mutates DB state on both
@@ -1953,16 +2011,86 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             for lock in reversed(held):
                 lock.release()
 
-    if pass3_ids:
-        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass3_ids))
+    # Sync replication: what Pass 3 could not wire for a remote-led LVS. Unlike
+    # the home-led wiring below it fails the activation: nothing repairs the
+    # redirect of a remote follower later, and the site rule would open its
+    # paths (Pass 4, then the lvol monitor's ANA self-heal) without one.
+    pass3_remote_failures: builtins.list[str] = []
+
+    def _wire_remote_led_hublvols(owner_id) -> None:
+        """Pass 3 for an LVS led from its remote triplet: the hublvol on the
+        leader (adopted: the LVS metadata is the owner's), the secondary
+        hublvol on the triplet's secondary, and the triplet's secondary /
+        tertiary connected to it. The home triplet gets none (a hublvol never
+        crosses a site). A failed adoption or a follower connect that does
+        not succeed is recorded in ``pass3_remote_failures``, which fails the
+        activation."""
+        owner = db_controller.get_storage_node_by_id(owner_id)
+        leader_id, sec_id, tert_id = storage_node_ops.remote_triplet_refs(owner)
+        held: builtins.list[threading.Lock] = []
+        try:
+            for nid in sorted({n for n in (leader_id, sec_id, tert_id) if n}):
+                lock = pass3_node_locks.setdefault(nid, threading.Lock())
+                lock.acquire()
+                held.append(lock)
+            leader = db_controller.get_storage_node_by_id(leader_id)
+            try:
+                leader.adopt_hublvol(owner, cluster.nqn)
+            except Exception as e:
+                logger.error("Error adopting hublvol of %s on %s: %s", owner.lvstore, leader_id, e)
+                pass3_remote_failures.append(f"{owner.lvstore}: hublvol on {leader_id}: {e}")
+                return
+            sec1 = db_controller.get_storage_node_by_id(sec_id) if sec_id else None
+            sec1_online = bool(sec1 and sec1.status == StorageNode.STATUS_ONLINE)
+            if sec1_online and sec1 is not None:
+                try:
+                    sec1.create_secondary_hublvol(owner, cluster.nqn)
+                except Exception as e:
+                    logger.error("Error creating secondary hublvol of %s on %s: %s",
+                                 owner.lvstore, sec_id, e)
+            for peer_id, role in ((sec_id, "secondary"), (tert_id, "tertiary")):
+                if not peer_id:
+                    continue
+                peer = db_controller.get_storage_node_by_id(peer_id)
+                if peer.status != StorageNode.STATUS_ONLINE:
+                    continue
+                failover = sec1 if role == "tertiary" and sec1_online else None
+                try:
+                    time.sleep(0.2)
+                    connected = peer.connect_to_hublvol(leader, failover_node=failover, role=role,
+                                                        lvs_node=owner)
+                except Exception as e:
+                    logger.error("Error connecting %s to hublvol of %s on %s: %s", peer_id,
+                                 owner.lvstore, leader_id, e)
+                    connected = False
+                if not connected:
+                    pass3_remote_failures.append(f"{owner.lvstore}: {peer_id} not connected to "
+                                                 f"the hublvol on {leader_id}")
+        finally:
+            for lock in reversed(held):
+                lock.release()
+
+    pass3_work = [(_wire_hublvols, nid) for nid in pass3_ids] + \
+        [(_wire_remote_led_hublvols, oid) for oid in pass3_remote_ids]
+    if pass3_work:
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass3_work))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p3") as pool:
-            for future in as_completed({pool.submit(_wire_hublvols, nid) for nid in pass3_ids}):
+            pass3_futures = {pool.submit(fn, nid): (fn, nid) for fn, nid in pass3_work}
+            for future in as_completed(pass3_futures):
                 try:
                     future.result()
                 except Exception as e:
                     # Same tolerance as the sequential loop: hublvol wiring
-                    # errors are logged, not fatal to activation.
+                    # errors are logged, not fatal to activation - except for
+                    # a remote-led LVS (pass3_remote_failures).
                     logger.error("Pass 3 hublvol wiring worker failed: %s", e)
+                    fn, nid = pass3_futures[future]
+                    if fn is _wire_remote_led_hublvols:
+                        pass3_remote_failures.append(f"{nid}: {e}")
+    if pass3_remote_failures:
+        logger.error("Pass 3: remote-led LVS not wired: %s", pass3_remote_failures)
+        set_cluster_status(cl_id, ols_status)
+        raise ValueError(f"Failed to activate cluster: {pass3_remote_failures[0]}")
 
     # reorder qos classes ids
     qos_classes = db_controller.get_qos(cl_id)
@@ -2013,8 +2141,11 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # ANA flips are RPC-only (no DB writes) so the per-primary workers need no
     # locks; different primaries touch different subsystems even when they
     # share a secondary node.
+    # Sync replication: a remote-led LVS whose owner is offline is opened too
+    # (its active triplet is up); every path follows the site rule.
     pass4_ids = [n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)
-                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+                 if not n.is_secondary_node and (n.status == StorageNode.STATUS_ONLINE
+                                                  or n.get_id() in pass3_remote_ids)]
     if pass4_ids:
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass4_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p4") as pool:

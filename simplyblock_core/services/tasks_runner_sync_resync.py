@@ -24,7 +24,6 @@ from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import events_controller, sync_replication_controller, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
 
@@ -120,25 +119,6 @@ def _run_failed(task, owner, reason):
 
 def _other_site(owner, nodes):
     return next((n.site for n in nodes if n.site and n.site != owner.site), "")
-
-
-def _zone_not_up(nodes, site):
-    """What keeps ``site``'s zone from being fully up: its nodes that are not
-    online and their devices that are not online (removed / migrated-away ones
-    do not count, as for the other migration runners)."""
-    down = []
-    for node in nodes:
-        if node.site != site or node.status in (StorageNode.STATUS_IN_CREATION,
-                                                StorageNode.STATUS_REMOVED):
-            continue
-        if node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
-            down.append(f"node:{node.get_id()}")
-        for dev in node.nvme_devices:
-            if dev.status in (NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
-                continue
-            if dev.status != NVMeDevice.STATUS_ONLINE:
-                down.append(f"dev:{dev.get_id()}")
-    return down
 
 
 def _migration_status(rpc, name):
@@ -252,7 +232,7 @@ def task_runner(task):
         zones = sync_replication_controller.lagging_sites(
             owner.site, _other_site(owner, nodes),
             db.get_unresolved_sync_replication_events(task.cluster_id, lvs_name))
-        down = [item for site in zones for item in _zone_not_up(nodes, site)]
+        down = [item for site in zones for item in sync_replication_controller.zone_not_up(nodes, site)]
         if down:
             return _wait(task, f"waiting for the lagging zone(s) {zones} to be up: {down}")
 

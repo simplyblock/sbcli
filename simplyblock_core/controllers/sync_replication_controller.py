@@ -30,6 +30,7 @@ from simplyblock_core.exceptions import (
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.sync_replication import SyncReplicationEvent
 from simplyblock_core.rpc_client import RPCException
@@ -489,6 +490,38 @@ def latest_journal_drop(events: Iterable[SyncReplicationEvent], drop_counts: Cal
     return None
 
 
+def zone_not_up(nodes: Iterable[StorageNode], site: str) -> list[str]:
+    """What keeps ``site``'s zone from being fully up: its nodes that are not
+    online and their devices that are not online (removed / migrated-away ones
+    do not count, as for the other migration runners). A FAILED device counts:
+    its zone is not whole. Shared by the resync runner and the site return."""
+    down = []
+    for node in nodes:
+        if node.site != site or node.status in (StorageNode.STATUS_IN_CREATION,
+                                                StorageNode.STATUS_REMOVED):
+            continue
+        if node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+            down.append(f"node:{node.get_id()}")
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+                continue
+            if dev.status != NVMeDevice.STATUS_ONLINE:
+                down.append(f"dev:{dev.get_id()}")
+    return down
+
+
+def site_return_problems(nodes: Iterable[StorageNode], site: str) -> list[str]:
+    """Why the lost ``site`` has not fully returned: a node of it (not removed,
+    not in creation) that is not ONLINE - SUSPENDED is not back - or anything
+    zone_not_up reports."""
+    nodes = list(nodes)
+    problems = [f"node:{n.get_id()} {n.status}" for n in nodes
+                if n.site == site and n.status not in (StorageNode.STATUS_REMOVED,
+                                                       StorageNode.STATUS_IN_CREATION,
+                                                       StorageNode.STATUS_ONLINE)]
+    return problems + [p for p in zone_not_up(nodes, site) if not p.startswith("node:")]
+
+
 def lvs_active_on(owner: StorageNode, site: str) -> bool:
     """Whether ``owner``'s LVS may be led from ``site``: it is its active site,
     or a leadership move is in flight (the leader may then be on either
@@ -666,6 +699,118 @@ def volume_sync_status(lvol: LVol, site: str, *, max_age: float = 0.0) -> Volume
                             cluster=cluster_sync_status(owner.cluster_id, max_age=max_age))
 
 
+# ---------------------------------------------------------------------------
+# Site return
+# ---------------------------------------------------------------------------
+
+#: The statuses a distrib reports once it has replayed its journal: anything
+#: else (``unknown`` before the first replay, a missing or malformed element)
+#: is not a fact yet.
+REPLAYED_STATUSES = (STATUS_SYNCED, "primary_unsynced", "replica_unsynced", "primary_syncing",
+                     "replica_syncing")
+
+#: At most one "return held" event per LVS per this many seconds (the return
+#: step runs on every monitor pass).
+_RETURN_EVENT_INTERVAL_SEC = 600
+_return_events = TTLCache()
+
+
+def replay_problems(layout: LvsLayout, answer) -> list[str]:
+    """Why the leader's ``distr_sync_replication_status`` ``answer`` does not
+    show every distrib of the LVS replayed yet: no answer, a distrib absent,
+    not in mode ``full``, or a status outside REPLAYED_STATUSES."""
+    if answer is None:
+        return [f"LVS {layout.lvs_name}: the leader did not answer"]
+    problems = []
+    for name in layout.distribs:
+        elem = _elem_of(answer, name)
+        if elem is None:
+            problems.append(f"LVS {layout.lvs_name}: {name}: no status")
+        elif elem.get("sync_replication_mode") != MODE_FULL:
+            problems.append(f"LVS {layout.lvs_name}: {name}: mode {elem.get('sync_replication_mode')}")
+        elif _elem_status(elem) not in REPLAYED_STATUSES:
+            problems.append(f"LVS {layout.lvs_name}: {name}: {_elem_status(elem)}")
+    return problems
+
+
+def _held(owner: StorageNode, leader: StorageNode, missing: list[str]) -> None:
+    key = (owner.cluster_id, owner.lvstore)
+    if _return_events.get(key, _RETURN_EVENT_INTERVAL_SEC):
+        return
+    _return_events.put(key, True)
+    from simplyblock_core.controllers import storage_events
+    storage_events.sync_site_return_lvols_missing(leader, owner.lvstore, missing)
+
+
+def _elect_on_returned_site(db: DBController, cluster, owner: StorageNode) -> bool:
+    """Give ``owner``'s LVS, led from the returned site, its leader there and
+    check it can serve: every expected volume registered on the leader, every
+    distrib replayed (a status that is a fact). False: not now."""
+    leader_id = storage_node_ops.elect_lvs_leader_on_site(owner.get_id())
+    if not leader_id:
+        return False
+    leader = db.get_storage_node_by_id(leader_id)
+    missing = storage_node_ops.missing_lvols_on(leader, owner, db)
+    if missing:
+        logger.error("Site return: leader %s of LVS %s misses volumes %s", leader_id,
+                     owner.lvstore, missing)
+        _held(owner, leader, missing)
+        return False
+    problems = replay_problems(lvs_layout(owner, cluster.page_size_in_blocks), _query_node(leader))
+    if problems:
+        logger.info("Site return: LVS %s not replayed yet: %s", owner.lvstore, problems)
+        return False
+    return True
+
+
+def settle_site_return(cluster_id: str) -> bool:
+    """The return of a lost site, run by the storage-node monitor on every pass
+    (cheap DB checks until the site is back). With a site recorded as lost -
+    its fence ``done``, or ``fencing`` left behind by a disaster promote that
+    no longer runs - and every node of it ONLINE with its zone up
+    (site_return_problems):
+
+    1. every LVS still led from that site (never failed over: not promoted,
+       not promotable, or empty) gets its leader there
+       (storage_node_ops.elect_lvs_leader_on_site) and must show every
+       expected volume on it and every distrib replayed;
+    2. a catch-up task for every LVS (both zones of each have diverged);
+    3. ``lost_site`` / ``lost_site_state`` cleared in one transaction that
+       re-reads the site's nodes (DBController.clear_lost_site).
+
+    Any step not possible now -> False, retried by the next pass. The volumes
+    of the LVS that were active on the site stay fenced there
+    (``sync_demoted_sites``) until promoted. True when the site was cleared."""
+    db = DBController()
+    cluster = db.get_cluster_by_id(cluster_id)
+    lost = cluster.lost_site
+    if not cluster.sync_replication or not lost:
+        return False
+    state = cluster.lost_site_state
+    if state == LOST_SITE_FENCING:
+        if any(t.function_params.get("lost_site") == lost
+               for t in db.get_active_sync_promote_tasks(cluster_id)):
+            return False
+    elif state != LOST_SITE_DONE:
+        return False
+    nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    if site_return_problems(nodes, lost):
+        return False
+    for owner in _lvs_owners(nodes):
+        if storage_node_ops._led_from_lost_site(cluster, owner) and \
+                not _elect_on_returned_site(db, cluster, owner):
+            return False
+    for owner in _lvs_owners(nodes):
+        tasks_controller.add_sync_resync_task(cluster_id, owner.get_id(), owner.lvstore)
+    problems = db.clear_lost_site(cluster_id, lost, (state,), [n.get_id() for n in nodes if n.site == lost],
+                                  lambda _cluster, site_nodes: site_return_problems(site_nodes, lost))
+    if problems:
+        logger.warning("Site %s return not recorded: %s", lost, problems)
+        return False
+    logger.warning("Site %s returned: lost_site cleared, catch-up scheduled for every LVS", lost)
+    return True
+
+
 def check_gate(cluster_id: str) -> None:
     """The planned switchover gate (both sites up), always live: every
     answering instance of every LVS reports every distrib ``synced`` in mode
@@ -683,12 +828,14 @@ def check_gate(cluster_id: str) -> None:
         raise SyncGateError("sync-replication planned", problems)
 
 
-def check_disaster_gate(cluster_id: str, lost_site: str) -> None:
+def check_disaster_gate(cluster_id: str, lost_site: str, lvs_names: Iterable[str] | None = None) -> None:
     """The disaster fail-over gate for the loss of ``lost_site``: only the LVS
     active on it (lvs_active_on) move, and each is judged from the persisted
     events of the lost site's nodes (disaster_gate_problems) - never a live
     query, the site is gone. LVS active on the surviving site go degraded
-    because of the loss itself and do not block.
+    because of the loss itself and do not block. ``lvs_names`` restricts it to
+    the LVS a promote moves (None: every LVS): another LVS of the lost site
+    that is not in sync blocks only its own promote.
 
     Raises SyncGateError listing what failed, SyncReplicationUnsupportedError
     on a cluster without sync replication, SyncReplicationSiteError for an
@@ -698,9 +845,10 @@ def check_disaster_gate(cluster_id: str, lost_site: str) -> None:
     _check_site(db, cluster_id, lost_site)
     nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
     node_sites = {n.get_id(): n.site for n in nodes}
+    selected = None if lvs_names is None else set(lvs_names)
     problems = []
     for owner in _lvs_owners(nodes):
-        if not lvs_active_on(owner, lost_site):
+        if not lvs_active_on(owner, lost_site) or (selected is not None and owner.lvstore not in selected):
             continue
         problems += disaster_gate_problems(
             owner.lvstore, db.get_sync_replication_events(cluster_id, owner.lvstore),
@@ -975,6 +1123,91 @@ def online_sites(db: DBController, cluster) -> set[str]:
             if n.site and n.status == StorageNode.STATUS_ONLINE and n.site != cluster.lost_site}
 
 
+#: Node states in which SPDK may still run: a site with such a node is not
+#: lost, whatever its other nodes say (DOWN: only the client port is blocked).
+SITE_RUNNING_STATES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                       StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_CREATION)
+
+
+def site_running_nodes(nodes: Iterable[StorageNode], site: str) -> list[str]:
+    """The nodes of ``site`` whose status says SPDK may still run there
+    (SITE_RUNNING_STATES), as ``id (status)``."""
+    return [f"{n.get_id()} ({n.status})" for n in nodes
+            if n.site == site and n.status in SITE_RUNNING_STATES]
+
+
+def disaster_move_problems(cluster, owner: StorageNode, volumes: Iterable[LVol], expect: str,
+                           target_site: str, lost_site: str, request_ids: Iterable[str]) -> list[str]:
+    """What forbids marking ``owner``'s LVS as moving to ``target_site`` in a
+    disaster fail-over of ``lost_site``, judged inside the promote's
+    transaction from the DB alone: the site steps not recorded as done,
+    ``lvs_active_site`` no longer ``expect``, the LVS not led from the lost
+    site, a volume of it still served there that the request does not move
+    (every other one was fenced by the site steps - one appearing now was
+    created or reopened since)."""
+    lvs = owner.lvstore
+    problems = []
+    if cluster.lost_site != lost_site or cluster.lost_site_state != LOST_SITE_DONE:
+        problems.append(f"the fence of site {lost_site} is not complete (lost_site="
+                        f"{cluster.lost_site!r}, state={cluster.lost_site_state!r})")
+    if owner.lvs_active_site != expect:
+        problems.append(f"LVS {lvs}: lvs_active_site is {owner.lvs_active_site!r}, "
+                        f"expected {expect!r}")
+        return problems
+    source = expect or owner.site
+    if source != lost_site:
+        problems.append(f"LVS {lvs} is led from site {source}, not from the lost site {lost_site}")
+    if source == target_site:
+        problems.append(f"LVS {lvs} is already led from site {target_site}")
+    requested = set(request_ids)
+    busy = [vid for vid in volumes_open_on(volumes, owner, source) if vid not in requested]
+    if busy:
+        problems.append(f"LVS {lvs}: volumes still active on site {source}: {busy}")
+    return problems
+
+
+#: ``Cluster.lost_site_state`` values (Technical Details): the site steps of a
+#: disaster fail-over are running (a retry redoes them), or they are complete.
+LOST_SITE_FENCING = "fencing"
+LOST_SITE_DONE = "done"
+
+
+def demote_site_volumes(db: DBController, cluster_id: str, lost_site: str,
+                        exclude_ids: Iterable[str]) -> list[str]:
+    """Site step of a disaster fail-over: every volume of every LVS that may be
+    led from ``lost_site`` (lvs_active_on, a move in flight included) gets the
+    lost site in ``sync_demoted_sites`` - fenced there for good, still closed
+    on the surviving site until its own promote - except ``exclude_ids`` (the
+    request's). Under the LVS's site-rule lock, field-scoped, idempotent.
+    Returns the ids newly demoted."""
+    exclude = set(exclude_ids)
+    owners = [o for o in _lvs_owners(db.get_storage_nodes_by_cluster_id(cluster_id))
+              if lvs_active_on(o, lost_site)]
+    demoted: list[str] = []
+    if not owners:
+        return demoted
+    with storage_node_ops.sync_site_rule_locks(cluster_id, {o.lvstore for o in owners}):
+        for owner in owners:
+            owner = db.get_storage_node_by_id(owner.get_id())
+            if not lvs_active_on(owner, lost_site):
+                continue
+            for lvol in db.get_lvols_by_node_id(owner.get_id()):
+                if (lvol.status == LVol.STATUS_DELETED or lvol.get_id() in exclude
+                        or lost_site in lvol.sync_demoted_sites):
+                    continue
+
+                def _demoted(v):
+                    if lost_site in v.sync_demoted_sites:
+                        return False
+                    v.sync_demoted_sites = [*v.sync_demoted_sites, lost_site]
+                    return True
+                db.atomic_update(lvol, _demoted)
+                demoted.append(lvol.get_id())
+    if demoted:
+        logger.warning("Site %s lost: volumes fenced there: %s", lost_site, demoted)
+    return demoted
+
+
 @dataclass(frozen=True)
 class SyncPromoteResult:
     """The answer to a promote call: still in progress (the promote task, or a
@@ -1025,24 +1258,59 @@ def _promote(db: DBController, volumes: list[LVol], site: str, force: bool) -> S
         raise SyncSiteOfflineError(
             f"site {first[PROMOTE_SITE_OFFLINE].source_site} is not online; only a forced "
             f"promote may fail it over")
-    if PROMOTE_DISASTER in kinds:
-        raise SyncReplicationUnsupportedError("the disaster fail-over (forced promote of a lost "
-                                              "site) is not available yet")
     for kind, message in _PROMOTE_REFUSALS.items():
         if kind in kinds:
             blocking = sorted({vid for _, d in decisions if d.kind == kind for vid in d.blocking})
             raise SyncPromoteRefusedError(
                 message.format(source=first[kind].source_site)
                 + (f": {blocking}" if blocking else ""), blocking)
-    queued = [lv for lv, d in decisions if d.kind in PROMOTE_QUEUED]
+    lost = _lost_site_of_request(db, cluster, site, {d.source_site for _, d in decisions
+                                                     if d.kind == PROMOTE_DISASTER})
+    queued = [lv for lv, d in decisions if d.kind in (*PROMOTE_QUEUED, PROMOTE_DISASTER)]
     if not queued:
         return SyncPromoteResult(in_progress=False, connection_strings=_connection_strings(volumes, site))
-    check_gate(cluster_id)
+    if lost:
+        check_disaster_gate(cluster_id, lost, {lv.lvs_name for lv in queued})
+    else:
+        check_gate(cluster_id)
     task_owners = {lv.lvs_name: lv.node_id for lv in queued}
     task_id, _ = tasks_controller.add_sync_promote_task(
         cluster_id, queued[0].node_id, site=site, lvol_ids=[lv.get_id() for lv in queued],
-        owners=task_owners)
+        owners=task_owners, lost_site=lost)
     return SyncPromoteResult(in_progress=True, task_id=task_id)
+
+
+def _lost_site_of_request(db: DBController, cluster, site: str, disaster_sources: set[str]) -> str:
+    """The lost site a promote to ``site`` is judged against: the source of
+    its disaster rows (a forced promote of a site that is not online), else
+    the cluster's recorded lost site - with a site lost the planned gate (live,
+    both sites) can never pass, and opening a volume of an LVS already led from
+    the surviving site is judged by the disaster gate, which judges only what
+    is still active on the lost site. "" for a planned promote.
+
+    Refuses (SyncPromoteRefusedError) a disaster of the promoted site itself
+    or while another site is already recorded as lost, and - before the site
+    is recorded as lost - while a node of it may still run SPDK
+    (site_running_nodes): force never acts on a live site. The runner proves
+    the loss (liveness evidence) before it changes anything."""
+    if len(disaster_sources) > 1:
+        raise SyncPromoteRefusedError(f"a forced promote can fail over one site, not "
+                                      f"{sorted(disaster_sources)}")
+    lost = next(iter(disaster_sources), "") or cluster.lost_site
+    if not lost:
+        return ""
+    if lost == site:
+        raise SyncPromoteRefusedError(f"site {site} is the lost site; it cannot be promoted")
+    if cluster.lost_site and cluster.lost_site != lost:
+        raise SyncPromoteRefusedError(f"site {cluster.lost_site} is already lost; site {lost} "
+                                      f"cannot be failed over too")
+    if cluster.lost_site != lost:
+        running = site_running_nodes(db.get_storage_nodes_by_cluster_id(cluster.get_id()), lost)
+        if running:
+            raise SyncPromoteRefusedError(
+                f"a forced promote acts only on a lost site; nodes of site {lost} may still "
+                f"run: {running}")
+    return lost
 
 
 def sync_promote_lvol(lvol_id: str, site: str, force: bool = False) -> SyncPromoteResult:
@@ -1052,9 +1320,15 @@ def sync_promote_lvol(lvol_id: str, site: str, force: bool = False) -> SyncPromo
     FN_SYNC_PROMOTE task is queued (tasks_runner_sync_promote) and the answer
     is "in progress" until it has finished - the call after it answers done.
 
+    A forced promote of a volume whose LVS is led from a site that is not
+    online is a disaster fail-over (_lost_site_of_request): refused while a
+    node of that site may still run, else judged by the disaster gate of that
+    site (persisted events of its nodes) and queued with ``lost_site``; the
+    runner fences the site before it moves anything. While a site is
+    recorded as lost every promote is judged by its disaster gate.
+
     Raises SyncGateError, SyncPromoteRefusedError (409 rows), SyncSiteOfflineError
-    (412), SyncReplicationUnsupportedError (no sync cluster; the disaster
-    fail-over until it exists), SyncReplicationSiteError."""
+    (412), SyncReplicationUnsupportedError (no sync cluster), SyncReplicationSiteError."""
     db = DBController()
     return _promote(db, [db.get_lvol_by_id(lvol_id)], site, force)
 

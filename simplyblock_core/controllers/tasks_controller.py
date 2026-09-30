@@ -1381,10 +1381,11 @@ def add_sync_resync_task(cluster_id, owner_node_id, lvs_name):
     return task_id
 
 
-def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners):
+def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners, lost_site=""):
     """Queue the promote of ``lvol_ids`` to ``site`` (sync replication,
     FN_SYNC_PROMOTE); ``owners`` maps each LVS the promote may move to its
-    owner id. Returns ``(task_id, created)``: when one of those LVS already
+    owner id; ``lost_site`` names the site a disaster fail-over fences first
+    ("" for a planned promote). Returns ``(task_id, created)``: when one of those LVS already
     has an active (not done, not canceled) promote task, that task's id and
     False - checked and created in one transaction
     (DBController.ensure_sync_promote_task)."""
@@ -1396,7 +1397,7 @@ def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners):
     task_obj.function_name = JobSchedule.FN_SYNC_PROMOTE
     task_obj.function_params = {"site": site, "lvol_ids": list(lvol_ids),
                                 "lvs_names": sorted(owners), "owners": dict(owners),
-                                "moves": {}, "transferring": []}
+                                "moves": {}, "transferring": [], "lost_site": lost_site}
     # A pass ends the task itself; max_retry bounds only the passes an
     # unexpected error interrupts (tasks_runner_sync_promote).
     task_obj.max_retry = constants.SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS
