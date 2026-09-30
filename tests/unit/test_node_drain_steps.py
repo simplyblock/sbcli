@@ -213,6 +213,39 @@ class ShutdownBeforeDrainTests(unittest.TestCase):
                          "re-POSTing the step tried to stop an already-stopped node")
 
 
+class DrainWaitsForTheShutdownTests(unittest.TestCase):
+    """The device step must not start while the node's shutdown is running.
+
+    That shutdown ends by writing OFFLINE, which undid a MIGRATING_DEVICES
+    stamp made under it; the rebuild of the node's own distribs then queued on
+    the node itself and never ran (2026-09-30, runs 19 and 24).
+    """
+
+    def setUp(self):
+        node_drain_steps._reset_for_test()
+        self.addCleanup(node_drain_steps._reset_for_test)
+
+    def test_a_node_still_shutting_down_is_refused_as_retryable(self):
+        from simplyblock_core.exceptions import NodeTransitionInProgress
+        node = _node(status=StorageNode.STATUS_IN_SHUTDOWN,
+                     devices=[_device(NVMeDevice.STATUS_ONLINE)])
+        db = MagicMock()
+        db.get_storage_node_by_id = MagicMock(return_value=node)
+        stamp = MagicMock()
+        devices = MagicMock(return_value=True)
+        shutdown = MagicMock(return_value=True)
+        with patch.object(node_drain_steps, 'DBController', MagicMock(return_value=db)),              patch.multiple('simplyblock_core.storage_node_ops',
+                            set_node_status=stamp,
+                            shutdown_storage_node=shutdown,
+                            _fail_and_migrate_node_devices=devices):
+            with self.assertRaises(NodeTransitionInProgress):
+                node_drain_steps.start_device_decommission("n1")
+            time.sleep(0.1)
+        stamp.assert_not_called()
+        shutdown.assert_not_called()
+        devices.assert_not_called()
+
+
 class DrainLeavesTheJournalAloneTests(unittest.TestCase):
     """The drain's device step must not decommission the node's JM.
 

@@ -30,6 +30,7 @@ import time
 from typing import Dict, Tuple
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import NodeTransitionInProgress
 from simplyblock_core.models.nvme_device import NVMeDevice
 
 
@@ -127,6 +128,13 @@ def start_device_decommission(node_id: str) -> bool:
     from simplyblock_core.models.storage_node import StorageNode
 
     node = DBController().get_storage_node_by_id(node_id)
+    # A shutdown still running -- the operator's own ShuttingDown step started
+    # it -- ends by writing OFFLINE. Stamping MIGRATING_DEVICES under it lost
+    # the stamp to that write, and with it the one thing that sends the rebuild
+    # of this node's own distribs to a peer (2026-09-30, runs 19 and 24).
+    if node.status == StorageNode.STATUS_IN_SHUTDOWN:
+        raise NodeTransitionInProgress(
+            f"node {node_id} is still shutting down; start the device rebuild once it is offline")
     # The same predicate remove_storage_node's phase 1 uses: shut down only a
     # node that is actually still running. A node already stopped -- by the
     # operator's own ShuttingDown step, or by an earlier pass of this one, or
