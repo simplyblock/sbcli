@@ -493,10 +493,8 @@ class RPCClient:
         return self._request("nvmf_subsystem_remove_host", params)
 
     def transport_list(self, trtype=None):
-        params = None
-        if trtype:
-            params = {"trtype": trtype}
-        return self._request("nvmf_get_transports", params)
+        kwargs = {"trtype": trtype} if trtype else {}
+        return self._request3("nvmf_get_transports", **kwargs)
 
     def transport_create(self, trtype, qpair_count=6, shared_bufs=24576):
         """
@@ -540,10 +538,7 @@ class RPCClient:
         return self._request("sock_impl_set_options", params)
 
     def transport_create_caching(self, trtype):
-        params = {
-            "trtype": trtype,
-        }
-        return self._request("nvmf_create_transport", params)
+        return self._request3("nvmf_create_transport", trtype=trtype)
 
     def listeners_list(self, nqn):
         params = {"nqn": nqn}
@@ -724,13 +719,9 @@ class RPCClient:
         Returns the SPDK result on success, or None if the RPC is unavailable
         or the call fails (caller should fall back to remove + add_ns).
         """
-        params = {
-            "nqn": nqn,
-            "nsid": nsid,
-            "bdev_name": bdev_name,
-        }
         try:
-            return self._request("nvmf_subsystem_ns_update", params)
+            return self._request3("nvmf_subsystem_ns_update",
+                                  nqn=nqn, nsid=nsid, bdev_name=bdev_name)
         except Exception as e:
             logger.debug("nvmf_subsystem_ns_update not available or failed: %s", e)
             return None
@@ -848,15 +839,10 @@ class RPCClient:
         return self._request("ultra21_lvol_set", params)
 
     def resize_clone(self, clone_bdev, blockcnt):
-        params = {
-            "clone_bdev": clone_bdev,
-            "blockcnt": blockcnt
-        }
-        return self._request("ultra21_lvol_set", params)
+        return self._request3("ultra21_lvol_set", clone_bdev=clone_bdev, blockcnt=blockcnt)
 
     def lvol_read_only(self, name):
-        params = {"name": name}
-        return self._request("bdev_lvol_set_read_only", params)
+        return self._request3("bdev_lvol_set_read_only", name=name)
 
     def lvol_create_snapshot(self, lvol_id, snapshot_name):
         ret, _ = self.lvol_create_snapshot2(lvol_id, snapshot_name)
@@ -903,8 +889,7 @@ class RPCClient:
         return self._request("bdev_crypto_delete", params)
 
     def lvol_compress_delete(self, name):
-        params = {"name": name}
-        return self._request("bdev_compress_delete", params)
+        return self._request3("bdev_compress_delete", name=name)
 
     def ultra21_bdev_pass_create(self, base_bdev, vuid, pt_name):
         params = {
@@ -928,7 +913,7 @@ class RPCClient:
             "inflight_io_threshold": inflight_io_threshold or 12
         }
 
-        return self._request("qos_vbdev_create", params)
+        return self._request3("qos_vbdev_create", **params)
 
     def qos_vbdev_delete(self, name):
         params = {"name": name}
@@ -1262,11 +1247,8 @@ class RPCClient:
         return result if result else True
 
     def bdev_split(self, base_bdev, split_count):
-        params = {
-            "base_bdev": base_bdev,
-            "split_count": split_count
-        }
-        return self._request("bdev_split_create", params)
+        return self._request3("bdev_split_create",
+                              base_bdev=base_bdev, split_count=split_count)
 
     def bdev_PT_NoExcl_create(self, name, base_bdev_name):
         params = {
@@ -1333,7 +1315,7 @@ class RPCClient:
         subsystem carries the real timeout_us / transport_ack_timeout /
         keep_alive_timeout_ms.
         """
-        return self._request("framework_get_config", {"name": name})
+        return self._request3("framework_get_config", name=name)
 
     def get_effective_nvme_options(self):
         """The bdev_nvme global options actually in force; {} if unknown.
@@ -1393,7 +1375,7 @@ class RPCClient:
         return self._request("accel_set_options", params)
 
     def distr_status_events_get(self):
-        return self._request("distr_status_events_get")
+        return self._request3("distr_status_events_get")
 
     def distr_status_events_discard_then_get(self, nev_discard, nev_read):
         params = {
@@ -1407,24 +1389,15 @@ class RPCClient:
         return self._request("alceml_get_pages_usage", params)
 
     def bdev_ocf_create(self, name, mode, cache_name, core_name):
-        params = {
-            "name": name,
-            "mode": mode,
-            "cache_bdev_name": cache_name,
-            "core_bdev_name": core_name}
-        return self._request("bdev_ocf_create", params)
+        return self._request3("bdev_ocf_create", name=name, mode=mode,
+                              cache_bdev_name=cache_name, core_bdev_name=core_name)
 
     def bdev_ocf_delete(self, name):
-        params = {"name": name}
-        return self._request("bdev_ocf_delete", params)
+        return self._request3("bdev_ocf_delete", name=name)
 
     def bdev_malloc_create(self, name, block_size, num_blocks):
-        params = {
-            "name": name,
-            "block_size": block_size,
-            "num_blocks": num_blocks,
-        }
-        return self._request("bdev_malloc_create", params)
+        return self._request3("bdev_malloc_create", name=name,
+                              block_size=block_size, num_blocks=num_blocks)
 
     def ultra21_lvol_bmap_init(self, bdev_name, num_blocks, block_len, page_len, max_num_blocks):
         params = {
@@ -1437,13 +1410,9 @@ class RPCClient:
         return self._request("ultra21_lvol_bmap_init", params)
 
     def ultra21_lvol_mount_snapshot(self, snapshot_name, lvol_bdev, base_bdev):
-        params = {
-            "modus": "SNAPSHOT",
-            "lvol_bdev": lvol_bdev,
-            "base_bdev": base_bdev,
-            "snapshot_bdev": snapshot_name
-        }
-        return self._request("ultra21_lvol_mount", params)
+        return self._request3("ultra21_lvol_mount", modus="SNAPSHOT",
+                              lvol_bdev=lvol_bdev, base_bdev=base_bdev,
+                              snapshot_bdev=snapshot_name)
 
     def ultra21_lvol_mount_lvol(self, lvol_name, base_bdev):
         params = {
@@ -1496,22 +1465,15 @@ class RPCClient:
         return self._request("ultra21_util_get_malloc_stats", params)
 
     def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev, blockcnt):
-        params = {
-            "modus": "CLONE",
-            "clone_bdev": clone_name,
-            "base_bdev": base_bdev,
-            "lvol_bdev": snap_bdev,
-            "blockcnt": blockcnt,
-        }
-        return self._request("ultra21_lvol_mount", params)
+        return self._request3("ultra21_lvol_mount", modus="CLONE",
+                              clone_bdev=clone_name, base_bdev=base_bdev,
+                              lvol_bdev=snap_bdev, blockcnt=blockcnt)
 
     def alceml_unmap_vuid(self, name, vuid):
-        params = {"name": name, "vuid": vuid}
-        return self._request("alceml_unmap_vuid", params)
+        return self._request3("alceml_unmap_vuid", name=name, vuid=vuid)
 
     def jm_delete(self):
-        params = {"name": 0, "vuid": 0}
-        return self._request("jm_delete", params)
+        return self._request3("jm_delete", name=0, vuid=0)
 
     def framework_start_init(self):
         return self._request("framework_start_init")
@@ -1534,11 +1496,11 @@ class RPCClient:
         return self._request("bdev_aio_create", params)
 
     def bdev_aio_delete(self, name):
-        return self._request("bdev_aio_delete", {"name": name})
+        return self._request3("bdev_aio_delete", name=name)
 
     def bdev_aio_rescan(self, name):
         """Re-read the backing device's size (device grow pickup)."""
-        return self._request("bdev_aio_rescan", {"name": name})
+        return self._request3("bdev_aio_rescan", name=name)
 
     def bdev_set_qd_sampling_period(self, name, period_us):
         """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
@@ -1583,8 +1545,7 @@ class RPCClient:
         return self._request("nbd_get_disks", params)
 
     def bdev_jm_unmap_vuid(self, name, vuid):
-        params = {"name": name, "vuid": vuid}
-        return self._request("bdev_jm_unmap_vuid", params)
+        return self._request3("bdev_jm_unmap_vuid", name=name, vuid=vuid)
 
     def nvmf_set_config(self, poll_groups_mask, dhchap_digests=None, dhchap_dhgroups=None):
         params = {"poll_groups_mask": poll_groups_mask}
@@ -1616,7 +1577,7 @@ class RPCClient:
         }
         if qos_high_priority:
             params["qos_high_priority"] = qos_high_priority
-        return self._request("distr_migration_to_primary_start", params)
+        return self._request3("distr_migration_to_primary_start", **params)
 
     def distr_migration_status(self, name):
         params = {"name": name}
@@ -1679,11 +1640,8 @@ class RPCClient:
         return self._request("bdev_lvol_inflate", params)
 
     def bdev_distrib_toggle_cluster_full(self, name, cluster_full=False):
-        params = {
-            "name": name,
-            "cluster_full": cluster_full,
-        }
-        return self._request("bdev_distrib_toggle_cluster_full", params)
+        return self._request3("bdev_distrib_toggle_cluster_full",
+                              name=name, cluster_full=cluster_full)
 
     def log_set_print_level(self, level):
         params = {
@@ -1699,10 +1657,7 @@ class RPCClient:
         return self._request("bdev_lvs_dump", params)
 
     def jc_explicit_synchronization(self, jm_vuid):
-        params = {
-            "jm_vuid": jm_vuid
-        }
-        return self._request("jc_explicit_synchronization", params)
+        return self._request3("jc_explicit_synchronization", jm_vuid=jm_vuid)
 
     def jc_replace_jm(self, name_old: str, replacements: list):
         """Swap the JM bdev backing one or more live JC members from
@@ -1822,10 +1777,7 @@ class RPCClient:
         return self._request("bdev_lvol_register", params)
 
     def nvmf_subsystem_get_controllers(self, nqn):
-        params = {
-            "nqn": nqn
-        }
-        return self._request("nvmf_subsystem_get_controllers", params)
+        return self._request3("nvmf_subsystem_get_controllers", nqn=nqn)
 
     def lvol_crypto_key_delete(self, name):
         params = {
@@ -1891,11 +1843,8 @@ class RPCClient:
         return self._request("bdev_lvol_get_lvol_delete_status", params)
 
     def bdev_lvol_set_lvs_read_only(self, lvs_name, read_only=False):
-        params = {
-            "lvs_name": lvs_name,
-            "read_only": read_only,
-        }
-        return self._request("bdev_lvol_set_lvs_read_only", params)
+        return self._request3("bdev_lvol_set_lvs_read_only",
+                              lvs_name=lvs_name, read_only=read_only)
 
     def bdev_lvol_create_hublvol(self, lvs, name=None):
         # Only send "name" when explicitly requested. Older data-plane SPDK
