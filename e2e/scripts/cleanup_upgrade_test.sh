@@ -479,10 +479,10 @@ else
       echo "  Cleaning node: $NODE"
       if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
         timeout 90 oc debug node/"$NODE" -- chroot /host bash -c \
-          "nvme disconnect-all 2>/dev/null; rm -rf /etc/simplyblock 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
+          "nvme disconnect-all 2>/dev/null; find /etc/simplyblock /var/simplyblock /var/crash -maxdepth 1 -type f \( -name core -o -name 'core.*' \) -printf 'removing core: %p %s bytes %TY-%Tm-%Td %TH:%TM\n' -delete 2>/dev/null; rm -rf /etc/simplyblock 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
       else
         timeout 90 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-          "nvme disconnect-all 2>/dev/null; rm -rf /etc/simplyblock 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
+          "nvme disconnect-all 2>/dev/null; find /etc/simplyblock /var/simplyblock /var/crash -maxdepth 1 -type f \( -name core -o -name 'core.*' \) -printf 'removing core: %p %s bytes %TY-%Tm-%Td %TH:%TM\n' -delete 2>/dev/null; rm -rf /etc/simplyblock 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
       fi
       echo "  Done: $NODE"
     ) &
