@@ -142,21 +142,54 @@ def main():
     new_worker_nodes = [n.strip() for n in args.new_worker_nodes.split(",") if n.strip()] if args.new_worker_nodes else []
     skipped_cases = 0
 
+    def _for_this_platform(classes, run_k8s):
+        """Drop the group's classes that belong to the other platform.
+
+        The empty-testname path below filters by platform as it walks the
+        list; the group keywords never did, so `--testname lblk` on a k8s
+        cluster queued the four *Docker classes as well and they ran against
+        a cluster they cannot reach. Same for security, backup and e2e-all
+        wherever a group carries both halves.
+
+        Only names that actually end in Docker or K8s are touched, so a group
+        with no platform variants -- parity, most of backup -- comes back
+        unchanged rather than being emptied by a rule that does not apply to
+        it.
+        """
+        wanted, other = ("K8s", "Docker") if run_k8s else ("Docker", "K8s")
+        paired = [c for c in classes
+                  if c.__name__.endswith(("Docker", "K8s"))]
+        if not paired:
+            return classes
+        kept = [c for c in classes if not c.__name__.endswith(other)]
+        dropped = [c.__name__ for c in classes if c.__name__.endswith(other)]
+        if dropped:
+            logger.info(
+                "Platform is %s: skipping %d %s-only test(s) from this group: %s",
+                wanted, len(dropped), other, ", ".join(dropped))
+        return kept
+
     # group keywords — run a named category of tests
-    if args.testname and args.testname.strip().lower() == "security":
-        test_class_run = get_security_tests()
-    elif args.testname and args.testname.strip().lower() == "backup":
-        test_class_run = get_backup_tests()
-    elif args.testname and args.testname.strip().lower() == "backup-topology":
-        test_class_run = get_backup_topology_tests()
-    elif args.testname and args.testname.strip().lower() == "backup-stress":
-        test_class_run = get_backup_stress_tests()
-    elif args.testname and args.testname.strip().lower() == "lblk":
-        test_class_run = get_lblk_tests()
-    elif args.testname and args.testname.strip().lower() == "parity":
-        test_class_run = get_parity_tests()
-    elif args.testname and args.testname.strip().lower() == "e2e-all":
-        test_class_run = get_e2e_all_tests()
+    # A lookup rather than eight near-identical elif arms, so the platform
+    # filter below can be applied in exactly one place. Written as a chain it
+    # had to be bolted on after the last arm, where it read as another link
+    # and quietly changed which branch the empty-testname case fell into.
+    _GROUPS = {
+        "security": get_security_tests,
+        "backup": get_backup_tests,
+        "backup-topology": get_backup_topology_tests,
+        "backup-stress": get_backup_stress_tests,
+        "lblk": get_lblk_tests,
+        "parity": get_parity_tests,
+        "e2e-all": get_e2e_all_tests,
+    }
+    _group = (args.testname or "").strip().lower()
+    if _group in _GROUPS:
+        # Filtered here and nowhere else. Explicitly named classes further
+        # down are NOT filtered: naming LblkFunctionalDocker by hand is a
+        # deliberate act, and silently dropping it would report the test as
+        # missing rather than as skipped.
+        test_class_run = _for_this_platform(_GROUPS[_group](), args.run_k8s)
     elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
