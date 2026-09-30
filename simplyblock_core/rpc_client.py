@@ -541,8 +541,7 @@ class RPCClient:
         return self._request3("nvmf_create_transport", trtype=trtype)
 
     def listeners_list(self, nqn):
-        params = {"nqn": nqn}
-        return self._request("nvmf_subsystem_get_listeners", params)
+        return self._request3("nvmf_subsystem_get_listeners", nqn=nqn)
 
     def listeners_create(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         """"
@@ -1380,15 +1379,11 @@ class RPCClient:
         return self._request3("distr_status_events_get")
 
     def distr_status_events_discard_then_get(self, nev_discard, nev_read):
-        params = {
-            "nev_discard": nev_discard,
-            "nev_read": nev_read,
-        }
-        return self._request("distr_status_events_discard_then_get", params)
+        return self._request3("distr_status_events_discard_then_get",
+                              nev_discard=nev_discard, nev_read=nev_read)
 
     def alceml_get_capacity(self, name):
-        params = {"name": name}
-        return self._request("alceml_get_pages_usage", params)
+        return self._request3("alceml_get_pages_usage", name=name)
 
     def bdev_ocf_create(self, name, mode, cache_name, core_name):
         return self._request3("bdev_ocf_create", name=name, mode=mode,
@@ -1566,7 +1561,7 @@ class RPCClient:
         return self._request("thread_get_stats")
 
     def framework_get_reactors(self):
-        return self._request("framework_get_reactors")
+        return self._request3("framework_get_reactors")
 
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
         params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
@@ -1596,7 +1591,7 @@ class RPCClient:
             params["job_size"] = job_size
         if jobs:
             params["jobs"] = jobs
-        return self._request("distr_migration_failure_start", params)
+        return self._request3("distr_migration_failure_start", **params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
         params = {
@@ -1608,7 +1603,7 @@ class RPCClient:
             params["job_size"] = job_size
         if jobs:
             params["jobs"] = jobs
-        return self._request("distr_migration_expansion_start", params)
+        return self._request3("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
         params = {
@@ -1961,10 +1956,7 @@ class RPCClient:
         and compression_status -- total_records is the record count the
         compression-backlog alert keys on.
         """
-        params = {
-            "jm_vuid": jm_vuid,
-        }
-        return self._request("bdev_jm_get_status", params)
+        return self._request3("bdev_jm_get_status", jm_vuid=jm_vuid)
 
     def jc_get_jm_status(self, jm_vuid):
         """
@@ -2180,7 +2172,7 @@ class RPCClient:
         # the fork is fixed.
         # if allow_partial:
         #     params["allow_partial"] = True
-        return self._request("bdev_lvol_transfer", params)
+        return self._request3("bdev_lvol_transfer", **params)
 
     def bdev_lvol_transfer_stat(self, name: str):
         """
@@ -2240,14 +2232,13 @@ class RPCClient:
 
         Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
         """
-        return self._request("bdev_lvol_transfer_final_step", {
-            "lvol_name": lvol_name,
-            "lvol_id": lvol_id,
-            "snapshot_name": snapshot_name,
-            "cluster_batch": batch_size,
-            "gateway": gateway,
-            "operation": operation,
-        })
+        return self._request3("bdev_lvol_transfer_final_step",
+                              lvol_name=lvol_name,
+                              lvol_id=lvol_id,
+                              snapshot_name=snapshot_name,
+                              cluster_batch=batch_size,
+                              gateway=gateway,
+                              operation=operation)
 
     def bdev_lvol_batch_transfer_final_step(self, lvol_names, lvol_ids, snapshot_names, batch_size, gateway, operation):
         """
@@ -2398,13 +2389,13 @@ class RPCClient:
                 failure. Concurrent transfers against the same device corrupt
                 the shared channel state.
         """
-        params = {
-            "s3_id": s3_id,
-            "snapshot_names": snapshot_names,
-            "s3_bdev": s3_bdev,
-            "cluster_batch": cluster_batch,
-        }
-        return self._request3("bdev_lvol_s3_backup", **params)
+        return self._request3(
+            "bdev_lvol_s3_backup", 
+            s3_id=s3_id,
+            s3_bdev=s3_bdev,
+            snapshot_names=snapshot_names,
+            cluster_batch=cluster_batch,
+)
 
     # Backup/recovery polling: use bdev_lvol_transfer_stat(lvol_name) which
     # reads lvol->transfer_status on the data plane. Works for backup (pass
@@ -2454,7 +2445,7 @@ class RPCClient:
         Result dict keys:
           ``transfer_state``: "No process" | "In progress" | "Failed" | "Done"
         """
-        return self._request("bdev_lvol_s3_merge_stat", {"s3_id": s3_id, "old_s3_id": old_s3_id})
+        return self._request3("bdev_lvol_s3_merge_stat", s3_id=s3_id, old_s3_id=old_s3_id)
 
     def bdev_lvol_s3_recovery(self, lvol_name: str, s3_ids: list[int],
                               cluster_batch: int, s3_bdev: str):

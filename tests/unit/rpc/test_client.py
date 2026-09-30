@@ -295,7 +295,7 @@ class TestBdevLvolS3Merge(unittest.TestCase):
 
 class TestBdevLvolS3MergeStat(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request")
+    @patch.object(RPCClient, "_request3")
     def test_merge_stat_calls_request_with_ids(self, mock_req):
         mock_req.return_value = {"transfer_state": "In progress"}
         client = _make_client()
@@ -303,7 +303,7 @@ class TestBdevLvolS3MergeStat(unittest.TestCase):
         result = client.bdev_lvol_s3_merge_stat(1, 2)
 
         self.assertEqual(result["transfer_state"], "In progress")
-        mock_req.assert_called_once_with("bdev_lvol_s3_merge_stat", {"s3_id": 1, "old_s3_id": 2})
+        mock_req.assert_called_once_with("bdev_lvol_s3_merge_stat", s3_id=1, old_s3_id=2)
 
 
 if __name__ == "__main__":
