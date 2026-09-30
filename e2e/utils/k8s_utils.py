@@ -2184,7 +2184,8 @@ class K8sUtils:
                        avoid_node: str = None,
                        warmup_config: str = None,
                        node_name: str = None,
-                       node_selector: str = None):
+                       node_selector: str = None,
+                       prefer_node: str = None):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
@@ -2248,9 +2249,30 @@ class K8sUtils:
         node_affinity_block = ""
         tolerations_block = ""
         node_name_line = f"      nodeName: {node_name}\n" if node_name else ""
-        if node_selector and node_name:
+        if sum(bool(x) for x in (node_name, node_selector, prefer_node)) > 1:
             raise ValueError(
-                "create_fio_job: pass node_name OR node_selector, not both")
+                "create_fio_job: pass at most one of node_name, "
+                "node_selector, prefer_node")
+        if prefer_node:
+            # Where to START, not where to stay. node_selector is a hard
+            # nodeSelector: a pod carrying one cannot be rescheduled anywhere
+            # else, so when its node goes away the Job's replacement sits
+            # Pending forever and the outage suites can never exercise the
+            # thing that matters most -- a client being moved off a dead node
+            # and getting its volume back. A preference schedules it on the
+            # same node in the normal case and lets the scheduler place it
+            # elsewhere when that node is gone.
+            node_affinity_block = (
+                "        nodeAffinity:\n"
+                "          preferredDuringSchedulingIgnoredDuringExecution:\n"
+                "          - weight: 100\n"
+                "            preference:\n"
+                "              matchExpressions:\n"
+                "              - key: kubernetes.io/hostname\n"
+                "                operator: In\n"
+                "                values:\n"
+                f"                - {prefer_node}\n"
+            )
         if node_selector:
             # nodeSelector keeps the scheduler in the loop, which a
             # WaitForFirstConsumer StorageClass requires in order to bind.
@@ -2258,7 +2280,8 @@ class K8sUtils:
                 "      nodeSelector:\n"
                 f"        kubernetes.io/hostname: {node_selector}\n")
         client_nodes_exist = (
-            not node_name and not node_selector and self.has_client_nodes())
+            not node_name and not node_selector and not prefer_node
+            and self.has_client_nodes())
         if client_nodes_exist:
             # Hard-pin FIO pods to client-role nodes
             node_affinity_block = (
@@ -2281,7 +2304,8 @@ class K8sUtils:
                 f"[K8sUtils] Client nodes detected — FIO job '{job_name}' "
                 f"pinned to client nodes (with toleration)"
             )
-        elif not node_name and not node_selector and avoid_node:
+        elif (not node_name and not node_selector and not prefer_node
+              and avoid_node):
             # No client nodes — at least avoid the primary storage node
             node_affinity_block = (
                 f"        nodeAffinity:\n"
@@ -2433,6 +2457,89 @@ class K8sUtils:
         """Get the first pod name created by a Job."""
         pods = self.get_job_pod_names(job_name, namespace=namespace)
         return pods[0] if pods else ""
+
+    def job_pod_node(self, job_name: str, namespace: str = None) -> str | None:
+        """Node hosting the Running pod of *job_name*, or None.
+
+        Deliberately only Running pods: a Job whose pod is Pending has no
+        node worth recording, and a Terminating one is already leaving.
+        """
+        ns = namespace or self.namespace
+        out, _err = self._exec_kubectl(
+            f"kubectl get pods -n {ns} --selector=job-name={job_name} "
+            f"--field-selector=status.phase=Running "
+            f"-o jsonpath='{{.items[0].spec.nodeName}}' 2>/dev/null || true",
+            supress_logs=True, timeout=120)
+        return (out or "").strip().strip("'") or None
+
+    def assert_clean_reschedule(self, job_name: str, from_node: str,
+                                timeout: int = 900,
+                                namespace: str = None) -> str:
+        """A Job whose node died must come back somewhere else, cleanly.
+
+        This is the assertion no k8s outage suite was making. The suites
+        either pinned FIO so hard it could not move, or kept its node out of
+        the outage list, so the single most important client-side behaviour --
+        a pod losing its node and getting its RWO volume back somewhere else
+        -- was never once exercised.
+
+        Three things have to hold, and they fail in different ways:
+
+        * a replacement is placed at all (the Job controller did its job);
+        * it is on a DIFFERENT node -- landing back on the original means the
+          node recovered before the scheduler moved anything, which is not the
+          case under test and must not be reported as though it were;
+        * nothing complained about the volume. An RWO volume whose old
+          attachment is not released leaves the new pod in ContainerCreating
+          behind "Multi-Attach error", and that is the failure this is hunting.
+
+        Slow on purpose. When a node goes NotReady rather than being drained,
+        kubernetes will not detach its RWO volumes until taint-based eviction
+        and then the force-detach timer have both elapsed -- minutes, not
+        seconds. A short timeout here would report a product failure every
+        time kubernetes was merely being patient.
+
+        Returns the new node name.
+        """
+        deadline = time.time() + timeout
+        seen = None
+        while time.time() < deadline:
+            seen = self.job_pod_node(job_name, namespace=namespace)
+            if seen and seen != from_node:
+                break
+            sleep_n_sec(10)
+        else:
+            seen = self.job_pod_node(job_name, namespace=namespace)
+
+        if not seen:
+            stuck = self.pods_stuck_on_volumes(namespace=namespace)
+            raise RuntimeError(
+                f"[reschedule] {job_name} was on {from_node}, that node went "
+                f"away, and {timeout}s later no replacement pod is Running "
+                f"anywhere. The Job controller should have placed one."
+                + (f" Pods are stuck on volumes: {stuck[:6]}" if stuck else
+                   " Nothing is stuck on a volume, so the pod is not being "
+                   "blocked by an attachment -- look at scheduling."))
+        if seen == from_node:
+            raise RuntimeError(
+                f"[reschedule] {job_name} is Running on {seen}, the same node "
+                f"the outage hit. Nothing was actually rescheduled, so this "
+                f"cycle proves nothing about moving a client off a dead node "
+                f"-- most likely the node came back before the scheduler "
+                f"acted, or the pod carries a hard nodeSelector.")
+
+        stuck = self.pods_stuck_on_volumes(namespace=namespace)
+        if stuck:
+            raise RuntimeError(
+                f"[reschedule] {job_name} moved {from_node} -> {seen}, but "
+                f"pod(s) cannot get their volume:\n    "
+                + "\n    ".join(stuck[:6])
+                + "\nAn RWO volume that does not detach from the old node in "
+                  "time leaves the replacement wedged in ContainerCreating.")
+        self.logger.info(
+            "[reschedule] %s moved %s -> %s and no pod is stuck on a volume",
+            job_name, from_node, seen)
+        return seen
 
     def get_pod_node_name(self, pod_name: str, namespace: str = None) -> str:
         """Return the K8s node hostname where a pod is/was scheduled."""

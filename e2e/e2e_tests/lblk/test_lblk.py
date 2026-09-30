@@ -1113,6 +1113,15 @@ class _LblkBase(TestClusterBase):
         self.logger.info("[lblk] %s on %s", outage_type, uuid)
         self.ssh_obj.notify_outage_started([ip])
 
+        # The *_fio_worker types borrow an existing mechanism and only differ
+        # in which node they aim at and what is asserted afterwards, so the
+        # dispatch below never needs to know about them. Translated here
+        # rather than in the caller so the log line above keeps the name the
+        # cycle was planned under -- that name is the whole point of having
+        # them separate.
+        outage_type = getattr(self, "FIO_WORKER_OUTAGES", {}).get(
+            outage_type, outage_type)
+
         if outage_type == "graceful_shutdown":
             self._issue_shutdown(uuid)
         elif outage_type == "container_stop":

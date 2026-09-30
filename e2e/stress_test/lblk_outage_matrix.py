@@ -78,6 +78,10 @@ class _LblkOutageMatrix(_LblkBase):
         "short_network_interrupt",
         "interface_full_network_interrupt",
         "node_network_isolation",
+        # Straight after its own generic form, and ahead of anything
+        # reboot-based: this one uses a mechanism that works, so it
+        # should not sit behind one that currently does not.
+        "node_network_isolation_fio_worker",
         # Last, because it is the one that currently cannot recover. Cordoning
         # a worker raises a HostMaintenance operation whose Releasing step
         # waits on a DaemonSet pod that never goes, so it expires after 15
@@ -92,6 +96,9 @@ class _LblkOutageMatrix(_LblkBase):
         # Move it back up once the operator can complete a maintenance window:
         # see k8s_hostmaintenance_releasing_waits_on_daemonset_pod_rca_20260929.
         "storage_node_reboot",
+        # Last of all: it inherits that same recovery problem on top of
+        # the question it is actually asking.
+        "storage_node_reboot_fio_worker",
     )
 
     #: Outage types this platform leaves out.
@@ -119,6 +126,36 @@ class _LblkOutageMatrix(_LblkBase):
     #: has behaved correctly and the continuity claim does not apply; for
     #: every other outage it still does.
     DRAINING_OUTAGES = ("storage_node_reboot",)
+
+    #: How long a client may take to come back on another node.
+    #:
+    #: Generous on purpose. A drained node hands its pods over in seconds,
+    #: but a node that merely went NotReady keeps its RWO volumes until
+    #: taint-based eviction AND the force-detach timer have both elapsed --
+    #: minutes, by kubernetes' own design. A tight bound here would report a
+    #: product failure every time kubernetes was being patient, which is the
+    #: most expensive kind of false positive we can write.
+    RESCHEDULE_SEC = 900
+
+    #: Outages aimed at the node running live FIO, rather than at storage.
+    #:
+    #: Named types rather than "whichever node the rotation happens to pick",
+    #: because when one of these fails the name has to say what broke. A
+    #: failure reading `node_network_isolation on 192.168.10.246` leaves the
+    #: reader to work out that .246 was the FIO worker that day; one reading
+    #: `node_network_isolation_fio_worker` does not. They are also then
+    #: deterministic, skippable on their own, and visible in the plan dump.
+    #:
+    #: Each maps to the mechanism it borrows. The mechanism is not new -- what
+    #: is new is the target, and what is asserted afterwards: the client must
+    #: be rescheduled onto a surviving node and get its RWO volume back, which
+    #: no k8s outage suite has ever checked.
+    #:
+    #: k8s only. Docker has no scheduler to move anything.
+    FIO_WORKER_OUTAGES = {
+        "storage_node_reboot_fio_worker": "storage_node_reboot",
+        "node_network_isolation_fio_worker": "node_network_isolation",
+    }
 
     #: Outages the live-FIO client cannot survive on the node being broken, so
     #: the reserved node sits these out.
@@ -257,6 +294,19 @@ class _LblkOutageMatrix(_LblkBase):
             # node dicts, and the API answered "Pool not found:" followed by a
             # dump of every storage node -- which reads like a cluster fault
             # rather than a variable collision.
+            if outage in self.FIO_WORKER_OUTAGES:
+                # Exactly one cycle, on the one node that matters for it.
+                # Running it per-node would be 3-4 repeats of the same
+                # question at up to eleven minutes each, and on any node but
+                # the FIO worker it is just the generic outage again.
+                if not self._fio_home_node:
+                    self.logger.warning(
+                        "[matrix] skipping %s: no reserved FIO worker on this "
+                        "platform, so there is no node whose loss would move "
+                        "the client. Nothing to assert.", outage)
+                    continue
+                cycles.append((self._fio_home_node, outage))
+                continue
             targets = (no_client_evict
                        if outage in self.CLIENT_EVICTING_OUTAGES
                        else nodes)
@@ -307,6 +357,11 @@ class _LblkOutageMatrix(_LblkBase):
         for i, (node, outage) in enumerate(cycles, start=1):
             self.logger.info("[matrix] cycle %d/%d: %s on %s",
                              i, len(cycles), outage, node.get("mgmt_ip"))
+            # Where each FIO job is standing BEFORE the outage. For the
+            # *_fio_worker cycles this is the thing being tested -- it has to
+            # be read now, because afterwards the old pod is gone and there
+            # is nothing left to say where it used to be.
+            self._fio_nodes_before = self._fio_job_nodes(live)
             self._outage_and_recover(node, outage)
             # Durability, checked here rather than only at the end so a
             # mismatch names the outage and the node that produced it.
@@ -1196,11 +1251,48 @@ class _LblkOutageMatrix(_LblkBase):
                 # and k8s could not trip it whatever the cluster did.
                 # That is what ended mxliveplain 21s into cycle 8 on
                 # 2026-09-21.
-                node_selector=(self._pin_for(name)
-                               or getattr(self, "_fio_home_worker", None)))))
+                # A pin only where the volume demands one (DHCHAP allowed
+                # nodes); otherwise a preference. The FIO home used to be a
+                # hard nodeSelector, which meant the Job could never be
+                # rescheduled: lose that node and the replacement sits
+                # Pending for ever. That is why *_fio_worker exists and why
+                # it could not have been written against the old placement.
+                node_selector=self._pin_for(name),
+                prefer_node=(None if self._pin_for(name)
+                             else getattr(self, "_fio_home_worker", None)))))
             self.logger.info("[matrix] live FIO started on %s volume %s",
                              label, name)
         return handles
+
+    #: job name -> node it was on before the current cycle's outage. Set per
+    #: cycle in run(); the default keeps _assert_fio_alive safe for callers
+    #: that never went through the loop, such as the smoke paths.
+    _fio_nodes_before = None
+
+    def _fio_job_nodes(self, handles):
+        """Which node each live FIO job is on right now. K8s only.
+
+        Missing entries are normal and not an error: a job between pods has
+        no node, and on docker there are no jobs at all. The caller treats an
+        absent entry as "cannot judge the move", which is honest, rather than
+        inventing a node to compare against.
+        """
+        if not self.k8s_test:
+            return {}
+        k8s = self._ensure_k8s_utils()
+        placed = {}
+        for _name, _log, job, handle in handles:
+            if not isinstance(handle, str):
+                continue
+            try:
+                node = k8s.job_pod_node(handle)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning("[matrix] could not read the node for "
+                                    "%s: %s", handle, str(exc)[:120])
+                continue
+            if node:
+                placed[handle] = node
+        return placed
 
     def _assert_fio_alive(self, handles, outage, outage_type=None):
         """FIO must still be running. A job that died is an interruption.
@@ -1224,6 +1316,28 @@ class _LblkOutageMatrix(_LblkBase):
                 # healthy -- a false failure on the availability gate, which
                 # is worse than having no gate. Ask the client instead.
                 alive = self._docker_fio_running(job)
+            if outage_type in self.FIO_WORKER_OUTAGES:
+                # The whole point of this cycle. Being moved is the pass
+                # condition, not a tolerated side effect, so it is asserted
+                # rather than waited out: a replacement must exist, it must
+                # be on a different node, and nothing may be stuck on a
+                # volume. assert_clean_reschedule says which of those failed.
+                was_on = (self._fio_nodes_before or {}).get(handle)
+                if not was_on:
+                    self.logger.warning(
+                        "[matrix] %s: no recorded node for %s before the "
+                        "outage, so the move cannot be judged. Treating as "
+                        "the plain liveness check.", outage_type, handle)
+                else:
+                    k8s = self._ensure_k8s_utils()
+                    landed = k8s.assert_clean_reschedule(
+                        handle, was_on, timeout=self.RESCHEDULE_SEC)
+                    self.logger.info(
+                        "[matrix] %s: live FIO %s moved %s -> %s and its "
+                        "volume followed. Continuity is NOT claimed for this "
+                        "cycle -- the outage took its node on purpose.",
+                        outage_type, name, was_on, landed)
+                    continue
             if not alive and outage_type in self.DRAINING_OUTAGES:
                 # The drain asked for this. Give the Job controller a moment
                 # to place the replacement, then judge it on whether IO
