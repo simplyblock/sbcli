@@ -3272,6 +3272,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_file="python3 simplyblock_core/services/tasks_runner_jc_comp.py",
                 service_image=service_image)
 
+        if "app_TasksRunnerSyncResync" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerSyncResync",
+                service_file="python3 simplyblock_core/services/tasks_runner_sync_resync.py",
+                service_image=service_image)
+
         if "app_BackupService" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,

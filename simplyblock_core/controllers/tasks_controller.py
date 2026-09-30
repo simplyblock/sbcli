@@ -1347,6 +1347,35 @@ def add_replication_final_task(cluster_id, src_node_id, function_params):
                      function_params=function_params, send_to_cluster_log=False)
 
 
+def add_sync_resync_task(cluster_id, owner_node_id, lvs_name):
+    """Queue the catch-up of ``lvs_name`` (owned by ``owner_node_id``) after a
+    zone desync, unless the LVS has an active one - every instance of a volume
+    pushes its own zone-unavailable event, and they all ask for the same
+    resync. Returns the new task's UUID, or False when one exists.
+
+    Check and create are one transaction over the LVS's sync state
+    (DBController.ensure_sync_resync_task), which the resync runner's DONE
+    decision also takes (DBController.finish_sync_resync): concurrent callers
+    never create two, and an event recorded before this call is either seen
+    by that decision or finds the task DONE here.
+    """
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster_id
+    task_obj.node_id = owner_node_id
+    task_obj.date = int(time.time())
+    task_obj.function_name = JobSchedule.FN_SYNC_RESYNC
+    task_obj.function_params = {"lvs_name": lvs_name}
+    task_obj.max_retry = -1
+    task_obj.status = JobSchedule.STATUS_NEW
+    task_id, created = db.ensure_sync_resync_task(task_obj, lvs_name)
+    if not created:
+        logger.info(f"Task found, skip adding new task: {task_id}")
+        return False
+    tasks_events.task_create(task_obj)
+    return task_id
+
+
 def get_active_lvol_migration(node_id):
     """Return active LVolMigration records with ``node_id`` as source or target."""
     return [

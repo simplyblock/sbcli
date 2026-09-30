@@ -661,8 +661,199 @@ class DBController(metaclass=Singleton):
         return self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved', cluster_id, lvs_name)
 
     def get_unresolved_sync_replication_events(self, cluster_id: str, lvs_name: str) -> list[SyncReplicationEvent]:
-        """The not-yet-resolved sync-replication events of one LVS, in no particular order."""
-        return self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved', cluster_id, lvs_name, False)
+        """The not-yet-resolved sync-replication events of one LVS, in no particular order.
+
+        Judged by the LVS's watermarks as well as by the flags: an event they
+        say is over is not returned even while its flag is still being brought
+        in line (_resolve_covered_sync_events)."""
+        events = self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved', cluster_id, lvs_name, False)
+        if not events:
+            return events
+        state = self.get_sync_state(cluster_id, lvs_name)
+        return [event for event in events if not self.sync_event_covered(event, state)]
+
+    #: One fixed-size key per LVS, outside the ``object/`` keyspace, that
+    #: serializes everything that changes the LVS's sync-replication state:
+    #:
+    #: - ``seq`` - the last receive_seq given out (the LVS's receive order);
+    #: - ``last_zone_seq`` - the receive_seq of its latest zone desync;
+    #: - ``journal_restored_seq`` - of its latest ``remote_journal_restored``:
+    #:   every drop received before it is over;
+    #: - ``zone_synced_seq`` - up to which receive_seq a completed catch-up has
+    #:   verified the zones equal: every zone desync up to it is over;
+    #: - ``resync_task`` - db key of its FN_SYNC_RESYNC task.
+    #:
+    #: The watermarks, not the records' ``resolved`` flags, say what is over:
+    #: the flags are brought in line afterwards in one small transaction per
+    #: record (_resolve_covered_sync_events), so no transaction ever touches a
+    #: number of records that grows with the length of an outage, and a flag
+    #: left behind by a crash is still read as resolved
+    #: (get_unresolved_sync_replication_events).
+    _SYNC_STATE_PREFIX = "sync_replication_state/"
+    _SYNC_STATE_DEFAULTS: ClassVar[dict] = {"seq": 0, "last_zone_seq": 0, "journal_restored_seq": 0,
+                                            "zone_synced_seq": 0, "resync_task": ""}
+
+    @staticmethod
+    def _sync_state_key(cluster_id, lvs_name) -> bytes:
+        return f"{DBController._SYNC_STATE_PREFIX}{cluster_id}/{lvs_name}".encode()
+
+    @staticmethod
+    def _parse_sync_state(raw) -> dict:
+        return {**DBController._SYNC_STATE_DEFAULTS, **(json.loads(bytes(raw)) if raw else {})}
+
+    @staticmethod
+    def _read_sync_state_tx(tr, key) -> dict:
+        raw = tr.get(key).wait()
+        return DBController._parse_sync_state(bytes(raw) if raw.present() else None)
+
+    def get_sync_state(self, cluster_id: str, lvs_name: str) -> dict:
+        """The LVS's sync-replication state record (see _SYNC_STATE_PREFIX)."""
+        return self._parse_sync_state(self.kv_store.get(self._sync_state_key(cluster_id, lvs_name)))
+
+    @staticmethod
+    def sync_event_covered(event: SyncReplicationEvent, state: dict) -> bool:
+        """Whether the watermarks of ``state`` (the event's LVS) say ``event``
+        is over. A record without a receive_seq (written before it existed) is
+        judged by its own flag only."""
+        seq = event.receive_seq
+        if seq <= 0:
+            return False
+        if event.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_DROPPED:
+            return seq < state["journal_restored_seq"]
+        if event.kind == SyncReplicationEvent.KIND_ZONE_UNAVAILABLE:
+            return seq <= state["zone_synced_seq"]
+        return True
+
+    @staticmethod
+    def _put_tx(tr, obj, index_list):
+        """Write ``obj`` inside ``tr``, indices and watch keys included."""
+        BaseModel._write_tx(tr, obj.get_db_id().encode(),
+                            json.dumps(obj.to_dict(unwrap_secrets=True)).encode(),
+                            type(obj), obj, index_list, *obj._watch_keys())
+
+    def _record_sync_event_tx(self, tr, event, index_list):
+        stored = BaseModel._read_record(tr, event.get_db_id().encode(), SyncReplicationEvent)
+        if stored is not None:
+            return stored, False
+        state_key = self._sync_state_key(event.cluster_id, event.lvs_name)
+        state = self._read_sync_state_tx(tr, state_key)
+        state["seq"] += 1
+        event.receive_seq = state["seq"]
+        if event.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED:
+            # The latest remote-journal event is the state: every drop of the
+            # LVS received before this one is over.
+            state["journal_restored_seq"] = event.receive_seq
+            event.resolved = True
+        else:
+            event.resolved = False
+            if event.kind == SyncReplicationEvent.KIND_ZONE_UNAVAILABLE:
+                state["last_zone_seq"] = event.receive_seq
+        self._put_tx(tr, event, index_list)
+        tr[state_key] = json.dumps(state).encode()
+        return event, True
+
+    def record_sync_replication_event(self, event: SyncReplicationEvent) -> tuple[SyncReplicationEvent, bool]:
+        """Persist a sync-replication event with its ``receive_seq``, in ONE
+        transaction with the LVS's state key (_SYNC_STATE_PREFIX): the next
+        sequence number, the record and the watermarks. The only writer of
+        these records besides the flag clean-up of _resolve_covered_sync_events.
+
+        Per LVS the sequence is therefore the commit order: a reader always
+        sees a prefix of it, and a drop committing after a restored gets the
+        higher number (it is the later state) and stays open. A restored is
+        stored resolved and ends every drop received before it; their flags
+        follow right after.
+
+        ``event.uuid`` must identify the producer's event (the collector may
+        read an event again when its batch was not discarded): a record that
+        already exists is a replay and is returned as stored, with False,
+        without a new sequence number - a replayed old restored must not end
+        a drop received since.
+        """
+        index_list = SyncReplicationEvent.active_indexes(self.kv_store)
+        event, recorded = fdb.transactional(DBController._record_sync_event_tx)(
+            self, self.kv_store, event, index_list)
+        if event.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED:
+            self._resolve_covered_sync_events(event.cluster_id, event.lvs_name)
+        return event, recorded
+
+    def _resolve_covered_sync_events(self, cluster_id: str, lvs_name: str) -> None:
+        """Set the ``resolved`` flag of every open event of the LVS that its
+        watermarks say is over, one small transaction per record (idempotent;
+        a concurrent writer never un-resolves a record)."""
+        state = self.get_sync_state(cluster_id, lvs_name)
+        for event in self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved',
+                                cluster_id, lvs_name, False):
+            if self.sync_event_covered(event, state):
+                self.atomic_update(event, lambda e: setattr(e, "resolved", True))
+
+    def _ensure_sync_resync_task_tx(self, tr, task, lvs_name, index_list):
+        state_key = self._sync_state_key(task.cluster_id, lvs_name)
+        state = self._read_sync_state_tx(tr, state_key)
+        if state["resync_task"]:
+            current = BaseModel._read_record(tr, state["resync_task"].encode(), JobSchedule)
+            if (current is not None and current.status != JobSchedule.STATUS_DONE
+                    and not current.canceled):
+                return current.uuid, False
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        state["resync_task"] = task.get_db_id()
+        tr[state_key] = json.dumps(state).encode()
+        return task.uuid, True
+
+    def ensure_sync_resync_task(self, task: JobSchedule, lvs_name: str) -> tuple[str, bool]:
+        """Create ``task`` (an FN_SYNC_RESYNC task for ``lvs_name``) unless the
+        LVS already has one that is neither done nor canceled - checked and
+        written in ONE transaction with the LVS's state key, so concurrent
+        callers never create two. Returns ``(uuid of the LVS's active task,
+        whether it is ``task``)``."""
+        return fdb.transactional(DBController._ensure_sync_resync_task_tx)(
+            self, self.kv_store, task, lvs_name, JobSchedule.active_indexes(self.kv_store))
+
+    def _finish_sync_resync_tx(self, tr, task_key, lvs_name, seq_limit, result, duration_sec,
+                               task_indexes):
+        task = BaseModel._read_record(tr, task_key, JobSchedule)
+        if task is None:
+            return False
+        state_key = self._sync_state_key(task.cluster_id, lvs_name)
+        state = self._read_sync_state_tx(tr, state_key)
+        state["zone_synced_seq"] = max(state["zone_synced_seq"], seq_limit)
+        newer = state["last_zone_seq"] > seq_limit
+        task.function_params.pop("resync", None)
+        if newer:
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.function_result = "a newer zone desync arrived during the catch-up, re-running"
+        else:
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = result
+            task.function_params["duration_sec"] = duration_sec
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, task_indexes)
+        tr[state_key] = json.dumps(state).encode()
+        return not newer
+
+    def finish_sync_resync(self, task: JobSchedule, lvs_name: str, seq_limit: int,
+                           result: str, duration_sec: float) -> bool:
+        """Close a converged catch-up of ``lvs_name``, in ONE transaction with
+        the LVS's state key: every zone desync received up to ``seq_limit`` is
+        over (the ``synced`` answer was read after it), and ``task`` is DONE -
+        unless a zone desync was received after ``seq_limit`` (one that answer
+        does not cover): then the task goes back to SUSPENDED for a new run and
+        False is returned.
+
+        An event recorded before this commits is seen (its write conflicts
+        with this read); one recorded after it finds the task DONE when its
+        resync is ensured (ensure_sync_resync_task) and gets a new task.
+        """
+        done = fdb.transactional(DBController._finish_sync_resync_tx)(
+            self, self.kv_store, task.get_db_id().encode(), lvs_name, seq_limit, result,
+            duration_sec, JobSchedule.active_indexes(self.kv_store))
+        self._resolve_covered_sync_events(task.cluster_id, lvs_name)
+        return done
+
+    def get_active_sync_resync_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Every non-done FN_SYNC_RESYNC task of the cluster, oldest first."""
+        return self._active_tasks(cluster_id, JobSchedule.FN_SYNC_RESYNC)
 
     def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0, *, source=None) -> list[JobSchedule]:
         if source is not None:

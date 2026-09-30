@@ -13,6 +13,14 @@ class SyncReplicationEvent(BaseModel):
     records rather than from a live query, since the site it is judged for is
     gone by then. ``status`` (inherited) holds the raw data-plane event status,
     ``timestamp_utc`` the event's own ISO-8601 UTC timestamp.
+
+    Records are written only through
+    ``DBController.record_sync_replication_event``: it assigns ``receive_seq``
+    in the same transaction as the write, over a fixed-size per-LVS state key,
+    so the sequence is the commit order and "the latest event of an LVS" never
+    depends on the producer nodes' clocks. What is over is decided by that
+    key's watermarks (a later ``remote_journal_restored``, a verified catch-up,
+    ``DBController.finish_sync_resync``); ``resolved`` follows them.
     """
 
     _INDEXES: ClassVar[tuple] = (
@@ -32,3 +40,6 @@ class SyncReplicationEvent(BaseModel):
     kind: str = ""
     timestamp_utc: str = ""
     resolved: bool = False
+    #: Receive order within the LVS, assigned at the write: higher =
+    #: committed later. 0 only on records older than the field.
+    receive_seq: int = 0

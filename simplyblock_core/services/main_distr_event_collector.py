@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from simplyblock_core import constants, db_controller, rpc_client, utils, distr_controller
-from simplyblock_core.controllers import events_controller, device_controller
+from simplyblock_core.controllers import events_controller, device_controller, sync_replication_controller
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -487,6 +487,19 @@ def start_event_collector_on_node(node_id):
                     if events:
                         logger.info(f"Found events: {len(events)}")
                         for event_dict in events:
+                            if event_dict.get('event_type') == sync_replication_controller.SYNC_EVENT_TYPE:
+                                # Sync-replication state changes are a
+                                # sequence, not repeats: each one is recorded
+                                # in batch order, never aggregated (the
+                                # latest remote-journal event of an LVS is its
+                                # state), and a journal event carries only
+                                # jm_vuid, which the grouping below drops.
+                                event = events_controller.log_distr_event(
+                                    snode.cluster_id, snode.get_id(), event_dict)
+                                sync_replication_controller.record_sync_event(snode.get_id(), event_dict)
+                                logger.info(f"Processed sync-replication event: {event.get_id()}")
+                                continue
+
                             if "storage_ID" in event_dict:
                                 sid = event_dict['storage_ID']
                             elif "vuid" in event_dict:

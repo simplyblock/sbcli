@@ -60,6 +60,12 @@ class JobSchedule(BaseModel):
     # storage_node_ops.move_lvs_leadership, and on failure / cancel records the
     # task DONE / canceled BEFORE calling reconcile_lvs_move.
     FN_SYNC_PROMOTE = "sync_promote"
+    # Sync replication: catch up the lagging zone of one LVS after a zone
+    # desync (tasks_runner_sync_resync). ``node_id`` is the owner of the LVS,
+    # ``function_params["lvs_name"]`` the LVS; one active task per LVS
+    # (tasks_controller.add_sync_resync_task). Unbounded (max_retry=-1): a
+    # failed catch-up re-runs with backoff once the lagging zone is back.
+    FN_SYNC_RESYNC = "sync_resync"
 
     canceled: bool = False
     cluster_id: str = ""
