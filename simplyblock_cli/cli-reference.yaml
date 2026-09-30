@@ -1979,6 +1979,19 @@ commands:
             help: "Replication policy id (must be a consistency-group policy)"
             dest: policy_id
             type: str
+      - name: sync-status
+        help: "Shows the sync-replication status of a sync-replication cluster: the aggregate (the worst over all lvstores) and one row per lvstore"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
   - name: "volume"
     help: "Logical Volume Commands"
     aliases:
@@ -2436,6 +2449,56 @@ commands:
             help: "Logical volume id"
             dest: lvol_id
             type: str
+      - name: sync-promote
+        help: "Sync-replication clusters: promotes a volume on a site (planned leadership move, or a disaster fail-over with --force); prints the connection strings of that site once done"
+        usage: >
+          Runs as a task: while it runs the command answers "in progress" - call it again. A planned promote needs the
+          volume (and every other volume of its lvstore) demoted on the other site and the replicas in sync; --force
+          fails over from a lost site and is refused while that site is online.
+        arguments:
+          - name: "volume_id"
+            help: "The logical volume id."
+            dest: volume_id
+            type: str
+          - name: "--site"
+            help: "The site to promote the volume on."
+            dest: site
+            type: str
+            required: true
+          - name: "--force"
+            help: "Disaster fail-over: the site the volume is served from is lost."
+            dest: force
+            type: bool
+            action: store_true
+      - name: sync-demote
+        help: "Sync-replication clusters: demotes (fences) a volume on a site. A no-op when the volume is not served there; refused while the replicas are not in sync."
+        arguments:
+          - name: "volume_id"
+            help: "The logical volume id."
+            dest: volume_id
+            type: str
+          - name: "--site"
+            help: "The site to demote the volume on."
+            dest: site
+            type: str
+            required: true
+      - name: sync-status
+        help: "Sync-replication clusters: shows the sync-replication status of a volume seen from a site (its role there and the cluster-wide state)"
+        arguments:
+          - name: "volume_id"
+            help: "The logical volume id."
+            dest: volume_id
+            type: str
+          - name: "--site"
+            help: "The site to look from."
+            dest: site
+            type: str
+            required: true
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
       - name: suspend
         help: "Suspend lvol subsystems"
         arguments:

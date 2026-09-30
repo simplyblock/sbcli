@@ -67,7 +67,11 @@ def _config_error(e: ReplicationConfigError):
 def get_relationship_by_lvol(cluster: Cluster, lvol_id: UUID) -> ReplicationRelationshipDTO:
     """Replication relationship for a volume, resolvable even when the source volume
     has been deleted (e.g. after replication-commit --delete-source). The CSI driver
-    uses this to redirect NodeStageVolume to the active volume on the target cluster."""
+    uses this to redirect NodeStageVolume to the active volume on the target cluster.
+    Always 404 on a sync-replication cluster: its volumes keep their identity on
+    both sites."""
+    if cluster.sync_replication:
+        raise HTTPException(404, f"Volume {lvol_id} is sync-replicated; it has no replication relationship")
     rel = replication_policy_controller.get_relationship(str(lvol_id))
     if rel is None:
         raise HTTPException(404, f"No replication relationship found for volume {lvol_id}")

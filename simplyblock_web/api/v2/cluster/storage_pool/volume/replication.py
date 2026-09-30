@@ -1,29 +1,40 @@
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from simplyblock_core.controllers import lvol_controller, replication_policy_controller
+from simplyblock_core import constants
+from simplyblock_core.controllers import lvol_controller, replication_policy_controller, sync_replication_controller
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
 from simplyblock_core.models.lvol_model import LVol
 
 from .... import util
 from ...._dependencies import Cluster, StoragePool, Volume
-from ...._dtos import ReplicationMode, ReplicationRelationshipDTO, ReplicationStatusDTO, TaskDTO
+from ...._dtos import (
+    ReplicationMode, ReplicationRelationshipDTO, ReplicationStatusDTO, SyncPromoteResultDTO,
+    SyncReplicationStatusDTO, TaskDTO,
+)
 
 
 api = APIRouter(tags=['replication'])
 collection_api = APIRouter(tags=['replication'])
 
 
-def apply_policy(volume: LVol, policy_id: UUID | None) -> None:
+def apply_policy(cluster: Cluster, volume: LVol, policy_id: UUID | None) -> None:
     """Put *volume* under replication policy *policy_id*, or take it out (None).
 
     Changing policy is detach-then-attach, so the new target receives a FULL
     copy. Detaching stops replication and deletes the internal replication
     snapshots on both sides.
+
+    A no-op on a sync-replication cluster: every volume there is replicated to
+    the other site, and csi-addons' Enable/DisableVolumeReplication must not
+    fail.
     """
+    if cluster.sync_replication:
+        return
     if policy_id is None:
         try:
             replication_policy_controller.detach_policy(volume.get_id())
@@ -49,6 +60,8 @@ def get_relationship(cluster: Cluster, pool: StoragePool, volume: Volume) -> Rep
     call itself, so a caller that had not kept them could not find the target
     volume through the API at all -- LVolReplication was exposed nowhere.
     """
+    if cluster.sync_replication:
+        raise HTTPException(404, 'A sync-replication volume has no replication relationship')
     relationship = replication_policy_controller.get_relationship(volume.get_id())
     if relationship is None:
         raise HTTPException(404, 'Volume has no replication relationship')
@@ -56,7 +69,8 @@ def get_relationship(cluster: Cluster, pool: StoragePool, volume: Volume) -> Rep
 
 
 @api.get('/status', name='clusters:storage-pools:volumes:replication:status')
-def get_status(cluster: Cluster, pool: StoragePool, volume: Volume) -> ReplicationStatusDTO:
+def get_status(cluster: Cluster, pool: StoragePool, volume: Volume,
+               site: util.SiteParameter = None) -> ReplicationStatusDTO:
     """The typed steady-state replication status.
 
     Unlike the relationship read above, which serves cutover records and 404s
@@ -64,9 +78,35 @@ def get_status(cluster: Cluster, pool: StoragePool, volume: Volume) -> Replicati
     for a volume that exists: ``state: not_replicating, role: none`` is the
     valid answer for an unreplicated volume. The csi-addons adapter derives
     its conditions and ``lastSyncTime`` from this read on every reconcile.
+
+    On a sync-replication cluster (``site`` required) the same DTO carries
+    the site replication's status: role ``source`` on the site the volume is
+    served from, state ``in_sync`` or ``degraded`` (``resyncing`` set while
+    a catch-up runs), ``outstanding_bytes`` = the bytes behind.
     """
+    if cluster.sync_replication:
+        site = util.require_site(site)
+        with util.sync_http_errors():
+            status = sync_replication_controller.volume_sync_status(
+                volume, site, max_age=constants.SYNC_STATUS_CACHE_SEC)
+        return ReplicationStatusDTO.from_sync_status(status)
     info = lvol_controller.get_replication_info(volume.get_id())
     return ReplicationStatusDTO.from_info(info)
+
+
+@api.get('/sync-status', name='clusters:storage-pools:volumes:replication:sync-status')
+def get_sync_status(cluster: Cluster, pool: StoragePool, volume: Volume,
+                    site: util.SiteParameter = None) -> SyncReplicationStatusDTO:
+    """The sync-replication status of the volume seen from ``site``: its role
+    there and the cluster-wide state (the worst over every LVS, the same for
+    every volume). 400 on a cluster without sync replication."""
+    if not cluster.sync_replication:
+        raise util.sync_error(400, f'cluster {cluster.get_id()} is not a sync-replication cluster')
+    site = util.require_site(site)
+    with util.sync_http_errors():
+        status = sync_replication_controller.volume_sync_status(
+            volume, site, max_age=constants.SYNC_STATUS_CACHE_SEC)
+    return SyncReplicationStatusDTO.from_status(status)
 
 
 class ReplicationStartParams(BaseModel):
@@ -88,14 +128,16 @@ def start(cluster: Cluster, pool: StoragePool, volume: Volume,
     at all. mode/interval_min were likewise unreachable.
     """
     parameters = body or ReplicationStartParams()
-    if not lvol_controller.replication_start(
+    with util.sync_http_errors():
+        started = lvol_controller.replication_start(
             volume.get_id(),
             replication_cluster_id=(
                 str(parameters.replication_cluster_id)
                 if parameters.replication_cluster_id else None
             ),
             mode=parameters.mode,
-            interval_min=parameters.interval_min):
+            interval_min=parameters.interval_min)
+    if not started:
         raise HTTPException(500, 'Failed to start volume snapshot replication')
 
     return Response(status_code=204)
@@ -104,7 +146,9 @@ def start(cluster: Cluster, pool: StoragePool, volume: Volume,
 @api.post('/stop', name='clusters:storage-pools:volumes:replication:stop',
           status_code=204, responses={204: {"content": None}})
 def stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
-    if not lvol_controller.replication_stop(volume.get_id()):
+    with util.sync_http_errors():
+        stopped = lvol_controller.replication_stop(volume.get_id())
+    if not stopped:
         raise HTTPException(500, 'Failed to stop volume snapshot replication')
 
     return Response(status_code=204)
@@ -113,16 +157,21 @@ def stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 @api.post('/trigger', name='clusters:storage-pools:volumes:replication:trigger',
           status_code=204, responses={204: {"content": None}})
 def trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
-    if not lvol_controller.replication_trigger(volume.get_id()):
+    with util.sync_http_errors():
+        triggered = lvol_controller.replication_trigger(volume.get_id())
+    if not triggered:
         raise HTTPException(500, 'Failed to start volume snapshot replication')
 
     return Response(status_code=204)
 
 
 @api.post('/failover', name='clusters:storage-pools:volumes:replication:failover',
-          status_code=204, responses={204: {"content": None}})
+          status_code=204, responses={204: {"content": None}, 200: {
+              "description": "Sync replication: the volume's connection strings on the promoted site "
+                             "(SyncPromoteResultDTO). Async: {\"warnings\": [...]} when a consistency-group "
+                             "generation does not match the current membership."}})
 def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
-             generation: int = 0, planned: bool = False) -> Response:
+             generation: int = 0, planned: bool = False, site: util.SiteParameter = None) -> Response:
     """Bring the volume up on the target cluster.
 
     The counterpart's id is read back from this volume's replication
@@ -149,7 +198,18 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
     force-escalation take over. Unplanned failover (the default) ignores
     demote state entirely, unchanged from today: its whole premise is that
     the source may never have been reachable to demote.
+
+    On a sync-replication cluster this is the promote of the volume on
+    ``site`` (required), forced unless ``planned``
+    (``sync_replication_controller.sync_promote_lvol``): 200 with its
+    connection strings on ``site`` once served there; 409 while the promote
+    task runs (the call that queues it included - call again), for a gate
+    that fails or a promote the decision table refuses (a volume still served
+    on the other site, the list in ``detail.volumes``); 412 when the site the
+    volume is served from is not online and the call is not forced.
     """
+    if cluster.sync_replication:
+        return _sync_promote(volume, util.require_site(site), generation=generation, planned=planned)
     if generation < 0:
         raise HTTPException(400, 'generation cannot be negative')
     if planned and volume.replication_demote_state != LVol.REPLICATION_DEMOTE_DONE:
@@ -188,6 +248,18 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
     return Response(status_code=204)
 
 
+def _sync_promote(volume: LVol, site: str, *, generation: int, planned: bool) -> Response:
+    if generation != 0:
+        raise util.sync_error(400, 'generation is not supported on a sync-replication cluster')
+    with util.sync_http_errors():
+        result = sync_replication_controller.sync_promote_lvol(volume.get_id(), site, force=not planned)
+    if result.in_progress:
+        raise util.sync_error(409, 'promote in progress; call again', task_id=result.task_id)
+    dto = SyncPromoteResultDTO(lvol_id=UUID(volume.get_id()),
+                               connection_strings=(result.connection_strings or {}).get(volume.get_id(), []))
+    return JSONResponse(status_code=200, content=jsonable_encoder(dto))
+
+
 class CommitParams(BaseModel):
     delete_source: bool = False
 
@@ -202,8 +274,9 @@ def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume
     after the cutover succeeds.
     """
     params = body or CommitParams()
-    result = lvol_controller.replication_commit(volume.get_id(),
-                                                delete_source=params.delete_source)
+    with util.sync_http_errors():
+        result = lvol_controller.replication_commit(volume.get_id(),
+                                                    delete_source=params.delete_source)
     if isinstance(result, tuple):  # (False, error)
         raise HTTPException(500, str(result[1]))
     if not result:
@@ -217,7 +290,8 @@ def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume
 
 @api.post('/demote', name='clusters:storage-pools:volumes:replication:demote',
           status_code=204, responses={204: {"content": None}, 202: {"content": None}})
-def demote(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+def demote(cluster: Cluster, pool: StoragePool, volume: Volume,
+           site: util.SiteParameter = None) -> Response:
     """Fence the source and confirm the last write replicated (P0-3).
 
     Synchronous and re-drivable, not queued: each call does only the work its
@@ -225,7 +299,16 @@ def demote(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     just check whether it has landed), so the caller re-invokes this route
     until it reports 204. A 202 means still waiting -- call again, the same
     way `GET .../status` is re-read rather than pushed.
+
+    On a sync-replication cluster: fence the volume on ``site`` (required),
+    synchronously - 204 (also when it is not served there), 409 when the gate
+    fails (the replicas are not in sync).
     """
+    if cluster.sync_replication:
+        site = util.require_site(site)
+        with util.sync_http_errors():
+            sync_replication_controller.sync_demote_lvol(volume.get_id(), site)
+        return Response(status_code=204)
     result = lvol_controller.demote_lvol(volume.get_id())
     if isinstance(result, tuple):  # (False, error)
         raise HTTPException(500, str(result[1]))
@@ -242,7 +325,9 @@ class FailbackParams(BaseModel):
           status_code=204, responses={204: {"content": None}})
 def failback(cluster: Cluster, pool: StoragePool, volume: Volume, body: FailbackParams) -> Response:
     """Point replication back at a source cluster. The cutover itself is
-    `commit`."""
+    `commit`. A no-op on a sync-replication cluster (its resync is automatic)."""
+    if cluster.sync_replication:
+        return Response(status_code=204)
     result = lvol_controller.replication_failback(
         volume.get_id(),
         source_cluster_id=str(body.source_cluster_id) if body.source_cluster_id else None,
@@ -264,7 +349,8 @@ def cutover_proceed(cluster: Cluster, pool: StoragePool, volume: Volume) -> Resp
     is suspended waiting for this signal; once set, it advances to the ANA flip.
     """
     try:
-        replication_policy_controller.set_cutover_proceed(volume.get_id())
+        with util.sync_http_errors():
+            replication_policy_controller.set_cutover_proceed(volume.get_id())
     except KeyError as exc:
         raise HTTPException(404, str(exc))
     return Response(status_code=204)

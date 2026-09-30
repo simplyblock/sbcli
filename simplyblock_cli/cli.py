@@ -412,6 +412,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__replication_policy_remove(subparser)
         self.init_cluster__replication_policy_failover(subparser)
         self.init_cluster__replication_policy_snapshot(subparser)
+        self.init_cluster__sync_status(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -735,6 +736,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'replication-policy-snapshot', 'Takes ONE crash-consistent snapshot of every volume in the policy\'s consistency group, as a new group generation')
         subcommand.add_argument('policy_id', help='Replication policy id (must be a consistency-group policy)', type=str)
 
+    def init_cluster__sync_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'sync-status', 'Shows the sync-replication status of a sync-replication cluster: the aggregate (the worst over all lvstores) and one row per lvstore')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
 
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical Volume Commands', aliases=['lvol',])
@@ -763,6 +769,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__replication_status(subparser)
         self.init_volume__replication_info(subparser)
         self.init_volume__replication_trigger(subparser)
+        self.init_volume__sync_promote(subparser)
+        self.init_volume__sync_demote(subparser)
+        self.init_volume__sync_status(subparser)
         self.init_volume__suspend(subparser)
         self.init_volume__resume(subparser)
         self.init_volume__clone_lvol(subparser)
@@ -927,6 +936,23 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_trigger(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__sync_promote(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'sync-promote', 'Sync-replication clusters: promotes a volume on a site (planned leadership move, or a disaster fail-over with --force); prints the connection strings of that site once done')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
+        subcommand.add_argument('--site', help='The site to promote the volume on.', type=str, dest='site', required=True)
+        subcommand.add_argument('--force', help='Disaster fail-over: the site the volume is served from is lost.', dest='force', action='store_true')
+
+    def init_volume__sync_demote(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'sync-demote', 'Sync-replication clusters: demotes (fences) a volume on a site. A no-op when the volume is not served there; refused while the replicas are not in sync.')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
+        subcommand.add_argument('--site', help='The site to demote the volume on.', type=str, dest='site', required=True)
+
+    def init_volume__sync_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'sync-status', 'Sync-replication clusters: shows the sync-replication status of a volume seen from a site (its role there and the cluster-wide state)')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
+        subcommand.add_argument('--site', help='The site to look from.', type=str, dest='site', required=True)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
 
     def init_volume__suspend(self, subparser):
         subcommand = self.add_sub_command(subparser, 'suspend', 'Suspend lvol subsystems')
@@ -1637,6 +1663,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__replication_policy_failover(sub_command, args)
                 elif sub_command in ['replication-policy-snapshot']:
                     ret = self.cluster__replication_policy_snapshot(sub_command, args)
+                elif sub_command in ['sync-status']:
+                    ret = self.cluster__sync_status(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1701,6 +1729,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__replication_info(sub_command, args)
                 elif sub_command in ['replication-trigger']:
                     ret = self.volume__replication_trigger(sub_command, args)
+                elif sub_command in ['sync-promote']:
+                    ret = self.volume__sync_promote(sub_command, args)
+                elif sub_command in ['sync-demote']:
+                    ret = self.volume__sync_demote(sub_command, args)
+                elif sub_command in ['sync-status']:
+                    ret = self.volume__sync_status(sub_command, args)
                 elif sub_command in ['suspend']:
                     ret = self.volume__suspend(sub_command, args)
                 elif sub_command in ['resume']:

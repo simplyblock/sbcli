@@ -1024,8 +1024,15 @@ def set_cutover_proceed(lvol_id):
     handles this case without changing the API surface.
 
     Returns the replication ID on success, raises KeyError when no matching
-    cutover_pending record is found.
+    cutover_pending record is found, SyncReplicationUnsupportedError on a
+    sync-replication cluster.
     """
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        lvol = None  # no volume record to judge; the relationship lookup below decides
+    if lvol is not None:
+        lvol_controller.reject_async_replication_on_sync(db, lvol, "Replication cutover-proceed")
     rep = _active_relationship(lvol_id)
     if rep is None or rep.state != LVolReplication.STATE_CUTOVER_PENDING:
         # Failback path: lvol_id is the target of the reverse replication.

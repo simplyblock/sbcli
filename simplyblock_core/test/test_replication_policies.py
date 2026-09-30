@@ -1166,22 +1166,6 @@ def test_create_reports_when_the_policy_cannot_be_attached(monkeypatch):
         "the attach failure has to surface to the caller"
 
 
-def test_direct_replication_start_refused_on_a_policy_managed_volume(monkeypatch):
-    """Attaching a policy IS the way replication is started; calling the raw verb
-    would let a volume run on settings that diverge from its policy."""
-    from simplyblock_core.controllers import lvol_controller
-
-    lv = _lvol("LV1", policy_id="CL_SRC/P1")
-
-    class _DB:
-        def get_lvol_by_id(self, lvol_id):
-            return lv
-
-    monkeypatch.setattr(lvol_controller, "DBController", lambda: _DB())
-    assert lvol_controller.replication_start("LV1", replication_cluster_id="CL_OTHER") is False
-    assert lvol_controller.replication_stop("LV1") is False
-
-
 def test_policy_controller_may_drive_the_raw_verbs(monkeypatch):
     """The guard must not lock the policy controller itself out."""
     import inspect

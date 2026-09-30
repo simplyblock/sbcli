@@ -7,6 +7,9 @@ from fastapi import Request
 from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
+from simplyblock_core.controllers.sync_replication_controller import (
+    ROLE_PRIMARY, STATE_HEALTHY, GroupSyncStatus, VolumeSyncStatus,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.utils import hexa_to_cpu_list
 from simplyblock_core.models.cluster import Cluster
@@ -90,6 +93,13 @@ ReplicationRole = Literal["source", "secondary", "failed_over", "none"]
 ReplicationHealthState = Literal[
     "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
 ]
+
+#: Sync replication: the role of a volume / group on the site it is queried
+#: from - ``primary`` where it is served.
+SyncReplicationRole = Literal["primary", "secondary"]
+
+#: Sync replication: the cluster-wide state, the worst over every LVS.
+SyncReplicationState = Literal["healthy", "degraded", "resyncing"]
 
 TaskFunctionName = Literal[
     "device_restart",
@@ -848,6 +858,82 @@ class ReplicationStatusDTO(BaseModel):
             resyncing=bool(info.get('resyncing', False)),
         )
 
+    @staticmethod
+    def from_sync_status(status: VolumeSyncStatus) -> 'ReplicationStatusDTO':
+        """A sync-replication volume's status in the async DTO (the
+        csi-addons adapter's existing read)."""
+        return ReplicationStatusDTO(**_sync_health(status))
+
+
+class SyncReplicationStatusDTO(BaseModel):
+    """The sync-replication status of a volume or consistency group seen from
+    one site (``GET .../replication/sync-status?site=``).
+
+    Everything but ``role`` is cluster-wide (the worst over every LVS), so
+    every volume and group answers the same: csi-addons' GetReplicationStatus
+    (``state``, ``last_replicated_at``, ``lag_seconds``, ``bytes_behind``,
+    ``diverged``) and GetSecondaryReadiness (``peer_ready = completed and not
+    degraded and not resyncing``).
+    """
+    site: str
+    role: SyncReplicationRole
+    state: SyncReplicationState
+    #: Now while healthy; else the last known in-sync time (null: not known).
+    last_replicated_at: datetime | None = None
+    lag_seconds: util.OptionalUnsigned = None
+    #: Upper bound: unsynced pages x page size.
+    bytes_behind: util.Unsigned = 0
+    diverged: bool
+    #: Every distrib replicates in mode ``full``.
+    completed: bool
+    degraded: bool
+    resyncing: bool
+    peer_ready: bool
+
+    @staticmethod
+    def from_status(status: VolumeSyncStatus | GroupSyncStatus) -> 'SyncReplicationStatusDTO':
+        cluster = status.cluster
+        return SyncReplicationStatusDTO(
+            site=status.site,
+            role=cast(SyncReplicationRole, status.role),
+            state=cast(SyncReplicationState, cluster.state),
+            last_replicated_at=cluster.last_replicated_at,
+            lag_seconds=cluster.lag_seconds,
+            bytes_behind=cluster.bytes_behind,
+            diverged=cluster.diverged,
+            completed=cluster.completed,
+            degraded=cluster.degraded,
+            resyncing=cluster.resyncing,
+            peer_ready=cluster.peer_ready,
+        )
+
+
+class SyncPromoteResultDTO(BaseModel):
+    """A completed sync-replication promote of one volume: its connection
+    entries on the promoted site (that site's triplet only)."""
+    lvol_id: UUID
+    connection_strings: list[NvmeConnectEntry]
+
+    @staticmethod
+    def from_result(connection_strings: dict) -> list['SyncPromoteResultDTO']:
+        return [SyncPromoteResultDTO(lvol_id=UUID(lvol_id), connection_strings=entries)
+                for lvol_id, entries in connection_strings.items()]
+
+
+def _sync_health(status: VolumeSyncStatus | GroupSyncStatus) -> dict:
+    """The async replication-status fields filled from a sync status: role
+    ``source`` where served, state ``in_sync`` only while healthy (a catch-up
+    in progress is ``degraded`` with ``resyncing`` set)."""
+    cluster = status.cluster
+    return {
+        'role': 'source' if status.role == ROLE_PRIMARY else 'secondary',
+        'state': 'in_sync' if cluster.state == STATE_HEALTHY else 'degraded',
+        'last_replicated_at': cluster.last_replicated_at,
+        'lag_seconds': cluster.lag_seconds,
+        'outstanding_bytes': cluster.bytes_behind,
+        'resyncing': cluster.resyncing,
+    }
+
 
 class ConsistencyGroupReplicationIntentDTO(BaseModel):
     """Request body to enable or disable group replication (design §14.4).
@@ -896,6 +982,11 @@ class ConsistencyGroupReplicationStatusDTO(BaseModel):
             outstanding_bytes=info.get('outstanding_bytes', 0),
             resyncing=bool(info.get('resyncing', False)),
         )
+
+    @staticmethod
+    def from_sync_status(status: GroupSyncStatus) -> 'ConsistencyGroupReplicationStatusDTO':
+        return ConsistencyGroupReplicationStatusDTO(
+            member_count=status.member_count, **_sync_health(status))
 
 
 class ReplicatedSnapshotDTO(BaseModel):

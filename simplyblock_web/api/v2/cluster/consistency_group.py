@@ -11,17 +11,21 @@ import builtins
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from simplyblock_core import constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import (
     consistency_group_controller,
     lvol_controller,
     replication_policy_controller,
+    sync_replication_controller,
 )
 from simplyblock_core.controllers.consistency_group_controller import ConsistencyGroupError
 
+from .. import util
 from .._dependencies import Cluster, ConsistencyGroupResource
 from .._dtos import (
     ConsistencyGroupDTO,
@@ -31,6 +35,8 @@ from .._dtos import (
     ConsistencyGroupMemberJoinDTO,
     ConsistencyGroupReplicationIntentDTO,
     ConsistencyGroupReplicationStatusDTO,
+    SyncPromoteResultDTO,
+    SyncReplicationStatusDTO,
 )
 
 api = APIRouter(tags=['consistency-groups'])
@@ -171,8 +177,11 @@ def configure_replication(cluster: Cluster, group: ConsistencyGroupResource,
     §14.4): a policy id attaches the whole group to that group replication
     policy; ``null`` detaches it (the group and its members stay grouped by
     label). A refused attach (not a consistency-group policy, missing policy) is
-    a 409.
+    a 409. A no-op on a sync-replication cluster, where every volume is
+    replicated to the other site.
     """
+    if cluster.sync_replication:
+        return Response(status_code=204)
     if body.replication_policy_id is None:
         consistency_group_controller.detach_group_policy(group)
     else:
@@ -186,12 +195,23 @@ def configure_replication(cluster: Cluster, group: ConsistencyGroupResource,
 
 @instance_api.get('/replication/status', name='clusters:consistency-groups:replication:status',
                   response_model=ConsistencyGroupReplicationStatusDTO)
-def replication_status(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupReplicationStatusDTO:
+def replication_status(cluster: Cluster, group: ConsistencyGroupResource,
+                       site: util.SiteParameter = None) -> ConsistencyGroupReplicationStatusDTO:
     """The group's replication status as one unit: oldest recovery point, worst
     member lag and health, summed backlog (design-csi-addons-replication.md
     §14.4/§14.6). Never 404s -- a group with no replicating member reports
     ``state: not_replicating``.
+
+    On a sync-replication cluster (``site`` required): the cluster-wide site
+    replication status (the same for every member, not summed) and the
+    group's role on ``site`` - ``source`` only when every member is served
+    there.
     """
+    if cluster.sync_replication:
+        with util.sync_http_errors():
+            status = sync_replication_controller.group_sync_status(
+                group.get_id(), util.require_site(site), max_age=constants.SYNC_STATUS_CACHE_SEC)
+        return ConsistencyGroupReplicationStatusDTO.from_sync_status(status)
     infos = []
     for member in consistency_group_controller.list_members(group):
         info = lvol_controller.get_replication_info(member["lvol_id"])
@@ -200,13 +220,44 @@ def replication_status(cluster: Cluster, group: ConsistencyGroupResource) -> Con
     return ConsistencyGroupReplicationStatusDTO.from_info(agg)
 
 
-@instance_api.post('/replication/failover', name='clusters:consistency-groups:replication:failover')
-def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> dict:
+@instance_api.get('/replication/sync-status', name='clusters:consistency-groups:replication:sync-status',
+                  response_model=SyncReplicationStatusDTO)
+def replication_sync_status(cluster: Cluster, group: ConsistencyGroupResource,
+                            site: util.SiteParameter = None) -> SyncReplicationStatusDTO:
+    """The sync-replication status of the group seen from ``site``: its role
+    there (``primary`` only when every member is served there) and the
+    cluster-wide state. 400 on a cluster without sync replication."""
+    if not cluster.sync_replication:
+        raise util.sync_error(400, f'cluster {cluster.get_id()} is not a sync-replication cluster')
+    with util.sync_http_errors():
+        status = sync_replication_controller.group_sync_status(
+            group.get_id(), util.require_site(site), max_age=constants.SYNC_STATUS_CACHE_SEC)
+    return SyncReplicationStatusDTO.from_status(status)
+
+
+@instance_api.post('/replication/failover', name='clusters:consistency-groups:replication:failover',
+                   response_model=None)
+def replication_failover(cluster: Cluster, group: ConsistencyGroupResource,
+                         planned: bool = False, site: util.SiteParameter = None) -> dict | JSONResponse:
     """Fail the whole group over as ONE unit through its replication policy
     (design-csi-addons-replication.md §14.4): every member is pinned to the same
     group generation, all-or-nothing. Refuses (412) a group not attached to a
     policy.
+
+    On a sync-replication cluster: the promote of every member on ``site``
+    (required) as one, forced unless ``planned``
+    (``sync_replication_controller.sync_promote_group``) - 200
+    ``{"members": [{lvol_id, connection_strings}]}`` once all are served
+    there; 409 in progress / gate / refused, 412 as for a volume.
     """
+    if cluster.sync_replication:
+        site = util.require_site(site)
+        with util.sync_http_errors():
+            result = sync_replication_controller.sync_promote_group(group.get_id(), site, force=not planned)
+        if result.in_progress:
+            raise util.sync_error(409, 'promote in progress; call again', task_id=result.task_id)
+        members = SyncPromoteResultDTO.from_result(result.connection_strings or {})
+        return JSONResponse(status_code=200, content={"members": jsonable_encoder(members)})
     if not group.policy_id:
         raise HTTPException(
             412, f'consistency group {group.get_id()} is not attached to a replication policy')
@@ -230,12 +281,21 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> d
 
 @instance_api.post('/replication/demote', name='clusters:consistency-groups:replication:demote',
                    status_code=204, responses={204: {"content": None}, 202: {"content": None}})
-def replication_demote(cluster: Cluster, group: ConsistencyGroupResource) -> Response:
+def replication_demote(cluster: Cluster, group: ConsistencyGroupResource,
+                       site: util.SiteParameter = None) -> Response:
     """Demote the whole group: fence every member and confirm each one's last
     write replicated (design-csi-addons-replication.md §14.4). Re-drivable, not
     queued: 204 once every member is demoted, 202 (with per-member detail) while
     any is still converging, 500 on a hard failure.
+
+    On a sync-replication cluster: fence every member on ``site`` (required),
+    one gate for all - 204, 409 when the gate fails.
     """
+    if cluster.sync_replication:
+        site = util.require_site(site)
+        with util.sync_http_errors():
+            sync_replication_controller.sync_demote_group(group.get_id(), site)
+        return Response(status_code=204)
     result = consistency_group_controller.demote_group(group)
     if result.get("error"):
         raise HTTPException(500, result["error"])
@@ -254,8 +314,11 @@ def replication_failback(cluster: Cluster, group: ConsistencyGroupResource,
                          body: GroupFailbackParams) -> Response:
     """Fail the whole group back: point every member's replication back at the
     source cluster (design-csi-addons-replication.md §14.4). The cutover itself is
-    each member's own commit.
+    each member's own commit. A no-op on a sync-replication cluster (its resync
+    is automatic).
     """
+    if cluster.sync_replication:
+        return Response(status_code=204)
     result = consistency_group_controller.failback_group(
         group,
         source_cluster_id=str(body.source_cluster_id) if body.source_cluster_id else None,

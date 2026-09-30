@@ -4084,10 +4084,23 @@ def inflate_lvol(lvol_id):
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
 
+
+def reject_async_replication_on_sync(db_controller, lvol, operation):
+    """Raise SyncReplicationUnsupportedError when ``lvol`` lives on a
+    sync-replication cluster: the async snapshot-replication operations are
+    not part of its contract (they would replicate to another cluster beside
+    the site replication). Called by the DIRECT operations only, before they
+    change anything; the policy paths (``from_policy=True``) are not guarded
+    here."""
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    reject_on_sync_replication(db_controller.get_cluster_by_id(node.cluster_id), operation)
+
+
 def replication_trigger(lvol_id):
     # create snapshot and replicate it
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
+    reject_async_replication_on_sync(db_controller, lvol, "Replication trigger")
     node = db_controller.get_storage_node_by_id(lvol.node_id)
     snapshot_controller.add(lvol_id, f"replication_{uuid.uuid4()}")
 
@@ -4308,6 +4321,8 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         logger.error(e)
         return False
 
+    if not from_policy:
+        reject_async_replication_on_sync(db_controller, lvol, "Replication start")
     if not from_policy and lvol.replication_policy_id:
         # Truthiness, NOT `is not None`: the field defaults to the empty
         # string, so an `is not None` test treats EVERY volume as
@@ -4599,6 +4614,8 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
         logger.error(e)
         return False
 
+    if not from_policy:
+        reject_async_replication_on_sync(db_controller, lvol, "Replication stop")
     if not from_policy and lvol.replication_policy_id:
         # Truthiness, NOT `is not None`: the field defaults to the empty
         # string, so an `is not None` test treats EVERY volume as
@@ -5744,6 +5761,7 @@ def replication_commit(lvol_id, delete_source=False):
         logger.error(e)
         return False
 
+    reject_async_replication_on_sync(db_controller, lvol, "Replication commit")
     if not lvol.replication_node_id:
         logger.error(f"LVol: {lvol_id} replication node id not found")
         return False

@@ -14,7 +14,7 @@ from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
     tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller, \
-    replication_policy_controller
+    replication_policy_controller, sync_replication_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
@@ -71,6 +71,41 @@ def _format_json(data, *, sort_keys: bool = False) -> str:
 
 def _format_result(data, *, json: bool) -> str:
     return _format_json(data) if json else utils.print_table(data, unwrap_secrets=True)
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _sync_status_fields(status) -> dict:
+    """The cluster-wide fields of a ``sync_replication_controller.ClusterSyncStatus``."""
+    return {
+        "state": status.state,
+        "completed": status.completed,
+        "degraded": status.degraded,
+        "resyncing": status.resyncing,
+        "peer_ready": status.peer_ready,
+        "diverged": status.diverged,
+        "last_replicated_at": _iso(status.last_replicated_at),
+        "lag_seconds": status.lag_seconds,
+        "bytes_behind": status.bytes_behind,
+    }
+
+
+def _sync_lvs_row(lvs) -> dict:
+    """One ``LvsSyncStatus`` as a row."""
+    return {
+        "lvs": lvs.lvs_name,
+        "owner": lvs.owner_id,
+        "state": lvs.state,
+        "worst_status": lvs.worst_status,
+        "mode_full": lvs.mode_full,
+        "bytes_behind": lvs.bytes_behind,
+        "remote_journal_in_sync": lvs.remote_journal_in_sync,
+        "last_replicated_at": _iso(lvs.last_replicated_at),
+        "answering": len(lvs.answering),
+        "gate_problems": "; ".join(lvs.gate_problems),
+    }
 
 
 class CLIWrapperBase:
@@ -772,6 +807,15 @@ class CLIWrapperBase:
             table += chr(10) + chr(10).join("WARNING: " + w for w in warnings)
         return table
 
+    def cluster__sync_status(self, sub_command, args):
+        status = sync_replication_controller.cluster_sync_status(args.cluster_id)
+        fields = _sync_status_fields(status)
+        lvs = [_sync_lvs_row(s) for s in status.lvs]
+        if args.json:
+            return _format_json({**fields, "lvs": lvs})
+        table = utils.print_table([{"key": key, "value": value} for key, value in fields.items()])
+        return table + "\n" + (utils.print_table(lvs) if lvs else "No lvstores")
+
     def volume__replication_policy_set(self, sub_command, args):
         return replication_policy_controller.attach_policy(args.volume_id, args.policy)
 
@@ -975,6 +1019,27 @@ class CLIWrapperBase:
 
     def volume__replication_trigger(self, sub_command, args):
         return lvol_controller.replication_trigger(args.lvol_id)
+
+    def volume__sync_promote(self, sub_command, args):
+        result = sync_replication_controller.sync_promote_lvol(args.volume_id, args.site, force=args.force)
+        if result.in_progress:
+            task = f" (task {result.task_id})" if result.task_id else ""
+            return (f"Promote of volume {args.volume_id} on site {args.site} in progress{task}; "
+                    f"run the command again for its result")
+        entries = (result.connection_strings or {}).get(args.volume_id, [])
+        return "\n".join(entry.connect for entry in entries)
+
+    def volume__sync_demote(self, sub_command, args):
+        if sync_replication_controller.sync_demote_lvol(args.volume_id, args.site):
+            return f"Volume {args.volume_id} demoted on site {args.site}"
+        return f"Volume {args.volume_id} is not served on site {args.site}; nothing to do"
+
+    def volume__sync_status(self, sub_command, args):
+        status = sync_replication_controller.volume_sync_status_by_id(args.volume_id, args.site)
+        data = {"site": status.site, "role": status.role, **_sync_status_fields(status.cluster)}
+        if args.json:
+            return _format_json(data)
+        return utils.print_table([{"key": key, "value": value} for key, value in data.items()])
 
     def volume__suspend(self, sub_command, args):
         return lvol_controller.suspend_lvol(args.lvol_id)

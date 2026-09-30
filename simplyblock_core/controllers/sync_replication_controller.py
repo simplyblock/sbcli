@@ -699,6 +699,52 @@ def volume_sync_status(lvol: LVol, site: str, *, max_age: float = 0.0) -> Volume
                             cluster=cluster_sync_status(owner.cluster_id, max_age=max_age))
 
 
+def volume_sync_status_by_id(lvol_id: str, site: str, *, max_age: float = 0.0) -> VolumeSyncStatus:
+    """volume_sync_status of the stored volume ``lvol_id`` (KeyError when
+    there is none)."""
+    return volume_sync_status(DBController().get_lvol_by_id(lvol_id), site, max_age=max_age)
+
+
+def group_role(roles: Iterable[str]) -> str:
+    """The role of a consistency group on a site from its members' roles:
+    ``primary`` only when it has members and every one is primary there - an
+    empty or partly served group never claims the site."""
+    roles = list(roles)
+    return ROLE_PRIMARY if roles and all(r == ROLE_PRIMARY for r in roles) else ROLE_SECONDARY
+
+
+@dataclass(frozen=True)
+class GroupSyncStatus:
+    """The status of a consistency group seen from one site: the cluster's
+    status (the same for every member, never summed over them), the group's
+    role there (group_role) and its current member count."""
+    role: str
+    site: str
+    member_count: int
+    cluster: ClusterSyncStatus
+
+
+def group_sync_status(group_id: str, site: str, *, max_age: float = 0.0) -> GroupSyncStatus:
+    """The sync-replication status of consistency group ``group_id`` seen from
+    ``site`` (cluster_sync_status for ``max_age``). The cluster and the site
+    are judged from the group's own cluster, so an empty group answers too.
+    Raises SyncReplicationUnsupportedError, SyncReplicationSiteError,
+    SyncGroupMemberError (a member that cannot be resolved)."""
+    db = DBController()
+    group = db.get_consistency_group_by_id(group_id)
+    _sync_cluster(db, group.cluster_id)
+    _check_site(db, group.cluster_id, site)
+    volumes = _group_volumes(db, group_id)
+    owners: dict[str, StorageNode] = {}
+    for lvol in volumes:
+        if lvol.node_id not in owners:
+            owners[lvol.node_id] = db.get_storage_node_by_id(lvol.node_id)
+    return GroupSyncStatus(
+        role=group_role(volume_role(lv, owners[lv.node_id], site) for lv in volumes),
+        site=site, member_count=len(volumes),
+        cluster=cluster_sync_status(group.cluster_id, max_age=max_age))
+
+
 # ---------------------------------------------------------------------------
 # Site return
 # ---------------------------------------------------------------------------

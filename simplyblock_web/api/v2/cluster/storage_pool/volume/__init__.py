@@ -211,7 +211,7 @@ def update(cluster: Cluster, pool: StoragePool, volume: Volume, body: UpdatableL
         lvol_controller.resize_lvol(volume.get_id(), body.size)
 
     if 'replication_policy_id' in body.model_fields_set:
-        apply_replication_policy(volume, body.replication_policy_id)
+        apply_replication_policy(cluster, volume, body.replication_policy_id)
 
     return Response(status_code=204)
 
@@ -266,8 +266,17 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str | None = None):
-    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
+def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str | None = None,
+            site: util.SiteParameter = None):
+    """The volume's connection entries. On a sync-replication cluster
+    ``site`` is required and only that site's paths are returned; elsewhere
+    it is ignored."""
+    if cluster.sync_replication:
+        with util.sync_http_errors():
+            details, err = lvol_controller.connect_lvol(
+                volume.get_id(), host_nqn=host_nqn, site=util.require_site(site))
+    else:
+        details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
         return Response(status_code=404, content=err)
     return details

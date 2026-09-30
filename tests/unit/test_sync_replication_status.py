@@ -261,6 +261,16 @@ class TestRoleAndActiveSite:
         assert src.volume_role(lvol, owner, "B") == src.ROLE_PRIMARY
         assert src.volume_role(lvol, owner, "A") == src.ROLE_SECONDARY
 
+    @pytest.mark.parametrize("roles, expected", [
+        ([], src.ROLE_SECONDARY),
+        ([src.ROLE_PRIMARY], src.ROLE_PRIMARY),
+        ([src.ROLE_PRIMARY, src.ROLE_PRIMARY], src.ROLE_PRIMARY),
+        ([src.ROLE_SECONDARY, src.ROLE_SECONDARY], src.ROLE_SECONDARY),
+        ([src.ROLE_PRIMARY, src.ROLE_SECONDARY], src.ROLE_SECONDARY),
+    ])
+    def test_group_role(self, roles, expected):
+        assert src.group_role(iter(roles)) == expected
+
     @pytest.mark.parametrize("home, active, lost, expected", [
         ("A", "", "A", True), ("A", "A", "A", True), ("B", "A", "A", True),
         ("B", "", "A", False), ("A", "B", "A", False),
