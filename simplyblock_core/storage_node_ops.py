@@ -14301,10 +14301,10 @@ def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
                         tr, iface.ip4_address, listener_port, lvol.nqn)
             continue
         logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
-        # listeners_create returns the RPC result and answers None on an RPC
-        # error without raising, so an unchecked call reports a listener this
-        # subsystem does not have -- and the caller then records the lvol as
-        # serving.
+        # listeners_create raises on an RPC error; this guards only the
+        # (unlikely) case of a falsy-but-non-error SPDK response, so a
+        # listener this subsystem does not have is never mistaken for one
+        # it does.
         if not rpc_client.listeners_create(
                 lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state):
             msg = (f"Failed to add listener {tr} {iface.ip4_address}:{listener_port} "

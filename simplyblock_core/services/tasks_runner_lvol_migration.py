@@ -1037,9 +1037,12 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             sec_registered = True
             logger.info(f"Secondary already has {tgt_composite}; skipping registration")
         else:
-            ret_sec = sec_rpc.bdev_lvol_register(
-                snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
-                _priority_class)
+            try:
+                ret_sec = sec_rpc.bdev_lvol_register(
+                    snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
+                    _priority_class)
+            except RPCException:
+                ret_sec = None
             if not ret_sec:
                 try:
                     _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc,
@@ -1053,9 +1056,12 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             if ter_rpc.bdev_get(tgt_composite):
                 ter_registered = True
             else:
-                ret_ter = ter_rpc.bdev_lvol_register(
-                    snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
-                    _priority_class)
+                try:
+                    ret_ter = ter_rpc.bdev_lvol_register(
+                        snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
+                        _priority_class)
+                except RPCException:
+                    ret_ter = None
                 if not ret_ter:
                     try:
                         _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc, ter_rpc,
@@ -2318,8 +2324,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
             _get_target_secondary_node(tgt_node, src_node.get_id())[0],
             _get_target_tertiary_node(tgt_node, src_node.get_id())[0],
         ]):
-            _ret = _make_rpc(_extra_node).bdev_lvol_add_clone(
-                _clone_tgt_composite, tgt_snap_composite)
+            try:
+                _ret = _make_rpc(_extra_node).bdev_lvol_add_clone(
+                    _clone_tgt_composite, tgt_snap_composite)
+            except RPCException as e:
+                logger.warning(
+                    f"add_clone on {_extra_node.get_id()[:8]} failed for final lvol (non-fatal): {e}")
+                continue
             if not _ret:
                 logger.warning(
                     f"add_clone on {_extra_node.get_id()[:8]} failed for final lvol (non-fatal)")

@@ -152,9 +152,13 @@ def get_data():
             except RPCException as e:
                 logger.error("Failed to get reactor stats for node %s: %s", node.get_id(), e)
                 reactor_data = None
-            thread_data = rpc_client.thread_get_stats()
+            try:
+                thread_data = rpc_client.thread_get_stats()
+            except RPCException as e:
+                logger.error("Failed to get thread stats for node %s: %s", node.get_id(), e)
+                thread_data = {}
 
-            thread_busy_map = {t["id"]: t["busy"] for t in thread_data.get("threads", [])}    
+            thread_busy_map = {t["id"]: t["busy"] for t in thread_data.get("threads", [])}
 
             node_records = db.get_node_stats(node, 1)
             if node_records:
