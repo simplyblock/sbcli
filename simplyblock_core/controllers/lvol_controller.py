@@ -1960,8 +1960,18 @@ def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
 
 
 def is_node_leader(snode, lvs_name):
+    """Whether ``snode`` is the LVS leader for ``lvs_name``.
+
+    Never raises: most callers use this as a gate in failover/migration
+    logic where an unreachable node is exactly as actionable as a confirmed
+    non-leader (skip it, try the next candidate, or retry). Returns False
+    when the lvstore is absent, unreported, or the RPC itself failed.
+    """
     rpc_client = snode.rpc_client()
-    ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+    try:
+        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+    except RPCException:
+        return False
     if ret and len(ret) > 0 and "lvs leadership" in ret[0]:
         is_leader = ret[0]["lvs leadership"]
         return is_leader

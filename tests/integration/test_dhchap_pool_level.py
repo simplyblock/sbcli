@@ -331,9 +331,9 @@ class TestBdevNvmeSetOptionsNoDhchap(unittest.TestCase):
     def test_rpc_call_never_contains_dhchap(self):
         from simplyblock_core.rpc_client import RPCClient
         c = RPCClient.__new__(RPCClient)
-        c._request = MagicMock(return_value=True)
+        c._request3 = MagicMock(return_value=True)
         c.bdev_nvme_set_options()
-        params = c._request.call_args[0][1]
+        params = c._request3.call_args.kwargs
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
 
