@@ -88,6 +88,20 @@ class TestDeviceActions:
         assert response.status_code == 204
         device_controller.reset_storage_device.assert_called_once_with(DEVICE_ID)
 
+    def test_fail(self, client, device, device_controller):
+        device_controller.device_set_failed.return_value = True
+
+        response = client.post(f'{BASE}/{DEVICE_ID}/fail')
+
+        assert response.status_code == 204
+        device_controller.device_set_failed.assert_called_once_with(DEVICE_ID)
+
+    def test_fail_raises_on_failure(self, client, device, device_controller):
+        device_controller.device_set_failed.return_value = False
+
+        with pytest.raises(ValueError):
+            client.post(f'{BASE}/{DEVICE_ID}/fail')
+
 
 class TestDeviceStats:
 
