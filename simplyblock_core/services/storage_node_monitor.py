@@ -275,6 +275,9 @@ def _cluster_status_verdicts(cluster_id):
     It used to count until it was REMOVED, which kept a k=1 cluster DEGRADED
     for the whole removal and stalled any driver that waits for ACTIVE.
 
+    A PENDING_REMOVAL node is counted like any other node -- it may still be
+    serving -- but when it counts as affected, it counts as the removal's.
+
     ``status_without_removal`` leaves those nodes out entirely: the status the
     cluster would have if the removal were not happening. DEGRADED with an
     ACTIVE here means the removal alone causes it (Cluster.is_degraded_by_removal).
@@ -300,9 +303,9 @@ def _cluster_status_verdicts(cluster_id):
     offline_devices = 0
     jm_replication_tasks = False
 
-    affected_physical_nodes = []
+    affected_physical_nodes: list[str] = []
     # Hosts affected only through a node that is being removed (see above).
-    removal_affected_ips = []
+    removal_affected_ips: list[str] = []
 
     # One task-table fetch for the whole verdict: is_new_migrated_node runs
     # once per ONLINE node below and used to re-fetch the full per-cluster
@@ -326,6 +329,14 @@ def _cluster_status_verdicts(cluster_id):
                 if node.mgmt_ip not in removal_affected_ips:
                     removal_affected_ips.append(node.mgmt_ip)
             continue
+
+        # A PENDING_REMOVAL node may still be serving, so it goes through the
+        # ordinary counting below. But once it does count as affected, that is
+        # the removal's own shutdown (prepare_node_for_removal stops it before
+        # it reaches MIGRATING_DEVICES), not an outage beside the removal.
+        affected_hosts = (removal_affected_ips
+                          if node.status == StorageNode.STATUS_PENDING_REMOVAL
+                          else affected_physical_nodes)
 
         if node.status == StorageNode.STATUS_ONLINE:
             if is_new_migrated_node(cluster_id, node, tasks=cluster_tasks):
@@ -354,8 +365,8 @@ def _cluster_status_verdicts(cluster_id):
                 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED)
                 or node.status == StorageNode.STATUS_OFFLINE):
             affected_nodes += 1
-            if node.mgmt_ip not in affected_physical_nodes:
-                affected_physical_nodes.append(node.mgmt_ip)
+            if node.mgmt_ip not in affected_hosts:
+                affected_hosts.append(node.mgmt_ip)
         elif node.status == StorageNode.STATUS_OFFLINE:
             # OFFLINE is a terminal mgmt escalation: data-plane loss was
             # already confirmed (_check_data_plane_and_escalate), the node
@@ -366,8 +377,8 @@ def _cluster_status_verdicts(cluster_id):
             # states) gates suspension on RPC probes against a node that is
             # already declared gone, and returns ACTIVE for whole-domain
             # outages (2026-07 failure-domain suspend regressions).
-            if node.mgmt_ip not in affected_physical_nodes:
-                affected_physical_nodes.append(node.mgmt_ip)
+            if node.mgmt_ip not in affected_hosts:
+                affected_hosts.append(node.mgmt_ip)
         elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
                                  StorageNode.STATUS_DOWN]:
             # Non-ONLINE (UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN / RESTARTING)
@@ -394,9 +405,9 @@ def _cluster_status_verdicts(cluster_id):
             # that entered a transient state after the probe pass defaults
             # to "connected" (don't count) — same conservative bias as the
             # inline probe had, and the next fast tick re-evaluates it.
-            if (node.mgmt_ip not in affected_physical_nodes
+            if (node.mgmt_ip not in affected_hosts
                     and dp_quorum_by_node.get(node.get_id(), False)):
-                affected_physical_nodes.append(node.mgmt_ip)
+                affected_hosts.append(node.mgmt_ip)
 
         online_devices += node_online_devices
         offline_devices += node_offline_devices
