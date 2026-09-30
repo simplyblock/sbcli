@@ -91,6 +91,11 @@ ReplicationHealthState = Literal[
     "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
 ]
 
+# Every value of JobSchedule's FN_* constants: the /tasks endpoints serialize a
+# task of any type the scheduler can persist, so an omission here is not a
+# narrower API -- it is a 500 (pydantic literal_error) the moment such a task
+# exists. Keep in lockstep with simplyblock_core.models.job_schedule.JobSchedule;
+# test_task_endpoints.test_serializes_every_task_function_name pins the two together.
 TaskFunctionName = Literal[
     "device_restart",
     "node_restart",
@@ -98,6 +103,7 @@ TaskFunctionName = Literal[
     "failed_device_migration",
     "new_device_migration",
     "node_add",
+    "node_removal",
     "port_allow",
     "balancing_on_restart",
     "balancing_on_dev_rem",
@@ -105,10 +111,15 @@ TaskFunctionName = Literal[
     "jc_comp_resume",
     "snapshot_replication",
     "lvol_sync_del",
+    "lvol_sync_op",
     "lvol_migration",
+    "lvol_batch_migration",
     "s3_backup",
     "s3_backup_restore",
     "s3_backup_merge",
+    "cluster_expand",
+    "replication_final",
+    "fdb_backup",
 ]
 
 
