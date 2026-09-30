@@ -154,7 +154,7 @@ def ask_for_lvol_vuid():
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
-                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols=None, all_snaps=None):
+                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
     #  Validation
     #  name validation
     db_controller = DBController()
@@ -194,7 +194,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         return False, f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
 
     if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
@@ -663,13 +663,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # TTL-cached scans: these feed advisory capacity math and random-vuid
     # dedup only — name uniqueness goes through the O(1) per-pool name index
     # inside validate_add_lvol_func, so a few seconds of staleness here cannot
-    # admit a duplicate name. Uncached, these two full-DB reads cost seconds
-    # per create at a few thousand objects and dominate mass-create runs.
+    # admit a duplicate name (the pool's capacity is likewise read fresh there).
+    # Uncached, these two full-DB reads cost seconds per create at a few
+    # thousand objects and dominate mass-create runs.
     from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
     all_lvols = cached_mini_lvols(db_controller)
     all_snaps = cached_mini_snapshots(db_controller)
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
-                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
+                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
 
     if error:
         logger.error(error)
