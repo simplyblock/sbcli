@@ -12,7 +12,7 @@ Covered:
   - restart_device: aio path recreates the missing AIO bdev (with qd
     sampling re-armed) instead of the PCIe attach sequence.
   - late-event gate: for aio devices the "controller gone?" probe is
-    get_bdevs_2 on the base bdev; a present bdev skips the late event.
+    bdev_get on the base bdev; a present bdev skips the late event.
 """
 
 import json
@@ -234,7 +234,7 @@ class TestLateEventGateAio(unittest.TestCase):
         event_node = MagicMock()
         event_node.get_id.return_value = "node-2"
         rpc = MagicMock()
-        rpc.get_bdevs_2.return_value = ([{"name": "aio_S1"}], None)
+        rpc.bdev_get.return_value = {"name": "aio_S1"}
         event_node.rpc_client.return_value = rpc
 
         event = MagicMock()
@@ -253,7 +253,7 @@ class TestLateEventGateAio(unittest.TestCase):
                           return_value=False):
             collector.process_device_event(event, collector.logger)
 
-        rpc.get_bdevs_2.assert_called_once_with("aio_S1")
+        rpc.bdev_get.assert_called_once_with("aio_S1")
         rpc.bdev_nvme_controller_list_2.assert_not_called()
         self.assertIn("skipping", event.status)
 

@@ -569,17 +569,17 @@ class RPCClient:
             params["ana_state"] = ana_state
         return self._request("nvmf_subsystem_add_listener", params)
 
-    def bdev_nvme_controller_list(self, name=None):
-        params = None
-        if name:
-            params = {"name": name}
-        return self._request("bdev_nvme_get_controllers", params)
-
-    def bdev_nvme_controller_list_2(self, name=None):
-        params = None
-        if name:
-            params = {"name": name}
-        return self._request2("bdev_nvme_get_controllers", params)
+    def bdev_nvme_controller_list(self, name=None) -> list[dict]:
+        """Every attached NVMe-oF controller, or -- filtered by ``name`` --
+        the (at most one) matching controller. An unmatched ``name`` yields
+        ``[]``; any other RPC error still raises."""
+        kwargs = {"name": name} if name else {}
+        try:
+            return self._request3("bdev_nvme_get_controllers", **kwargs)
+        except RPCRemoteError as e:
+            if name and e.code == -errno.EINVAL:
+                return []
+            raise
 
     def bdev_nvme_controller_attach(self, name, pci_addr, max_bdevs=1024):
         return self._request3(
@@ -1546,12 +1546,6 @@ class RPCClient:
         bdevs (period 0 disables)."""
         params = {"name": name, "period": period_us}
         return self._request("bdev_set_qd_sampling_period", params)
-
-    def get_bdevs_2(self, name):
-        """(ret, err) probe variant of bdev_get_bdevs, mirroring
-        bdev_nvme_controller_list_2 — used where the caller must distinguish
-        'bdev gone' from RPC failure without raising."""
-        return self._request2("bdev_get_bdevs", {"name": name})
 
     def bdev_enable_histogram(self, name, enable=True, opc=None):
         # opc filters to a single I/O type (e.g. "read"/"write"); requires
