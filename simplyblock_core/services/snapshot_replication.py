@@ -519,6 +519,29 @@ def process_snap_replicate_start(task, snapshot):
                 logger.error(f"Unable to find pool on remote cluster: {remote_node_uuid.cluster_id}")
                 return
 
+        # The destination may already hold this snapshot: after a relocate,
+        # the chain of the volume now on this side came FROM the destination,
+        # and its originals are still there (same data_uuid). Link to the one
+        # on the destination's lvstore instead of shipping it back in full --
+        # the full copy also collided with the original's name on 2026-09-29,
+        # which broke the finish after the convert and led to writes into the
+        # converted landing volume.
+        counterpart = _counterpart_on_destination(snapshot, remote_node_uuid)
+        if counterpart is not None:
+            if replicate_to_source:
+                snapshot.source_replicated_snap_uuid = counterpart.get_id()
+            else:
+                snapshot.target_replicated_snap_uuid = counterpart.get_id()
+            snapshot.write_to_db()
+            msg = (f"Snapshot {snapshot.get_id()} is already replicated "
+                   f"(remote copy {counterpart.get_id()} on {counterpart.lvol.lvs_name}, "
+                   f"same data); linked, nothing to transfer")
+            logger.info(msg)
+            task.function_result = msg
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db()
+            return
+
         # An earlier attempt of THIS task may have created the landing volume
         # and died before storing its id (a node outage mid-create): add_lvol_ha
         # then fails "LVol name must be unique" on EVERY retry and the task
@@ -618,6 +641,30 @@ def process_snap_replicate_start(task, snapshot):
         _suspend_for_retry(task, "receiving lvol map_id unavailable, retrying")
         return
 
+    # Never transfer into a snapshot. The landing volume is written ONLY
+    # before it is converted; after the convert it is part of the target's
+    # snapshot chain, and a write into it fails -- on 2026-09-29 every such
+    # write made the target LVS drop its leadership and fence its ports
+    # (14 times in 11 minutes). A landing volume that is already a snapshot on
+    # any member here, without this task knowing its transfer completed (that
+    # case resumes the finish, see _resume_finish), holds data of unknown
+    # completeness: discard it and start over on a fresh one.
+    converted_on = _landing_volume_snapshot_members(remote_lv)
+    if converted_on:
+        logger.error("Replication task %s: landing volume %s is already a snapshot on %s; "
+                     "refusing to transfer into it, discarding it and starting over",
+                     task.uuid, remote_lv.top_bdev, ", ".join(converted_on))
+        try:
+            lvol_controller.delete_lvol(remote_lv, force_delete=True)
+        except Exception as e:                            # noqa: BLE001
+            logger.error("Failed to discard landing volume %s: %s", remote_lv.get_id(), e)
+        for key in ("remote_lvol_id", "converted_nodes", "offset", "transfer_done"):
+            task.function_params.pop(key, None)
+        _suspend_for_retry(task, f"landing volume {remote_lv.top_bdev} was already a snapshot "
+                                 f"on {', '.join(converted_on)}; discarded, retrying",
+                           backoff=True)
+        return
+
     # NOTE deliberately NO bdev_lvol_set_migration_flag here: the flag drives the
     # distrib-level special_io machinery of INTRA-cluster migration; it has no
     # place in a cross-cluster receive (the source cluster's map/COW context does
@@ -704,6 +751,51 @@ def process_snap_replicate_start(task, snapshot):
     # the budget expires, in which case the pass-based path picks it up as
     # before.
     _await_transfer_completion(task, snapshot, snode)
+
+
+def _counterpart_on_destination(snapshot, remote_node):
+    """The destination's copy of *snapshot* on *remote_node*'s lvstore, or None.
+
+    Copies share data_uuid (the finish copies it onto every replicated
+    snapshot). Only a copy on the destination's own lvstore counts: a chain
+    can only be built on a snapshot in the same lvstore.
+    """
+    if not snapshot.data_uuid or not remote_node.lvstore:
+        return None
+    for cand in db.get_snapshots(remote_node.cluster_id):
+        if (cand.get_id() != snapshot.get_id()
+                and cand.data_uuid == snapshot.data_uuid
+                and cand.status != SnapShot.STATUS_IN_DELETION
+                and cand.lvol and cand.lvol.lvs_name == remote_node.lvstore):
+            return cand
+    return None
+
+
+def _landing_volume_snapshot_members(remote_lv):
+    """Ids of the online target members on which *remote_lv* is a snapshot.
+
+    Reads SPDK's own view (bdev driver_specific.lvol.snapshot) on every online
+    member of the target lvstore: the control plane's record cannot say
+    whether an earlier attempt converted the volume on some members only. A
+    member that cannot be asked is skipped; the transfer's own leader probe
+    decides about it.
+    """
+    members = []
+    for node_id in (getattr(remote_lv, "nodes", None) or [remote_lv.node_id]):
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            ret = node.rpc_client().get_bdevs(remote_lv.top_bdev)
+            if ret and ret[0].get("driver_specific", {}).get("lvol", {}).get("snapshot"):
+                members.append(node.get_id())
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("Could not read landing volume %s on %s: %s",
+                           remote_lv.top_bdev, node.get_id(), e)
+    return members
 
 
 def _receiving_leader_node(remote_lv):
@@ -1412,6 +1504,16 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.size = snapshot.size
     new_snapshot.used_size = snapshot.used_size
     new_snapshot.snap_name = snapshot.snap_name
+    # Snapshot names are unique per cluster. The destination can hold a
+    # snapshot of this name already (the original of a chain coming back
+    # after a relocate, on another lvstore than this copy): the record must
+    # not fail AFTER the convert, which leaves a converted landing volume the
+    # control plane knows nothing about.
+    if any(s.snap_name == new_snapshot.snap_name
+           for s in db.get_snapshots(remote_snode.cluster_id)):
+        new_snapshot.snap_name = f"{snapshot.snap_name}-{new_snapshot_uuid[:8]}"
+        logger.warning("Snapshot name %s is taken on cluster %s; recording the copy as %s",
+                       snapshot.snap_name, remote_snode.cluster_id, new_snapshot.snap_name)
     new_snapshot.blobid = remote_lv.blobid
     new_snapshot.created_at = int(time.time())
     new_snapshot.status = SnapShot.STATUS_ONLINE
