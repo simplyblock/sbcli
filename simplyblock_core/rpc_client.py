@@ -419,7 +419,7 @@ class RPCClient:
 
 
     def get_version(self):
-        return self._request("spdk_get_version")
+        return self._request3("spdk_get_version")
 
     def subsystem_list(self) -> list[dict]:
         return self._request3("nvmf_get_subsystems")
@@ -466,8 +466,7 @@ class RPCClient:
 
     def keyring_file_remove_key(self, name):
         """Remove a key from SPDK's keyring."""
-        params = {"name": name}
-        return self._request("keyring_file_remove_key", params)
+        return self._request3("keyring_file_remove_key", name=name)
 
     def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None, dhchap_group=None):
         """Add a host to a subsystem. Key params are keyring key names (not raw values).
@@ -489,8 +488,7 @@ class RPCClient:
         return self._request("nvmf_subsystem_add_host", params)
 
     def subsystem_remove_host(self, nqn, host):
-        params = {"nqn": nqn, "host": host}
-        return self._request("nvmf_subsystem_remove_host", params)
+        return self._request3("nvmf_subsystem_remove_host", nqn=nqn, host=host)
 
     def transport_list(self, trtype=None):
         kwargs = {"trtype": trtype} if trtype else {}
@@ -769,8 +767,7 @@ class RPCClient:
         return self._request("bdev_get_iostat", params)
 
     def reset_device(self, device_name):
-        params = {"name": device_name}
-        return self._request("bdev_nvme_reset_controller", params)
+        return self._request3("bdev_nvme_reset_controller", name=device_name)
 
     def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=1):
         params = {
@@ -856,38 +853,23 @@ class RPCClient:
         return self._request2("bdev_lvol_snapshot", params)
 
     def lvol_clone(self, snapshot_name, clone_name):
-        params = {
-            "snapshot_name": snapshot_name,
-            "clone_name": clone_name}
-        return self._request("bdev_lvol_clone", params)
+        return self._request3("bdev_lvol_clone",
+                              snapshot_name=snapshot_name, clone_name=clone_name)
 
     def lvol_compress_create(self, base_bdev_name, pm_path):
-        params = {
-            "base_bdev_name": base_bdev_name,
-            "pm_path": pm_path
-        }
-        return self._request("bdev_compress_create", params)
+        return self._request3("bdev_compress_create",
+                              base_bdev_name=base_bdev_name, pm_path=pm_path)
 
     def lvol_crypto_create(self, name, base_name, key_name):
-        params = {
-            "base_bdev_name": base_name,
-            "name": name,
-            "key_name": key_name,
-        }
-        return self._request("bdev_crypto_create", params)
+        return self._request3("bdev_crypto_create",
+                              base_bdev_name=base_name, name=name, key_name=key_name)
 
     def lvol_crypto_key_create(self, name, key: SecretStr, key2: SecretStr):
-        params = {
-            "cipher": "AES_XTS",
-            "key": key,
-            "key2": key2,
-            "name": name
-        }
-        return self._request("accel_crypto_key_create", params)
+        return self._request3("accel_crypto_key_create", cipher="AES_XTS",
+                              key=key, key2=key2, name=name)
 
     def lvol_crypto_delete(self, name):
-        params = {"name": name}
-        return self._request("bdev_crypto_delete", params)
+        return self._request3("bdev_crypto_delete", name=name)
 
     def lvol_compress_delete(self, name):
         return self._request3("bdev_compress_delete", name=name)
@@ -1140,24 +1122,19 @@ class RPCClient:
             params['r_mbytes_per_sec'] = r_mbytes_per_sec
         if w_mbytes_per_sec is not None and w_mbytes_per_sec >= 0:
             params['w_mbytes_per_sec'] = w_mbytes_per_sec
-        return self._request("bdev_set_qos_limit", params)
+        return self._request3("bdev_set_qos_limit", **params)
 
     def bdev_lvol_add_to_group(self, group_id, lvol_name_list):
-        params = {
-            "bdev_group_id": group_id ,
-            "lvol_vbdev_list": lvol_name_list
-        }
-        return self._request("bdev_lvol_add_to_group", params)
+        return self._request3("bdev_lvol_add_to_group",
+                              bdev_group_id=group_id, lvol_vbdev_list=lvol_name_list)
 
     def bdev_lvol_set_qos_limit(self, bdev_group_id, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
-        params = {
-            "bdev_group_id": bdev_group_id,
-            "rw_ios_per_sec": rw_ios_per_sec,
-            "rw_mbytes_per_sec": rw_mbytes_per_sec,
-            "r_mbytes_per_sec": r_mbytes_per_sec,
-            "w_mbytes_per_sec": w_mbytes_per_sec
-        }
-        return self._request("bdev_lvol_set_qos_limit", params)
+        return self._request3("bdev_lvol_set_qos_limit",
+                              bdev_group_id=bdev_group_id,
+                              rw_ios_per_sec=rw_ios_per_sec,
+                              rw_mbytes_per_sec=rw_mbytes_per_sec,
+                              r_mbytes_per_sec=r_mbytes_per_sec,
+                              w_mbytes_per_sec=w_mbytes_per_sec)
 
     def distr_send_cluster_map(self, params):
         return self._request("distr_send_cluster_map", params)
@@ -1275,37 +1252,23 @@ class RPCClient:
                           avg_write_latency=0, p99_write_latency=0):
         # Transparent pass-through when all latencies are 0; arm later via
         # bdev_delay_update_latency to make the device "hang".
-        params = {
-            "base_bdev_name": base_name,
-            "name": name,
-            "avg_read_latency": avg_read_latency,
-            "p99_read_latency": p99_read_latency,
-            "avg_write_latency": avg_write_latency,
-            "p99_write_latency": p99_write_latency,
-        }
-        return self._request("bdev_delay_create", params)
+        return self._request3("bdev_delay_create",
+                              base_bdev_name=base_name, name=name,
+                              avg_read_latency=avg_read_latency,
+                              p99_read_latency=p99_read_latency,
+                              avg_write_latency=avg_write_latency,
+                              p99_write_latency=p99_write_latency)
 
     def bdev_delay_update_latency(self, name, latency_type, latency_us):
         # latency_type: one of avg_read, p99_read, avg_write, p99_write
-        params = {
-            "delay_bdev_name": name,
-            "latency_type": latency_type,
-            "latency_us": latency_us,
-        }
-        return self._request("bdev_delay_update_latency", params)
+        return self._request3("bdev_delay_update_latency", delay_bdev_name=name,
+                              latency_type=latency_type, latency_us=latency_us)
 
     def bdev_passtest_mode(self, name, mode):
-        params = {
-            "pt_name": name,
-            "mode": mode
-        }
-        return self._request("bdev_passtest_mode", params)
+        return self._request3("bdev_passtest_mode", pt_name=name, mode=mode)
 
     def bdev_passtest_delete(self, name):
-        params = {
-            "pt_name": name
-        }
-        return self._request("bdev_passtest_delete", params)
+        return self._request3("bdev_passtest_delete", pt_name=name)
 
     def framework_get_config(self, name):
         """Dump one SPDK subsystem's effective configuration.
@@ -1397,14 +1360,10 @@ class RPCClient:
                               block_size=block_size, num_blocks=num_blocks)
 
     def ultra21_lvol_bmap_init(self, bdev_name, num_blocks, block_len, page_len, max_num_blocks):
-        params = {
-            "base_bdev": bdev_name,
-            "blockcnt": num_blocks,
-            "blocklen": block_len,
-            "pagelen": page_len,
-            "maxblockcnt": max_num_blocks
-        }
-        return self._request("ultra21_lvol_bmap_init", params)
+        return self._request3("ultra21_lvol_bmap_init",
+                              base_bdev=bdev_name, blockcnt=num_blocks,
+                              blocklen=block_len, pagelen=page_len,
+                              maxblockcnt=max_num_blocks)
 
     def ultra21_lvol_mount_snapshot(self, snapshot_name, lvol_bdev, base_bdev):
         return self._request3("ultra21_lvol_mount", modus="SNAPSHOT",
@@ -1412,18 +1371,11 @@ class RPCClient:
                               snapshot_bdev=snapshot_name)
 
     def ultra21_lvol_mount_lvol(self, lvol_name, base_bdev):
-        params = {
-            "modus": "BASE",
-            "lvol_bdev": lvol_name,
-            "base_bdev": base_bdev
-        }
-        return self._request("ultra21_lvol_mount", params)
+        return self._request3("ultra21_lvol_mount", modus="BASE",
+                              lvol_bdev=lvol_name, base_bdev=base_bdev)
 
     def ultra21_lvol_dismount(self, lvol_name):
-        params = {
-            "lvol_bdev": lvol_name
-        }
-        return self._request("ultra21_lvol_dismount", params)
+        return self._request3("ultra21_lvol_dismount", lvol_bdev=lvol_name)
 
     def bdev_jm_create(self, name, name_storage1, block_size=4096, jm_cpu_mask="", shared_placement=False,
                        compression_thread=False, compression_cpu_mask=""):
@@ -1455,7 +1407,7 @@ class RPCClient:
         params = {"name": name}
         if safe_removal is True:
             params["safe_removal"] = True
-        return self._request("bdev_jm_delete", params)
+        return self._request3("bdev_jm_delete", **params)
 
     def ultra21_util_get_malloc_stats(self):
         params = {"socket_id": 0}
@@ -1606,17 +1558,11 @@ class RPCClient:
         return self._request3("distr_migration_expansion_start", **params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
-        params = {
-            "raid_bdev": raid_bdev,
-            "base_bdev": base_bdev,
-        }
-        return self._request("bdev_raid_add_base_bdev", params)
+        return self._request3("bdev_raid_add_base_bdev",
+                              raid_bdev=raid_bdev, base_bdev=base_bdev)
 
     def bdev_raid_remove_base_bdev(self, base_bdev):
-        params = {
-            "name": base_bdev,
-        }
-        return self._request("bdev_raid_remove_base_bdev", params)
+        return self._request3("bdev_raid_remove_base_bdev", name=base_bdev)
 
     def bdev_lvol_get_lvstores(self, name):
         params = {"lvs_name": name}
@@ -1633,8 +1579,7 @@ class RPCClient:
         return self._request("bdev_lvol_resize", params)
 
     def bdev_lvol_inflate(self, name):
-        params = {"name": name}
-        return self._request("bdev_lvol_inflate", params)
+        return self._request3("bdev_lvol_inflate", name=name)
 
     def bdev_distrib_toggle_cluster_full(self, name, cluster_full=False):
         return self._request3("bdev_distrib_toggle_cluster_full",
@@ -1777,10 +1722,7 @@ class RPCClient:
         return self._request3("nvmf_subsystem_get_controllers", nqn=nqn)
 
     def lvol_crypto_key_delete(self, name):
-        params = {
-            "key_name": name
-        }
-        return self._request("accel_crypto_key_destroy", params)
+        return self._request3("accel_crypto_key_destroy", key_name=name)
 
     def bdev_lvol_snapshot_register(self, lvol_name, snapshot_name, registered_uuid, blobid):
         params = {
@@ -1792,20 +1734,13 @@ class RPCClient:
         return self._request("bdev_lvol_snapshot_register", params)
 
     def bdev_lvol_clone_register(self, clone_name, snapshot_name, registered_uuid, blobid):
-        params = {
-            "snapshot_name": snapshot_name,
-            "clone_name": clone_name,
-            "blobid": blobid,
-            "registered_uuid": registered_uuid,
-        }
-        return self._request("bdev_lvol_clone_register", params)
+        return self._request3("bdev_lvol_clone_register",
+                              snapshot_name=snapshot_name, clone_name=clone_name,
+                              blobid=blobid, registered_uuid=registered_uuid)
 
     def distr_replace_id_in_map_prob(self, storage_ID_from, storage_ID_to):
-        params = {
-            "storage_ID_from": storage_ID_from,
-            "storage_ID_to": storage_ID_to,
-        }
-        return self._request("distr_replace_id_in_map_prob", params)
+        return self._request3("distr_replace_id_in_map_prob",
+                              storage_ID_from=storage_ID_from, storage_ID_to=storage_ID_to)
 
     def nvmf_set_max_subsystems(self, max_subsystems):
         params = {
@@ -1991,11 +1926,8 @@ class RPCClient:
 
 
     def bdev_lvol_remove_from_group(self, group_id, lvol_name_list):
-        params = {
-            "bdev_group_id": group_id ,
-            "lvol_vbdev_list": lvol_name_list
-        }
-        return self._request("bdev_lvol_remove_from_group", params)
+        return self._request3("bdev_lvol_remove_from_group",
+                              bdev_group_id=group_id, lvol_vbdev_list=lvol_name_list)
 
     def alceml_set_qos_weights(self, qos_weights):
         params = {
@@ -2364,10 +2296,7 @@ class RPCClient:
         """Attach an S3 bdev to the given lvstore.
         The S3 bdev must already exist (created via bdev_s3_create).
         Called once per lvstore at setup time (cluster activate, node restart)."""
-        return self._request("bdev_lvol_s3_bdev", {
-            "lvs_name": lvs_name,
-            "s3_bdev": bdev_name,
-        })
+        return self._request3("bdev_lvol_s3_bdev", lvs_name=lvs_name, s3_bdev=bdev_name)
 
     def bdev_lvol_s3_backup(self, s3_id: int, snapshot_names: list[str],
                             s3_bdev: str, cluster_batch: int = 1):
@@ -2482,12 +2411,7 @@ class RPCClient:
     def bdev_lvol_s3_delete(self, s3_ids: list[int]):
         """Delete all S3 backups for the given IDs (list of uint32)."""
         # RPC still missing on data plane — use dummy
-        return self._request("bdev_lvol_s3_delete", {
-            "s3_ids": s3_ids,
-        })
+        return self._request3("bdev_lvol_s3_delete", s3_ids=s3_ids)
 
     def bdev_nvme_get_controller_health_info(self, name):
-        params = {
-            "name": name
-        }
-        return self._request("bdev_nvme_get_controller_health_info", params)
+        return self._request3("bdev_nvme_get_controller_health_info", name=name)
