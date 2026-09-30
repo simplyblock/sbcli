@@ -691,7 +691,7 @@ class DBController(metaclass=Singleton):
     #: (get_unresolved_sync_replication_events).
     _SYNC_STATE_PREFIX = "sync_replication_state/"
     _SYNC_STATE_DEFAULTS: ClassVar[dict] = {"seq": 0, "last_zone_seq": 0, "journal_restored_seq": 0,
-                                            "zone_synced_seq": 0, "resync_task": ""}
+                                            "zone_synced_seq": 0, "resync_task": "", "promote_task": ""}
 
     @staticmethod
     def _sync_state_key(cluster_id, lvs_name) -> bytes:
@@ -863,6 +863,130 @@ class DBController(metaclass=Singleton):
     def get_active_sync_resync_tasks(self, cluster_id: str) -> list[JobSchedule]:
         """Every non-done FN_SYNC_RESYNC task of the cluster, oldest first."""
         return self._active_tasks(cluster_id, JobSchedule.FN_SYNC_RESYNC)
+
+    @staticmethod
+    def sync_promote_task_blocks(task: JobSchedule | None) -> bool:
+        """Whether ``task`` (the promote task recorded for an LVS) is still in
+        progress for the API and for a new promote: neither done nor
+        canceled. The runner also sees canceled ones until it has settled them
+        (get_active_sync_promote_tasks)."""
+        return task is not None and task.status != JobSchedule.STATUS_DONE and not task.canceled
+
+    def _ensure_sync_promote_task_tx(self, tr, task, lvs_names, index_list):
+        states = {}
+        for lvs_name in lvs_names:
+            state_key = self._sync_state_key(task.cluster_id, lvs_name)
+            state = self._read_sync_state_tx(tr, state_key)
+            if state["promote_task"]:
+                current = BaseModel._read_record(tr, state["promote_task"].encode(), JobSchedule)
+                if self.sync_promote_task_blocks(current):
+                    return current.uuid, False
+            states[state_key] = state
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        for state_key, state in states.items():
+            state["promote_task"] = task.get_db_id()
+            tr[state_key] = json.dumps(state).encode()
+        return task.uuid, True
+
+    def ensure_sync_promote_task(self, task: JobSchedule, lvs_names: list[str]) -> tuple[str, bool]:
+        """Create ``task`` (an FN_SYNC_PROMOTE task over ``lvs_names``) unless
+        one of those LVS already has a promote task in progress
+        (sync_promote_task_blocks) - checked and written in ONE transaction
+        with every LVS's state key, so two concurrent promotes never both
+        start. Returns ``(uuid of the blocking or new task, whether it is
+        ``task``)``."""
+        return fdb.transactional(DBController._ensure_sync_promote_task_tx)(
+            self, self.kv_store, task, list(lvs_names), JobSchedule.active_indexes(self.kv_store))
+
+    def get_sync_promote_task(self, cluster_id: str, lvs_name: str) -> JobSchedule | None:
+        """The promote task last recorded for ``lvs_name``, or None."""
+        key = self.get_sync_state(cluster_id, lvs_name)["promote_task"]
+        if not key:
+            return None
+        raw = self.kv_store.get(key.encode())
+        return JobSchedule().from_dict(json.loads(bytes(raw))) if raw is not None else None
+
+    def get_active_sync_promote_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Every FN_SYNC_PROMOTE task of the cluster that is not done, oldest
+        first - canceled ones included: the runner still has to settle the
+        leadership moves they own."""
+        return self._active_tasks(cluster_id, JobSchedule.FN_SYNC_PROMOTE)
+
+    def _lvols_of_node_tx(self, tr, node_id) -> list[LVol]:
+        """The volumes whose ``node_id`` is ``node_id``, read in ``tr`` WITH
+        conflict ranges: a volume written by a concurrent transaction (its
+        index entry, or its record when the index is not ready) makes ``tr``
+        retry."""
+        idx = indices.get_index(LVol, 'node_id')
+        if self.index_state(LVol, idx) == indices.STATE_READY:
+            ids = [idx.entry_id(LVol, bytes(key), bytes(value))
+                   for key, value in tr.get_range_startswith(idx.prefix(LVol, (node_id,)))]
+            out = []
+            for lvol_id in ids:
+                lvol = BaseModel._read_record(tr, LVol().get_db_id(lvol_id).encode(), LVol)
+                if lvol is not None:
+                    out.append(lvol)
+            return out
+        return [lvol for lvol in LVol().read_from_db(tr, id=" ") if lvol.node_id == node_id]
+
+    def _begin_sync_promote_moves_tx(self, tr, task_key, cluster_id, moves, target_site, check,
+                                     node_indexes, task_indexes, now):
+        from simplyblock_core import storage_node_ops
+        task = BaseModel._read_record(tr, task_key, JobSchedule)
+        if task is None or task.status == JobSchedule.STATUS_DONE or task.canceled:
+            return ["the promote task is no longer active"]
+        cluster = BaseModel._read_record(tr, Cluster().get_db_id(cluster_id).encode(), Cluster)
+        if cluster is None:
+            return [f"cluster {cluster_id} not found"]
+        problems: list[str] = []
+        owners = {}
+        for lvs_name, (owner_id, expect) in sorted(moves.items()):
+            holder = self._lvstore_lock_holder_tx(
+                tr, cluster_id, storage_node_ops._grant_lock_name(lvs_name), now)
+            if holder:
+                problems.append(f"LVS {lvs_name}: a leadership grant is in progress ({holder})")
+                continue
+            owner = BaseModel._read_record(tr, StorageNode().get_db_id(owner_id).encode(), StorageNode)
+            if owner is None:
+                problems.append(f"LVS {lvs_name}: owner {owner_id} not found")
+                continue
+            problems += check(cluster, owner, self._lvols_of_node_tx(tr, owner_id), expect)
+            owners[lvs_name] = owner
+        if problems:
+            return problems
+        moving = storage_node_ops.lvs_moving_value(target_site)
+        for owner in owners.values():
+            self._atomic_update_tx(tr, owner.get_db_id().encode(), StorageNode,
+                                   lambda n: setattr(n, "lvs_active_site", moving), node_indexes)
+        task.function_params["moves"] = {lvs_name: expect for lvs_name, (_, expect) in moves.items()}
+        task.status = JobSchedule.STATUS_RUNNING
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, task_indexes)
+        return []
+
+    def begin_sync_promote_moves(self, task: JobSchedule, moves: dict[str, tuple[str, str]],
+                                 target_site: str, check) -> list[str]:
+        """The DB side of a sync promote, in ONE transaction and without any
+        RPC: re-check what the promote requires and mark every LVS of
+        ``moves`` (``{lvs: (owner id, lvs_active_site expected now)}``) as
+        moving to ``target_site``.
+
+        Read in the transaction: the task (still active), the cluster, each
+        LVS's grant lock (a leadership grant holding it refuses the move, one
+        acquiring it later sees the marker - storage_node_ops.begin_lvs_move),
+        each owner and each owner's volumes (with conflict ranges, so a
+        concurrent volume create or clone makes this retry and be judged).
+        ``check(cluster, owner, volumes, expect)`` returns the problems of one
+        LVS (a pure function: it may run several times). With none at all,
+        every owner's ``lvs_active_site`` becomes ``moving:<target_site>`` and
+        the task records ``moves`` (``{lvs: expect}``, the journal its
+        clean-up restores from) and turns RUNNING - in the same transaction.
+        Returns the problems; nothing is written when there are any."""
+        return fdb.transactional(DBController._begin_sync_promote_moves_tx)(
+            self, self.kv_store, task.get_db_id().encode(), task.cluster_id, dict(moves),
+            target_site, check, StorageNode.active_indexes(self.kv_store),
+            JobSchedule.active_indexes(self.kv_store), int(time.time()))
 
     def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0, *, source=None) -> list[JobSchedule]:
         if source is not None:
@@ -1394,8 +1518,29 @@ class DBController(metaclass=Singleton):
                 lvol.allowed_hosts = standalone_allowed_hosts
 
         tr.set(alloc_key, str(seq + 1).encode())
+        self._claim_sync_active_site_tx(tr, lvol, host_node)
         lvol.write_to_db(tr)
         return target is not None
+
+    @staticmethod
+    def _claim_sync_active_site_tx(tr, lvol, host_node):
+        """Sync replication: a volume is created on the site its LVS is led
+        from, read from the owner record IN the claim transaction - a promote
+        marking the LVS ``moving:`` (begin_sync_promote_moves) conflicts with
+        it - and refused while the move is in flight. No read outside sync
+        replication."""
+        from simplyblock_core import storage_node_ops
+        from simplyblock_core.exceptions import SyncLeadershipMovingError
+        if not storage_node_ops._sync_site(host_node):
+            return
+        owner = BaseModel._read_record(tr, StorageNode().get_db_id(lvol.node_id).encode(), StorageNode)
+        if owner is None:
+            raise KeyError(f"LVS owner {lvol.node_id} not found")
+        if owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX):
+            raise SyncLeadershipMovingError(
+                f"the leadership of {owner.lvstore} is being moved ({owner.lvs_active_site}); "
+                f"retry the volume creation once the move has completed")
+        lvol.sync_active_site = storage_node_ops.lvs_active_site_of(owner)
 
     def claim_lvol_ns_slot(self, lvol, host_node, namespaced, standalone_nqn,
                            standalone_namespace="", standalone_allowed_hosts=None,

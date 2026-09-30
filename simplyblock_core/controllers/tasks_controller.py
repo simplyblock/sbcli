@@ -665,8 +665,13 @@ def cancel_task(task_id):
     if task.device_id:
         device_controller.device_set_retries_exhausted(task.device_id, True)
 
-    task.canceled = True
-    task.write_to_db(db.kv_store)
+    # Field-scoped: a full write of the copy read above would erase what the
+    # task's runner recorded meanwhile (its progress, a sync promote's
+    # journal of the leadership moves it has to settle).
+    task = db.atomic_update(task, lambda t: setattr(t, "canceled", True))
+    if task is None:
+        logger.error(f"Task {task_id} not found")
+        return False
     tasks_events.task_canceled(task)
     return True
 
@@ -1374,6 +1379,34 @@ def add_sync_resync_task(cluster_id, owner_node_id, lvs_name):
         return False
     tasks_events.task_create(task_obj)
     return task_id
+
+
+def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners):
+    """Queue the promote of ``lvol_ids`` to ``site`` (sync replication,
+    FN_SYNC_PROMOTE); ``owners`` maps each LVS the promote may move to its
+    owner id. Returns ``(task_id, created)``: when one of those LVS already
+    has an active (not done, not canceled) promote task, that task's id and
+    False - checked and created in one transaction
+    (DBController.ensure_sync_promote_task)."""
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster_id
+    task_obj.node_id = owner_node_id
+    task_obj.date = int(time.time())
+    task_obj.function_name = JobSchedule.FN_SYNC_PROMOTE
+    task_obj.function_params = {"site": site, "lvol_ids": list(lvol_ids),
+                                "lvs_names": sorted(owners), "owners": dict(owners),
+                                "moves": {}, "transferring": []}
+    # A pass ends the task itself; max_retry bounds only the passes an
+    # unexpected error interrupts (tasks_runner_sync_promote).
+    task_obj.max_retry = constants.SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS
+    task_obj.status = JobSchedule.STATUS_NEW
+    task_id, created = db.ensure_sync_promote_task(task_obj, sorted(owners))
+    if created:
+        tasks_events.task_create(task_obj)
+    else:
+        logger.info(f"Sync promote task found, skip adding new task: {task_id}")
+    return task_id, created
 
 
 def get_active_lvol_migration(node_id):

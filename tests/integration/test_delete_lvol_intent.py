@@ -295,9 +295,14 @@ class TestDeleteLvolSourceOrder(unittest.TestCase):
 
     def test_status_assignment_precedes_leader_failover_call(self):
         body = self._delete_lvol_body()
-        # Look for the assignment statement specifically (not the
-        # short-circuit check earlier in the function).
-        assign_pos = body.find("lvol.status = LVol.STATUS_IN_DELETION")
+        # Look for the persisting call specifically (not the short-circuit
+        # check earlier in the function): _mark_in_deletion writes the status
+        # (under the site-rule lock on a sync-replication cluster).
+        assign_pos = body.find("lvol = _mark_in_deletion(")
+        helper = self._read_source()
+        helper = helper[helper.find("def _mark_in_deletion("):]
+        self.assertIn("lvol.status = LVol.STATUS_IN_DELETION", helper[:helper.find("\ndef ")])
+        self.assertIn("setattr(v, \"status\", LVol.STATUS_IN_DELETION)", helper[:helper.find("\ndef ")])
         # execute_on_leader_with_failover is invoked inside the
         # _delete_lvol_from_all_nodes helper, which delete_lvol calls only
         # after persisting the deletion intent.

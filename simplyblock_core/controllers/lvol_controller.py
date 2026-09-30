@@ -13,7 +13,7 @@ from simplyblock_core.controllers import snapshot_controller, pool_controller, l
     snapshot_events
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import (
-    PreconditionError, SyncReplicationSiteError, reject_on_sync_replication,
+    PreconditionError, SyncLeadershipMovingError, SyncReplicationSiteError, reject_on_sync_replication,
 )
 from simplyblock_core.kms import KMSException, create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.rpc_client import RPCException
@@ -879,7 +879,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
     lvol.lvs_name = host_node.lvstore
-    _set_sync_active_site(lvol, host_node)
     lvol.subsys_port = host_node.get_lvol_subsys_port(host_node.lvstore)
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
@@ -1005,7 +1004,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             standalone_nqn=cl.nqn + ":lvol:" + lvol.uuid,
             standalone_allowed_hosts=standalone_allowed_hosts,
             internal=internal)
-    except SubsystemCapacityError as e:
+    except (SubsystemCapacityError, SyncLeadershipMovingError) as e:
         logger.error(str(e))
         return False, str(e)
 
@@ -1438,6 +1437,26 @@ def _fail_after_ns(lvol, rpc_client, nsid, msg, is_primary=True):
     return _fail_after_bdev(lvol, rpc_client, msg, is_primary=is_primary)
 
 
+def _mark_in_deletion(db_controller, lvol, snode):
+    """Persist ``lvol``'s deletion intent (delete_lvol). Sync replication: under
+    the LVS's site-rule lock and field-scoped - a promote opening the volume
+    holds that lock from its status check to its record, so the transition
+    never lands between the two (the opened paths would stay up while the
+    volume is torn down), and this copy of the volume never overwrites the
+    promote's record. Returns the volume as stored."""
+    from simplyblock_core import storage_node_ops
+    if not storage_node_ops._sync_site(snode):
+        lvol.status = LVol.STATUS_IN_DELETION
+        lvol.write_to_db(db_controller.kv_store)
+        return lvol
+    with storage_node_ops.sync_site_rule_locks(snode.cluster_id, [lvol.lvs_name]):
+        fresh = db_controller.atomic_update(
+            lvol, lambda v: setattr(v, "status", LVol.STATUS_IN_DELETION))
+    if fresh is None:
+        raise KeyError(f"LVol {lvol.get_id()} not found")
+    return fresh
+
+
 def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
     already produced a bdev/blob. Without this, a post-bdev-stack failure (a
@@ -1767,7 +1786,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                         lvol, snode, True,
                         standalone_nqn=cluster.nqn + ":lvol:" + lvol.uuid,
                         exclude_nqns={lvol.nqn})
-                except SubsystemCapacityError as e:
+                except (SubsystemCapacityError, SyncLeadershipMovingError) as e:
                     logger.error(str(e))
                     return _fail_after_bdev(lvol, rpc_client, str(e),
                                             is_primary=is_primary)
@@ -2789,8 +2808,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
     # — the API returned results=False and no background process retried.
     if lvol.status != LVol.STATUS_IN_DELETION:
         old_status = lvol.status
-        lvol.status = LVol.STATUS_IN_DELETION
-        lvol.write_to_db(db_controller.kv_store)
+        lvol = _mark_in_deletion(db_controller, lvol, snode)
 
         try:
             lvol_events.lvol_status_change(lvol, lvol.status, old_status)
@@ -6358,15 +6376,6 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
 
 
 # --- Functions carried over from main (reconcile-1276): SSE watch + HA role helper ---
-def _set_sync_active_site(lvol, host_node):
-    """Sync replication: a new volume is served from the site its LVS is led
-    from now (storage_node_ops.lvs_active_site_of, read fresh)."""
-    from simplyblock_core import storage_node_ops
-    if storage_node_ops._sync_site(host_node):
-        owner = DBController().get_storage_node_by_id(host_node.get_id())
-        lvol.sync_active_site = storage_node_ops.lvs_active_site_of(owner)
-
-
 def role_secondary_ids(host_node):
     """The host's non-empty secondary/tertiary node ids, in role order.
     Non-HA topologies have none; never emit empty-string ids into

@@ -6,6 +6,7 @@ the rejection helper and the CLI ``--site``. The flows against the real
 database (create, clone, restart, repair, failover, Pass 4, connect, the
 rejections) are in tests/integration/test_sync_replication_lvol_publish.py.
 """
+import contextlib
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -265,6 +266,17 @@ class TestListenerProbe:
 
 
 class TestGroupsWithoutASweep:
+    """The rule's inputs are read fresh under the site-rule lock (its
+    serialization is tested against FDB in
+    tests/integration/test_sync_replication_demote_promote.py); here the lock
+    is a no-op and the fresh read answers the volume as given."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_inputs(self):
+        with patch.object(ops, "sync_site_rule_locks", lambda *a, **k: contextlib.nullcontext()), \
+                patch.object(ops, "_fresh_site_rule_inputs",
+                             side_effect=lambda lvol, db=None: (lvol, _ctx())):
+            yield
 
     def test_own_group_on_the_given_listeners_only(self):
         node = _node("p", SITE_A)
@@ -273,7 +285,7 @@ class TestGroupsWithoutASweep:
         rpc.nvmf_subsystem_listener_set_ana_state.return_value = True
         ok, err = ops.apply_sync_ana_groups(
             rpc, _lvol(fabric="tcp", nqn="nqn:1"), node, 4420, "non_optimized", ns_id=3,
-            nics=[("TCP", "10.0.0.2")], ctx=_ctx())
+            nics=[("TCP", "10.0.0.2")])
         assert (ok, err) == (True, None)
         rpc.nvmf_subsystem_listener_set_ana_state.assert_called_once_with(
             "nqn:1", "10.0.0.2", 4420, trtype="TCP", ana="optimized", anagrpid=3)
@@ -288,7 +300,7 @@ class TestGroupsWithoutASweep:
         lvol = _lvol(fabric="tcp", nqn="nqn:1", nodes=["p", "s", "t", "rp", "rs", "rt"])
         with patch.object(ops.tasks_controller, "add_lvol_sync_op_task") as queue:
             ok, err = ops.apply_sync_ana_groups(
-                rpc, lvol, node, 4420, "non_optimized", ns_id=2, ctx=_ctx())
+                rpc, lvol, node, 4420, "non_optimized", ns_id=2)
         assert not ok and "ns [2]" in err
         queue.assert_called_once_with("cl-1", "s", "lv-1", "register", secondary_index=0)
 

@@ -349,14 +349,29 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
 
 
 
-def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state, *, promoted=False,
-                          ctx: "SyncAnaContext | None" = None):
+def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state, *, promoted=False):
     """Set ANA state for a single lvol's listeners on a given node.
 
     On a sync-replication cluster the state is the site rule's
     (lvol_ana_state), whatever the caller passed: ``promoted`` marks the
-    in-site failover target."""
-    ana_state = lvol_ana_state(lvol, node, ana_state, promoted=promoted, ctx=ctx)
+    in-site failover target. The rule is read and applied under the LVS's
+    site-rule lock (sync_site_rule_locks), so a promote / demote never
+    interleaves with it; when the lock cannot be taken nothing is sent (the
+    lvol monitor's ANA-drift check repairs the path later)."""
+    if not _sync_site(node):
+        _send_lvol_ana(lvol, node, ana_state)
+        return
+    try:
+        with sync_site_rule_locks(node.cluster_id, [lvol.lvs_name]):
+            fresh, ctx = _fresh_site_rule_inputs(lvol)
+            state = ("inaccessible" if fresh is None
+                     else lvol_ana_state(fresh, node, ana_state, promoted=promoted, ctx=ctx))
+            _send_lvol_ana(lvol, node, state)
+    except PreconditionError as e:
+        logger.error("ANA of %s ns %s on %s not set: %s", lvol.nqn, lvol.ns_id, node.get_id(), e)
+
+
+def _send_lvol_ana(lvol: LVol, node: StorageNode, ana_state) -> None:
     rpc_client = node.rpc_client(timeout=10, retry=2)
     listener_port = node.get_lvol_subsys_port(lvol.lvs_name)
     for trtype, ip in _lvol_listener_nics(lvol, node):
@@ -453,7 +468,6 @@ def _sync_flip_active_peer(node: StorageNode, owners, ana_state, *, promoted=Fal
     LVS led from the other site, or being moved, is not touched: its paths on
     ``node``'s site are fenced anyway."""
     db_ctrl = DBController()
-    cluster = db_ctrl.get_cluster_by_id(node.cluster_id)
     for owner in owners:
         pair = _active_pair(owner)
         if pair is None or pair[0] != node.get_id():
@@ -464,9 +478,8 @@ def _sync_flip_active_peer(node: StorageNode, owners, ana_state, *, promoted=Fal
             continue
         if peer.status != StorageNode.STATUS_ONLINE:
             continue
-        ctx = SyncAnaContext(cluster, owner)
         for lvol in _served_lvols(db_ctrl, owner.get_id()):
-            _set_lvol_ana_on_node(lvol, peer, ana_state, promoted=promoted, ctx=ctx)
+            _set_lvol_ana_on_node(lvol, peer, ana_state, promoted=promoted)
 
 
 def promote_active_secondary_ana(node: StorageNode) -> None:
@@ -475,7 +488,6 @@ def promote_active_secondary_ana(node: StorageNode) -> None:
     secondary and whose active primary is OFFLINE, set ``node``'s paths
     ``optimized`` under the site rule. Per volume, best effort."""
     db_ctrl = DBController()
-    cluster = db_ctrl.get_cluster_by_id(node.cluster_id)
     for owner in _lvs_owners_on(node, db_ctrl):
         pair = _active_pair(owner)
         if pair is None or pair[1] != node.get_id():
@@ -488,10 +500,9 @@ def promote_active_secondary_ana(node: StorageNode) -> None:
             continue
         logger.info("Active primary %s of %s is OFFLINE; promoting recovered secondary %s",
                     primary.get_id()[:8], owner.lvstore, node.get_id()[:8])
-        ctx = SyncAnaContext(cluster, owner)
         for lvol in _served_lvols(db_ctrl, owner.get_id()):
             try:
-                _set_lvol_ana_on_node(lvol, node, "optimized", promoted=True, ctx=ctx)
+                _set_lvol_ana_on_node(lvol, node, "optimized", promoted=True)
             except Exception as e:
                 logger.warning("Deferred ANA promotion of %s on %s failed: %s",
                                lvol.nqn, node.get_id()[:8], e)
@@ -11031,8 +11042,6 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label="", *, p
     """
     if not lvol_list:
         return []
-    # Every lvol of the batch belongs to one LVS (one owner).
-    ctx = sync_ana_context(lvol_list[0]) if _sync_site(snode) else None
 
     def _submit_all(items):
         out = {}
@@ -11102,7 +11111,7 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label="", *, p
             continue
         try:
             ok, msg = _publish_lvol_listener(lvol, snode, listener_rpc, lvol_ana_state,
-                                             promoted=promoted, ctx=ctx)
+                                             promoted=promoted)
         except Exception as e:
             ok, msg = False, "raised: %s" % e
         if not ok:
@@ -14234,15 +14243,15 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # start demoting all its lvol subsystems to non_optimized.
             # Sync replication: the site rule's state per volume group instead
             # (a peer of a demoted site stays inaccessible).
-            sync_ctx = sync_ana_context(lvol_list[0]) if lvol_list and _sync_site(snode) else None
+            sync_node = _sync_site(snode)
             for sec_node in sec_nodes:
                 if sec_node.get_id() in disconnected_peers:
                     continue
                 try:
                     sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
                     for lvol in lvol_list:
-                        if sync_ctx is not None:
-                            _set_lvol_ana_on_node(lvol, sec_node, "non_optimized", ctx=sync_ctx)
+                        if sync_node:
+                            _set_lvol_ana_on_node(lvol, sec_node, "non_optimized")
                             continue
                         listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
                         for iface in sec_node.data_nics:
@@ -14280,7 +14289,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
 
 
-def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state, *, promoted=False, ctx=None):
+def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state, *, promoted=False):
     """Publish one lvol's listener on ``snode``.
 
     Split out of add_lvol_thread so the batch registration can run it
@@ -14357,11 +14366,11 @@ def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state, *, promoted=
     if sync:
         # A failed group is queued for a durable retry by the helper.
         return apply_sync_ana_groups(rpc_client, lvol, snode, listener_port, lvol_ana_state,
-                                     promoted=promoted, all_namespaces=created, ctx=ctx)
+                                     promoted=promoted, all_namespaces=created)
     return True, None
 
 def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_listener=False,
-                    *, promoted=False, ctx=None):
+                    *, promoted=False):
     db_controller = DBController()
 
     # Refuse to (re)register an lvol that is being torn down: the delete
@@ -14461,7 +14470,7 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_
 
     if not defer_listener:
         ok, msg = _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state,
-                                         promoted=promoted, ctx=ctx)
+                                         promoted=promoted)
         if not ok:
             return False, msg
 
@@ -15159,8 +15168,7 @@ def queue_sync_ana_retry(node, volumes) -> None:
 
 def apply_sync_ana_groups(rpc_client, lvol: LVol, node, port, state: str, *, ns_id=None,
                           promoted: bool = False, all_namespaces: bool = False,
-                          nics: list[tuple[str, str]] | None = None,
-                          ctx: SyncAnaContext | None = None) -> tuple[bool, str | None]:
+                          nics: list[tuple[str, str]] | None = None) -> tuple[bool, str | None]:
     """Set the ANA group state of ``lvol``'s namespace on every listener of
     ``node`` (sync replication, where a listener is created ``inaccessible``
     and never carries a volume's state: a subsystem can hold namespaces of
@@ -15176,6 +15184,11 @@ def apply_sync_ana_groups(rpc_client, lvol: LVol, node, port, state: str, *, ns_
     saw: ``nics``, default every listener of the node). A namespace with no
     volume record stays ``inaccessible``.
 
+    Everything - the members, their site fields, the rule's context and every
+    group RPC - runs under the LVS's site-rule lock (sync_site_rule_locks), so
+    a promote / demote never interleaves with it; a lock not acquired in time
+    is handled like a failed group.
+
     A group whose RPC fails stays at the listener default, and the lvol
     monitor's presence check (listener + namespace) cannot tell: every volume
     whose group failed - this one or another member of the subsystem - is
@@ -15184,12 +15197,28 @@ def apply_sync_ana_groups(rpc_client, lvol: LVol, node, port, state: str, *, ns_
 
     Returns ``(True, None)`` or ``(False, reason)``.
     """
-    ctx = ctx or sync_ana_context(lvol)
+    try:
+        with sync_site_rule_locks(node.cluster_id, [lvol.lvs_name]):
+            return _apply_sync_ana_groups_locked(rpc_client, lvol, node, port, state, ns_id=ns_id,
+                                                 promoted=promoted, all_namespaces=all_namespaces,
+                                                 nics=nics)
+    except PreconditionError as e:
+        queue_sync_ana_retry(node, [lvol])
+        return False, (f"ANA of {lvol.nqn} on {node.get_id()} not set: {e} "
+                       f"(re-registration queued)")
+
+
+def _apply_sync_ana_groups_locked(rpc_client, lvol: LVol, node, port, state: str, *, ns_id,
+                                  promoted: bool, all_namespaces: bool,
+                                  nics: list[tuple[str, str]] | None) -> tuple[bool, str | None]:
+    db = DBController()
+    fresh, ctx = _fresh_site_rule_inputs(lvol, db)
     own_nsid = ns_id or lvol.ns_id
     groups: dict[int, str] = {}
     volumes: dict[int, LVol] = {}
     if own_nsid:
-        groups[int(own_nsid)] = lvol_ana_state(lvol, node, state, promoted=promoted, ctx=ctx)
+        groups[int(own_nsid)] = ("inaccessible" if fresh is None
+                                 else lvol_ana_state(fresh, node, state, promoted=promoted, ctx=ctx))
         volumes[int(own_nsid)] = lvol
     if all_namespaces or not own_nsid:
         members = subsystem_volumes(lvol)
@@ -15209,8 +15238,11 @@ def apply_sync_ana_groups(rpc_client, lvol: LVol, node, port, state: str, *, ns_
                 ns, dev_name=m.top_bdev, uuid=m.get_ns_uuid())), None)
             if member is None:
                 continue
-            groups[nsid] = lvol_ana_state(member, node, state,
-                                          promoted=promoted and member is lvol, ctx=ctx)
+            # subsystem_volumes read the other members fresh, inside the lock.
+            source = fresh if member is lvol else member
+            groups[nsid] = ("inaccessible" if source is None
+                            else lvol_ana_state(source, node, state,
+                                                promoted=promoted and member is lvol, ctx=ctx))
             volumes[nsid] = member
     failed = []
     for nsid, group_state in sorted(groups.items()):
@@ -15234,6 +15266,69 @@ def apply_sync_ana_groups(rpc_client, lvol: LVol, node, port, state: str, *, ns_
         return True, None
     return False, (f"Failed to set the ANA state of {lvol.nqn} ns {failed} on {node.get_id()} "
                    f"(re-registration queued)")
+
+
+#: Key prefix of the per-LVS site-rule lock (sync_site_rule_locks) in the
+#: shared lvstore lock table.
+_SITE_RULE_LOCK_PREFIX = "__sync_ana__"
+
+_site_rule_locks_held = threading.local()
+
+
+@contextlib.contextmanager
+def sync_site_rule_locks(cluster_id, lvs_names, *, timeout=None):
+    """Hold the site-rule lock of every LVS in ``lvs_names`` (sync
+    replication), acquired in sorted order.
+
+    It serializes the two sides of the ANA site rule of an LVS's volumes:
+    every writer that applies the rule (_set_lvol_ana_on_node,
+    apply_sync_ana_groups) reads the rule's inputs AND sends its RPCs inside
+    it, and every change of those inputs that must not interleave with a
+    writer - a demote's fence and record, a promote's ``moving:`` marker and
+    its opening - runs inside it too. Without it a writer that read the state
+    before the change could send the old (open) state after it.
+
+    Durable (snapshot_controller.lvstore_op_lock: FDB, heartbeat, stale
+    holder reclaimed) and re-entrant per thread: a holder that calls a writer
+    of the same LVS does not wait for itself. Callers taking several take them
+    in one call; nobody takes a second one later (lock order).
+
+    Raises PreconditionError when a lock is not acquired within ``timeout``
+    seconds (default LVSTORE_MUTATION_LOCK_WAIT_SEC).
+    """
+    held = getattr(_site_rule_locks_held, "keys", None)
+    if held is None:
+        held = _site_rule_locks_held.keys = set()
+    with contextlib.ExitStack() as stack:
+        for lvs_name in sorted(set(lvs_names)):
+            key = (cluster_id, lvs_name)
+            if key in held:
+                continue
+            stack.enter_context(snapshot_controller.lvstore_op_lock(
+                cluster_id, f"{_SITE_RULE_LOCK_PREFIX}{lvs_name}", timeout=timeout))
+            held.add(key)
+            stack.callback(held.discard, key)
+        yield
+
+
+def _fresh_site_rule_inputs(lvol: LVol, db=None) -> tuple[LVol | None, SyncAnaContext]:
+    """What the site rule of ``lvol`` reads, fresh from the DB: a copy of
+    ``lvol`` carrying its stored site fields (``sync_active_site``,
+    ``sync_demoted_sites``) - None when the record is gone or being deleted
+    (its paths stay closed while the namespace is torn down) -, and the
+    context (cluster, owner). Read under the site-rule lock by its writers."""
+    db = db or DBController()
+    ctx = sync_ana_context(lvol, db)
+    try:
+        stored = db.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return None, ctx
+    if stored.status in (LVol.STATUS_DELETED, LVol.STATUS_IN_DELETION):
+        return None, ctx
+    fresh = copy.copy(lvol)
+    fresh.sync_active_site = stored.sync_active_site
+    fresh.sync_demoted_sites = list(stored.sync_demoted_sites)
+    return fresh, ctx
 
 
 def _lvs_member_ids(owner: StorageNode) -> tuple[str, ...]:

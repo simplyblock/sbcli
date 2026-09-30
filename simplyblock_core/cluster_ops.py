@@ -1139,19 +1139,18 @@ def _activation_open_node_ana(node_id) -> None:
         return
     # Sync replication: every path, the remote triplet's too, follows the
     # site rule (a volume demoted on, or not active on, a site stays fenced
-    # there); the context is read once per LVS.
-    ctx = (storage_node_ops.sync_ana_context(node_lvols[0])
-           if storage_node_ops._sync_site(snode) else None)
+    # there), read under the LVS's site-rule lock by the setter.
+    sync = bool(storage_node_ops._sync_site(snode))
     # primary path -> optimized
     for lv in node_lvols:
         try:
-            storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized", ctx=ctx)
+            storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
         except Exception as e:
             logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
                          node_id, lv.nqn, e)
     # secondary/tertiary paths -> non_optimized
     peer_ids = [snode.secondary_node_id, snode.tertiary_node_id]
-    if ctx is not None:
+    if sync:
         peer_ids += storage_node_ops.remote_triplet_refs(snode)
     for sec_id in peer_ids:
         if not sec_id:
@@ -1161,7 +1160,7 @@ def _activation_open_node_ana(node_id) -> None:
             continue
         for lv in node_lvols:
             try:
-                storage_node_ops._set_lvol_ana_on_node(lv, sec_node, "non_optimized", ctx=ctx)
+                storage_node_ops._set_lvol_ana_on_node(lv, sec_node, "non_optimized")
             except Exception as e:
                 logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
                              sec_node.get_id(), lv.nqn, e)
@@ -3277,6 +3276,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerSyncResync",
                 service_file="python3 simplyblock_core/services/tasks_runner_sync_resync.py",
+                service_image=service_image)
+
+        if "app_TasksRunnerSyncPromote" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerSyncPromote",
+                service_file="python3 simplyblock_core/services/tasks_runner_sync_promote.py",
                 service_image=service_image)
 
         if "app_BackupService" not in service_names:

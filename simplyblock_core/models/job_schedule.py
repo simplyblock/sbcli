@@ -51,14 +51,21 @@ class JobSchedule(BaseModel):
     FN_REPLICATION_FINAL = "replication_final"
     FN_FDB_BACKUP = "fdb_backup"
     # Sync replication: move the leadership of one or more LVS to the other
-    # site's triplet (promote). ``node_id`` is the owner of the LVS (its home
-    # primary), ``function_params["lvs_names"]`` every LVS the promote moves (a
-    # group promote spans several). While such a task is active with a live
-    # lease it owns the move: no leaderless recovery grants for those LVS, and
-    # an LVS it left at ``moving:<site>`` is reconciled only afterwards
-    # (storage_node_ops.reconcile_lvs_move). Its runner grants only through
-    # storage_node_ops.move_lvs_leadership, and on failure / cancel records the
-    # task DONE / canceled BEFORE calling reconcile_lvs_move.
+    # site's triplet and open the promoted volumes there (promote,
+    # tasks_runner_sync_promote). ``node_id`` is the owner of the first LVS;
+    # ``function_params``: ``site`` (the target), ``lvol_ids`` (the volumes to
+    # open there), ``lvs_names`` every LVS the promote may move (a group
+    # promote spans several), ``owners`` ({lvs: owner id}), and the journal
+    # the runner keeps: ``moves`` ({lvs: lvs_active_site before}, written in
+    # the transaction that sets the ``moving:`` markers) and ``transferring``
+    # (the LVS whose leadership hand-off has started). While such a task is
+    # active with a live lease it owns the move: no leaderless recovery grants
+    # for those LVS, and an LVS it left at ``moving:<site>`` is reconciled
+    # only afterwards (storage_node_ops.reconcile_lvs_move). Its runner grants
+    # only through storage_node_ops.move_lvs_leadership, and on failure /
+    # cancel records the task DONE BEFORE settling its markers (the previous
+    # site written back before any hand-off, reconcile_lvs_move after one).
+    # One pass, no retry: the caller's next promote call judges again.
     FN_SYNC_PROMOTE = "sync_promote"
     # Sync replication: catch up the lagging zone of one LVS after a zone
     # desync (tasks_runner_sync_resync). ``node_id`` is the owner of the LVS,

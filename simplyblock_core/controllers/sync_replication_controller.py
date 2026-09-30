@@ -24,7 +24,10 @@ from typing import NamedTuple
 from simplyblock_core import constants, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.exceptions import SyncGateError, SyncReplicationSiteError, SyncReplicationUnsupportedError
+from simplyblock_core.exceptions import (
+    SyncAnaError, SyncGateError, SyncGroupMemberError, SyncPromoteRefusedError, SyncReplicationSiteError,
+    SyncReplicationUnsupportedError, SyncSiteOfflineError,
+)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
@@ -704,3 +707,363 @@ def check_disaster_gate(cluster_id: str, lost_site: str) -> None:
             db.get_sync_state(cluster_id, owner.lvstore), lost_site, node_sites)
     if problems:
         raise SyncGateError(f"sync-replication disaster fail-over (site {lost_site} lost)", problems)
+
+
+# ---------------------------------------------------------------------------
+# Demote / promote
+# ---------------------------------------------------------------------------
+
+def volume_site(lvol: LVol, owner: StorageNode) -> str:
+    """The site ``lvol`` is recorded as active on (its LVS's home site until
+    set)."""
+    return lvol.sync_active_site or owner.site
+
+
+def volume_open_on(lvol: LVol, owner: StorageNode, site: str) -> bool:
+    """Whether ``lvol`` is recorded as served on ``site``: active there and not
+    demoted there. The record view of the site rule, without the LVS's
+    leadership state (storage_node_ops.lvol_site_open)."""
+    return volume_site(lvol, owner) == site and site not in lvol.sync_demoted_sites
+
+
+def volumes_open_on(volumes: Iterable[LVol], owner: StorageNode, site: str) -> list[str]:
+    """The ids of ``volumes`` (of ``owner``'s LVS) recorded as served on
+    ``site``; deleted records do not count."""
+    return [v.get_id() for v in volumes
+            if v.status != LVol.STATUS_DELETED and volume_open_on(v, owner, site)]
+
+
+def lvs_site_triplet(owner: StorageNode, site: str) -> tuple[str, ...]:
+    """The triplet of ``owner``'s LVS on ``site``, primary first: the home
+    triplet on the owner's site, the remote one on the other."""
+    triplet = ((owner.get_id(), owner.secondary_node_id, owner.tertiary_node_id)
+               if site == owner.site else storage_node_ops.remote_triplet_refs(owner))
+    return tuple(nid for nid in triplet if nid)
+
+
+#: Node states whose paths a strict close skips: SPDK is down, and the node's
+#: restart publishes every path by the site rule (closed once recorded).
+_CLOSE_SKIPPED = (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED)
+
+
+def site_triplet_nodes(db: DBController, owner: StorageNode, site: str) -> list[StorageNode]:
+    """The nodes of ``site``'s triplet of ``owner``'s LVS, primary first
+    (lvs_site_triplet). A member that no longer exists fails (SyncAnaError):
+    its paths cannot be told closed."""
+    nodes = []
+    for node_id in lvs_site_triplet(owner, site):
+        try:
+            nodes.append(db.get_storage_node_by_id(node_id))
+        except KeyError as e:
+            raise SyncAnaError(f"LVS {owner.lvstore}: node {node_id} of site {site} not found") from e
+    return nodes
+
+
+def set_site_ana_strict(lvol: LVol, nodes: list[StorageNode], *, open_site: bool) -> None:
+    """Set ``lvol``'s ANA group (anagrpid = its namespace id) on every path of
+    ``nodes`` - the triplet of one site of THIS LVS, primary first
+    (site_triplet_nodes) - on each node's port of the LVS: closed
+    (``inaccessible``) or opened (the triplet primary ``optimized``, its
+    secondary / tertiary ``non_optimized``). No retry queue: any path that
+    answers false or raises fails the whole call (SyncAnaError), so the caller
+    records nothing.
+
+    A close skips members whose SPDK is down (OFFLINE / REMOVED); an open
+    touches ONLINE members only - a member that is not online gets the right
+    state from the site rule when it comes back. The caller holds the LVS's
+    site-rule lock (storage_node_ops.sync_site_rule_locks)."""
+    if not lvol.ns_id:
+        raise SyncAnaError(f"volume {lvol.get_id()} has no namespace id")
+    for index, node in enumerate(nodes):
+        node_id = node.get_id()
+        if open_site:
+            if node.status != StorageNode.STATUS_ONLINE:
+                logger.warning("ANA open of %s on %s skipped: node is %s", lvol.get_id(), node_id,
+                               node.status)
+                continue
+            state = "optimized" if index == 0 else "non_optimized"
+        else:
+            if node.status in _CLOSE_SKIPPED:
+                logger.warning("ANA close of %s on %s skipped: node is %s", lvol.get_id(), node_id,
+                               node.status)
+                continue
+            state = "inaccessible"
+        rpc = node.rpc_client(timeout=10, retry=2)
+        port = node.get_lvol_subsys_port(lvol.lvs_name)
+        for trtype, ip in storage_node_ops._lvol_listener_nics(lvol, node):
+            where = f"{lvol.nqn} ns {lvol.ns_id} on {node_id} ({ip}:{port})"
+            try:
+                done = rpc.nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, ip, port, trtype=trtype, ana=state, anagrpid=lvol.ns_id)
+            except RPCException as e:
+                raise SyncAnaError(f"ANA {state} of {where} failed: {e}") from e
+            if not done:
+                raise SyncAnaError(f"ANA {state} of {where} refused")
+            logger.info("ANA: %s -> %s", where, state)
+
+
+def _group_volumes(db: DBController, group_id: str) -> list[LVol]:
+    """Every current member of consistency group ``group_id``, as volumes; a
+    member that cannot be resolved to a live volume refuses the whole group."""
+    from simplyblock_core.controllers import consistency_group_controller
+    group = db.get_consistency_group_by_id(group_id)
+    volumes, missing = [], []
+    for row in consistency_group_controller.list_members(group):
+        try:
+            lvol = db.get_lvol_by_id(row["lvol_id"])
+        except KeyError:
+            missing.append(row["lvol_id"])
+            continue
+        if lvol.status == LVol.STATUS_DELETED:
+            missing.append(row["lvol_id"])
+        else:
+            volumes.append(lvol)
+    if missing:
+        raise SyncGroupMemberError(f"consistency group {group_id}: members not found: {missing}",
+                                   missing)
+    return volumes
+
+
+def _volumes_context(db: DBController, volumes: list[LVol], site: str):
+    """The cluster and each volume's owner (fresh) of a demote / promote
+    request, after the cluster and site checks."""
+    if not volumes:
+        raise SyncReplicationSiteError("no volume given")
+    owners = {}
+    for lvol in volumes:
+        if lvol.node_id not in owners:
+            owners[lvol.node_id] = db.get_storage_node_by_id(lvol.node_id)
+    cluster_id = next(iter(owners.values())).cluster_id
+    cluster = _sync_cluster(db, cluster_id)
+    _check_site(db, cluster_id, site)
+    return cluster, owners
+
+
+def _demote(db: DBController, volumes: list[LVol], site: str) -> list[str]:
+    cluster, owners = _volumes_context(db, volumes, site)
+    todo = [lv for lv in volumes if volume_open_on(lv, owners[lv.node_id], site)]
+    if not todo:
+        return []
+    check_gate(cluster.get_id())
+    demoted = []
+    with storage_node_ops.sync_site_rule_locks(cluster.get_id(), {lv.lvs_name for lv in todo}):
+        for lvol in todo:
+            # Re-read inside the lock: what a writer sees is what counts.
+            lvol = db.get_lvol_by_id(lvol.get_id())
+            owner = db.get_storage_node_by_id(lvol.node_id)
+            if not volume_open_on(lvol, owner, site):
+                continue
+            set_site_ana_strict(lvol, site_triplet_nodes(db, owner, site), open_site=False)
+
+            def _demoted(v):
+                if site in v.sync_demoted_sites:
+                    return False
+                v.sync_demoted_sites = [*v.sync_demoted_sites, site]
+                return True
+            db.atomic_update(lvol, _demoted)
+            demoted.append(lvol.get_id())
+            logger.info("Volume %s demoted on site %s", lvol.get_id(), site)
+    return demoted
+
+
+def sync_demote_lvol(lvol_id: str, site: str) -> list[str]:
+    """Demote volume ``lvol_id`` on ``site``: fence its paths there. A volume
+    not served on ``site`` is a no-op. Otherwise the planned gate (live), then,
+    under the LVS's site-rule lock, ``inaccessible`` on every path of the
+    site's triplet (set_site_ana_strict) and only then ``site`` added to
+    ``sync_demoted_sites``. Returns the ids demoted (empty: no-op).
+
+    Raises SyncGateError, SyncAnaError (nothing recorded),
+    SyncReplicationUnsupportedError, SyncReplicationSiteError."""
+    db = DBController()
+    return _demote(db, [db.get_lvol_by_id(lvol_id)], site)
+
+
+def sync_demote_group(group_id: str, site: str) -> list[str]:
+    """sync_demote_lvol over every member of consistency group ``group_id``:
+    one gate, the members in order, each recorded right after its own fence;
+    the first failure raises (members recorded before it stay demoted - a
+    retry is a no-op for them). SyncGroupMemberError when a member cannot be
+    resolved, before anything is fenced."""
+    db = DBController()
+    return _demote(db, _group_volumes(db, group_id), site)
+
+
+PROMOTE_ACTIVE = "active"
+PROMOTE_IN_PROGRESS = "in_progress"
+PROMOTE_ANA_ONLY = "ana_only"
+PROMOTE_MOVE = "move"
+PROMOTE_NOT_DEMOTED = "not_demoted"
+PROMOTE_LVS_BUSY = "lvs_busy"
+PROMOTE_SITE_OFFLINE = "site_offline"
+PROMOTE_FORCE_ONLINE = "force_online"
+PROMOTE_DISASTER = "disaster"
+
+#: The rows that queue a promote task (after the live gate).
+PROMOTE_QUEUED = (PROMOTE_MOVE, PROMOTE_ANA_ONLY)
+
+
+class PromoteDecision(NamedTuple):
+    """The row of the promote table a volume falls in (promote_decision)."""
+    kind: str
+    #: The site the volume's LVS is led from (T), "" while it is moving.
+    source_site: str = ""
+    #: Volumes that block it (not demoted / still served on T).
+    blocking: tuple[str, ...] = ()
+
+
+def promote_decision(lvol: LVol, owner: StorageNode, lvs_volumes: Iterable[LVol], site: str, *,
+                     online_sites: set[str], force: bool) -> PromoteDecision:
+    """The promote table for ``lvol`` to ``site`` (S). T is the site its LVS is
+    led from; ``online_sites`` the sites with an online node that are not the
+    cluster's lost site; ``lvs_volumes`` every volume of the LVS.
+
+    - a leadership move in flight -> in progress
+    - led from S and the volume served there -> active (200, no-op)
+    - led from S, the volume not open there -> only the ANA step
+    - T not online -> disaster fail-over when forced, else site offline (412)
+    - forced while T is online -> refused (force never acts on a live site)
+    - the volume still served on T -> not demoted (409)
+    - another volume of the LVS still served on T -> LVS busy (409, the list)
+    - else -> the planned leadership move
+    """
+    if owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX):
+        return PromoteDecision(PROMOTE_IN_PROGRESS)
+    source = storage_node_ops.lvs_active_site_of(owner)
+    if source == site:
+        kind = PROMOTE_ACTIVE if volume_open_on(lvol, owner, site) else PROMOTE_ANA_ONLY
+        return PromoteDecision(kind, source)
+    if source not in online_sites:
+        return PromoteDecision(PROMOTE_DISASTER if force else PROMOTE_SITE_OFFLINE, source)
+    if force:
+        return PromoteDecision(PROMOTE_FORCE_ONLINE, source)
+    if volume_open_on(lvol, owner, source):
+        return PromoteDecision(PROMOTE_NOT_DEMOTED, source, (lvol.get_id(),))
+    busy = volumes_open_on(lvs_volumes, owner, source)
+    if busy:
+        return PromoteDecision(PROMOTE_LVS_BUSY, source, tuple(busy))
+    return PromoteDecision(PROMOTE_MOVE, source)
+
+
+def promote_move_problems(cluster, owner: StorageNode, volumes: Iterable[LVol], expect: str,
+                          target_site: str) -> list[str]:
+    """What forbids marking ``owner``'s LVS as moving to ``target_site`` now,
+    judged inside the promote's transaction (DBController.begin_sync_promote_moves)
+    from the DB alone: a lost site, ``lvs_active_site`` no longer ``expect``,
+    a volume of the LVS still served on the site it is led from."""
+    lvs = owner.lvstore
+    problems = []
+    if cluster.lost_site:
+        problems.append(f"site {cluster.lost_site} is lost; a planned promote needs both sites")
+    if owner.lvs_active_site != expect:
+        problems.append(f"LVS {lvs}: lvs_active_site is {owner.lvs_active_site!r}, "
+                        f"expected {expect!r}")
+        return problems
+    source = expect or owner.site
+    if source == target_site:
+        problems.append(f"LVS {lvs} is already led from site {target_site}")
+    busy = volumes_open_on(volumes, owner, source)
+    if busy:
+        problems.append(f"LVS {lvs}: volumes still active on site {source}: {busy}")
+    return problems
+
+
+def online_sites(db: DBController, cluster) -> set[str]:
+    """The sites with an online storage node, the cluster's lost site
+    excepted."""
+    return {n.site for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())
+            if n.site and n.status == StorageNode.STATUS_ONLINE and n.site != cluster.lost_site}
+
+
+@dataclass(frozen=True)
+class SyncPromoteResult:
+    """The answer to a promote call: still in progress (the promote task, or a
+    leadership move in flight) or done, with the connection entries of every
+    volume on the promoted site (``{volume id: connect_lvol entries}``)."""
+    in_progress: bool
+    task_id: str = ""
+    connection_strings: dict | None = None
+
+
+_PROMOTE_REFUSALS = {
+    PROMOTE_FORCE_ONLINE: "a forced promote acts only on a lost site; site {source} is online",
+    PROMOTE_NOT_DEMOTED: "volume(s) not demoted on site {source}",
+    PROMOTE_LVS_BUSY: "other volumes of the LVS are still active on site {source}",
+}
+
+
+def _connection_strings(volumes: list[LVol], site: str) -> dict:
+    from simplyblock_core.controllers import lvol_controller
+    out = {}
+    for lvol in volumes:
+        entries, err = lvol_controller.connect_lvol(lvol.get_id(), site=site)
+        if entries is False:
+            raise SyncPromoteRefusedError(f"volume {lvol.get_id()}: {err}", [lvol.get_id()])
+        out[lvol.get_id()] = entries
+    return out
+
+
+def _promote(db: DBController, volumes: list[LVol], site: str, force: bool) -> SyncPromoteResult:
+    cluster, owners = _volumes_context(db, volumes, site)
+    cluster_id = cluster.get_id()
+    for lvs_name in sorted({lv.lvs_name for lv in volumes}):
+        task = db.get_sync_promote_task(cluster_id, lvs_name)
+        if task is not None and db.sync_promote_task_blocks(task):
+            return SyncPromoteResult(in_progress=True, task_id=task.uuid)
+    sites = online_sites(db, cluster)
+    lvs_volumes = {owner_id: db.get_lvols_by_node_id(owner_id) for owner_id in owners}
+    decisions = [(lv, promote_decision(lv, owners[lv.node_id], lvs_volumes[lv.node_id], site,
+                                       online_sites=sites, force=force))
+                 for lv in volumes]
+    kinds = {d.kind for _, d in decisions}
+    if PROMOTE_IN_PROGRESS in kinds:
+        return SyncPromoteResult(in_progress=True)
+    first: dict[str, PromoteDecision] = {}
+    for _, decision in decisions:
+        first.setdefault(decision.kind, decision)
+    if PROMOTE_SITE_OFFLINE in kinds:
+        raise SyncSiteOfflineError(
+            f"site {first[PROMOTE_SITE_OFFLINE].source_site} is not online; only a forced "
+            f"promote may fail it over")
+    if PROMOTE_DISASTER in kinds:
+        raise SyncReplicationUnsupportedError("the disaster fail-over (forced promote of a lost "
+                                              "site) is not available yet")
+    for kind, message in _PROMOTE_REFUSALS.items():
+        if kind in kinds:
+            blocking = sorted({vid for _, d in decisions if d.kind == kind for vid in d.blocking})
+            raise SyncPromoteRefusedError(
+                message.format(source=first[kind].source_site)
+                + (f": {blocking}" if blocking else ""), blocking)
+    queued = [lv for lv, d in decisions if d.kind in PROMOTE_QUEUED]
+    if not queued:
+        return SyncPromoteResult(in_progress=False, connection_strings=_connection_strings(volumes, site))
+    check_gate(cluster_id)
+    task_owners = {lv.lvs_name: lv.node_id for lv in queued}
+    task_id, _ = tasks_controller.add_sync_promote_task(
+        cluster_id, queued[0].node_id, site=site, lvol_ids=[lv.get_id() for lv in queued],
+        owners=task_owners)
+    return SyncPromoteResult(in_progress=True, task_id=task_id)
+
+
+def sync_promote_lvol(lvol_id: str, site: str, force: bool = False) -> SyncPromoteResult:
+    """Promote volume ``lvol_id`` on ``site`` (promote_decision): already
+    served there -> done with its connection entries on ``site``; a planned
+    move or only the ANA step -> the planned gate (live), then the
+    FN_SYNC_PROMOTE task is queued (tasks_runner_sync_promote) and the answer
+    is "in progress" until it has finished - the call after it answers done.
+
+    Raises SyncGateError, SyncPromoteRefusedError (409 rows), SyncSiteOfflineError
+    (412), SyncReplicationUnsupportedError (no sync cluster; the disaster
+    fail-over until it exists), SyncReplicationSiteError."""
+    db = DBController()
+    return _promote(db, [db.get_lvol_by_id(lvol_id)], site, force)
+
+
+def sync_promote_group(group_id: str, site: str, force: bool = False) -> SyncPromoteResult:
+    """sync_promote_lvol over every member of consistency group
+    ``group_id``, as one promote: the LVS rule holds over the union of their
+    LVS, one task moves them all, and the group is done only when every member
+    is served on ``site``. SyncGroupMemberError when a member cannot be
+    resolved."""
+    db = DBController()
+    return _promote(db, _group_volumes(db, group_id), site, force)

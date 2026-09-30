@@ -490,7 +490,9 @@ class TestSharedSubsystem:
     def test_an_open_joiner_before_the_listener_is_opened_by_the_sweep(self, db, spdk):
         _, a, b, owner, first, second = self._pair(db)
         first.namespace = ""
+        # the site rule reads the stored record (under the site-rule lock)
         first.sync_demoted_sites = [SITE_A]
+        first.write_to_db(db.kv_store)
         second.sync_demoted_sites = []
         second.write_to_db(db.kv_store)
         lvol_controller.add_lvol_on_node(first, owner, defer_listeners=True)

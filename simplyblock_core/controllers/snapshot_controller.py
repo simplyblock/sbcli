@@ -15,7 +15,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
     migration_controller
 
 from simplyblock_core import constants, utils
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import PreconditionError, SyncLeadershipMovingError
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -1510,7 +1510,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
     lvol.nodes = snap.lvol.nodes
-    lvol_controller._set_sync_active_site(lvol, snode)
     lvol.cloned_from_snap = snapshot_id
     lvol.place_in_pool(pool)
     lvol.ha_type = snap.lvol.ha_type
@@ -1602,7 +1601,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             lvol, snode, bool(namespaced),
             standalone_nqn=cluster.nqn + ":lvol:" + lvol.uuid,
             standalone_namespace=pvc_namespace or "")
-    except SubsystemCapacityError as e:
+    except (SubsystemCapacityError, SyncLeadershipMovingError) as e:
         logger.error(str(e))
         return False, str(e)
 
