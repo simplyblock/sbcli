@@ -3145,12 +3145,23 @@ def upgrade_complete(cluster_id) -> bool:
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
     get_cluster = db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
+    # Nodes a removal has shut down are left alone, as cluster_grace_shutdown
+    # leaves them: restarting one would bring it back into service in the
+    # middle of its removal (restart_storage_node refuses it anyway, and the
+    # online check below would then fail the whole start over a node that was
+    # never meant to come back).
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
+        if _grace_shutdown_skipped(node):
+            logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
+            continue
         logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
+        if _grace_shutdown_skipped(node):
+            logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
+            continue
         logger.info(f"Restarting node: {node.get_id()}")
         storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data, force=True, spdk_image=spdk_image)
         # time.sleep(5)

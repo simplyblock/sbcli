@@ -7098,6 +7098,18 @@ def restart_storage_node(
         logger.warning(f"Could not read pre-call status for {node_id}; "
                        f"skipping orphan-RESTARTING cleanup as a precaution")
 
+    # A node the removal has already shut down belongs to the removal until it
+    # is removed (or removed_failed and re-driven). A restart -- even a forced
+    # one: a full-cluster start, the operator's node recycle, `sn restart
+    # --force` -- would bring it back into service in the middle of that, with
+    # its devices failed or migrated, its volumes moving, and its journal and
+    # replicas being dismantled. Refused before anything is touched.
+    if pre_status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        logger.error(
+            f"Refusing to restart {node_id}: it is {pre_status}, part of a node "
+            f"removal that owns it until the node is removed")
+        return False
+
     # Transferable ownership: ensure a persistent NODE_RESTART task exists,
     # claim its lease for this host, and heartbeat it while this process
     # drives the restart. If this process dies mid-restart (pod evicted while
