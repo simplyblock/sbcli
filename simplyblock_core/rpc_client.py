@@ -943,7 +943,7 @@ class RPCClient:
             # atomicity (cluster.atomic_4k). Tell the data plane to skip its >=4K
             # block-size gate for fallback-mode checksum validation.
             params["cv_ignore_block_size"] = bool(force_4k_atomic)
-        return self._request("bdev_alceml_create", params)
+        return self._request3("bdev_alceml_create", **params)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
@@ -1471,8 +1471,7 @@ class RPCClient:
         # Returns {"histogram": <base64 of uint64 buckets>, "bucket_shift",
         # "tsc_rate"}. Counts are cumulative since enable; diff two snapshots
         # to get a time window.
-        params = {"name": name}
-        return self._request("bdev_get_histogram", params)
+        return self._request3("bdev_get_histogram", name=name)
 
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {
@@ -1799,10 +1798,11 @@ class RPCClient:
         })
 
     def bdev_lvol_connect_hublvol(self, lvs, bdev):
-        return self._request('bdev_lvol_connect_hublvol', {
+        params = {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "remote_bdev": bdev,
-        })
+        }
+        return self._request3('bdev_lvol_connect_hublvol', **params)
 
     def jc_set_dual_node(self, enable):
         """Tell the journal component whether this is a DUAL-NODE cluster.
