@@ -394,3 +394,20 @@ class TestDisasterGate:
         assert src.latest_journal_drop(events, on_s, on_s) is None
         events.append(_event(DROPPED, "s1", 4))
         assert src.latest_journal_drop(events, on_s, on_s).receive_seq == 4
+
+    @pytest.mark.parametrize("sequence, site, open_seq", [
+        ([(DROPPED, "gone")], "T", 1),                    # an unknown node's drop counts on either site
+        ([(DROPPED, "gone")], "S", 1),
+        ([(DROPPED, "gone"), (RESTORED, "gone")], "T", 1),    # its own restore does not end it
+        ([(DROPPED, "gone"), (LIVE, "gone")], "T", 1),
+        ([(DROPPED, "gone"), (RESTORED, "t2")], "T", 1),  # nor another node's collected restore
+        ([(DROPPED, "gone"), (LIVE, "t2")], "T", None),   # a live restore of the site does
+        ([(DROPPED, "gone"), (LIVE, "s1")], "T", 1),      # only in that site's view
+        ([(DROPPED, "gone"), (LIVE, "s1")], "S", None),
+        ([(DROPPED, "t1"), (RESTORED, "t1")], "T", None),
+        ([(DROPPED, "t1")], "S", None),                   # a known node counts on its own site only
+    ])
+    def test_site_journal_drop_is_fail_closed_on_unknown_nodes(self, sequence, site, open_seq):
+        events = [_event(kind, node, seq) for seq, (kind, node) in enumerate(sequence, 1)]
+        drop = src.site_journal_drop(events, site, SITES)
+        assert (drop.receive_seq if drop else None) == open_seq

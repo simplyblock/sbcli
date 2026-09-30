@@ -367,6 +367,53 @@ class TestLiveJournalRestore:
         _record(a1, "remote_journal_unsynced", "2026-09-30T10:10:00Z", jm_vuid=1)
         _gate_problems(src.check_disaster_gate, cluster_id, SITE_A)
 
+    def _deleted_nodes_drop(self, db, layout):
+        """a1 drops, a2's "synced" is received later (the bookkeeping takes
+        the drop as over), then a1's node record is deleted: the gate still
+        counts its drop (fail-closed on an unknown node)."""
+        a1, a2, cluster_id = layout.a[1], layout.a[2], layout.cluster.get_id()
+        _record(a1, "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)
+        _record(a2, "remote_journal_synced", "2026-09-30T09:59:00Z", jm_vuid=1)
+        db.get_storage_node_by_id(a1.get_id()).remove(db.kv_store)
+        assert a1.get_id() not in {n.get_id() for n in db.get_storage_nodes_by_cluster_id(cluster_id)}
+        assert db.get_unresolved_sync_replication_events(cluster_id, "LVS_1") == []
+        assert any(f"reported by {a1.get_id()}" in p
+                   for p in _gate_problems(src.check_disaster_gate, cluster_id, SITE_A))
+
+    def test_a_deleted_nodes_drop_is_ended_by_a_live_answer_of_its_site(self, db, rpcs):
+        # The recorder judges the drop as the gate does: before, it ignored the
+        # unknown node's drop and nothing could ever record the live restore.
+        layout = _Layout(db, rpcs)
+        a2, cluster_id = layout.a[2], layout.cluster.get_id()
+        self._deleted_nodes_drop(db, layout)
+        count = len(_journal_events(db, layout))
+        layout.leaders["LVS_1"] = a2.get_id()
+        src.cluster_sync_status(cluster_id)
+        events = _journal_events(db, layout)
+        assert len(events) == count + 1
+        assert (events[-1].kind, events[-1].node_id, events[-1].observed_live) == (RESTORED, a2.get_id(), True)
+        src.check_disaster_gate(cluster_id, SITE_A)
+        src.cluster_sync_status(cluster_id)
+        assert len(_journal_events(db, layout)) == count + 1
+
+    def test_a_deleted_nodes_drop_is_not_ended_by_a_live_answer_of_the_other_site(self, db, rpcs):
+        layout = _Layout(db, rpcs)
+        a2, b0, cluster_id = layout.a[2], layout.b[0], layout.cluster.get_id()
+        self._deleted_nodes_drop(db, layout)
+        count = len(_journal_events(db, layout))
+        layout.leaders["LVS_1"] = b0.get_id()     # the JC leadership moved to B
+        src.cluster_sync_status(cluster_id)
+        src.cluster_sync_status(cluster_id)
+        events = _journal_events(db, layout)
+        assert len(events) == count + 1           # recorded once, for B's view
+        assert (events[-1].node_id, events[-1].observed_live) == (b0.get_id(), True)
+        _gate_problems(src.check_disaster_gate, cluster_id, SITE_A)
+        # back on A: the first live in-sync answer there ends it
+        layout.leaders["LVS_1"] = a2.get_id()
+        src.cluster_sync_status(cluster_id)
+        assert _journal_events(db, layout)[-1].node_id == a2.get_id()
+        src.check_disaster_gate(cluster_id, SITE_A)
+
     def test_nothing_is_recorded_without_a_drop_or_from_an_unknown_journal_state(self, db, rpcs):
         layout = _Layout(db, rpcs)
         src.cluster_sync_status(layout.cluster.get_id())

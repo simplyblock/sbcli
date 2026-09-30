@@ -518,6 +518,19 @@ def latest_journal_drop(events: Iterable[SyncReplicationEvent], drop_counts: Cal
     return max(open_drops, key=lambda e: e.receive_seq, default=None)
 
 
+def site_journal_drop(events: Iterable[SyncReplicationEvent], site: str,
+                      node_sites: dict[str, str]) -> SyncReplicationEvent | None:
+    """The open remote-journal drop of an LVS as the nodes of ``site`` tell it
+    (latest_journal_drop), ``node_sites`` mapping node id -> site. Fail-closed
+    on a node no longer known: its drop counts (it cannot be shown to be of
+    another site), its restore does not. Shared by the disaster gate and the
+    live-restore recorder, so the recorder sees a drop as open exactly when
+    the gate does - otherwise a drop of a deleted node would block the gate
+    with nothing ever recording the live restore that ends it."""
+    return latest_journal_drop(events, lambda node_id: node_sites.get(node_id, site) == site,
+                               lambda node_id: node_sites.get(node_id) == site)
+
+
 def zone_not_up(nodes: Iterable[StorageNode], site: str) -> list[str]:
     """What keeps ``site``'s zone from being fully up: its nodes that are not
     online and their devices that are not online (removed / migrated-away ones
@@ -572,15 +585,12 @@ def disaster_gate_problems(lvs_name: str, events: Iterable[SyncReplicationEvent]
     def on_lost_site(node_id: str) -> bool:
         return node_sites.get(node_id, lost_site) == lost_site
 
-    def known_on_lost_site(node_id: str) -> bool:
-        return node_sites.get(node_id) == lost_site
-
     events = list(events)
     problems = [f"LVS {lvs_name}: zone desync {e.status} at {e.timestamp_utc} reported by {e.node_id}"
                 for e in events
                 if e.kind == SyncReplicationEvent.KIND_ZONE_UNAVAILABLE and on_lost_site(e.node_id)
                 and not e.resolved and not DBController.sync_event_covered(e, state)]
-    drop = latest_journal_drop(events, on_lost_site, known_on_lost_site)
+    drop = site_journal_drop(events, lost_site, node_sites)
     if drop is not None:
         problems.append(f"LVS {lvs_name}: remote journal dropped at {drop.timestamp_utc} "
                         f"reported by {drop.node_id}")
@@ -625,7 +635,8 @@ def _record_live_journal_restore(db: DBController, cluster_id: str, owner: Stora
                                  status: LvsSyncStatus, seq: int, node_sites: dict[str, str]) -> None:
     """Record a live ``remote_journal_in_sync: true`` of the LVS's JC leader as
     a synced journal state, when some drop is still open for it - LVS-wide, or
-    for the leader's site alone (latest_journal_drop). Conditional on no event
+    for the leader's site alone, as the disaster gate judges it
+    (site_journal_drop: a drop of a deleted node counts). Conditional on no event
     of the LVS having been received since ``seq`` was read, before the query:
     a drop received meanwhile may be newer than the answer. That condition is
     what makes it ``observed_live``: it ends the drops of every node received
@@ -637,10 +648,7 @@ def _record_live_journal_restore(db: DBController, cluster_id: str, owner: Stora
     state = db.get_sync_state(cluster_id, owner.lvstore)
     open_drop = any(e.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_DROPPED and not e.resolved
                     and not db.sync_event_covered(e, state) for e in events)
-    def on_leader_site(node_id: str) -> bool:
-        return node_sites.get(node_id) == leader_site
-
-    if not open_drop and latest_journal_drop(events, on_leader_site, on_leader_site) is None:
+    if not open_drop and site_journal_drop(events, leader_site, node_sites) is None:
         return
     timestamp = datetime.now(UTC).isoformat()
     event = SyncReplicationEvent()
