@@ -12,7 +12,9 @@ from simplyblock_core.controllers import events_controller
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import (
+    PreconditionError, SyncReplicationSiteError, reject_on_sync_replication,
+)
 from simplyblock_core.kms import KMSException, create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.controllers.host_auth import (
@@ -877,6 +879,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
     lvol.lvs_name = host_node.lvstore
+    _set_sync_active_site(lvol, host_node)
     lvol.subsys_port = host_node.get_lvol_subsys_port(host_node.lvstore)
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
@@ -1053,10 +1056,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 execute_on_leader_with_failover,
             )
 
-            # Build nodes list
-            secondary_ids = [host_node.secondary_node_id]
-            if host_node.tertiary_node_id:
-                secondary_ids.append(host_node.tertiary_node_id)
+            # Build nodes list (every instance of the LVS: role_secondary_ids)
+            secondary_ids = role_secondary_ids(host_node)
             lvol.nodes = [host_node.get_id()] + secondary_ids
 
             all_nodes = [host_node]
@@ -1587,7 +1588,13 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
 
     if resolve_subsys:
         if min_cntlid is None:
-            min_cntlid = lvol_min_cntlid(0 if is_primary else secondary_index + 1)
+            # Sync replication: the window of snode's own position in
+            # lvol.nodes - the leader a volume is created on can be a
+            # member of the remote triplet, never at position 0.
+            from simplyblock_core.storage_node_ops import _sync_site
+            min_cntlid = lvol_min_cntlid(
+                _lvol_path_index(lvol, snode) if _sync_site(snode)
+                else (0 if is_primary else secondary_index + 1))
         allow_any = not bool(lvol.allowed_hosts)
         logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
         ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
@@ -1810,10 +1817,34 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         # that costs a listener the monitor can repair; here, with the rollback
         # below, it would delete the namespace and the blob under a create that
         # actually succeeded.
-        ok, err = publish_lvol_listeners(lvol, snode, rpc_client, is_primary=is_primary)
+        ok, err = publish_lvol_listeners(lvol, snode, rpc_client, is_primary=is_primary,
+                                         ns_id=attached_nsid)
         if not ok:
             return _fail_after_ns(lvol, rpc_client, attached_nsid, err,
                                   is_primary=is_primary)
+    elif not resolve_subsys:
+        # Joining an existing subsystem. Sync replication: its listeners that
+        # are up yet are inaccessible for every group but the ones set
+        # explicitly - set this volume's own there. A listener published
+        # later sets every namespace present then (apply_sync_ana_groups),
+        # so one this join does not see is not its business.
+        from simplyblock_core import storage_node_ops
+        if storage_node_ops._sync_site(snode):
+            listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+            try:
+                live = storage_node_ops.live_listener_nics(rpc_client, lvol, snode, listener_port)
+            except Exception as e:
+                return _fail_after_ns(
+                    lvol, rpc_client, attached_nsid,
+                    f"Cannot tell which listeners {lvol.nqn} has on {snode.get_id()}: {e}",
+                    is_primary=is_primary)
+            if live:
+                ok, err = storage_node_ops.apply_sync_ana_groups(
+                    rpc_client, lvol, snode, listener_port, _path_ana_state(lvol, snode, is_primary),
+                    ns_id=attached_nsid, promoted=is_primary, nics=live)
+                if not ok:
+                    return _fail_after_ns(lvol, rpc_client, attached_nsid, err,
+                                          is_primary=is_primary)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
@@ -1844,53 +1875,80 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
     else:
         return False, "Failed to get lvol bdev"
 
-def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
+def _path_ana_state(lvol, snode, is_primary):
+    """The ANA state of a path outside sync replication: optimized on the
+    leader / owner, non_optimized elsewhere."""
+    return "optimized" if is_primary or lvol.node_id == snode.get_id() else "non_optimized"
+
+
+def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True, ns_id=None):
     """Publish ``lvol``'s subsystem listeners on ``snode``.
 
     Separated from add_lvol_on_node so it can be called once a whole batch of
     namespaces is attached: see the defer_listeners note there. Returns
     ``(True, None)`` or ``(False, reason)``; "listener already exists" is a
     success, since that is what a re-registration looks like.
+
+    Sync replication: the listener is created ``inaccessible`` and every
+    namespace of the subsystem then gets its own volume's group state under
+    the site rule (storage_node_ops.apply_sync_ana_groups; ``is_primary`` =
+    the leader the volume is created on, the optimized path of an open site).
+    ``ns_id`` is this volume's namespace id before ``lvol.ns_id`` is written.
     """
+    from simplyblock_core import storage_node_ops
     rpc_client = rpc_client or snode.rpc_client()
-    if is_primary or lvol.node_id == snode.get_id():
-        ana_state = "optimized"
-    else:
-        ana_state = "non_optimized"
+    ana_state = _path_ana_state(lvol, snode, is_primary)
+    sync = bool(storage_node_ops._sync_site(snode))
 
     # Use the per-lvstore port for the lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     logger.info("adding listeners")
     added: list[tuple[str, str]] = []
-    for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-            trtype = iface.trtype
-        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-            trtype = "TCP"
-        else:
-            continue
-        logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-        ret, err = rpc_client.nvmf_subsystem_add_listener(
-            lvol.nqn, trtype, iface.ip4_address, listener_port, ana_state)
-        if not ret:
-            if err and "code" in err and err["code"] == -32602:
-                logger.warning("listener already exists")
+
+    def _rollback():
+        # A node with several matching NICs can get one listener up and
+        # fail on the next. The caller rolls the namespace and the bdev
+        # back, so anything published here would be left pointing at a
+        # deleted bdev -- take them down again first.
+        for done_trtype, done_ip in added:
+            try:
+                rpc_client.listeners_del(
+                    lvol.nqn, done_trtype, done_ip, listener_port)
+            except Exception:
+                logger.exception(
+                    "failed to remove listener %s %s:%s from %s during rollback",
+                    done_trtype, done_ip, listener_port, lvol.nqn)
+        if sync and added:
+            # Volumes that joined the subsystem before its listener existed
+            # relied on this publication for their group; the rollback may
+            # not have removed every listener.
+            storage_node_ops.queue_sync_ana_retry(snode, storage_node_ops.subsystem_volumes(lvol)[1:])
+
+    try:
+        for trtype, ip in storage_node_ops._lvol_listener_nics(lvol, snode):
+            logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, ip, listener_port))
+            ret, err = rpc_client.nvmf_subsystem_add_listener(
+                lvol.nqn, trtype, ip, listener_port, "inaccessible" if sync else ana_state)
+            if not ret:
+                if err and "code" in err and err["code"] == -32602:
+                    logger.warning("listener already exists")
+                else:
+                    _rollback()
+                    return False, f"Failed to create listener for {lvol.get_id()}"
             else:
-                # A node with several matching NICs can get one listener up and
-                # fail on the next. The caller rolls the namespace and the bdev
-                # back, so anything published here would be left pointing at a
-                # deleted bdev -- take them down again first.
-                for done_trtype, done_ip in added:
-                    try:
-                        rpc_client.listeners_del(
-                            lvol.nqn, done_trtype, done_ip, listener_port)
-                    except Exception:
-                        logger.exception(
-                            "failed to remove listener %s %s:%s from %s during rollback",
-                            done_trtype, done_ip, listener_port, lvol.nqn)
-                return False, f"Failed to create listener for {lvol.get_id()}"
-        else:
-            added.append((trtype, iface.ip4_address))
+                added.append((trtype, ip))
+    except RPCException as e:
+        if not sync:
+            raise
+        _rollback()
+        return False, f"Failed to create listener for {lvol.get_id()}: {e}"
+    if sync:
+        ok, msg = storage_node_ops.apply_sync_ana_groups(
+            rpc_client, lvol, snode, listener_port, ana_state, ns_id=ns_id,
+            promoted=is_primary, all_namespaces=True)
+        if not ok:
+            _rollback()
+            return False, msg
     return True, None
 
 
@@ -2004,16 +2062,30 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
 
     # add listeners - use per-lvstore port
     recreate_lvs_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+    if not ana_state:
+        ana_state = _path_ana_state(lvol, snode, False)
+    # Sync replication: the listener comes up inaccessible and the site rule
+    # sets each namespace's group (storage_node_ops.apply_sync_ana_groups).
+    from simplyblock_core import storage_node_ops
+    sync = bool(storage_node_ops._sync_site(snode))
     logger.info("adding listeners")
-    for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric==iface.trtype.lower():
-            if not ana_state:
-                ana_state = "non_optimized"
-                if lvol.node_id == snode.get_id():
-                    ana_state = "optimized"
-            logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, recreate_lvs_port))
-            logger.info(f"Setting ANA state: {ana_state}")
-            ret = rpc_client.listeners_create(lvol.nqn, iface.trtype, iface.ip4_address, recreate_lvs_port, ana_state)
+    created = False
+    try:
+        for iface in snode.data_nics:
+            if iface.ip4_address and lvol.fabric==iface.trtype.lower():
+                logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, recreate_lvs_port))
+                logger.info(f"Setting ANA state: {ana_state}")
+                ret = rpc_client.listeners_create(lvol.nqn, iface.trtype, iface.ip4_address, recreate_lvs_port,
+                                                  "inaccessible" if sync else ana_state)
+                created = created or bool(ret)
+    except RPCException:
+        # Sync: a listener created above holds every group at inaccessible.
+        if sync and created:
+            storage_node_ops.queue_sync_ana_retry(snode, storage_node_ops.subsystem_volumes(lvol))
+        raise
+    if sync:
+        return storage_node_ops.apply_sync_ana_groups(
+            rpc_client, lvol, snode, recreate_lvs_port, ana_state, all_namespaces=True)
 
     return True, None
 
@@ -2872,11 +2944,9 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     if not ret:
         return "Error setting qos limits"
 
-    secondary_ids = []
-    if snode.secondary_node_id:
-        secondary_ids.append(snode.secondary_node_id)
-    if snode.tertiary_node_id:
-        secondary_ids.append(snode.tertiary_node_id)
+    # Every other instance of the LVS (the remote triplet too on a
+    # sync-replication cluster: it serves the volume after a promote).
+    secondary_ids = role_secondary_ids(snode)
     for sec_id in secondary_ids:
         sec_node = db_controller.get_storage_node_by_id(sec_id)
         if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -3372,7 +3442,18 @@ def get_lvol(lvol_id_or_name):
     return data
 
 
-def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, host_nqn=None):
+def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, host_nqn=None,
+                 site=None):
+    """The connect entries of volume ``uuid``: ``(entries, None)`` or
+    ``(False, reason)`` when the volume does not exist.
+
+    Sync replication: ``site`` is required and names one of the cluster's
+    two sites; the entries are the paths of that site's triplet only.
+
+    Raises:
+        SyncReplicationSiteError: ``site`` missing or unknown on a
+            sync-replication cluster, or given on a cluster without sites.
+    """
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(uuid)
@@ -3382,6 +3463,8 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         logger.exception("Failed to get lvol by id: %s", uuid)
         return False, "Failed to find volume"
 
+    _check_connect_site(db_controller, lvol, site)
+
     try:
         host_entry = HostConnectAuth.resolve(lvol, host_nqn, db_controller)
     except ValueError as e:
@@ -3390,7 +3473,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     out = []
     for path_lvol in _connect_path_volumes(db_controller, lvol):
         entries = _connect_entries_for_volume(
-            db_controller, path_lvol, ctrl_loss_tmo, host_entry, host_nqn)
+            db_controller, path_lvol, ctrl_loss_tmo, host_entry, host_nqn, site=site)
         clone_id = path_lvol.get_id()
         if clone_id != uuid:
             for entry in entries:
@@ -3429,6 +3512,25 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 for entry in out:
                     entry.target_lvol_id = rep.source_lvol.get_id()
     return out, None
+
+
+def _check_connect_site(db_controller, lvol, site):
+    """Validate ``site`` against the cluster of ``lvol`` (connect_lvol)."""
+    owner = db_controller.get_storage_node_by_id(lvol.node_id)
+    cluster = db_controller.get_cluster_by_id(owner.cluster_id)
+    if not cluster.sync_replication:
+        if site:
+            raise SyncReplicationSiteError(
+                f"site {site!r} given, but cluster {cluster.get_id()} is not a "
+                f"sync-replication cluster")
+        return
+    if not site:
+        raise SyncReplicationSiteError(
+            f"site is required to connect a volume of sync-replication cluster {cluster.get_id()}")
+    sites = {n.site for n in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id()) if n.site}
+    if site not in sites:
+        raise SyncReplicationSiteError(
+            f"site {site!r} is not a site of cluster {cluster.get_id()} (sites: {sorted(sites)})")
 
 
 def _connect_path_volumes(db_controller, lvol):
@@ -3491,7 +3593,9 @@ def _replication_for_lvol(db_controller, lvol_id):
     return None
 
 
-def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, host_nqn):
+def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, host_nqn, site=None):
+    """``site`` (sync replication): only the paths on that site - a path of a
+    node without a site (another, non-sync cluster) is never filtered."""
     out = []
     nodes_ids = []
     if lvol.ha_type == 'single':
@@ -3507,6 +3611,8 @@ def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, 
 
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
+        if site and snode.site and snode.site != site:
+            continue
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
@@ -5749,6 +5855,8 @@ def suspend_lvol(lvol_id):
 
     logger.info(f"suspending LVol subsystem: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    # It sets the home paths' ANA without the site rule of sync replication.
+    reject_on_sync_replication(db_controller.get_cluster_by_id(snode.cluster_id), "Volume suspend")
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
@@ -5785,6 +5893,7 @@ def resume_lvol(lvol_id):
 
     logger.info(f"suspending LVol subsystem: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    reject_on_sync_replication(db_controller.get_cluster_by_id(snode.cluster_id), "Volume resume")
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
@@ -6249,12 +6358,29 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
 
 
 # --- Functions carried over from main (reconcile-1276): SSE watch + HA role helper ---
+def _set_sync_active_site(lvol, host_node):
+    """Sync replication: a new volume is served from the site its LVS is led
+    from now (storage_node_ops.lvs_active_site_of, read fresh)."""
+    from simplyblock_core import storage_node_ops
+    if storage_node_ops._sync_site(host_node):
+        owner = DBController().get_storage_node_by_id(host_node.get_id())
+        lvol.sync_active_site = storage_node_ops.lvs_active_site_of(owner)
+
+
 def role_secondary_ids(host_node):
     """The host's non-empty secondary/tertiary node ids, in role order.
     Non-HA topologies have none; never emit empty-string ids into
-    ``lvol.nodes`` (every ``lvol.nodes[1:]`` consumer would iterate them)."""
-    return [i for i in (host_node.secondary_node_id,
-                        host_node.tertiary_node_id) if i]
+    ``lvol.nodes`` (every ``lvol.nodes[1:]`` consumer would iterate them).
+
+    Sync replication: every other instance of the host's LVS - the remote
+    triplet follows, in ref order (primary, secondary, tertiary), so an lvol
+    has six paths (five on FTT1) at stable positions: each position is a
+    path's cntlid window."""
+    from simplyblock_core.storage_node_ops import _sync_site, remote_triplet_refs
+    ids = [host_node.secondary_node_id, host_node.tertiary_node_id]
+    if _sync_site(host_node):
+        ids += remote_triplet_refs(host_node)
+    return [i for i in ids if i]
 
 
 async def watch_volumes(cluster_id, pool_id):

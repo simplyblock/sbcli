@@ -45,7 +45,7 @@ from datetime import datetime
 from simplyblock_core import constants
 from simplyblock_core.controllers import migration_events, tasks_controller
 from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError, reject_on_sync_replication
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.db_controller import DBController
@@ -965,6 +965,10 @@ def create_migration(lvol_id, target_node_id,
     except KeyError:
         raise ValueError(f"Target node {target_node_id} not found")
 
+    # Before anything is created: a migration rebuilds lvol.nodes and its
+    # paths for one triplet, without the site rule.
+    reject_on_sync_replication(db.get_cluster_by_id(tgt_node.cluster_id), "Volume migration")
+
     if not tgt_node.lvstore:
         raise ValueError(f"Target node {target_node_id} has no lvstore")
 
@@ -1366,6 +1370,8 @@ def create_batch_migration(lvol_id, target_node_id,
         tgt_node = db_inst.get_storage_node_by_id(target_node_id)
     except KeyError:
         raise ValueError(f"Target node {target_node_id} not found")
+
+    reject_on_sync_replication(db_inst.get_cluster_by_id(tgt_node.cluster_id), "Volume migration")
 
     members = _get_shared_subsystem_members(lvol, tgt_node.cluster_id)
     if not members:

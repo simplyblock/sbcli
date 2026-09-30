@@ -826,14 +826,34 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
         if snode.lvstore_status != "ready":
             continue
 
+        from simplyblock_core import storage_node_ops
+        # Sync replication: the site-rule context, read once per volume.
+        sync_ctx = (storage_node_ops.sync_ana_context(lvol)
+                    if lvol.ha_type == "ha" and storage_node_ops._sync_site(snode) else None)
         passed = True
         try:
             # Verify against the WIRE identity: after a fail-back the record
             # uuid differs from the namespace's advertised uuid, and checking
             # the record uuid here marked healthy volumes unhealthy and drove
             # the self-heal below into re-registering the wrong identity.
-            passed &= health_controller.check_subsystem(
-                lvol.nqn, rpc_client=snode.rpc_client(), ns_uuid=lvol.get_ns_uuid())
+            owner_rpc = snode.rpc_client()
+            owner_ok = health_controller.check_subsystem(
+                lvol.nqn, rpc_client=owner_rpc, ns_uuid=lvol.get_ns_uuid())
+            passed &= owner_ok
+            # Sync replication: the owner's path, too, must carry the ANA
+            # state of the site rule (on a remote-led LVS it is a fenced
+            # non-leader); a drift is repaired like a non-leader's below.
+            drift = (storage_node_ops.lvol_ana_drift(owner_rpc, lvol, snode, ctx=sync_ctx)
+                     if owner_ok and sync_ctx is not None else None)
+            if drift:
+                passed = False
+                logger.error("ANA DRIFT: lvol %s (%s) path on owner %s: %s",
+                             lvol.get_id(), lvol.lvs_name, snode.get_id(), drift)
+                try:
+                    try_repair_lvol_on_non_leader(lvol, snode, 0)
+                except Exception as re:
+                    logger.error(f"Repair attempt for lvol {lvol.get_id()} "
+                                 f"on owner {snode.get_id()} raised: {re}")
         except Exception as e:
             logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
             logger.error(e)
@@ -846,10 +866,21 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                     continue
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                     try:
+                        sec_rpc = sec_node.rpc_client()
                         ret = health_controller.check_subsystem(
-                            lvol.nqn, rpc_client=sec_node.rpc_client(),
+                            lvol.nqn, rpc_client=sec_rpc,
                             ns_uuid=lvol.get_ns_uuid())
-                        if not ret:
+                        # Sync replication: present is not enough - the
+                        # volume's ANA group must follow the site rule (a
+                        # group left inaccessible where the site is open is a
+                        # path the host cannot use).
+                        drift = (storage_node_ops.lvol_ana_drift(sec_rpc, lvol, sec_node, ctx=sync_ctx)
+                                 if ret and sync_ctx is not None else None)
+                        if drift:
+                            passed = False
+                            logger.error("ANA DRIFT: lvol %s (%s) path on node %s: %s",
+                                         lvol.get_id(), lvol.lvs_name, sec_id, drift)
+                        elif not ret:
                             passed = False
                             # Explicit, greppable degraded-path signal. Without
                             # it a replica whose subsystem is missing (or,
@@ -864,11 +895,14 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                                 "no namespace; volume is running below its "
                                 "configured redundancy",
                                 lvol.get_id(), lvol.lvs_name, sec_id)
+                        if drift or not ret:
                             # Self-heal: a missing registration on an online
                             # non-leader never fixes itself (the create-time
-                            # deferral queue is lossy) — re-register now. The
-                            # next monitor cycle re-checks and restores
-                            # health_check once the repair sticks.
+                            # deferral queue is lossy) — re-register now; on a
+                            # sync node the re-registration also sets the ANA
+                            # group by the site rule. The next monitor cycle
+                            # re-checks and restores health_check once the
+                            # repair sticks.
                             try:
                                 try_repair_lvol_on_non_leader(lvol, sec_node, sec_index)
                             except Exception as re:

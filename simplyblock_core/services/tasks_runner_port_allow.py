@@ -1007,7 +1007,13 @@ def exec_port_allow_task(task):
     # tertiary to this secondary gradually rather than gating the recovery.
     # The tertiary→secondary hublvol hard gate above already guaranteed the
     # tertiary can redirect here before any client lands on this node.
-    if node.lvstore_stack_secondary:
+    if storage_node_ops._sync_site(node):
+        # Sync replication: this node may be the secondary of the ACTIVE
+        # triplet of several LVS (a local one, or another owner's remote
+        # triplet); each whose active primary is OFFLINE is promoted here,
+        # under the site rule.
+        storage_node_ops.promote_active_secondary_ana(node)
+    elif node.lvstore_stack_secondary:
         try:
             # reverse ref holds the primary's node id (str at runtime despite
             # the model's List[dict] annotation — see field-semantics note)

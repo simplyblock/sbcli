@@ -173,7 +173,7 @@ class TestClusterActivatePass4(unittest.TestCase):
         db.get_lvols_by_node_id.side_effect = \
             lambda nid: lvols if nid == primary.get_id() else []
 
-        def _ana(lvol, node, ana_state):
+        def _ana(lvol, node, ana_state, **kwargs):
             events.append(("ana", node.get_id(), ana_state))
 
         def _set_status(cid, status):

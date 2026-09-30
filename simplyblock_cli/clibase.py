@@ -876,6 +876,8 @@ class CLIWrapperBase:
             kwargs['ctrl_loss_tmo'] = ctrl_loss_tmo
         if args.host_nqn:
             kwargs['host_nqn'] = args.host_nqn
+        if args.site:
+            kwargs['site'] = args.site
 
         data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
         if err:

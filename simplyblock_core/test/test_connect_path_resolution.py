@@ -144,6 +144,8 @@ def _connect(monkeypatch, db, requested_id):
                         classmethod(lambda cls, lvol, host_nqn, db_controller: None))
     monkeypatch.setattr(lvol_controller, "_connect_entries_for_volume",
                         lambda *a, **kw: [_FakeEntry()])
+    # The sync-replication site check reads the cluster; these volumes have none.
+    monkeypatch.setattr(lvol_controller, "_check_connect_site", lambda *a, **kw: None)
     entries, err = lvol_controller.connect_lvol(requested_id)
     assert err is None
     return entries

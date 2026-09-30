@@ -1127,6 +1127,46 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         stop_beat.set()
 
 
+def _activation_open_node_ana(node_id) -> None:
+    """Activation Pass 4 for the LVS owned by ``node_id``: optimized on its
+    primary, non_optimized on its secondary / tertiary - on a
+    sync-replication cluster every member of both triplets, each under the
+    site rule (storage_node_ops.lvol_ana_state)."""
+    snode = db_controller.get_storage_node_by_id(node_id)
+    node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(node_id)
+                  if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]]
+    if not node_lvols:
+        return
+    # Sync replication: every path, the remote triplet's too, follows the
+    # site rule (a volume demoted on, or not active on, a site stays fenced
+    # there); the context is read once per LVS.
+    ctx = (storage_node_ops.sync_ana_context(node_lvols[0])
+           if storage_node_ops._sync_site(snode) else None)
+    # primary path -> optimized
+    for lv in node_lvols:
+        try:
+            storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized", ctx=ctx)
+        except Exception as e:
+            logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
+                         node_id, lv.nqn, e)
+    # secondary/tertiary paths -> non_optimized
+    peer_ids = [snode.secondary_node_id, snode.tertiary_node_id]
+    if ctx is not None:
+        peer_ids += storage_node_ops.remote_triplet_refs(snode)
+    for sec_id in peer_ids:
+        if not sec_id:
+            continue
+        sec_node = db_controller.get_storage_node_by_id(sec_id)
+        if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+            continue
+        for lv in node_lvols:
+            try:
+                storage_node_ops._set_lvol_ana_on_node(lv, sec_node, "non_optimized", ctx=ctx)
+            except Exception as e:
+                logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
+                             sec_node.get_id(), lv.nqn, e)
+
+
 def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
     prev_status = cluster.status
@@ -1971,33 +2011,6 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # we set the cluster ACTIVE — so clients never resume IO against a primary
     # whose redirect to its peers isn't established (which is what produced the
     # mid-activation writer-conflict / EIO).
-    def _set_node_ana(node_id) -> None:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(node_id)
-                      if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]]
-        if not node_lvols:
-            return
-        # primary path -> optimized
-        for lv in node_lvols:
-            try:
-                storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
-            except Exception as e:
-                logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
-                             node_id, lv.nqn, e)
-        # secondary/tertiary paths -> non_optimized
-        for sec_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-            if not sec_id:
-                continue
-            sec_node = db_controller.get_storage_node_by_id(sec_id)
-            if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
-                continue
-            for lv in node_lvols:
-                try:
-                    storage_node_ops._set_lvol_ana_on_node(lv, sec_node, "non_optimized")
-                except Exception as e:
-                    logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
-                                 sec_node.get_id(), lv.nqn, e)
-
     # ANA flips are RPC-only (no DB writes) so the per-primary workers need no
     # locks; different primaries touch different subsystems even when they
     # share a secondary node.
@@ -2006,7 +2019,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     if pass4_ids:
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass4_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p4") as pool:
-            for future in as_completed({pool.submit(_set_node_ana, nid) for nid in pass4_ids}):
+            for future in as_completed({pool.submit(_activation_open_node_ana, nid) for nid in pass4_ids}):
                 try:
                     future.result()
                 except Exception as e:

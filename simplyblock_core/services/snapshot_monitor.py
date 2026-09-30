@@ -7,7 +7,7 @@ from datetime import datetime
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.controllers import (
-    snapshot_events, snapshot_controller)
+    snapshot_events, snapshot_controller, lvol_controller)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
@@ -42,13 +42,14 @@ def sync_delete_peer_ids(lvol_ha_type, snode, primary_node_id):
     """Node ids owing a phase-2 sync delete: every LVS member other than the
     phase-1 node. ha_type=single snapshots were never registered on peers —
     deriving the sync-delete set from node topology would send peers deletes
-    for registrations they never had, so their peer set is empty."""
+    for registrations they never had, so their peer set is empty.
+
+    The members are the ones a snapshot is registered on
+    (lvol_controller.role_secondary_ids): on a sync-replication cluster the
+    LVS's remote triplet too."""
     secondary_ids = []
     if lvol_ha_type != "single":
-        if snode.secondary_node_id:
-            secondary_ids.append(snode.secondary_node_id)
-        if snode.tertiary_node_id:
-            secondary_ids.append(snode.tertiary_node_id)
+        secondary_ids = lvol_controller.role_secondary_ids(snode)
     peer_ids = []
     if snode.get_id() != primary_node_id:
         peer_ids.append(snode.get_id())

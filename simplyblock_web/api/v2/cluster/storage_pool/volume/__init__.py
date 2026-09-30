@@ -331,7 +331,10 @@ def create_snapshot(
     return Response(status_code=201, headers={'Location': entity_url})
 
 
-@instance_api.route(
+# api_route, not the Starlette-level route(): a plain Starlette route gets no
+# dependency injection and was not carried into the app by include_router,
+# so both endpoints answered 404.
+@instance_api.api_route(
         '/suspend',
         name='clusters:storage-pools:volumes:suspend',
         methods=['GET', 'POST'],  # Support both until all clients have switched to POST
@@ -339,7 +342,7 @@ def create_snapshot(
 def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.suspend_lvol(volume.get_id())
 
-@instance_api.route(
+@instance_api.api_route(
         '/resume',
         name='clusters:storage-pools:volumes:resume',
         methods=['GET', 'POST'],  # Support both until all clients have switched to POST

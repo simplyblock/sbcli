@@ -836,6 +836,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
         subcommand.add_argument('--ctrl-loss-tmo', help='The control loss timeout for this volume.', type=int, dest='ctrl_loss_tmo')
         subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts with secrets).', type=str, dest='host_nqn')
+        subcommand.add_argument('--site', help='Site to connect from (sync-replication clusters, required there): only the paths of that site\'s triplet.', type=str, dest='site')
 
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume.')

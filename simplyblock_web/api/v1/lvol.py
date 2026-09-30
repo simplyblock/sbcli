@@ -269,9 +269,15 @@ def resize_lvol(uuid):
 @bp.route('/lvol/connect/<string:uuid>', methods=['GET'])
 def connect_lvol(uuid):
     try:
-        db.get_lvol_by_id(uuid)
+        lvol = db.get_lvol_by_id(uuid)
+        cluster = db.get_cluster_by_id(db.get_storage_node_by_id(lvol.node_id).cluster_id)
     except KeyError as e:
         return utils.get_response_error(str(e), 404)
+    if cluster.sync_replication:
+        # A sync-replication volume is connected per site; v1 has no site.
+        return utils.get_response_error(
+            "lvol connect is not supported on a sync-replication cluster by the v1 API: "
+            "use the v2 volume connect with a site", 400)
 
     host_nqn = request.args.get('host_nqn')
     ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)

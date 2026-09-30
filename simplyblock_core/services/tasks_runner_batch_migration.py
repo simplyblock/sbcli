@@ -1120,6 +1120,20 @@ def task_runner(task):
     )
 
     cluster = db.get_cluster_by_id(group.cluster_id)
+    if cluster.sync_replication is True:
+        # create_batch_migration refuses a sync-replication cluster; a group
+        # that exists anyway is never driven (it would publish paths without
+        # the site rule).
+        reason = "Volume migration is not supported on a sync-replication cluster"
+        group.status = LVolMigrationGroup.STATUS_FAILED
+        group.error_message = reason
+        group.write_to_db(db.kv_store)
+        task.status = JobSchedule.STATUS_DONE
+        task.function_result = reason
+        task.write_to_db(db.kv_store)
+        logger.error(f"Group {group_id[:8]}: {reason}")
+        return True
+
     if cluster.status not in Cluster.MUTABLE_STATUSES:
         if not _is_cleanup_phase:
             task.function_result = f"cluster not active (status={cluster.status})"

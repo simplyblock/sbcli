@@ -2216,6 +2216,10 @@ commands:
             help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts with secrets)."
             dest: host_nqn
             type: str
+          - name: "--site"
+            help: "Site to connect from (sync-replication clusters, required there): only the paths of that site's triplet."
+            dest: site
+            type: str
       - name: resize
         help: "Resizes a logical volume."
         usage: >
