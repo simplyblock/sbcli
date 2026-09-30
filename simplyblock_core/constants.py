@@ -297,6 +297,16 @@ CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
 
+# add_node_add_task's dedup check (by node_addr) is itself a plain
+# read-then-write: two concurrent posts for one host can both pass it before
+# either commits, queuing two FN_NODE_ADD tasks for the same host (the
+# create-time twin of the cluster_add mesh race above). Serialized per
+# (cluster, node_addr) behind "node_add_task/<cluster_id>/<node_addr>". Short,
+# unlike CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC: the guarded section is a couple of
+# FDB round trips, not the mesh section of add_node itself, so a waiter only
+# needs to outlast the holder's own read-then-write.
+NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC = 10
+
 # Snapshot create concurrency: the primary-create + replica-register sequence of
 # a snapshot is serialized per lvstore behind an LVStoreMutationLock so that
 # concurrent snapshot creates of the same lvstore register on the
