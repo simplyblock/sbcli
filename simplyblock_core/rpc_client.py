@@ -385,17 +385,22 @@ class RPCClient:
 
         return None, None
 
-    def _request3(self, method: str, **kwargs):
+    def _request3(self, method: str, *, request_timeout=None, **kwargs):
         logger.debug("Requesting method: %s, params: %s", method, redact_rpc_params(kwargs))
         wire_payload = unwrap_secrets_for_send({
             'id': 1,
             'method': method,
             'params': kwargs,
         })
+        # Per-call override of the client-level HTTP timeout, same as _request2 --
+        # see bdev_nvme_attach_controller for why this exists (the LVS rejoin
+        # freeze window). Keyword-only so it can never collide with an RPC
+        # param of the same name landing in **kwargs.
+        effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
             response = self.session.post(
-                self.url, data=json.dumps(wire_payload), timeout=self.timeout,
-                headers={"X-RPC-Timeout": str(self.timeout)})
+                self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
+                headers={"X-RPC-Timeout": str(effective_timeout)})
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
@@ -533,7 +538,7 @@ class RPCClient:
             "enable_zerocopy_send_client": True}
         if bind_to_device:
             params["bind_to_device"] = bind_to_device
-        return self._request("sock_impl_set_options", params)
+        return self._request3("sock_impl_set_options", **params)
 
     def transport_create_caching(self, trtype):
         return self._request3("nvmf_create_transport", trtype=trtype)
@@ -999,7 +1004,7 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
-        return self._request("bdev_distrib_create", params)
+        return self._request3("bdev_distrib_create", **params)
 
     def distr_shared_placement(self, name=None, enable=True):
         """Flip the shared_placement (data placement-binding mode) of distrib
@@ -1024,7 +1029,7 @@ class RPCClient:
         params: dict = {"enable": bool(enable)}
         if name:
             params["name"] = name
-        return self._request("distr_shared_placement", params)
+        return self._request3("distr_shared_placement", **params)
 
     def distr_write_protection_v2(self, name=None, enable=True):
         """Activate (or deactivate) v2 write protection on distrib bdevs at
@@ -1049,7 +1054,7 @@ class RPCClient:
         params: dict = {"enable": bool(enable)}
         if name:
             params["name"] = name
-        return self._request("distr_write_protection_v2", params)
+        return self._request3("distr_write_protection_v2", **params)
 
     def jm_set_shared_placement(self, name, enable=True):
         """Flip the shared_placement mode of a JM bdev at runtime.
@@ -1067,8 +1072,7 @@ class RPCClient:
             name: the JM bdev to target (required).
             enable: True to enable shared-placement mode, False to disable.
         """
-        params: dict = {"name": name, "enable": bool(enable)}
-        return self._request("jm_set_shared_placement", params)
+        return self._request3("jm_set_shared_placement", name=name, enable=bool(enable))
 
     def bdev_lvol_delete_lvstore(self, name):
         params = {"lvs_name": name}
@@ -1137,21 +1141,21 @@ class RPCClient:
                               w_mbytes_per_sec=w_mbytes_per_sec)
 
     def distr_send_cluster_map(self, params):
-        return self._request("distr_send_cluster_map", params)
+        return self._request3("distr_send_cluster_map", **params)
 
     def distr_get_cluster_map(self, name):
         params = {"name": name}
         return self._request("distr_dump_cluster_map", params)
 
     def distr_add_nodes(self, params):
-        return self._request("distr_add_nodes", params)
+        return self._request3("distr_add_nodes", **params)
 
     def distr_add_devices(self, params):
-        return self._request("distr_add_devices", params)
+        return self._request3("distr_add_devices", **params)
 
     def distr_status_events_update(self, params):
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
-        return self._request("distr_status_events_update", params)
+        return self._request3("distr_status_events_update", **params)
 
     def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False,
                                     ctrlr_loss_timeout_sec=None,
@@ -1314,7 +1318,7 @@ class RPCClient:
         if iobuf_small_cache_size > 0:
             params['iobuf_large_cache_size'] = iobuf_large_cache_size
         if params:
-            return self._request("bdev_set_options", params)
+            return self._request3("bdev_set_options", **params)
         else:
             return False
 
@@ -1329,14 +1333,12 @@ class RPCClient:
         if large_bufsize > 0:
             params['large_bufsize'] = large_bufsize
         if params:
-            return self._request("iobuf_set_options", params)
+            return self._request3("iobuf_set_options", **params)
         else:
             return False
 
     def accel_set_options(self):
-        params = {"small_cache_size": 512,
-                   "large_cache_size": 64}
-        return self._request("accel_set_options", params)
+        return self._request3("accel_set_options", small_cache_size=512, large_cache_size=64)
 
     def distr_status_events_get(self):
         return self._request3("distr_status_events_get")
@@ -1410,8 +1412,7 @@ class RPCClient:
         return self._request3("bdev_jm_delete", **params)
 
     def ultra21_util_get_malloc_stats(self):
-        params = {"socket_id": 0}
-        return self._request("ultra21_util_get_malloc_stats", params)
+        return self._request3("ultra21_util_get_malloc_stats", socket_id=0)
 
     def ultra21_lvol_mount_clone(self, clone_name, snap_bdev, base_bdev, blockcnt):
         return self._request3("ultra21_lvol_mount", modus="CLONE",
@@ -1425,7 +1426,7 @@ class RPCClient:
         return self._request3("jm_delete", name=0, vuid=0)
 
     def framework_start_init(self):
-        return self._request("framework_start_init")
+        return self._request3("framework_start_init")
 
     def bdev_examine(self, name):
         params = {"name": name}
@@ -1474,23 +1475,13 @@ class RPCClient:
         return self._request3("bdev_get_histogram", name=name)
 
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
-        params = {
-            "bdev_name": bdev_name,
-            "nbd_device": nbd_device,
-        }
-        return self._request("nbd_start_disk", params)
+        return self._request3("nbd_start_disk", bdev_name=bdev_name, nbd_device=nbd_device)
 
     def nbd_stop_disk(self, nbd_device):
-        params = {
-            "nbd_device": nbd_device
-        }
-        return self._request("nbd_stop_disk", params)
+        return self._request3("nbd_stop_disk", nbd_device=nbd_device)
 
     def nbd_get_disks(self, nbd_device):
-        params = {
-            "nbd_device": nbd_device
-        }
-        return self._request("nbd_get_disks", params)
+        return self._request3("nbd_get_disks", nbd_device=nbd_device)
 
     def bdev_jm_unmap_vuid(self, name, vuid):
         return self._request3("bdev_jm_unmap_vuid", name=name, vuid=vuid)
@@ -1501,11 +1492,10 @@ class RPCClient:
             params["dhchap_digests"] = dhchap_digests
         if dhchap_dhgroups:
             params["dhchap_dhgroups"] = dhchap_dhgroups
-        return self._request("nvmf_set_config", params)
+        return self._request3("nvmf_set_config", **params)
 
     def jc_set_hint_lcpu_mask(self, jc_singleton_mask):
-        params = {"hint_lcpu_mask": int(jc_singleton_mask, 16)}
-        return self._request("jc_set_hint_lcpu_mask", params)
+        return self._request3("jc_set_hint_lcpu_mask", hint_lcpu_mask=int(jc_singleton_mask, 16))
 
 
     def thread_get_stats(self):
@@ -1515,8 +1505,8 @@ class RPCClient:
         return self._request3("framework_get_reactors")
 
     def thread_set_cpumask(self, app_thread_process_id, app_thread_mask):
-        params = {"id": app_thread_process_id, "cpumask": app_thread_mask}
-        return self._request("thread_set_cpumask", params)
+        return self._request3("thread_set_cpumask",
+                              id=app_thread_process_id, cpumask=app_thread_mask)
 
     def distr_migration_to_primary_start(self, storage_ID, name, qos_high_priority=False):
         params = {
@@ -1585,17 +1575,10 @@ class RPCClient:
                               name=name, cluster_full=cluster_full)
 
     def log_set_print_level(self, level):
-        params = {
-            "level": level
-        }
-        return self._request("log_set_print_level", params)
+        return self._request3("log_set_print_level", level=level)
 
     def bdev_lvs_dump(self, lvs_name, file):
-        params = {
-            "lvs_name": lvs_name,
-            "file": file,
-        }
-        return self._request("bdev_lvs_dump", params)
+        return self._request3("bdev_lvs_dump", lvs_name=lvs_name, file=file)
 
     def jc_explicit_synchronization(self, jm_vuid):
         return self._request3("jc_explicit_synchronization", jm_vuid=jm_vuid)
@@ -1669,10 +1652,8 @@ class RPCClient:
 
 
     def bdev_distrib_force_to_non_leader(self, jm_vuid=0):
-        params = None
-        if jm_vuid:
-            params = {"jm_vuid": jm_vuid}
-        return self._request("bdev_distrib_force_to_non_leader", params)
+        kwargs = {"jm_vuid": jm_vuid} if jm_vuid else {}
+        return self._request3("bdev_distrib_force_to_non_leader", **kwargs)
 
     def bdev_lvol_set_leader(self, lvs, *, leader=False, bs_nonleadership=False):
         return self._request("bdev_lvol_set_leader_all", {
@@ -1688,9 +1669,8 @@ class RPCClient:
         non-leader LVS (the SPDK side asserts leader == false). Used before a
         control-plane leadership grant so the grant never serves stale blob
         metadata (the 2026-07-06 LVS_13 hazard of a bare set_leader)."""
-        return self._request("bdev_lvol_update_lvstore", {
-            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
-        })
+        params = {"uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs}
+        return self._request3("bdev_lvol_update_lvstore", **params)
 
     def bdev_lvol_set_lvs_signal(self, lvs):
         """Send a fabric-level signal to an LVS to drop leadership.
@@ -1702,7 +1682,7 @@ class RPCClient:
         peer.
         """
         params = {"uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs}
-        return self._request("bdev_lvol_set_lvs_signal", params)
+        return self._request3("bdev_lvol_set_lvs_signal", **params)
 
     def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
         params = {
@@ -1742,10 +1722,7 @@ class RPCClient:
                               storage_ID_from=storage_ID_from, storage_ID_to=storage_ID_to)
 
     def nvmf_set_max_subsystems(self, max_subsystems):
-        params = {
-            "max_subsystems": max_subsystems,
-        }
-        return self._request("nvmf_set_max_subsystems", params)
+        return self._request3("nvmf_set_max_subsystems", max_subsystems=max_subsystems)
 
     def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, hublvol_port=0, role="primary"):
         """Set lvstore options
@@ -1880,8 +1857,8 @@ class RPCClient:
             params["selector"] = selector
         if rr_min_io is not None:
             params["rr_min_io"] = rr_min_io
-        return self._request("bdev_nvme_set_multipath_policy", params,
-                             request_timeout=request_timeout)
+        return self._request3("bdev_nvme_set_multipath_policy",
+                              request_timeout=request_timeout, **params)
 
     def bdev_jm_get_status(self, jm_vuid):
         """Journal status for one JM group.
@@ -1919,10 +1896,7 @@ class RPCClient:
         return self._request3("jc_disable_replication", **params)
 
     def bdev_distrib_check_inflight_io(self, jm_vuid):
-        params = {
-            "jm_vuid": jm_vuid,
-        }
-        return self._request("bdev_distrib_check_inflight_io", params)
+        return self._request3("bdev_distrib_check_inflight_io", jm_vuid=jm_vuid)
 
 
     def bdev_lvol_remove_from_group(self, group_id, lvol_name_list):
@@ -2049,7 +2023,7 @@ class RPCClient:
         capabilities without side effects — e.g. whether the image carries
         the runtime shared-placement RPCs (see
         cluster_ops.all_nodes_support_shared_placement)."""
-        return self._request("rpc_get_methods")
+        return self._request3("rpc_get_methods")
 
     def bdev_lvs_dump_tree(self, lvstore_uuid):
         params = {

@@ -347,14 +347,14 @@ class TestRpcMethodShape(unittest.TestCase):
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "bdev_get", return_value=None), \
-             patch.object(c, "_request", return_value=True) as mock_req:
+             patch.object(c, "_request3", return_value=True) as mock_req:
             c.bdev_distrib_create(
                 name="distrib_42", vuid=42, ndcs=1, npcs=1,
                 num_blocks=1000, block_size=4096,
                 jm_names=["jm_1"], chunk_size=4096,
                 shared_placement=True)
 
-        params = mock_req.call_args.args[1]
+        params = mock_req.call_args.kwargs
         self.assertEqual(mock_req.call_args.args[0], "bdev_distrib_create")
         self.assertEqual(params["shared_placement"], True)
 
@@ -364,13 +364,13 @@ class TestRpcMethodShape(unittest.TestCase):
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "bdev_get", return_value=None), \
-             patch.object(c, "_request", return_value=True) as mock_req:
+             patch.object(c, "_request3", return_value=True) as mock_req:
             c.bdev_distrib_create(
                 name="distrib_42", vuid=42, ndcs=1, npcs=1,
                 num_blocks=1000, block_size=4096,
                 jm_names=["jm_1"], chunk_size=4096)
 
-        params = mock_req.call_args.args[1]
+        params = mock_req.call_args.kwargs
         # Absent (not False) — matches the spec's "Default: false" semantics.
         self.assertNotIn("shared_placement", params)
 
@@ -379,11 +379,11 @@ class TestRpcMethodShape(unittest.TestCase):
 
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
-        with patch.object(c, "_request", return_value=True) as mock_req:
+        with patch.object(c, "_request3", return_value=True) as mock_req:
             c.distr_shared_placement(name="distrib_1", enable=True)
 
         self.assertEqual(mock_req.call_args.args[0], "distr_shared_placement")
-        self.assertEqual(mock_req.call_args.args[1],
+        self.assertEqual(mock_req.call_args.kwargs,
                          {"name": "distrib_1", "enable": True})
 
     def test_distr_shared_placement_all_bdevs_when_name_omitted(self):
@@ -391,10 +391,10 @@ class TestRpcMethodShape(unittest.TestCase):
 
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
-        with patch.object(c, "_request", return_value=True) as mock_req:
+        with patch.object(c, "_request3", return_value=True) as mock_req:
             c.distr_shared_placement(enable=True)
 
-        params = mock_req.call_args.args[1]
+        params = mock_req.call_args.kwargs
         self.assertEqual(params, {"enable": True})
         self.assertNotIn("name", params)
 
@@ -431,11 +431,11 @@ class TestRpcMethodShape(unittest.TestCase):
 
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
-        with patch.object(c, "_request", return_value=True) as mock_req:
+        with patch.object(c, "_request3", return_value=True) as mock_req:
             c.jm_set_shared_placement(name="jm_1", enable=True)
 
         self.assertEqual(mock_req.call_args.args[0], "jm_set_shared_placement")
-        self.assertEqual(mock_req.call_args.args[1],
+        self.assertEqual(mock_req.call_args.kwargs,
                          {"name": "jm_1", "enable": True})
 
     def test_jm_set_shared_placement_requires_name(self):
@@ -454,10 +454,10 @@ class TestRpcMethodShape(unittest.TestCase):
 
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
-        with patch.object(c, "_request", return_value=True) as mock_req:
+        with patch.object(c, "_request3", return_value=True) as mock_req:
             c.jm_set_shared_placement(name="jm_1", enable=False)
 
-        self.assertEqual(mock_req.call_args.args[1],
+        self.assertEqual(mock_req.call_args.kwargs,
                          {"name": "jm_1", "enable": False})
 
 
