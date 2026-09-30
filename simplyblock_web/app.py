@@ -5,19 +5,20 @@ import ssl
 import sys
 import time
 
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-import uvicorn
-from uvicorn.config import Config
 from prometheus_fastapi_instrumentator import Instrumentator
+from starlette.middleware.base import BaseHTTPMiddleware
+from uvicorn.config import Config
 
+from simplyblock_core import constants
+from simplyblock_core import utils as core_utils
+from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.settings import Settings
 from simplyblock_web.api import v1, v2
 from simplyblock_web.settings import Settings as WebSettings
-from simplyblock_core import constants, utils as core_utils
-from simplyblock_core.settings import Settings
-from simplyblock_core.exceptions import PreconditionError
 
 logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)

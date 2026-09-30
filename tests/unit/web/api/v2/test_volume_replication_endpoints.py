@@ -1,8 +1,9 @@
 """Unit tests for the volume replication endpoints and the policy assignment
 folded into the volume PUT."""
 
-from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
-
+from simplyblock_core.controllers.replication_policy_controller import (
+    ReplicationConfigError,
+)
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
     CLUSTER_ID,
@@ -12,7 +13,6 @@ from tests.unit.web.api.v2._factories import (
     TASK_ID,
     VOLUME_ID,
 )
-
 
 VOLUME_URL = f'/api/v2/clusters/{CLUSTER_ID}/storage-pools/{POOL_ID}/volumes/{VOLUME_ID}/'
 REPLICATION_URL = VOLUME_URL + 'replication/'

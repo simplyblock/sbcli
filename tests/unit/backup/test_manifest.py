@@ -10,12 +10,12 @@ import pytest
 
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.manifest import (
+    MANIFEST_SCHEMA_VERSION,
     BackupManifest,
-    ManifestDataPlane,
     FDBKeyDescriptor,
     HCPKeyDescriptor,
+    ManifestDataPlane,
     ManifestError,
-    MANIFEST_SCHEMA_VERSION,
     ManifestSource,
     ManifestVolume,
 )

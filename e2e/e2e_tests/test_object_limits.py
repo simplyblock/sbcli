@@ -31,7 +31,6 @@ import json
 import time
 
 import requests
-
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 

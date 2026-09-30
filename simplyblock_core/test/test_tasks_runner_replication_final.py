@@ -9,11 +9,11 @@ tests/unit/tasks/test_task_runner_base.py.
 """
 import pytest
 
-from simplyblock_core.services import tasks_runner_replication_final as runner
-from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services import tasks_runner_replication_final as runner
+from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 
 
 def _task(**params):
@@ -278,6 +278,7 @@ def test_shrink_takes_next_snapshot_immediately(monkeypatch):
     shorter.
     """
     import time as _time
+
     from simplyblock_core import constants
     runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=True)},
                        {"shrink_round": 1, "shrink_snap_id": "S1",
@@ -306,6 +307,7 @@ def test_shrink_takes_next_snapshot_immediately(monkeypatch):
 def test_shrink_hands_over_when_it_cannot_converge(monkeypatch):
     """Written faster than it replicates: freeze anyway, but say so."""
     import time as _time
+
     from simplyblock_core import constants
     monkeypatch.setattr(constants, "REPL_CUTOVER_MAX_SHRINK_ROUNDS", 3)
     runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=True)},

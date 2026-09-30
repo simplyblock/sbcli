@@ -28,13 +28,15 @@ import time
 import uuid as uuid_module
 from datetime import datetime
 
-from simplyblock_core import constants
+from simplyblock_core import constants, utils
 from simplyblock_core import db_controller as db_mod
-from simplyblock_core import utils
 from simplyblock_core.controllers import snapshot_events, tasks_controller
 from simplyblock_core.controllers.snapshot_controller import (
-    _find_lvs_leader, _rollback_snapshot_bdev, lvstore_op_lock,
-    object_mutation_lock)
+    _find_lvs_leader,
+    _rollback_snapshot_bdev,
+    lvstore_op_lock,
+    object_mutation_lock,
+)
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
@@ -528,7 +530,9 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
 
             for sec in secondary_nodes:
                 from simplyblock_core.storage_node_ops import (
-                    wait_or_delay_for_restart_gate, queue_for_restart_drain)
+                    queue_for_restart_drain,
+                    wait_or_delay_for_restart_gate,
+                )
                 gate = wait_or_delay_for_restart_gate(sec.get_id(), group.lvs_name)
                 if gate == "delay":
                     queue_for_restart_drain(

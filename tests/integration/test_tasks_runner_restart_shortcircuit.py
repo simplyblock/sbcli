@@ -36,12 +36,11 @@ import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.nvme_device import NVMeDevice
 import simplyblock_core.services.task_runner_base as trb
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services.task_runner_base import TaskAbort, TaskRetry
-
 
 _RUNNER_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..",

@@ -16,7 +16,6 @@ from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import LVolStatObject, StatsObject
 from simplyblock_core.models.storage_node import StorageNode
 
-
 WATCHED_CLASSES = [Cluster, StorageNode, Pool, LVol, SnapShot, JobSchedule, EventObj]
 UNWATCHED_CLASSES = [
     LVolMini, SnapShotMini, StatsObject, LVolStatObject,

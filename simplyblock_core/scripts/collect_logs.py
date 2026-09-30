@@ -48,7 +48,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +63,8 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from kubernetes import client as k8s_client, config as k8s_config
+    from kubernetes import client as k8s_client
+    from kubernetes import config as k8s_config
     from kubernetes.client.rest import ApiException
     from kubernetes.stream import stream as k8s_stream
 except ImportError:

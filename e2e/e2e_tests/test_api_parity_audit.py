@@ -18,8 +18,8 @@ import traceback
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
-from utils.sbcli_utils_v2 import SbcliUtilsV2
 from utils.parity_report import generate_html_report
+from utils.sbcli_utils_v2 import SbcliUtilsV2
 
 
 class TestAPIParityAudit(TestClusterBase):

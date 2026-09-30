@@ -2,11 +2,11 @@ import logging
 import re
 from datetime import datetime, timedelta
 
+from prometheus_api_client import PrometheusConnect
+
 from simplyblock_core import constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
-
-from prometheus_api_client import PrometheusConnect
 
 logger = logging.getLogger()
 

@@ -21,8 +21,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from simplyblock_core.models.job_schedule import FrozenTaskError, JobSchedule
 import simplyblock_core.services.task_runner_base as trb
+from simplyblock_core.models.job_schedule import FrozenTaskError, JobSchedule
 
 
 def _task(status=JobSchedule.STATUS_NEW, retry=0, max_retry=8, canceled=False):

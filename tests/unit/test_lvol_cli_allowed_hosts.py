@@ -17,7 +17,6 @@ import pytest
 
 from simplyblock_cli import clibase
 
-
 VALID = "nqn.2024-01.io.simplyblock:host"
 
 

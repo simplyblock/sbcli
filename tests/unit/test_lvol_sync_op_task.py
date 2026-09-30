@@ -18,8 +18,8 @@ from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.services import tasks_runner_sync_lvol_del as runner
 from simplyblock_core.services import task_runner_base
+from simplyblock_core.services import tasks_runner_sync_lvol_del as runner
 from simplyblock_core.services.task_runner_base import TaskAbort, TaskDefer
 
 

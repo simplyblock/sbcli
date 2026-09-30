@@ -27,7 +27,6 @@ def _expected_layout_4_to_5_ftt1():
 def test_4_to_5_ftt1_happy_path(fdb_clean, db_controller_singleton_reset,
                                  patched_rpc_router):
     """Phase 1 acceptance: full expand from 4 → 5 with FTT=1 succeeds."""
-    from tests.integration.expansion_sim._scenarios import build_4_node_ftt1_baseline
     from simplyblock_core.controllers.cluster_expansion.executor import (
         integrate_new_node_into_cluster,
     )
@@ -35,6 +34,7 @@ def test_4_to_5_ftt1_happy_path(fdb_clean, db_controller_singleton_reset,
         EXPAND_PHASE_COMPLETED,
     )
     from simplyblock_core.db_controller import DBController
+    from tests.integration.expansion_sim._scenarios import build_4_node_ftt1_baseline
 
     db = DBController()
     cluster_id, _existing_ids, new_node_id = build_4_node_ftt1_baseline(

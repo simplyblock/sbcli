@@ -10,7 +10,6 @@ import importlib
 
 import pytest
 
-
 # Every top-level module that a service entrypoint imports.
 # Add new modules here when new API routes or services are created.
 _IMPORT_TARGETS = [

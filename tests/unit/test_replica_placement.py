@@ -23,8 +23,9 @@ import unittest
 
 from simplyblock_core.controllers import replica_placement as rp
 from simplyblock_core.controllers.replica_placement import (
-    InfeasiblePlacement, Placement)
-
+    InfeasiblePlacement,
+    Placement,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers

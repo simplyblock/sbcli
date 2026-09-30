@@ -1,7 +1,7 @@
 from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import tasks_controller
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.services.task_runner_base import (

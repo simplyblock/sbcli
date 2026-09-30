@@ -5,32 +5,53 @@ import logging
 import os.path
 import struct
 import time
-
-import fdb
 from typing import Any, ClassVar
 
+import fdb
+
 from simplyblock_core import constants, index_ops, utils
-from simplyblock_core.utils import ttl_cache
 from simplyblock_core.models import indices, watches
+from simplyblock_core.models.backup import (
+    Backup,
+    BackupChainLock,
+    BackupPolicy,
+    BackupPolicyAttachment,
+)
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
+from simplyblock_core.models.cluster import (
+    Cluster,
+    ClusterAddNodeLock,
+    ClusterCreateLock,
+    DeployConfig,
+    PortReservation,
+)
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
-from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
-from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.port_stat import PortStat
-from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-from simplyblock_core.models.replication import ConsistencyGroup, ReplicationPolicy, ReplicationTarget
-from simplyblock_core.models.qos import QOSClass
-from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
-from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
-    PoolStatObject, CachedLVolStatObject
-from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
+from simplyblock_core.models.lvol_model import LVol, LVolMini, LVolReplication
 from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
+from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.port_stat import PortStat
+from simplyblock_core.models.qos import QOSClass
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
+from simplyblock_core.models.stats import (
+    CachedLVolStatObject,
+    ClusterStatObject,
+    DeviceStatObject,
+    LVolStatObject,
+    NodeStatObject,
+    PoolStatObject,
+)
+from simplyblock_core.models.storage_node import NodeLVolDelLock, StorageNode
+from simplyblock_core.utils import ttl_cache
 from simplyblock_core.utils.helpers import single_or_none
 
 logger = logging.getLogger(__name__)
@@ -1555,8 +1576,8 @@ class DBController(metaclass=Singleton):
             # re-emit). Delayed imports avoid any dependency cycle between
             # db_controller and the controllers package.
             try:
-                from simplyblock_core.controllers import storage_events
                 from simplyblock_core import distr_controller
+                from simplyblock_core.controllers import storage_events
                 snode = self.get_storage_node_by_id(node_id)
                 if snode is not None and old_status != snode.status:
                     storage_events.snode_status_change(

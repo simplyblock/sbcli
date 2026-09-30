@@ -6,7 +6,6 @@ from string import Template
 from simplyblock_core import constants
 from simplyblock_core.utils import shell as shell_utils
 
-
 logger = logging.getLogger()
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 SPDK_PATH = constants.SPK_DIR

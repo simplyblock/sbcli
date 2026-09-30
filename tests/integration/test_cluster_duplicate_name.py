@@ -34,7 +34,6 @@ from simplyblock_core import cluster_ops
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster, DeployConfig
 
-
 # ---------------------------------------------------------------------------
 # Fixtures — real FDB, wiped before every test for isolation.
 # ---------------------------------------------------------------------------

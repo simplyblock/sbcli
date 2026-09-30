@@ -46,8 +46,8 @@ def write_through_cas(monkeypatch):
     ``tests/unit/tasks/test_runner_specs.py``; pytest discovers conftests per
     directory and these tests don't share a parent with ``tests/unit/``.
     """
-    from simplyblock_core.models.job_schedule import JobSchedule
     import simplyblock_core.services.task_runner_base as trb
+    from simplyblock_core.models.job_schedule import JobSchedule
 
     rows: dict = {}
     take_view = JobSchedule.frozen_view

@@ -22,9 +22,9 @@ earlier counter+full-re-read backend without touching controllers or the API.
 import asyncio
 import logging
 import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
-from collections.abc import Callable, Sequence
 
 import fdb
 

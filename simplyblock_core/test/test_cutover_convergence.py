@@ -418,6 +418,7 @@ class TestRoundOneIsMeasured(unittest.TestCase):
     def test_the_controller_enqueues_no_round_of_its_own(self):
         """Commit takes no snapshot, so it must not claim a round in flight."""
         import inspect
+
         from simplyblock_core.controllers import lvol_controller as lc
         src = inspect.getsource(lc.replication_commit)
         self.assertIn('"shrink_round": 0', src)

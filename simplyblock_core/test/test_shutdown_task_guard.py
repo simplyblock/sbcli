@@ -12,7 +12,6 @@ migration in progress is not.
 """
 from simplyblock_core.models.job_schedule import JobSchedule
 
-
 MIGRATION_FNS = {
     JobSchedule.FN_DEV_MIG,
     JobSchedule.FN_FAILED_DEV_MIG,
@@ -63,6 +62,7 @@ def test_guard_uses_the_same_set_as_this_test():
     shutdown_storage_node delegates to.
     """
     import inspect
+
     from simplyblock_core import storage_node_ops
     src = inspect.getsource(storage_node_ops.check_node_shutdown_preconditions)
     for fn_const in ("FN_DEV_MIG", "FN_FAILED_DEV_MIG", "FN_NEW_DEV_MIG",

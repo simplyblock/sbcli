@@ -329,8 +329,8 @@ class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
 
     def _node(self, uuid, lvstore, jm_vuid, secondary_node_id="",
               tertiary_node_id="", status="online", lvstore_ports=None):
-        from simplyblock_core.models.iface import IFace
         from simplyblock_core.models.hublvol import HubLVol
+        from simplyblock_core.models.iface import IFace
         n = StorageNode()
         n.uuid = uuid
         n.status = status

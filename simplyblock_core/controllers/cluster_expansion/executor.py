@@ -44,7 +44,6 @@ from simplyblock_core.controllers.cluster_expansion.preconditions import (
 )
 from simplyblock_core.models.storage_node import StorageNode
 
-
 logger = utils.get_logger(__name__)
 
 

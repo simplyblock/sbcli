@@ -1,26 +1,30 @@
-import time
-import paramiko
-# paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
-import os
 import gzip
 import json
+
+# paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
+import os
+import random
+import re
+import shlex
 import shutil
+import string
+import subprocess
+import threading
+import time
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+import paramiko
 import paramiko.buffered_pipe
 import paramiko.ssh_exception
+from exceptions.custom_exception import NodeUnreachableTimeout
 from logger_config import setup_logger
-from pathlib import Path
-from datetime import datetime
-import threading
-import random
-import string
-import re
-import subprocess
-import shlex
-from collections import defaultdict
+
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
-from exceptions.custom_exception import NodeUnreachableTimeout
+
 # import importlib
 # from glob import glob
 
@@ -5323,8 +5327,8 @@ class RunnerK8sLog:
             self.logger.info("K8s resource monitor thread stopped.")
 
 def _rid(n=6):
-    import string
     import random
+    import string
     letters = string.ascii_uppercase
     digits = string.digits
     return random.choice(letters) + ''.join(random.choices(letters + digits, k=n-1))

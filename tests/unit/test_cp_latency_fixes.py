@@ -13,8 +13,8 @@ import types
 
 from simplyblock_core import storage_node_ops
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import hublvol_reconnect
 
 
@@ -282,6 +282,7 @@ class TestWindowCollapseWiring:
 
     def test_stamp_deferred_on_external_lock(self):
         import inspect
+
         from simplyblock_core.utils import hublvol_reconnect as hr
         src = inspect.getsource(
             hr.HublvolReconnectCoordinator._reconcile_under_lock)
@@ -336,9 +337,9 @@ class TestBlockedPortsBatching:
 
     def test_loops_wired_to_batch(self):
         import inspect
-        from simplyblock_core.services import health_check_service
-        from simplyblock_core.services import storage_node_monitor
+
         from simplyblock_core.controllers import health_controller
+        from simplyblock_core.services import health_check_service, storage_node_monitor
         for mod in (health_check_service, storage_node_monitor):
             src = inspect.getsource(mod)
             assert "check_ports_on_node" in src, mod.__name__

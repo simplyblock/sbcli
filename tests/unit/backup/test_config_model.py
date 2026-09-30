@@ -11,7 +11,6 @@ from simplyblock_core.models.backup_config import (
 )
 from simplyblock_core.models.cluster import Cluster
 
-
 MINIMAL = {"bucket_name": "backups", "region": "eu-central-1"}
 
 

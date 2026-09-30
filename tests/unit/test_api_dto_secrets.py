@@ -1,12 +1,12 @@
 """PR 4 — request DTOs use SecretStr; response DTOs mask in python mode but unwrap on the JSON wire."""
 import json
+from uuid import uuid4
 
 from pydantic import SecretStr
 
-from simplyblock_core.models.base_model import default_factory
 from simplyblock_core.models.backup_config import BackupConfig
-from simplyblock_web.api.v2._dtos import BackupConfigDTO, ClusterDTO, CapacityStatDTO
-from uuid import uuid4
+from simplyblock_core.models.base_model import default_factory
+from simplyblock_web.api.v2._dtos import BackupConfigDTO, CapacityStatDTO, ClusterDTO
 
 
 def _build_capacity():
