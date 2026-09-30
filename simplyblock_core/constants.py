@@ -541,6 +541,11 @@ REPL_XFER_INLINE_WAIT_SEC = 5.0
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
 REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
+# Delay before retrying a snapshot transfer whose transfer or finish failed:
+# base * 2^retry, capped. An immediate retry repeats whatever the target did
+# with the previous attempt.
+REPL_RETRY_BACKOFF_BASE_SEC = 15
+REPL_RETRY_BACKOFF_MAX_SEC = 600
 # Pass interval for the cutover runner while any cutover is mid-round. The
 # freeze pays for every millisecond between a transfer completing and the next
 # snapshot starting, so this must stay well under a second.

@@ -484,6 +484,15 @@ def process_task(task, cl):
         task.write_to_db(db.kv_store)
 
 
+#: The task types this runner owns. The cluster's task list holds every other
+#: runner's tasks too, and process_task terminates what it is handed (timeout,
+#: max retry): without this filter it closed snapshot-replication tasks with
+#: "max retry reached (8/8)" and would end any other task older than the
+#: backup timeout (2026-09-29).
+BACKUP_FUNCTIONS = (JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE,
+                    JobSchedule.FN_BACKUP_MERGE)
+
+
 def main():
     logger.info("Starting backup tasks runner...")
     while True:
@@ -500,6 +509,8 @@ def main():
 
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
+                if task.function_name not in BACKUP_FUNCTIONS:
+                    continue
                 if task.status == JobSchedule.STATUS_DONE or task.canceled:
                     continue
 

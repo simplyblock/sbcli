@@ -3017,6 +3017,26 @@ def _replication_role(db_controller: DBController, lvol: LVol) -> str:
     return "none"
 
 
+def _task_shipped(task):
+    """True when a snapshot-replication task ended by shipping its snapshot.
+
+    The success path stores the new remote snapshot's uuid as the result
+    (snap-instance replication sets no counterpart id, so the result is its
+    only trace); a snapshot already on the other side ends "is already
+    replicated". Every other DONE result is a give-up.
+    """
+    if task.status != JobSchedule.STATUS_DONE or task.canceled:
+        return False
+    result = str(task.function_result or "")
+    if " is already replicated " in result:
+        return True
+    try:
+        uuid.UUID(result)
+    except ValueError:
+        return False
+    return True
+
+
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
     # Id first, then name — the order the scan this replaces used. Not
@@ -3140,10 +3160,16 @@ def _replication_cycle_stats(db_controller, lvol, items, policy):
     # in source_replicated_snap_uuid and never sets the target one, so a
     # target-only test reported every failing-back volume as 0 replicated
     # and left lag_seconds None for ever — no gate on lag could ever pass.
+    #
+    # A DONE task alone is NOT a replicated snapshot: tasks that gave up
+    # (max retry, cancelled, snapshot gone) are DONE too. Counting them
+    # reported a fresh lag and a recent last_replicated_at for a volume of
+    # which nothing had reached the target for an hour, and Ramen took it
+    # as protected (2026-09-29, vm-a: 12 tasks at max retry).
     def _is_replicated(task, snap):
-        return (task.status == JobSchedule.STATUS_DONE
-                or bool(snap.target_replicated_snap_uuid)
-                or bool(snap.source_replicated_snap_uuid))
+        return (bool(snap.target_replicated_snap_uuid)
+                or bool(snap.source_replicated_snap_uuid)
+                or _task_shipped(task))
 
     replicated_pairs = [(t, s) for (t, s) in items if _is_replicated(t, s)]
     outstanding_pairs = [(t, s) for (t, s) in items if not _is_replicated(t, s)]
@@ -3226,9 +3252,14 @@ def _replication_cycle_stats(db_controller, lvol, items, policy):
     # while every status view looked normal.
     failing = [t for t in tasks
                if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
-    gave_up = [t for t in tasks
+    # A task that gave up still matters while nothing newer reached the
+    # target; once a later snapshot has, the volume is protected again and
+    # the old give-up is history, not a current error.
+    newest_replicated = max((s.created_at for s in replicated), default=None)
+    gave_up = [t for (t, s) in items
                if t.status == JobSchedule.STATUS_DONE
-               and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
+               and str(t.function_result or "").startswith(("max retry", "task cancelled"))
+               and (newest_replicated is None or s.created_at > newest_replicated)]
     out["failing_count"] = len(failing)
     out["max_retry_reached"] = len(gave_up)
     out["last_error"] = ""
