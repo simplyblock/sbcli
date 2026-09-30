@@ -138,22 +138,33 @@ class TestPassLatency(unittest.TestCase):
     def test_the_per_task_backoff_is_gone(self):
         """It punished the COMMON case: 20 queued tasks cost ~70s per pass.
 
-        The DB-failure backoff in the except branch is a different thing and
-        stays -- this asserts only that a yielding TASK no longer sleeps.
+        The loop now belongs to the shared driver, which skips a task that is
+        not yet due instead of sleeping on it, so the only thing left to pin
+        here is that the pass still runs at the fast cadence while a cutover
+        is converging.
         """
         import inspect
-        src = inspect.getsource(final.main)
-        self.assertNotIn("if not res:", src,
-                         "a queued or mid-round task must not cost a sleep")
-        self.assertIn("REPL_CUTOVER_ACTIVE_POLL_SEC", src)
+        self.assertIn("REPL_CUTOVER_ACTIVE_POLL_SEC",
+                      inspect.getsource(final._poll_interval))
+        self.assertIs(final.SPEC.dynamic_interval, final._poll_interval,
+                      "the runner must pace its pass by what is in flight")
 
     def test_the_owner_lookup_reuses_the_prefetched_task_list(self):
-        """Re-reading per task is O(N^2) DB reads, unaffordable at 200ms."""
+        """Re-reading per task is O(N^2) DB reads, unaffordable at 200ms.
+
+        The driver has already read the pass's tasks, so the lookup takes them
+        as a REQUIRED argument: there is no longer a per-task fallback that
+        could quietly reintroduce the rescan.
+        """
         import inspect
-        self.assertIn("tasks=None",
-                      inspect.signature(final._lvs_cutover_owner).__str__()
-                      .replace(" ", "").replace("'", ""))
-        self.assertIn("cluster_tasks", inspect.getsource(final.main))
+        params = inspect.signature(final._lvs_cutover_owner).parameters
+        self.assertIs(params["tasks"].default, inspect.Parameter.empty,
+                      "tasks must be required, not an optional re-read")
+        self.assertNotIn("get_job_tasks",
+                         inspect.getsource(final._lvs_cutover_owner),
+                         "the owner lookup must not read the task table itself")
+        self.assertTrue(final.SPEC.wants_cycle_tasks,
+                        "the driver must hand the pass's tasks to the handler")
 
 
 if __name__ == "__main__":
