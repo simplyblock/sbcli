@@ -1079,10 +1079,8 @@ class RPCClient:
         return self._request2("bdev_alceml_delete", params)
 
     def get_lvol_stats(self, name=""):
-        params = {}
-        if name:
-            params["name"] = name
-        return self._request("bdev_get_iostat", params)
+        kwargs = {"name": name} if name else {}
+        return self._request3("bdev_get_iostat", **kwargs)
 
     def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4, superblock=False):
         ret = self.bdev_get(name)
@@ -1098,13 +1096,10 @@ class RPCClient:
         }
         if raid_level == "1":
             params["strip_size_kb"] = 0
-        return self._request("bdev_raid_create", params)
+        return self._request3("bdev_raid_create", **params)
 
     def bdev_raid_delete(self, name):
-        params = {
-            "name": name
-        }
-        return self._request("bdev_raid_delete", params)
+        return self._request3("bdev_raid_delete", name=name)
 
     def bdev_set_qos_limit(self, name, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
         params = {
@@ -1136,8 +1131,7 @@ class RPCClient:
         return self._request3("distr_send_cluster_map", **params)
 
     def distr_get_cluster_map(self, name):
-        params = {"name": name}
-        return self._request("distr_dump_cluster_map", params)
+        return self._request3("distr_dump_cluster_map", name=name)
 
     def distr_add_nodes(self, params):
         return self._request3("distr_add_nodes", **params)
@@ -1225,24 +1219,13 @@ class RPCClient:
                               base_bdev=base_bdev, split_count=split_count)
 
     def bdev_PT_NoExcl_create(self, name, base_bdev_name):
-        params = {
-            "name": name,
-            "base_bdev_name": base_bdev_name
-        }
-        return self._request("bdev_ptnonexcl_create", params)
+        return self._request3("bdev_ptnonexcl_create", name=name, base_bdev_name=base_bdev_name)
 
     def bdev_PT_NoExcl_delete(self, name):
-        params = {
-            "name": name
-        }
-        return self._request("bdev_ptnonexcl_delete", params)
+        return self._request3("bdev_ptnonexcl_delete", name=name)
 
     def bdev_passtest_create(self, name, base_name):
-        params = {
-            "base_name": base_name,
-            "pt_name": name
-        }
-        return self._request("bdev_passtest_create", params)
+        return self._request3("bdev_passtest_create", base_name=base_name, pt_name=name)
 
     def bdev_delay_create(self, name, base_name, avg_read_latency=0, p99_read_latency=0,
                           avg_write_latency=0, p99_write_latency=0):
@@ -1296,7 +1279,7 @@ class RPCClient:
         return {}
 
     def bdev_nvme_set_options(self):
-        return self._request("bdev_nvme_set_options", nvme_bdev_opts_params())
+        return self._request3("bdev_nvme_set_options", **nvme_bdev_opts_params())
 
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
@@ -1395,7 +1378,7 @@ class RPCClient:
             params["compression_thread"] = True
             if compression_cpu_mask:
                 params["compression_cpu_mask"] = int(compression_cpu_mask, 16)
-        return self._request("bdev_jm_create", params)
+        return self._request3("bdev_jm_create", **params)
 
     def bdev_jm_delete(self, name, safe_removal=False):
         params = {"name": name}
@@ -1421,21 +1404,20 @@ class RPCClient:
         return self._request3("framework_start_init")
 
     def bdev_examine(self, name):
-        params = {"name": name}
-        return self._request("bdev_examine", params)
+        return self._request3("bdev_examine", name=name)
 
     def bdev_wait_for_examine(self):
-        return self._request("bdev_wait_for_examine")
+        return self._request3("bdev_wait_for_examine")
 
     def bdev_aio_create(self, name, filename, block_size=0):
         """Create an SPDK AIO bdev over a Linux block device (lblk cluster
         mode). ``filename`` is the device path — prefer the stable
         /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
         logical block size."""
-        params = {"name": name, "filename": filename}
+        kwargs = {"name": name, "filename": filename}
         if block_size:
-            params["block_size"] = block_size
-        return self._request("bdev_aio_create", params)
+            kwargs["block_size"] = block_size
+        return self._request3("bdev_aio_create", **kwargs)
 
     def bdev_aio_delete(self, name):
         return self._request3("bdev_aio_delete", name=name)
