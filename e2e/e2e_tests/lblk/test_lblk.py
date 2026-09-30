@@ -745,7 +745,7 @@ class _LblkBase(TestClusterBase):
                    f"bash -c {shlex.quote(command)}")
         return k8s.exec_in_spdk_container(node_ip, wrapped)
 
-    def _isolate_and_verify_eviction(self, ip):
+    def _isolate_and_verify_eviction(self, ip, uuid=None):
         """Cut the node off until k8s evicts it, then check the pods landed.
 
         What is actually being asserted, in order:
@@ -772,18 +772,50 @@ class _LblkBase(TestClusterBase):
         k8s.isolate_node(ip, self.NODE_ISOLATION_SEC)
 
         if not k8s.wait_node_condition(ip, ready=False, timeout=240):
-            # Say so and carry on: the checks below would pass trivially, and
-            # a green that proves nothing is worse than a named gap.
-            self.logger.warning(
-                "[lblk] %s never went NotReady during isolation -- eviction "
-                "was not triggered, so this cycle did not test rescheduling.",
-                ip)
+            # Two very different things look identical from here, so ask the
+            # node which one happened before saying anything about the
+            # cluster. The marker is written by the cut itself, immediately
+            # before the first iptables call.
             k8s.wait_node_condition(ip, ready=True, timeout=600)
+            if not k8s.isolation_marker(ip):
+                raise LblkPreconditionError(
+                    f"[lblk] the isolation of {ip} never armed: no marker at "
+                    f"{k8s.ISOLATION_MARKER}, so the cut script did not reach "
+                    f"its first iptables call. This is the harness failing to "
+                    f"deliver the outage, not the cluster tolerating it -- "
+                    f"nothing about {ip} has been tested.")
+            # Armed and the node still held its heartbeats. Say so and carry
+            # on: the checks below would pass trivially, and a green that
+            # proves nothing is worse than a named gap.
+            self.logger.warning(
+                "[lblk] %s never went NotReady during isolation even though "
+                "the cut armed -- eviction was not triggered, so this cycle "
+                "did not test rescheduling.", ip)
             return
 
         # Give the scheduler the eviction window plus enough to place the pods.
         self.logger.info("[lblk] %s is NotReady; waiting out the eviction "
                          "window", ip)
+
+        # Whether the control plane notices has to be asked HERE, while the
+        # links are still down. The shared tail used to ask it after this
+        # method returned, by which point the cut had ended and the node was
+        # Ready again -- so it polled "online" until it gave up and failed the
+        # run. Non-fatal either way: what this outage is for is the eviction
+        # and the reattach below, and the same question is asked properly by
+        # interface_full_network_interrupt.
+        if uuid:
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    uuid, "offline", timeout=120)
+                self.logger.info("[lblk] %s went offline while cut off", uuid)
+            except Exception:                         # noqa: BLE001
+                self.logger.warning(
+                    "[lblk] %s stayed online through the isolation of %s. "
+                    "The node was NotReady to kubernetes, so the control "
+                    "plane is either tolerating the gap or not watching.",
+                    uuid, ip)
+
         sleep_n_sec(self.NODE_ISOLATION_SEC // 2)
 
         still = self._pods_on_node(ip)
@@ -1159,7 +1191,13 @@ class _LblkBase(TestClusterBase):
                     "node_network_isolation is a k8s-only outage: it tests pod "
                     "eviction and rescheduling, which docker has no analogue "
                     "for.")
-            self._isolate_and_verify_eviction(ip)
+            self._isolate_and_verify_eviction(ip, uuid)
+            # Return, rather than falling through to the shared offline
+            # wait below. That wait only makes sense while the links are
+            # down, and by here the cut has ended and the node is Ready
+            # again -- exactly the mistake that was found and fixed in
+            # interface_full_network_interrupt above, still living here.
+            return
         elif outage_type == "short_network_interrupt":
             # Same cut as the full one, held for seconds rather than minutes,
             # so the node never goes NotReady and nothing is evicted. What is

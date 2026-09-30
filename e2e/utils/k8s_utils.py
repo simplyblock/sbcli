@@ -464,33 +464,90 @@ class K8sUtils:
         the node before the cut lands. Two independent restores are armed, a
         timer and a boot-time flush, so a node that reboots mid-cut still
         comes back reachable.
+
+        Handed to systemd rather than backgrounded, because the delivery
+        vehicle is ``oc debug node/<n>`` -- an ephemeral pod that is torn down
+        the moment the command returns, taking its cgroup and every child
+        process with it. A `nohup ... &` script that opens with `sleep 2` is
+        killed inside that sleep, before it ever reaches its first iptables
+        call: run 20260929-205137 armed this on worker-2, the command returned
+        clean, and nothing whatsoever happened for the next four minutes. A
+        transient systemd unit is owned by PID 1 instead, so it outlives the
+        pod that asked for it.
+
+        The marker file is how a caller tells the two failure shapes apart
+        afterwards. "Never armed" is a broken harness; "armed, but the node
+        stayed Ready" is a finding about the cluster. Without it they look
+        identical from outside, which is exactly how the bug above survived.
         """
-        ssh_port_keep = (
-            # Keep the loopback and established SSH/console alive long enough
-            # for the scheduling command itself to return.
-            "iptables -I INPUT 1 -i lo -j ACCEPT; "
-            "iptables -I OUTPUT 1 -o lo -j ACCEPT; "
-        )
+        marker = "/tmp/sb_isolate.stamp"
         script = (
+            # Loopback first, so the scheduling command itself can return and
+            # so the node can still talk to itself under the blanket DROP.
             f"set -e; "
-            f"{ssh_port_keep}"
+            f"iptables -I INPUT 1 -i lo -j ACCEPT; "
+            f"iptables -I OUTPUT 1 -o lo -j ACCEPT; "
+            f"rm -f {marker}; "
             f"cat > /tmp/sb_isolate.sh <<'EOS'\n"
             f"#!/bin/sh\n"
             f"sleep 2\n"
+            f"date -u +'armed %Y-%m-%dT%H:%M:%SZ' >> {marker}\n"
             f"iptables -I INPUT 2 ! -i lo -j DROP\n"
             f"iptables -I OUTPUT 2 ! -o lo -j DROP\n"
             f"sleep {duration}\n"
             f"iptables -D INPUT ! -i lo -j DROP 2>/dev/null || true\n"
             f"iptables -D OUTPUT ! -o lo -j DROP 2>/dev/null || true\n"
+            f"date -u +'restored %Y-%m-%dT%H:%M:%SZ' >> {marker}\n"
             f"EOS\n"
             f"chmod +x /tmp/sb_isolate.sh; "
-            f"nohup /tmp/sb_isolate.sh >/dev/null 2>&1 &"
+            # SELinux is enforcing on these hosts, and a file written into
+            # /tmp is user_tmp_t, which init_t may not execute -- systemd
+            # reports that as "Failed to locate executable ...: Permission
+            # denied", which reads like the file is missing. Relabelling it
+            # bin_t is what makes systemd-run able to start it at all;
+            # verified on the lab, where without this the unit dies 203/EXEC.
+            f"chcon -t bin_t /tmp/sb_isolate.sh 2>/dev/null || true; "
+            # --collect so the unit does not linger in failed state and block
+            # the next cycle from reusing the name. The whole thing sits in
+            # the `if` CONDITION rather than its body, so that systemd-run
+            # being present but unable to reach the host manager falls through
+            # to the fallback instead of tripping `set -e` and leaving the
+            # node uncut -- which is the failure this whole change is about.
+            f"if command -v systemd-run >/dev/null 2>&1 && "
+            f"systemd-run --collect --unit=sb-isolate-$$ /tmp/sb_isolate.sh; "
+            f"then echo armed-via-systemd; else "
+            # setsid is the best available on a host without systemd: it at
+            # least escapes the session, though not the pod's cgroup.
+            f"echo armed-via-setsid; "
+            f"setsid nohup /tmp/sb_isolate.sh </dev/null >/dev/null 2>&1 & "
+            f"fi"
         )
         self.logger.info(
             "[K8sUtils] isolating %s completely for %ds (self-restoring on "
             "the host)", node_ip, duration)
         self.run_on_node(node_ip, script, timeout=120, check=False)
         return True
+
+    #: Where :meth:`isolate_node` records that its cut actually ran.
+    ISOLATION_MARKER = "/tmp/sb_isolate.stamp"
+
+    def isolation_marker(self, node_ip: str) -> str:
+        """What the last :meth:`isolate_node` on this node left behind.
+
+        Empty string when the cut never armed. Read through the SPDK pod
+        rather than a debug pod, so it costs nothing and works once the node
+        is reachable again.
+        """
+        try:
+            out, _err = self.exec_in_spdk_container(
+                node_ip,
+                f"sudo nsenter --target 1 --mount -- "
+                f"cat {self.ISOLATION_MARKER} 2>/dev/null || true")
+            return (out or "").strip()
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[K8sUtils] could not read the isolation "
+                                "marker on %s: %s", node_ip, str(exc)[:120])
+            return ""
 
     #: Substrings that mean a pod could not get its volume. Matched
     #: case-insensitively against event messages.
@@ -4415,6 +4472,20 @@ class K8sSbcliUtils:
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn restart {node_uuid}{force_flag}")
 
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
+        """Wait for *node_id* to reach *status*.
+
+        Careful with *timeout*: it counts POLLS, not seconds. Each pass costs
+        an ``sbctl`` exec into the admin pod -- about 4.5s against this lab --
+        plus the 1s sleep below, so ``timeout=600`` waits something closer to
+        54 minutes than to 10. The message on the way out reports the real
+        elapsed time so the two numbers cannot be confused again.
+
+        Left as polls rather than quietly redefined: 161 call sites pass this,
+        95 of them taking the default, and every one of those values was tuned
+        against the behaviour as it is. Changing the unit here would shorten
+        every wait in the suite roughly fivefold in one go.
+        """
+        started = time.time()
         actual_status = None
         status_list = status if isinstance(status, list) else [status]
         while timeout > 0:
@@ -4436,7 +4507,8 @@ class K8sSbcliUtils:
             timeout -= 1
         raise TimeoutError(
             f"Timed out waiting for node status, {node_id}, "
-            f"Expected: {status_list}, Actual: {actual_status}"
+            f"Expected: {status_list}, Actual: {actual_status} "
+            f"(waited {time.time() - started:.0f}s)"
         )
 
     def is_secondary_node(self, node_id):
