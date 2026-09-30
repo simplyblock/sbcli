@@ -248,6 +248,12 @@ def check_expansion_preconditions(cluster, db_controller,
     # outage is in progress; IN_EXPANSION means another expansion runs.
     if cluster.status != Cluster.STATUS_ACTIVE:
         return False, f"cluster status is {cluster.status}, expansion requires active"
+    # A removal in progress is "shrinking", no longer a status of its own
+    # (it used to be IN_SHRINK, which the check above refused).
+    shrinking = [n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id())
+                 if n.status in StorageNode.REMOVAL_IN_PROGRESS_STATUSES]
+    if shrinking:
+        return False, f"a node removal is in progress ({', '.join(shrinking)}); expansion must wait for it"
 
     # Every node must be ONLINE — a sec/tert teardown while any peer is
     # out reduces redundancy below the FTT contract.

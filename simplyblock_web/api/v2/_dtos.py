@@ -124,6 +124,11 @@ class ClusterDTO(BaseModel):
     # Device/balancing tasks only; is_re_balancing also counts volume migrations.
     is_data_rebalancing: bool = False
     active_lvol_migrations: int = 0
+    # A node removal is in progress; the status beside it is the calculated
+    # one (in_shrink is no longer set as a status).
+    is_shrinking: bool = False
+    # The status is degraded only because of the node being removed.
+    is_degraded_by_removal: bool = False
     block_size: util.Unsigned
     distr_ndcs: int
     distr_npcs: int
@@ -158,6 +163,8 @@ class ClusterDTO(BaseModel):
             is_re_balancing=model.is_re_balancing,
             is_data_rebalancing=model.is_data_rebalancing,
             active_lvol_migrations=model.active_lvol_migrations,
+            is_shrinking=model.is_shrinking,
+            is_degraded_by_removal=model.is_degraded_by_removal,
             block_size=model.blk_size,
             distr_ndcs=model.distr_ndcs,
             distr_npcs=model.distr_npcs,

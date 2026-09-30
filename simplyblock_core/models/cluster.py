@@ -170,6 +170,17 @@ class Cluster(BaseModel):
     # without waiting on its own work. active_lvol_migrations counts the rest.
     is_data_rebalancing: bool = False
     active_lvol_migrations: int = 0
+    # A node removal is in progress: some node is between pending_removal and
+    # in_removal. A flag beside the status, not a status: the status stays the
+    # calculated one (active, degraded, ...), which leaves the removal's own
+    # node out once its data is rebuilt, so "active + shrinking" (and
+    # rebalancing) can hold at once. Recomputed from the node statuses on every
+    # monitor tick; it replaces the IN_SHRINK status, which new code never sets.
+    is_shrinking: bool = False
+    # The calculated status is DEGRADED only because of the node being removed
+    # (its devices are not all rebuilt yet); without that node it would be
+    # ACTIVE. A removal driver must not pause on that degraded state.
+    is_degraded_by_removal: bool = False
     # Suspend-recovery drain phase marker.
     #
     # When a cluster becomes SUSPENDED, recovering it by auto-restarting nodes

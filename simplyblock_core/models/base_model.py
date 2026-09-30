@@ -587,6 +587,13 @@ class BaseNodeObject(BaseModel):
     DEPARTING_STATUSES: ClassVar[tuple] = (
         STATUS_PENDING_REMOVAL,) + REMOVAL_SHUT_DOWN_STATUSES
 
+    #: A removal is running on the node: from the trigger (pending_removal)
+    #: until it is removed, or has given up (removed_failed). Any node here
+    #: makes the cluster "shrinking" (Cluster.is_shrinking).
+    REMOVAL_IN_PROGRESS_STATUSES: ClassVar[tuple] = (
+        STATUS_PENDING_REMOVAL, STATUS_MIGRATING_DEVICES,
+        STATUS_MIGRATING_LVOLS, STATUS_IN_REMOVAL)
+
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 0,

@@ -134,6 +134,13 @@ def start_device_decommission(node_id: str) -> bool:
     if node.status == StorageNode.STATUS_IN_SHUTDOWN:
         raise NodeTransitionInProgress(
             f"node {node_id} is still shutting down; start the device rebuild once it is offline")
+    # Past the device half already: stamping MIGRATING_DEVICES here would move
+    # the removal backwards. Nothing to start. (REMOVED_FAILED is a re-drive
+    # and does start again.)
+    if node.status in (StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.STATUS_IN_REMOVAL,
+                       StorageNode.STATUS_REMOVED):
+        logger.info(f"[DRAIN] {node_id}: already {node.status}; device rebuild not restarted")
+        return False
     # The same predicate remove_storage_node's phase 1 uses: shut down only a
     # node that is actually still running. A node already stopped -- by the
     # operator's own ShuttingDown step, or by an earlier pass of this one, or
@@ -170,9 +177,16 @@ def start_device_decommission(node_id: str) -> bool:
     # own phase 2 -- the one call with the right ordering -- finds nothing left
     # to do. Every CRD removal left its two replica peers retrying a dead JM for
     # good (2026-09-29, runs 15-17 on vm12).
+    #
+    # When every device is rebuilt the node moves on to MIGRATING_LVOLS by
+    # itself: that is the end of the removal's first step, and the volume half
+    # starts from it.
     def drive():
         node = DBController().get_storage_node_by_id(node_id)
-        return storage_node_ops._fail_and_migrate_node_devices(node)
+        if not storage_node_ops._fail_and_migrate_node_devices(node):
+            return False
+        mark_migrating_lvols(node_id)
+        return True
 
     return _spawn(node_id, 'devices', drive)
 
@@ -249,6 +263,83 @@ def mark_migrating_lvols(node_id: str) -> bool:
     return True
 
 
+def prepare_node_for_removal(node_id: str, force_remove: bool = False) -> dict:
+    """The removal's first step: admit, shut down, rebuild the devices.
+
+    1. The same admission checks remove_storage_node makes (FTT headroom,
+       failure-domain balance, replica-relocation feasibility, active tasks),
+       except "no snapshots on the node": the volumes and their snapshots are
+       migrated after this. A refusal raises PreconditionError and changes
+       nothing.
+    2. PENDING_REMOVAL is stamped. There is no way back from it: every later
+       status only moves forward, and a failure leaves the node to be driven
+       again, not resumed.
+    3. The node is shut down and its devices rebuilt onto its peers
+       (start_device_decommission); when that finishes the node is
+       MIGRATING_LVOLS.
+
+    Idempotent. On a node already past admission (pending_removal or later)
+    it only makes sure the device rebuild is running; on one already past the
+    device half it does nothing. Returns the node status and whether this call
+    started the rebuild.
+    """
+    from simplyblock_core import storage_node_ops
+    from simplyblock_core.exceptions import PreconditionError
+    from simplyblock_core.models.storage_node import StorageNode
+
+    db = DBController()
+    node = db.get_storage_node_by_id(node_id)
+    if node.status == StorageNode.STATUS_REMOVED:
+        raise PreconditionError(f"node {node_id} is already removed")
+
+    if node.status not in StorageNode.DEPARTING_STATUSES:
+        ok, reason = storage_node_ops.check_removal_admission(
+            node, db, force_remove=force_remove, check_snapshots=False)
+        if not ok:
+            raise PreconditionError(f"Can not remove node {node_id}: {reason}")
+        storage_node_ops.set_node_status(
+            node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
+        logger.info(f"[DRAIN] {node_id}: marked pending_removal")
+
+    started = start_device_decommission(node_id)
+    return {'status': db.get_storage_node_by_id(node_id).status, 'started': started}
+
+
+def prepare_progress(node_id: str) -> dict:
+    """The first step's progress: the device rebuild, plus the node status.
+
+    ``done`` once the node has left the first step -- MIGRATING_LVOLS or
+    later -- which happens only after every device is rebuilt.
+    """
+    from simplyblock_core.models.storage_node import StorageNode
+
+    progress = device_decommission_progress(node_id)
+    status = DBController().get_storage_node_by_id(node_id).status
+    progress['node_status'] = status
+    progress['done'] = progress['done'] and status in (
+        StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.STATUS_IN_REMOVAL,
+        StorageNode.STATUS_REMOVED)
+    return progress
+
+
+def verify_node_drained(node_id: str) -> dict:
+    """The removal's second step, closing the volume half: is anything left?
+
+    The volumes are moved by the caller (on Kubernetes, the operator's
+    VolumeMigration CRs); this is the control plane's own check that the node
+    no longer hosts a volume or a snapshot, before the node DELETE dismantles
+    it. It moves no data and changes no status.
+    """
+    from simplyblock_core import storage_node_ops
+
+    db = DBController()
+    lvols = [lv.get_id() for lv in db.get_lvols_by_node_id(node_id)]
+    snaps = [sn.get_id() for sn in db.get_snapshots()
+             if sn.deleted is False
+             and storage_node_ops._snapshot_lives_on_node(sn, node_id, db)]
+    return {'drained': not lvols and not snaps, 'lvols': lvols, 'snapshots': snaps}
+
+
 # Replica-role reallocation deliberately has no step here.
 #
 # It is phase 3b of the control plane's removal, and it has a precondition the
@@ -275,4 +366,7 @@ __all__ = [
     'start_device_decommission',
     'mark_migrating_lvols',
     'device_decommission_progress',
+    'prepare_node_for_removal',
+    'prepare_progress',
+    'verify_node_drained',
 ]

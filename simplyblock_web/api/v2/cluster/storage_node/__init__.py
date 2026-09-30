@@ -314,6 +314,43 @@ class DrainStepProgress(BaseModel):
     completed: int = 0
     failed: int = 0
     message: str = ''
+    # The node's status, for the removal's first step (prepare-removal).
+    node_status: str = ''
+
+
+class DrainVerification(BaseModel):
+    """Whether the node still hosts anything, before its DELETE."""
+    drained: bool
+    lvols: List[str] = []
+    snapshots: List[str] = []
+
+
+@instance_api.post(
+    '/prepare-removal', name='clusters:storage-nodes:prepare-removal',
+    status_code=202, responses={202: {"content": None}})
+def prepare_removal(cluster: Cluster, storage_node: StorageNode, force_remove: bool = False) -> Response:
+    """The removal's first step: admit the node, mark it pending_removal, shut
+    it down and rebuild its devices onto its peers. The node is
+    migrating_lvols when this step is done (see GET).
+
+    A refused admission is a 400 and changes nothing. From pending_removal on
+    there is no way back; re-POSTing is a no-op while the step runs.
+    """
+    node_drain_steps.prepare_node_for_removal(storage_node.get_id(), force_remove=force_remove)
+    return Response(status_code=202)
+
+
+@instance_api.get('/prepare-removal', name='clusters:storage-nodes:prepare-removal-progress')
+def prepare_removal_progress(cluster: Cluster, storage_node: StorageNode) -> DrainStepProgress:
+    return DrainStepProgress(**node_drain_steps.prepare_progress(storage_node.get_id()))
+
+
+@instance_api.post('/verify-drained', name='clusters:storage-nodes:verify-drained')
+def verify_drained(cluster: Cluster, storage_node: StorageNode) -> DrainVerification:
+    """The removal's second step, closing the volume half: whether the node
+    still hosts a volume or a snapshot. The volumes are moved by the caller;
+    this moves nothing and changes no status. The node DELETE is the third."""
+    return DrainVerification(**node_drain_steps.verify_node_drained(storage_node.get_id()))
 
 
 @instance_api.post(
