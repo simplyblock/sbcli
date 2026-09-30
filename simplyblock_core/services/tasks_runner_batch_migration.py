@@ -820,13 +820,9 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         # 5s blanket timeout _make_rpc()/src_rpc uses for every other RPC in
         # this file -- use a dedicated, longer-timeout client just for it.
         final_step_rpc = src_node.rpc_client(timeout=15, retry=2)
-        # All members go through one hub in this call; each gets its share of
-        # the batch (test-only split, see utils.hub_transfer_batch_size).
-        batch_size = utils.hub_transfer_batch_size(len(lvol_names))
-        logger.info(f"Group {group.uuid[:8]}: batch_final_step cluster_batch={batch_size}")
         ret = final_step_rpc.bdev_lvol_batch_transfer_final_step(
             lvol_names, lvol_ids, snapshot_names,
-            batch_size, hub_bdev, "migrate")
+            constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
         logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
         # The RPC can return normally (no exception) while still reporting the
         # transfer itself failed -- transfer_state is one of "No process" |

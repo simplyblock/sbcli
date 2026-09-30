@@ -906,17 +906,6 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
 _BDEV_INFO_UNSET = object()
 
 
-def _group_member_count(migration):
-    """How many lvols share this migration's transfer hub: the size of its
-    migration group, or 1 for a migration outside a group."""
-    if migration is None or not migration.migration_group_id:
-        return 1
-    try:
-        return db.get_migration_group_by_id(migration.migration_group_id).member_count() or 1
-    except KeyError:
-        return 1
-
-
 def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
                          src_rpc, tgt_rpc, trtype,
                          tgt_sec=None, sec_rpc=None, tgt_ter=None, ter_rpc=None,
@@ -1101,14 +1090,9 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         _cleanup()
         return None, hub_err
 
-    # Step 6: fire async transfer via hub. A group's members share the hub,
-    # so each one's transfer gets its share of the batch (test-only split).
-    batch_size = utils.hub_transfer_batch_size(_group_member_count(migration))
-    if batch_size != constants.LVOL_MIG_TRANSFER_BATCH_SIZE:
-        logger.info(f"snap={snap_uuid[:8]}: cluster_batch={batch_size} "
-                    f"(hub shared by {_group_member_count(migration)} group members)")
+    # Step 6: fire async transfer via hub
     ret = src_rpc.bdev_lvol_transfer(
-        src_composite, 0, batch_size, hub_bdev,
+        src_composite, 0, constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev,
         "migrate", lvol_id=tgt_map_id)
     if ret is None:
         _cleanup()
