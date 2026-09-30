@@ -190,7 +190,7 @@ class TestReplicationStatusCountsOnlyShippedSnapshots(unittest.TestCase):
                                function_params={"snapshot_id": sid},
                                status=JobSchedule.STATUS_DONE, canceled=False,
                                function_result=result, date=date, updated_at="",
-                               to_dict=lambda: {})
+                               to_dict=dict)
 
     def test_given_up_tasks_are_not_replicated(self):
         snaps = [self._snap("s-1", 600), self._snap("s-2", 300)]
