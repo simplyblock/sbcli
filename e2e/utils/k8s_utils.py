@@ -22,6 +22,7 @@ import re
 import shlex
 import subprocess
 import time
+import uuid
 from datetime import datetime, UTC
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
@@ -481,6 +482,15 @@ class K8sUtils:
         identical from outside, which is exactly how the bug above survived.
         """
         marker = "/tmp/sb_isolate.stamp"
+        # Named here, not with $$ in the script. The command crosses two
+        # shells before systemd sees it, and $$ did not survive the trip:
+        # run 20260930-032853 answered
+        #   Invalid unit name "sb-isolate-$" escaped as "sb-isolate-\x24"
+        # so every node and every cycle asked for the same unit. --collect
+        # cleans one up as it exits, which is the only reason consecutive
+        # cycles did not start colliding. A name built in Python cannot be
+        # eaten by a shell.
+        unit = f"sb-isolate-{uuid.uuid4().hex[:8]}"
         script = (
             # Loopback first, so the scheduling command itself can return and
             # so the node can still talk to itself under the blanket DROP.
@@ -514,7 +524,7 @@ class K8sUtils:
             # to the fallback instead of tripping `set -e` and leaving the
             # node uncut -- which is the failure this whole change is about.
             f"if command -v systemd-run >/dev/null 2>&1 && "
-            f"systemd-run --collect --unit=sb-isolate-$$ /tmp/sb_isolate.sh; "
+            f"systemd-run --collect --unit={unit} /tmp/sb_isolate.sh; "
             f"then echo armed-via-systemd; else "
             # setsid is the best available on a host without systemd: it at
             # least escapes the session, though not the pod's cgroup.

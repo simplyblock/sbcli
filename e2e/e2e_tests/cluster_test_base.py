@@ -2328,8 +2328,60 @@ class TestClusterBase:
             except Exception as e:
                 self.logger.warning(f"[k8s collect_mgmt] {filename}: {e}")
 
+        # Kernel logs from the WORKERS, which on k8s is the only place they
+        # exist. The client loop below cannot reach them: a k8s run has no ssh
+        # client machines, so client_machines carries a placeholder, and
+        # "0.0.0.0" over ssh is the RUNNER. Run 20260930-032853 collected
+        # 1.2MB of dmesg that way and every line of it was the runner's own,
+        # dated 14 May 2026 -- months before the run, and not from any node
+        # under test. A raw device died of ENXIO in that run and the kernel
+        # log that would have explained it was never collected from the host
+        # that had it.
+        #
+        # Same route the outages already use: a debug pod with the host's
+        # namespaces, so it works wherever run_on_node works.
+        if self.k8s_test:
+            try:
+                k8s_nodes = [n["mgmt_ip"] for n
+                             in self.sbcli_utils.get_storage_nodes()["results"]
+                             if n.get("mgmt_ip")]
+            except Exception as e:                    # noqa: BLE001
+                k8s_nodes = []
+                self.logger.warning(
+                    f"[k8s collect_mgmt] could not list storage nodes for "
+                    f"kernel logs: {e}")
+            for ip in dict.fromkeys(k8s_nodes):
+                try:
+                    node_log_dir = os.path.join(self.docker_logs_path, ip)
+                    os.makedirs(node_log_dir, exist_ok=True)
+                    for fname, hostcmd in (
+                        (f"dmesg_{ip}{suffix}.txt",
+                         "dmesg -T 2>/dev/null || dmesg"),
+                        (f"journalctl_{ip}{suffix}.txt",
+                         "journalctl -k --no-pager 2>/dev/null || true"),
+                    ):
+                        out, _err = k8s.run_on_node(ip, hostcmd, timeout=180,
+                                                    check=False)
+                        with open(os.path.join(node_log_dir, fname), "w") as fh:
+                            fh.write(out or "")
+                    self.logger.info(
+                        f"[k8s collect_mgmt] kernel logs collected from "
+                        f"worker {ip}")
+                except Exception as e:                # noqa: BLE001
+                    self.logger.warning(
+                        f"[k8s collect_mgmt] kernel logs for worker {ip}: {e}")
+
         # Collect journalctl + dmesg final snapshot from client/fio nodes (accessible via SSH)
         for node in self.client_machines:
+            # A k8s run has no real client, and the placeholder resolves to
+            # the runner. Collecting its kernel log files a large, plausible
+            # looking artefact under a node directory that is not a node.
+            if node in ("0.0.0.0", "127.0.0.1", "localhost", ""):
+                self.logger.info(
+                    "[k8s collect_mgmt] skipping kernel logs for placeholder "
+                    "client %r -- that address is the runner, not a node "
+                    "under test", node)
+                continue
             try:
                 node_log_dir = os.path.join(self.docker_logs_path, node)
                 os.makedirs(node_log_dir, exist_ok=True)
