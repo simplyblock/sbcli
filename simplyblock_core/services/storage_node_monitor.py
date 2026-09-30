@@ -2,6 +2,7 @@ import threading
 import time
 from datetime import datetime, UTC
 
+import fdb
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
@@ -993,6 +994,16 @@ def _update_cluster_status_impl(cluster_id):
         sync_replication_controller.settle_site_return(cluster_id)
     except Exception:
         logger.exception("Sync-replication site return failed for cluster %s", cluster_id)
+    # Sync replication: an LVS left "moving:" by a promote that ended without
+    # settling it (every member must answer) gets settled here - nothing else
+    # retries it while nobody deletes, resizes or snapshots on it. Its own
+    # boundary, and one per owner inside it.
+    # Per-owner operational failures are handled inside; here only the
+    # cluster-level DB reads can fail (a record gone, the database).
+    try:
+        sync_replication_controller.reconcile_abandoned_moves(cluster_id)
+    except (KeyError, fdb.FDBError) as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
+        logger.error("Sync-replication move reconcile failed for cluster %s: %s", cluster_id, e)
 
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)

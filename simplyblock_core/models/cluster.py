@@ -33,6 +33,9 @@ class Cluster(BaseModel):
     #: clear out from under a live rebuild.
     STATUS_IN_SHRINK = "in_shrink"
 
+    #: ``lost_site_state`` values (sync replication): the site steps of a
+    #: disaster fail-over are running (a retry redoes them), or they are
+    #: complete. The one definition - every reader compares against these.
     LOST_SITE_FENCING = "fencing"
     LOST_SITE_DONE = "done"
 

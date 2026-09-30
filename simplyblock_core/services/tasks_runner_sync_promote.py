@@ -24,7 +24,10 @@ after; a volume being deleted is refused (and closed again when its delete
 started during the open).
 
 Any failure or a cancel ends the task DONE FIRST (it then no longer owns the
-move), then settles every marker it set: the previous site written back for
+move) - a failure recorded on each of its volumes in the same transaction
+(``LVol.sync_promote_failures``, reported once to the next promote of that
+volume to that site), unless the task was canceled or replaced meanwhile -,
+then settles every marker it set: the previous site written back for
 an LVS whose hand-off never started, storage_node_ops.reconcile_lvs_move for
 one whose hand-off did (the leader decides). A pass that restarts after a
 crash finds its markers by ``moves`` and goes on from the DB state.
@@ -46,6 +49,7 @@ from simplyblock_core import db_controller, distr_controller, storage_node_ops, 
 from simplyblock_core.controllers import device_controller, tasks_controller
 from simplyblock_core.controllers import sync_replication_controller as sync_ctl
 from simplyblock_core.exceptions import PreconditionError, SyncAnaError, SyncGateError
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -104,12 +108,14 @@ def _settle_markers(task) -> None:
                            lvs_name, previous)
 
 
-def _end(task, result) -> bool:
-    def done(t):
-        t.status = JobSchedule.STATUS_DONE
-        t.function_result = result
-    task = _save(task, done)
-    logger.info("Sync promote task %s: %s", task.uuid, result)
+def _end(task, result, outcome=None) -> bool:
+    """Record the task DONE with ``result`` and, for ``outcome`` (failed /
+    succeeded), its volumes' outcome - one guarded transaction
+    (DBController.finish_sync_promote_task: nothing is published for a task
+    that was canceled or replaced meanwhile) - then settle its markers."""
+    db.finish_sync_promote_task(task, result, outcome)
+    task = db.get_task_by_id(task.uuid)
+    logger.info("Sync promote task %s: %s", task.uuid, task.function_result)
     _settle_markers(task)
     return True
 
@@ -264,13 +270,13 @@ def _site_steps(task, site):
     (idempotent) from ``fencing``."""
     cluster_id = task.cluster_id
     cluster = db.get_cluster_by_id(cluster_id)
-    if cluster.lost_site == site and cluster.lost_site_state == sync_ctl.LOST_SITE_DONE:
+    if cluster.lost_site == site and cluster.lost_site_state == Cluster.LOST_SITE_DONE:
         return
     if cluster.lost_site not in ("", site):
         raise _PromoteFailed(f"site {cluster.lost_site} is already lost")
     _require_site_lost(cluster_id, site, "before the fence")
-    if not _set_lost_site_state(cluster_id, site, sync_ctl.LOST_SITE_FENCING,
-                                ("", sync_ctl.LOST_SITE_FENCING)):
+    if not _set_lost_site_state(cluster_id, site, Cluster.LOST_SITE_FENCING,
+                                ("", Cluster.LOST_SITE_FENCING)):
         raise _PromoteFailed(f"the lost-site record changed before the fence of {site}")
     logger.warning("Sync promote task %s: site %s lost, fencing", task.uuid, site)
     acked: set = set()
@@ -281,8 +287,8 @@ def _site_steps(task, site):
     # A node that turned ack-required since the first pass (e.g. a restart
     # that built its map before the DB write) gets the devices now.
     _fence_devices(cluster_id, site, acked)
-    if not _set_lost_site_state(cluster_id, site, sync_ctl.LOST_SITE_DONE,
-                                (sync_ctl.LOST_SITE_FENCING,)):
+    if not _set_lost_site_state(cluster_id, site, Cluster.LOST_SITE_DONE,
+                                (Cluster.LOST_SITE_FENCING,)):
         raise _PromoteFailed(f"the lost-site record changed during the fence of {site}")
     logger.warning("Sync promote task %s: fence of site %s done", task.uuid, site)
 
@@ -487,8 +493,8 @@ def task_runner(task):
     except _PromoteCanceled:
         return _end(task, "canceled")
     except _PromoteFailed as e:
-        return _end(task, f"failed: {e}")
-    return _end(task, result)
+        return _end(task, f"failed: {e}", db.PROMOTE_FAILED)
+    return _end(task, result, db.PROMOTE_SUCCEEDED)
 
 
 def _record_unexpected_error(task, error) -> None:
@@ -501,7 +507,7 @@ def _record_unexpected_error(task, error) -> None:
         t.function_result = f"unexpected error (attempt {t.retry}/{t.max_retry}): {error}"
     task = _save(task, bump)
     if task.status != JobSchedule.STATUS_DONE and task.retry >= task.max_retry:
-        _end(task, f"failed: max retry reached after unexpected errors, last: {error}")
+        _end(task, f"failed: max retry reached after unexpected errors, last: {error}", db.PROMOTE_FAILED)
 
 
 def main():

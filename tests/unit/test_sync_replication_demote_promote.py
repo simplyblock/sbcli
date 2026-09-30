@@ -130,6 +130,21 @@ class TestPromoteDecision:
         d = _decide(_lvol(sync_demoted_sites=[SITE_A]), force=True)
         assert d.kind == src.PROMOTE_FORCE_ONLINE
 
+    @pytest.mark.parametrize("force", [False, True])
+    @pytest.mark.parametrize("online", [{SITE_A}, set()])     # S down; T up or down too
+    @pytest.mark.parametrize("demoted", [[SITE_A], []])
+    def test_a_target_site_without_an_online_node_is_refused_before_every_t_row(
+            self, force, online, demoted):
+        d = _decide(_lvol(sync_demoted_sites=demoted), online=online, force=force)
+        assert d == src.PromoteDecision(src.PROMOTE_TARGET_OFFLINE, SITE_A)
+
+    def test_a_target_site_offline_does_not_change_the_rows_led_from_it(self):
+        owner = _owner(lvs_active_site=SITE_B)
+        served = _lvol(sync_active_site=SITE_B, sync_demoted_sites=[SITE_A])
+        closed = _lvol(sync_active_site=SITE_A, sync_demoted_sites=[SITE_A])
+        assert _decide(served, owner, online={SITE_A}).kind == src.PROMOTE_ACTIVE
+        assert _decide(closed, owner, online={SITE_A}).kind == src.PROMOTE_ANA_ONLY
+
     def test_a_move_in_flight_is_in_progress(self):
         d = _decide(_lvol(sync_demoted_sites=[SITE_A]), _owner(lvs_active_site="moving:site-b"))
         assert d.kind == src.PROMOTE_IN_PROGRESS

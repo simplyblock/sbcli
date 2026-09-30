@@ -11,7 +11,7 @@ from pydantic import BaseModel, BeforeValidator, Field
 
 from simplyblock_core import utils as core_utils
 from simplyblock_core.exceptions import (
-    SyncGateError, SyncGroupMemberError, SyncLeadershipMovingError, SyncPromoteRefusedError,
+    SyncGateError, SyncGroupMemberError, SyncPromoteFailedError, SyncPromoteRefusedError,
     SyncReplicationSiteError, SyncReplicationUnsupportedError, SyncSiteOfflineError,
 )
 
@@ -89,7 +89,8 @@ def sync_http_errors() -> Iterator[None]:
     """Answer the sync-replication refusals of the controllers as HTTP: an
     unsupported operation or a bad site 400, a gate or a refused promote /
     demote 409 (retryable, never a code csi-addons escalates to force on), a
-    site that is not online 412 (csi-addons escalates to a forced promote).
+    site that is not online 412 (csi-addons escalates to a forced promote);
+    a promote whose task failed 409 with its ``task_id`` (reported once).
     A failed ANA RPC (``SyncAnaError``) is left to the 500 handler."""
     try:
         yield
@@ -97,9 +98,9 @@ def sync_http_errors() -> Iterator[None]:
         raise sync_error(400, str(e)) from e
     except SyncGateError as e:
         raise sync_error(409, str(e), problems=e.problems) from e
+    except SyncPromoteFailedError as e:
+        raise sync_error(409, str(e), volumes=e.volumes, task_id=e.task_id) from e
     except (SyncPromoteRefusedError, SyncGroupMemberError) as e:
         raise sync_error(409, str(e), volumes=e.volumes) from e
-    except SyncLeadershipMovingError as e:
-        raise sync_error(409, str(e)) from e
     except SyncSiteOfflineError as e:
         raise sync_error(412, str(e)) from e

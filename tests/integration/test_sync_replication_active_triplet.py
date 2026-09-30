@@ -20,6 +20,7 @@ import pytest
 
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -300,6 +301,19 @@ class TestMovingOwnedByPromote:
 # the grant lock serialises grants against the move's marker
 # ---------------------------------------------------------------------------
 
+def _begin_move(db, cluster, owner, target, *, expect=""):
+    """The promote's marker transaction (DBController.begin_sync_promote_moves)
+    for ``owner``'s LVS, by an active promote task that does NOT own this
+    LVS's move (other node, no lvs_names), so only the grant lock and the
+    marker decide - not _leadership_moving_tasks_active. Returns the
+    problems."""
+    task = _promote_task(db, cluster, owner, node_id="elsewhere", function_params={"lvs_names": []})
+
+    def check(cluster, owner, volumes, exp):
+        return src.promote_move_problems(cluster, owner, volumes, exp, target)
+    return db.begin_sync_promote_moves(task, {owner.lvstore: (owner.get_id(), expect)}, target, check)
+
+
 class TestGrantLockAgainstBeginMove:
 
     @pytest.fixture(autouse=True)
@@ -323,25 +337,42 @@ class TestGrantLockAgainstBeginMove:
             cluster.get_id(), nodes, "LVS_1", nodes[0]), kwargs={"owner_id": owner.get_id()})
         worker.start()
         assert inside.wait(10)
-        ok, reason = ops.begin_lvs_move(owner.get_id(), SITE_B, expect="")
-        assert not ok and "in progress" in reason
+        problems = _begin_move(db, cluster, owner, SITE_B)
+        assert len(problems) == 1 and "a leadership grant is in progress" in problems[0]
+        assert _fresh(db, owner).lvs_active_site == ""
         release.set()
         worker.join(10)
         assert _grants(rpcs, nodes) == [a[0].get_id()]
-        assert ops.begin_lvs_move(owner.get_id(), SITE_B, expect="") == (True, "")
+        assert _begin_move(db, cluster, owner, SITE_B) == []
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
     def test_a_committed_move_makes_the_next_recovery_grant_nothing(self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, owner = _layout(db)
         _journal_ready(rpcs, a[0])
-        assert ops.begin_lvs_move(owner.get_id(), SITE_B, expect="") == (True, "")
+        assert _begin_move(db, cluster, owner, SITE_B) == []
         nodes = _home(db, a)
         assert ops._recover_leaderless_lvs(
             cluster.get_id(), nodes, "LVS_1", nodes[0], owner_id=owner.get_id()) is None
         assert _grants(rpcs, [*a, *b]) == []
 
+    def test_a_move_owned_by_a_live_promote_task_makes_the_recovery_grant_nothing(
+            self, db, rpcs, hub, env, no_sleep):
+        cluster, a, b, owner = _layout(db)
+        _journal_ready(rpcs, a[0])
+        task = _promote_task(db, cluster, owner)
+
+        def check(cluster, owner, volumes, exp):
+            return src.promote_move_problems(cluster, owner, volumes, exp, SITE_B)
+        assert db.begin_sync_promote_moves(task, {"LVS_1": (owner.get_id(), "")}, SITE_B, check) == []
+        assert db.get_task_by_id(task.uuid).function_params["moves"] == {"LVS_1": ""}
+        nodes = _home(db, a)
+        assert ops._recover_leaderless_lvs(
+            cluster.get_id(), nodes, "LVS_1", nodes[0], owner_id=owner.get_id()) is None
+        assert _grants(rpcs, [*a, *b]) == []
+        assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
+
     def test_a_home_leader_rebuild_holds_the_lock_against_the_move(self, db, env):
-        _, a, _, owner = _layout(db)
+        cluster, a, _, owner = _layout(db)
         inside, release = threading.Event(), threading.Event()
 
         def _impl(*args, **kwargs):
@@ -352,11 +383,11 @@ class TestGrantLockAgainstBeginMove:
             worker = threading.Thread(target=ops.recreate_lvstore, args=(_fresh(db, owner),))
             worker.start()
             assert inside.wait(10)
-            ok, _ = ops.begin_lvs_move(owner.get_id(), SITE_B, expect="")
-            assert not ok
+            assert _begin_move(db, cluster, owner, SITE_B)
+            assert _fresh(db, owner).lvs_active_site == ""
             release.set()
             worker.join(10)
-        assert ops.begin_lvs_move(owner.get_id(), SITE_B, expect="")[0]
+        assert _begin_move(db, cluster, owner, SITE_B) == []
 
     @pytest.mark.parametrize("marker", ["moving:" + SITE_B, SITE_B])
     def test_a_home_leader_rebuild_after_the_move_is_refused(self, db, env, marker):
@@ -369,11 +400,12 @@ class TestGrantLockAgainstBeginMove:
         impl.assert_not_called()
 
     def test_begin_move_needs_the_expected_marker(self, db, env):
-        _, _, _, owner = _layout(db, active_site=SITE_B)
-        ok, reason = ops.begin_lvs_move(owner.get_id(), SITE_A, expect="")
-        assert not ok and "expected ''" in reason
+        cluster, _, _, owner = _layout(db, active_site=SITE_B)
+        problems = _begin_move(db, cluster, owner, SITE_A)
+        assert len(problems) == 1 and "expected ''" in problems[0]
         assert _fresh(db, owner).lvs_active_site == SITE_B
-        assert ops.begin_lvs_move(owner.get_id(), SITE_A, expect=SITE_B) == (True, "")
+        assert _begin_move(db, cluster, owner, SITE_A, expect=SITE_B) == []
+        assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_A
 
     def test_the_marker_compare_and_set_reports_a_changed_value(self, db, env):
         _, _, _, owner = _layout(db, active_site="moving:" + SITE_B)

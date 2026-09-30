@@ -23,7 +23,9 @@ import pytest
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.controllers import tasks_controller
-from simplyblock_core.exceptions import SyncGateError, SyncPromoteRefusedError, SyncSiteOfflineError
+from simplyblock_core.exceptions import (
+    SyncGateError, SyncPromoteFailedError, SyncPromoteRefusedError, SyncSiteOfflineError,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -216,7 +218,7 @@ class TestSiteSteps:
             assert lost.run(result.task_id)
         task = lost.task(result.task_id)
         assert task.status == JobSchedule.STATUS_DONE and task.function_result.startswith("promoted")
-        assert seen["cluster"] == (SITE_A, src.LOST_SITE_DONE)
+        assert seen["cluster"] == (SITE_A, Cluster.LOST_SITE_DONE)
         assert seen["demoted"] == {"v1a": [], "v1b": [SITE_A], "v2a": [SITE_A], "v2b": [SITE_A]}
         assert moves.calls == [("LVS_1", None, lost.b[0].get_id(), MOVING_B, SITE_B)]
         # every device of A unavailable, in the DB and in every distrib of B
@@ -308,7 +310,7 @@ class TestSiteSteps:
             lost.run(result.task_id)
         assert "before the fence is recorded done" in lost.task(result.task_id).function_result
         cluster = lost.cluster_now()
-        assert (cluster.lost_site, cluster.lost_site_state) == (SITE_A, src.LOST_SITE_FENCING)
+        assert (cluster.lost_site, cluster.lost_site_state) == (SITE_A, Cluster.LOST_SITE_FENCING)
         assert moves.calls == []
 
     def test_a_missing_ack_fails_the_phase_and_a_retry_completes_it(self, db, spdk, evidence, moves):
@@ -317,12 +319,16 @@ class TestSiteSteps:
         first = lost.promote("v1a")
         lost.run(first.task_id)
         assert "could not be marked unavailable" in lost.task(first.task_id).function_result
-        assert lost.cluster_now().lost_site_state == src.LOST_SITE_FENCING
-        # the retry (a new promote call) redoes the site steps from ``fencing``
+        assert lost.cluster_now().lost_site_state == Cluster.LOST_SITE_FENCING
+        # the next call reports the failure once ...
+        with pytest.raises(SyncPromoteFailedError) as exc:
+            lost.promote("v1a")
+        assert exc.value.task_id == first.task_id
+        # ... the retry (a new promote call) redoes the site steps from ``fencing``
         second = lost.promote("v1a")
         assert second.task_id != first.task_id
         assert lost.run(second.task_id)
-        assert lost.cluster_now().lost_site_state == src.LOST_SITE_DONE
+        assert lost.cluster_now().lost_site_state == Cluster.LOST_SITE_DONE
         assert lost.vol("v1a").sync_active_site == SITE_B
 
     def test_a_down_or_unreachable_surviving_node_must_acknowledge(self, db, spdk, evidence, moves):
@@ -334,7 +340,7 @@ class TestSiteSteps:
         lost.run(result.task_id)
         assert lost.b[2].get_id() in lost.task(result.task_id).function_result
         assert lost.events_to(spdk, lost.b[1])          # the DOWN node got them
-        assert lost.cluster_now().lost_site_state == src.LOST_SITE_FENCING
+        assert lost.cluster_now().lost_site_state == Cluster.LOST_SITE_FENCING
 
     def test_a_node_restarting_during_the_first_pass_gets_the_devices_before_done(
             self, db, spdk, evidence, moves):
@@ -400,9 +406,9 @@ class TestSiteSteps:
     def test_a_returning_node_of_the_site_keeps_every_path_closed(self, db, spdk, evidence, state):
         lost = _Lost(db, spdk)
         if state == "fencing":
-            runner._set_lost_site_state(lost.cluster.get_id(), SITE_A, src.LOST_SITE_FENCING, ("",))
+            runner._set_lost_site_state(lost.cluster.get_id(), SITE_A, Cluster.LOST_SITE_FENCING, ("",))
         else:
-            runner._set_lost_site_state(lost.cluster.get_id(), SITE_A, src.LOST_SITE_DONE, ("",))
+            runner._set_lost_site_state(lost.cluster.get_id(), SITE_A, Cluster.LOST_SITE_DONE, ("",))
             _update(db, lost.owner1, lvs_active_site=MOVING_B)
         for node in lost.a:
             node = _update(db, node, status=StorageNode.STATUS_ONLINE)
@@ -428,7 +434,7 @@ class TestLostSiteGrantGuards:
 
     def test_an_abandoned_move_to_the_lost_site_is_not_granted_there(self, db, rpcs, env):
         cluster, a, b, owner = stack._one_owner_layout(db, lost_site=SITE_A)
-        cluster.lost_site_state = src.LOST_SITE_FENCING
+        cluster.lost_site_state = Cluster.LOST_SITE_FENCING
         cluster.write_to_db(db.kv_store)
         _update(db, owner, lvs_active_site="moving:" + SITE_A)
         with patch.object(ops, "_taker_jm_quorum_ok", return_value=True), \
@@ -517,7 +523,7 @@ class TestElection:
 
     def _returned(self, db, rpcs):
         cluster, a, b, owner = stack._one_owner_layout(db, lost_site=SITE_A)
-        cluster.lost_site_state = src.LOST_SITE_DONE
+        cluster.lost_site_state = Cluster.LOST_SITE_DONE
         cluster.write_to_db(db.kv_store)
         return cluster, a, b, owner
 
@@ -531,7 +537,7 @@ class TestElection:
 
     def test_the_remote_primary_of_an_s_home_lvs_led_from_the_lost_site(self, db, rpcs, env, transfer):
         cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db)
-        cluster.lost_site, cluster.lost_site_state = SITE_A, src.LOST_SITE_DONE
+        cluster.lost_site, cluster.lost_site_state = SITE_A, Cluster.LOST_SITE_DONE
         cluster.write_to_db(db.kv_store)
         _update(db, owner_b, lvs_active_site=SITE_A)
         assert ops.elect_lvs_leader_on_site(owner_b.get_id()) == owner_b.remote_primary_node_id
@@ -590,7 +596,7 @@ class _Return:
     (a2, no volumes) still led from A, LVS_2 (b0, S-home) led from its remote
     triplet on A. Every node online, every device online."""
 
-    def __init__(self, db, rpcs, state=src.LOST_SITE_DONE):
+    def __init__(self, db, rpcs, state=Cluster.LOST_SITE_DONE):
         self.cluster, self.a, self.b, self.owner_a, self.owner_b = stack._two_owner_layout(
             db, lost_site=SITE_A)
         self.cluster.lost_site_state = state
@@ -669,7 +675,7 @@ class TestSiteReturn:
         assert ret.elected == [] and ret.resync_lvs() == []
 
     def test_an_aborted_fence_is_cleared_unless_a_disaster_task_runs(self, db, rpcs):
-        ret = _Return(db, rpcs, state=src.LOST_SITE_FENCING)
+        ret = _Return(db, rpcs, state=Cluster.LOST_SITE_FENCING)
         task_id, _ = tasks_controller.add_sync_promote_task(
             ret.cluster.get_id(), ret.owner_a1.get_id(), site=SITE_B, lvol_ids=["x"],
             owners={"LVS_3": ret.owner_a1.get_id()}, lost_site=SITE_A)

@@ -681,7 +681,13 @@ class DBController(metaclass=Singleton):
     #:   every drop received before it is over;
     #: - ``zone_synced_seq`` - up to which receive_seq a completed catch-up has
     #:   verified the zones equal: every zone desync up to it is over;
-    #: - ``resync_task`` - db key of its FN_SYNC_RESYNC task.
+    #: - ``resync_task`` - db key of its FN_SYNC_RESYNC task;
+    #: - ``promote_task`` - db key of its latest FN_SYNC_PROMOTE task
+    #:   (ensure_sync_promote_task): the key also serializes promote-task
+    #:   creation per LVS - a new one is refused while that task is in
+    #:   progress (sync_promote_task_blocks). It is not a record of what a
+    #:   caller's promote ended with: a later task replaces it (the outcome is
+    #:   kept per volume, ``LVol.sync_promote_failures``).
     #:
     #: The watermarks, not the records' ``resolved`` flags, say what is over:
     #: the flags are brought in line afterwards in one small transaction per
@@ -899,6 +905,86 @@ class DBController(metaclass=Singleton):
         return fdb.transactional(DBController._ensure_sync_promote_task_tx)(
             self, self.kv_store, task, list(lvs_names), JobSchedule.active_indexes(self.kv_store))
 
+    #: ``outcome`` values of finish_sync_promote_task.
+    PROMOTE_FAILED = "failed"
+    PROMOTE_SUCCEEDED = "succeeded"
+
+    def _finish_sync_promote_task_tx(self, tr, task_key, result, outcome, task_indexes, lvol_indexes):
+        task = BaseModel._read_record(tr, task_key, JobSchedule)
+        if task is None or task.status == JobSchedule.STATUS_DONE:
+            return False
+        params = task.function_params
+        publish = outcome is not None and not task.canceled
+        # Every state key is read (conflict ranges): a replacement task
+        # created concurrently makes this retry and see it.
+        pointers = [self._read_sync_state_tx(tr, self._sync_state_key(task.cluster_id, lvs_name))["promote_task"]
+                    for lvs_name in sorted(params.get("owners") or {})]
+        publish = publish and all(p == task.get_db_id() for p in pointers)
+        if publish:
+            site = params["site"]
+            entry = {"task_id": task.uuid, "reason": result}
+
+            def _outcome(v):
+                if v.status == LVol.STATUS_DELETED:
+                    return False
+                failures = dict(v.sync_promote_failures or {})
+                if outcome == self.PROMOTE_FAILED:
+                    failures[site] = entry
+                elif site in failures:
+                    del failures[site]
+                else:
+                    return False
+                v.sync_promote_failures = failures
+                return True
+            for lvol_id in params.get("lvol_ids") or []:
+                self._atomic_update_tx(tr, LVol().get_db_id(lvol_id).encode(), LVol, _outcome, lvol_indexes)
+        task.status = JobSchedule.STATUS_DONE
+        task.function_result = result
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, task_indexes)
+        return True
+
+    def finish_sync_promote_task(self, task: JobSchedule, result: str, outcome: str | None) -> bool:
+        """Record the end of promote task ``task`` - DONE with ``result`` - and
+        its outcome for the caller, in ONE transaction that reads the task
+        and every LVS state key of it fresh:
+
+        - already DONE -> nothing (returns False; a repeat never publishes
+          again, so an outcome a caller consumed is not resurrected);
+        - ``outcome`` (PROMOTE_FAILED / PROMOTE_SUCCEEDED), the task not
+          canceled and still the recorded promote task of each of its LVS ->
+          each volume of its ``lvol_ids`` gets ``sync_promote_failures[site] =
+          {task_id, reason: result}`` (failed) or loses that entry
+          (succeeded; no newer task of that LVS exists, so it is older);
+        - canceled, superseded or ``outcome`` None -> no volume is written;
+        - the task -> DONE.
+
+        No state shows DONE without the outcomes or the outcomes without DONE;
+        an interrupted transaction commits nothing and a retry (the task is
+        not DONE) judges everything again. Returns whether it ended the task."""
+        return fdb.transactional(DBController._finish_sync_promote_task_tx)(
+            self, self.kv_store, task.get_db_id().encode(), result, outcome,
+            JobSchedule.active_indexes(self.kv_store), LVol.active_indexes(self.kv_store))
+
+    def consume_sync_promote_failure(self, lvol: LVol, site: str) -> dict | None:
+        """Take the unreported failed promote of ``lvol`` to ``site``
+        (``{task_id, reason}``) off the FRESH volume record, or None when it
+        has none. Field-scoped: of concurrent callers exactly one gets an
+        entry."""
+        taken: dict = {}
+
+        def _take(v):
+            taken.clear()    # atomic_update may replay this on a conflict
+            entry = (v.sync_promote_failures or {}).get(site)
+            if not entry:
+                return False
+            taken.update(entry)
+            v.sync_promote_failures = {k: e for k, e in v.sync_promote_failures.items() if k != site}
+            return True
+        if self.atomic_update(lvol, _take) is None:
+            return None
+        return dict(taken) or None
+
     def get_sync_promote_task(self, cluster_id: str, lvs_name: str) -> JobSchedule | None:
         """The promote task last recorded for ``lvs_name``, or None."""
         key = self.get_sync_state(cluster_id, lvs_name)["promote_task"]
@@ -959,7 +1045,10 @@ class DBController(metaclass=Singleton):
         for owner in owners.values():
             self._atomic_update_tx(tr, owner.get_db_id().encode(), StorageNode,
                                    lambda n: setattr(n, "lvs_active_site", moving), node_indexes)
-        task.function_params["moves"] = {lvs_name: expect for lvs_name, (_, expect) in moves.items()}
+        # Merged: an LVS a resumed pass marked earlier (not re-marked now)
+        # keeps its entry, so a failure still undoes its marker directly.
+        task.function_params["moves"] = {**(task.function_params.get("moves") or {}),
+                                         **{lvs_name: expect for lvs_name, (_, expect) in moves.items()}}
         task.status = JobSchedule.STATUS_RUNNING
         task.updated_at = str(datetime.datetime.now(datetime.UTC))
         self._put_tx(tr, task, task_indexes)
@@ -974,14 +1063,15 @@ class DBController(metaclass=Singleton):
 
         Read in the transaction: the task (still active), the cluster, each
         LVS's grant lock (a leadership grant holding it refuses the move, one
-        acquiring it later sees the marker - storage_node_ops.begin_lvs_move),
+        acquiring it later sees the marker - storage_node_ops._lvs_grant_lock),
         each owner and each owner's volumes (with conflict ranges, so a
         concurrent volume create or clone makes this retry and be judged).
         ``check(cluster, owner, volumes, expect)`` returns the problems of one
         LVS (a pure function: it may run several times). With none at all,
         every owner's ``lvs_active_site`` becomes ``moving:<target_site>`` and
         the task records ``moves`` (``{lvs: expect}``, the journal its
-        clean-up restores from) and turns RUNNING - in the same transaction.
+        clean-up restores from; merged into the entries it already holds) and
+        turns RUNNING - in the same transaction.
         Returns the problems; nothing is written when there are any."""
         return fdb.transactional(DBController._begin_sync_promote_moves_tx)(
             self, self.kv_store, task.get_db_id().encode(), task.cluster_id, dict(moves),
@@ -1411,28 +1501,6 @@ class DBController(metaclass=Singleton):
         if (now - existing.heartbeat_at) > constants.LVSTORE_MUTATION_LOCK_TTL_SEC:
             return ""
         return existing.owner
-
-    def _update_unless_lvstore_locked_tx(self, tr, key, model_cls, mutate_fn, index_list,
-                                         cluster_id, lock_name, now):
-        holder = self._lvstore_lock_holder_tx(tr, cluster_id, lock_name, now)
-        if holder:
-            return None, holder
-        return self._atomic_update_tx(tr, key, model_cls, mutate_fn, index_list), ""
-
-    def update_unless_lvstore_locked(self, obj, mutate_fn, cluster_id, lock_name):
-        """``atomic_update(obj, mutate_fn)`` in a transaction that first checks
-        the per-lvstore lock ``lock_name`` is free, so the write and a
-        concurrent acquire of that lock are serialized by FDB.
-
-        Returns ``(fresh_obj, "")``, or ``(None, holder)`` without writing when
-        a live holder owns the lock. As with atomic_update, ``fresh_obj`` is
-        also returned when ``mutate_fn`` returned False (nothing written)."""
-        if not self.kv_store:
-            return None, "No DB connection"
-        transactional = fdb.transactional(DBController._update_unless_lvstore_locked_tx)
-        return transactional(self, self.kv_store, obj.get_db_id().encode(), type(obj), mutate_fn,
-                             type(obj).active_indexes(self.kv_store), cluster_id, lock_name,
-                             int(time.time()))
 
     def watch_lvstore_lock(self, cluster_id, lvs_name):
         """Return an FDB watch future that fires when the lock key changes

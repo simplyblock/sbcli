@@ -18,9 +18,17 @@ class SyncReplicationEvent(BaseModel):
     ``DBController.record_sync_replication_event``: it assigns ``receive_seq``
     in the same transaction as the write, over a fixed-size per-LVS state key,
     so the sequence is the commit order and "the latest event of an LVS" never
-    depends on the producer nodes' clocks. What is over is decided by that
-    key's watermarks (a later ``remote_journal_restored``, a verified catch-up,
+    depends on the producer nodes' clocks. What is over for the status and the
+    bookkeeping is decided by that key's watermarks (a later
+    ``remote_journal_restored`` of any node, a verified catch-up,
     ``DBController.finish_sync_resync``); ``resolved`` follows them.
+
+    Commit order is production order only per node: the nodes' collectors
+    run independently, so across nodes it is not causal. The disaster gate
+    therefore does not use the LVS-wide journal watermark nor ``resolved``
+    for a remote-journal drop: a drop is over only by a later restore of its
+    own node or a later ``observed_live`` restore
+    (sync_replication_controller.latest_journal_drop).
     """
 
     _INDEXES: ClassVar[tuple] = (
@@ -43,3 +51,10 @@ class SyncReplicationEvent(BaseModel):
     #: Receive order within the LVS, assigned at the write: higher =
     #: committed later. 0 only on records older than the field.
     receive_seq: int = 0
+    #: A ``remote_journal_restored`` sbcli observed itself (a live
+    #: ``remote_journal_in_sync: true`` of the JC leader), recorded only if no
+    #: event of the LVS was received since the query started - so it is
+    #: causally after every event received before it, whichever node sent
+    #: them. A collected restore (False) is only known to follow its own
+    #: node's earlier events (one collector per node).
+    observed_live: bool = False

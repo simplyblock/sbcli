@@ -176,14 +176,16 @@ members' LVSs, one promote task for all.
 | Route | Answer on a sync cluster |
 |---|---|
 | `POST G/replication/failover?site=S&planned=` | **200** `{"members": [SyncPromoteResultDTO, ...]}` once every member is served on S; otherwise as the volume route (409 / 412 / 400). |
-| `POST G/replication/demote?site=S` | **204**; **409** gate failed. Members are fenced in order, each recorded right after its own fence: a failure leaves the members before it demoted (a retry is a no-op for them). |
+| `POST G/replication/demote?site=S` | **204** (an empty group too); **409** gate failed. Members are fenced in order, each recorded right after its own fence: a failure leaves the members before it demoted (a retry is a no-op for them). |
 | `GET G/replication/sync-status?site=S` | **200** `SyncReplicationStatusDTO`; **400** on a cluster without sync replication. |
 | `GET G/replication/status?site=S` | **200** `ConsistencyGroupReplicationStatusDTO` filled from the sync status plus `member_count`. |
 | `PUT G/replication` body `{"replication_policy_id": null or UUID}` | **204** no-op. The field is required (422 without it). |
 | `POST G/replication/failback` (body `{}`) | **204** no-op. |
 
 A member that cannot be resolved to a live volume refuses the whole group request with **409** and the
-ids in `volumes`, before anything is fenced.
+ids in `volumes`, before anything is fenced or queued; on demote and promote so does a member that
+belongs to another cluster than the group (the status routes do not check that). The cluster and the site are judged from the group itself, so an empty group answers like a
+populated one: demote 204, promote 200 with no members.
 
 ### Errors
 
@@ -192,8 +194,8 @@ ids in `volumes`, before anything is fenced.
   - `problems`: the gate refusals (list of strings, per LVS / distrib / node);
   - `volumes`: the volumes that block a promote (not demoted, still served on the source site) or
     group members that were not found;
-  - `task_id`: the promote task of a 409 "promote in progress" (`""` when the LVS is in a leadership
-    move that was not started by a task of this request).
+  - `task_id`: the promote task of a 409 "promote in progress", or of a failed promote reported once
+    (with `volumes`).
 - Other errors keep their usual shapes: a failed ANA RPC is a **500**
   `{"status": "An error occured while processing the request", "detail": "..."}`; a sync precondition
   raised outside these routes' translation is a **400** `{"error": "Preconditions are not met",
@@ -211,7 +213,8 @@ How the status is computed: every online node holding an instance of an LVS is a
 several report leadership); without a leader (an idle volume) the worst answer of the instances that
 answered counts; a distrib nobody answered for is `missing` (degraded). A silent instance alone does
 not degrade the status, and the unsynced page counts come from the selected answers. This is
-**not** the planned gate, which requires every answering instance to report `synced`: a follower
+**not** the planned gate, which requires every answering instance to report `synced` and fails on a
+silent online instance: a follower
 still reporting `*_unsynced` while the leader reports `synced` gives `healthy` / `peer_ready` and a
 refused (409) demote or planned promote at the same time.
 
@@ -287,13 +290,20 @@ path.
 
 - **Planned gate** (demote, planned promote): live and cluster-wide. Every answering instance of every
   LVS must report every distrib `synced` in replication mode `full`; an LVS nobody answered for, or a
-  distrib missing from an answer, fails. A silent instance alone does not fail it when others answer.
-  There is no remote-journal condition (with both sites up the new leader levels the journal over all
+  distrib missing from an answer, fails. An `ONLINE` instance that is asked and does not answer fails
+  it too (the others' `synced` is provisional while the catch-up node has not confirmed it), and so
+  does a running catch-up (`FN_SYNC_RESYNC`) of the LVS; an instance that is not `ONLINE` is not
+  asked and does not count. There is no remote-journal condition (with both sites up the new leader levels the journal over all
   reachable copies). A single desynced LVS anywhere in the cluster blocks every planned demote and
   promote.
 - **Disaster gate** (forced promote of a lost site T): only the LVSs the request moves (those led from
   T), judged from the **persisted** events of T's nodes, never a live query: no unresolved zone desync
-  and no unresolved remote-journal drop recorded by a T node before the loss. Events emitted by the
+  and no unresolved remote-journal drop recorded by a T node before the loss. A drop of a T node ends
+  only with a later "journal synced" of **the same node**, or with a live in-sync answer of the JC
+  leader that sbcli recorded itself while nothing else was received: the nodes' events are collected
+  independently, so another node's "synced" received later may be older than the drop (a JC
+  leadership handover). After such a handover the drop stays open (fail-closed) until the status is
+  queried while the new JC leader reports the journal in sync. Events emitted by the
   surviving site's instances (the consequences of the loss) never count. LVSs **led from** the
   surviving site go degraded because of the loss and do not block. The home site does not decide
   this: an LVS homed on the surviving site but moved to T earlier is judged by T's events, and an LVS
@@ -315,7 +325,10 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
 
 | Situation | Answer |
 |---|---|
-| a promote task for the LVS is running, or its leadership is moving | 409 in progress (`task_id`) |
+| a promote task for the LVS is running | 409 in progress (`task_id`) |
+| the last promote of this volume to S failed (reported once per volume) | 409 with its reason, `task_id` and `volumes`; the next call judges the table again |
+| the LVS's leadership is left moving by a promote that ended | reconciled first; still moving: 409 (`volumes`) with the owner and marker |
+| S has no online node (a move or a disaster fail-over is needed) | 409 (never 412) |
 | LVS led from S and the volume served there | 200 with the connection entries (no-op) |
 | LVS led from S, the volume not open there (e.g. a sibling left behind by an earlier move) | ANA-only promote queued: 409 in progress, then 200 |
 | T online, the volume not demoted on T | 409 (`volumes`) |
@@ -330,12 +343,19 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
 - While a site is recorded as lost, **every** promote is judged by the disaster gate (the planned gate
   needs both sites).
 - The promote task does the whole promote in one pass and always ends DONE, **also when it failed**;
-  the task being DONE is not the success condition. The next POST judges the table again: 200 when the
-  volume is served on S, otherwise it re-queues or answers the refusal. Keep calling while the answer
-  is 409 "in progress"; stop on any other 409 and fix its cause.
+  the task being DONE is not the success condition. A failed task is reported once to each of its
+  volumes: the first POST of that volume to S after the failure answers 409 with the task's reason and
+  `task_id` and queues nothing. The call after that judges the table again: 200 when the volume is
+  served on S, otherwise it re-queues or answers the refusal. Keep calling while the answer is 409
+  "in progress"; stop on any other 409 and fix its cause.
+- A leadership move left unsettled by a promote that ended (a member did not answer when it was
+  settled) is settled by the next promote call or by the storage-node monitor (every 30 s at most per
+  LVS) once every member of both triplets answers.
 - A move promotes the LVS's leadership and opens **only the volumes of the request**. The other
   volumes of that LVS stay closed on S until their own promote (the ANA-only row).
-- Volume creation and clone on an LVS whose leadership is moving are refused with a retryable error.
+- Volume creation and clone on an LVS whose leadership is moving are refused: the v2 create / clone
+  route answers **422** with the reason (the refusal reaches the route as a message, like every create
+  refusal). Retry once the move has completed; the CSI provisioner's backoff does.
 
 ### Disaster fail-over (site T lost)
 

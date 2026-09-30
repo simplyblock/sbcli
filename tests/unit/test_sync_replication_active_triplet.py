@@ -155,11 +155,3 @@ class TestTakerJournalQuorum:
         taker, rpc = self._taker({"jm_b0": False, "remote_jm_b1n1": True, "remote_jm_b2n1": True})
         assert ops._taker_jm_quorum_ok(taker) is True
         rpc.jc_get_jm_status.assert_called_once_with(7)
-
-
-class TestBeginMoveArguments:
-
-    @pytest.mark.parametrize("site", ["", "moving:site-b"])
-    def test_an_invalid_target_site_is_rejected(self, site):
-        with pytest.raises(ValueError):
-            ops.begin_lvs_move("p", site, expect="")

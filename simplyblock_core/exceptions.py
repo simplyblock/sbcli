@@ -47,14 +47,29 @@ class SyncAnaError(RuntimeError):
 
 
 class SyncPromoteRefusedError(PreconditionError):
-    """A sync-replication promote was refused by its decision table (a volume
-    still served on the other site, a leadership move in flight, a forced
-    promote while the other site is online, ...). ``volumes`` lists the ids
-    that block it, when the refusal is about volumes."""
+    """A sync-replication promote was refused: a row of its decision table (a
+    volume still served on the other site, another volume of the LVS still
+    served there, a forced promote while the other site is online, the target
+    site not online), a lost-site refusal of the request, a leadership move
+    left unsettled by an ended promote, or a failed connect of a promoted
+    volume. ``volumes`` lists the ids that block it, when the refusal is about
+    volumes."""
 
     def __init__(self, message: str, volumes=()):
         self.volumes = list(volumes)
         super().__init__(message)
+
+
+class SyncPromoteFailedError(SyncPromoteRefusedError):
+    """The last promote of these volumes to the requested site ran and failed
+    (its task ended ``failed: ...``); reported once per volume, to the first
+    promote of that volume to that site after the failure - the next call
+    judges the promote table again. ``volumes`` lists the volumes it is
+    reported for, ``task_id`` the failed task."""
+
+    def __init__(self, message: str, volumes=(), task_id: str = ""):
+        self.task_id = task_id
+        super().__init__(message, volumes)
 
 
 class SyncSiteOfflineError(PreconditionError):

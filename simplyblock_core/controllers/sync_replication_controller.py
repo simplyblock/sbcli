@@ -21,13 +21,16 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
+import fdb
+
 from simplyblock_core import constants, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
-    SyncAnaError, SyncGateError, SyncGroupMemberError, SyncPromoteRefusedError, SyncReplicationSiteError,
-    SyncReplicationUnsupportedError, SyncSiteOfflineError,
+    PreconditionError, SyncAnaError, SyncGateError, SyncGroupMemberError, SyncPromoteFailedError, SyncPromoteRefusedError,
+    SyncReplicationSiteError, SyncReplicationUnsupportedError, SyncSiteOfflineError,
 )
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -308,10 +311,20 @@ def _journal_in_sync(layout: LvsLayout, answers: dict) -> tuple[bool | None, str
     return True, next(iter(leaders)) if len(leaders) == 1 else ""
 
 
-def _gate_problems(layout: LvsLayout, answers: dict, answering: list[str]) -> tuple[str, ...]:
+def _gate_problems(layout: LvsLayout, answers: dict, answering: list[str], *,
+                   resync_running: bool) -> tuple[str, ...]:
+    """The planned gate's verdict on one LVS. Besides the answers themselves:
+    a member of THIS LVS that was asked and did not answer (``None`` in
+    ``answers``) fails it - its ``synced`` cannot be taken from the others,
+    whose ``synced`` is provisional while the catch-up node has not confirmed
+    it - and so does a running catch-up. A member not asked (absent: not
+    ONLINE) does not count."""
     if not answering:
         return (f"LVS {layout.lvs_name}: no instance answered",)
-    problems = []
+    problems = [f"LVS {layout.lvs_name}: {nid} did not answer" for nid in layout.members
+                if nid in answers and answers[nid] is None]
+    if resync_running:
+        problems.append(f"LVS {layout.lvs_name}: catch-up task running")
     for nid in answering:
         for name in layout.distribs:
             elem = _elem_of(answers[nid], name)
@@ -329,8 +342,8 @@ def aggregate_lvs(layout: LvsLayout, answers: dict, *, resync_running: bool) -> 
     """The status of one LVS from the live answers of its instances.
 
     ``answers`` maps a node id to its ``distr_sync_replication_status`` answer
-    (the list of its distribs' elements), or to None when the node was not
-    asked or did not answer. Per distrib the HA leader's answer is preferred
+    (the list of its distribs' elements), or to None when the node was asked
+    and did not answer; a node that was not asked (not ONLINE) is absent. Per distrib the HA leader's answer is preferred
     (a non-leader reports ``*_unsynced`` while the leader catches up, and its
     ``synced`` is provisional); without a leader (an idle volume) the worst
     answer counts. A distrib nobody answered for is ``missing``.
@@ -376,7 +389,7 @@ def aggregate_lvs(layout: LvsLayout, answers: dict, *, resync_running: bool) -> 
         unsynced_pages=pages, bytes_behind=bytes_behind, remote_journal_in_sync=in_sync,
         jc_leader_id=jc_leader_id, lag_seconds=max(lags, default=None),
         answering=tuple(answering), resync_running=resync_running,
-        gate_problems=_gate_problems(layout, answers, answering))
+        gate_problems=_gate_problems(layout, answers, answering, resync_running=resync_running))
 
 
 def parse_event_time(timestamp: str) -> datetime | None:
@@ -469,25 +482,40 @@ def latest_journal_drop(events: Iterable[SyncReplicationEvent], drop_counts: Cal
                         restore_counts: Callable[[str], bool]) -> SyncReplicationEvent | None:
     """The open remote-journal drop of an LVS as told by the drops of the
     nodes ``drop_counts`` accepts and the restores of the nodes
-    ``restore_counts`` accepts (by node id) alone: the latest of those events
-    by receive order, when it is a drop. A record without a receive_seq (older
-    than the field) is judged by its own flag.
+    ``restore_counts`` accepts (by node id) alone, or None.
 
-    Deliberately not the LVS-wide watermark: receive order across nodes is not
-    real order (each node has its own collector), so a delayed ``synced`` of
-    another site must not end a drop of this one.
+    Causal, not by receive order across nodes: each node's collector records
+    its node's events in production order, but the collectors run
+    independently, so a restore of node Y received after a drop of node X
+    may have been produced before it (a JC handover t1 -> t2: t1's delayed
+    old ``synced`` after t2's ``unsynced``). A drop of X is therefore over
+    only by a LATER restore of X itself, or by a later ``observed_live``
+    restore (a live in-sync answer, recorded only when nothing of the LVS
+    was received since its query started: it follows every earlier event).
+    The latest drop still open is returned. Fail-closed after a handover: a
+    drop of the old JC leader stays open until it restores itself or a live
+    in-sync answer is recorded (the status query records one while a drop is
+    open). A record without a receive_seq (older than the field) is judged
+    by its own flag.
+
+    Deliberately not the LVS-wide watermark nor ``resolved``: those end a drop
+    by any later restore of any node (status bookkeeping).
     """
-    journal = [e for e in events
-               if (e.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_DROPPED and drop_counts(e.node_id))
-               or (e.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED and restore_counts(e.node_id))]
-    legacy = [e for e in journal if e.receive_seq <= 0
+    events = list(events)
+    legacy = [e for e in events if e.receive_seq <= 0 and drop_counts(e.node_id)
               and e.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_DROPPED and not e.resolved]
     if legacy:
         return legacy[0]
-    latest = max((e for e in journal if e.receive_seq > 0), key=lambda e: e.receive_seq, default=None)
-    if latest is not None and latest.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_DROPPED:
-        return latest
-    return None
+    restores = [e for e in events if e.receive_seq > 0
+                and e.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED and restore_counts(e.node_id)]
+    live_seq = max((e.receive_seq for e in restores if e.observed_live), default=0)
+    own_seq: dict[str, int] = {}
+    for e in restores:
+        own_seq[e.node_id] = max(own_seq.get(e.node_id, 0), e.receive_seq)
+    open_drops = [e for e in events if e.receive_seq > 0
+                  and e.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_DROPPED and drop_counts(e.node_id)
+                  and e.receive_seq > max(live_seq, own_seq.get(e.node_id, 0))]
+    return max(open_drops, key=lambda e: e.receive_seq, default=None)
 
 
 def zone_not_up(nodes: Iterable[StorageNode], site: str) -> list[str]:
@@ -599,7 +627,9 @@ def _record_live_journal_restore(db: DBController, cluster_id: str, owner: Stora
     a synced journal state, when some drop is still open for it - LVS-wide, or
     for the leader's site alone (latest_journal_drop). Conditional on no event
     of the LVS having been received since ``seq`` was read, before the query:
-    a drop received meanwhile may be newer than the answer."""
+    a drop received meanwhile may be newer than the answer. That condition is
+    what makes it ``observed_live``: it ends the drops of every node received
+    before it, not only its own node's (latest_journal_drop)."""
     if status.remote_journal_in_sync is not True or not status.jc_leader_id:
         return
     leader_site = node_sites.get(status.jc_leader_id, "")
@@ -622,6 +652,7 @@ def _record_live_journal_restore(db: DBController, cluster_id: str, owner: Stora
     event.kind = SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED
     event.status = STATUS_REMOTE_JOURNAL_SYNCED
     event.timestamp_utc = timestamp
+    event.observed_live = True
     event, recorded = db.record_sync_replication_event(event, expect_seq=seq)
     if recorded:
         logger.info("LVS %s: live remote journal in sync on JC leader %s recorded, receive_seq %s",
@@ -734,7 +765,7 @@ def group_sync_status(group_id: str, site: str, *, max_age: float = 0.0) -> Grou
     group = db.get_consistency_group_by_id(group_id)
     _sync_cluster(db, group.cluster_id)
     _check_site(db, group.cluster_id, site)
-    volumes = _group_volumes(db, group_id)
+    volumes = _group_volumes(db, group)
     owners: dict[str, StorageNode] = {}
     for lvol in volumes:
         if lvol.node_id not in owners:
@@ -833,11 +864,11 @@ def settle_site_return(cluster_id: str) -> bool:
     if not cluster.sync_replication or not lost:
         return False
     state = cluster.lost_site_state
-    if state == LOST_SITE_FENCING:
+    if state == Cluster.LOST_SITE_FENCING:
         if any(t.function_params.get("lost_site") == lost
                for t in db.get_active_sync_promote_tasks(cluster_id)):
             return False
-    elif state != LOST_SITE_DONE:
+    elif state != Cluster.LOST_SITE_DONE:
         return False
     nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
     if site_return_problems(nodes, lost):
@@ -860,7 +891,9 @@ def settle_site_return(cluster_id: str) -> bool:
 def check_gate(cluster_id: str) -> None:
     """The planned switchover gate (both sites up), always live: every
     answering instance of every LVS reports every distrib ``synced`` in mode
-    ``full``; an LVS or a distrib nobody answered for fails. No journal
+    ``full``; an LVS or a distrib nobody answered for fails, and so does an
+    ONLINE instance that was asked and did not answer, or a running catch-up
+    of the LVS (_gate_problems). No journal
     condition: with both sites up the new leader levels the journal over every
     reachable copy, and a JC leader may not exist while the apps are stopped.
 
@@ -996,11 +1029,11 @@ def set_site_ana_strict(lvol: LVol, nodes: list[StorageNode], *, open_site: bool
             logger.info("ANA: %s -> %s", where, state)
 
 
-def _group_volumes(db: DBController, group_id: str) -> list[LVol]:
-    """Every current member of consistency group ``group_id``, as volumes; a
+def _group_volumes(db: DBController, group) -> list[LVol]:
+    """Every current member of consistency group ``group``, as volumes; a
     member that cannot be resolved to a live volume refuses the whole group."""
     from simplyblock_core.controllers import consistency_group_controller
-    group = db.get_consistency_group_by_id(group_id)
+    group_id = group.get_id()
     volumes, missing = [], []
     for row in consistency_group_controller.list_members(group):
         try:
@@ -1018,23 +1051,36 @@ def _group_volumes(db: DBController, group_id: str) -> list[LVol]:
     return volumes
 
 
-def _volumes_context(db: DBController, volumes: list[LVol], site: str):
+def _volumes_context(db: DBController, volumes: list[LVol], site: str, *, group=None):
     """The cluster and each volume's owner (fresh) of a demote / promote
-    request, after the cluster and site checks."""
-    if not volumes:
-        raise SyncReplicationSiteError("no volume given")
+    request, after the cluster and site checks.
+
+    A single volume's request is judged in its owner's cluster. A group's
+    (``group``) in the group's own cluster, checked before its members - an
+    empty group gets the same answer as a populated one -, and every member
+    must belong to it: a member owned by another cluster refuses the whole
+    request (SyncGroupMemberError), before anything is fenced or queued."""
     owners = {}
     for lvol in volumes:
         if lvol.node_id not in owners:
             owners[lvol.node_id] = db.get_storage_node_by_id(lvol.node_id)
-    cluster_id = next(iter(owners.values())).cluster_id
+    if group is not None:
+        cluster_id = group.cluster_id
+    elif owners:
+        cluster_id = next(iter(owners.values())).cluster_id
+    else:
+        raise SyncReplicationSiteError("no volume given")
     cluster = _sync_cluster(db, cluster_id)
     _check_site(db, cluster_id, site)
+    foreign = sorted(lv.get_id() for lv in volumes if owners[lv.node_id].cluster_id != cluster_id)
+    if foreign:
+        raise SyncGroupMemberError(
+            f"consistency group {group.get_id()}: members of another cluster: {foreign}", foreign)
     return cluster, owners
 
 
-def _demote(db: DBController, volumes: list[LVol], site: str) -> list[str]:
-    cluster, owners = _volumes_context(db, volumes, site)
+def _demote(db: DBController, volumes: list[LVol], site: str, *, group=None) -> list[str]:
+    cluster, owners = _volumes_context(db, volumes, site, group=group)
     todo = [lv for lv in volumes if volume_open_on(lv, owners[lv.node_id], site)]
     if not todo:
         return []
@@ -1078,9 +1124,11 @@ def sync_demote_group(group_id: str, site: str) -> list[str]:
     one gate, the members in order, each recorded right after its own fence;
     the first failure raises (members recorded before it stay demoted - a
     retry is a no-op for them). SyncGroupMemberError when a member cannot be
-    resolved, before anything is fenced."""
+    resolved or belongs to another cluster, before anything is fenced. An
+    empty group is a no-op (after the cluster and site checks)."""
     db = DBController()
-    return _demote(db, _group_volumes(db, group_id), site)
+    group = db.get_consistency_group_by_id(group_id)
+    return _demote(db, _group_volumes(db, group), site, group=group)
 
 
 PROMOTE_ACTIVE = "active"
@@ -1092,6 +1140,7 @@ PROMOTE_LVS_BUSY = "lvs_busy"
 PROMOTE_SITE_OFFLINE = "site_offline"
 PROMOTE_FORCE_ONLINE = "force_online"
 PROMOTE_DISASTER = "disaster"
+PROMOTE_TARGET_OFFLINE = "target_offline"
 
 #: The rows that queue a promote task (after the live gate).
 PROMOTE_QUEUED = (PROMOTE_MOVE, PROMOTE_ANA_ONLY)
@@ -1115,6 +1164,7 @@ def promote_decision(lvol: LVol, owner: StorageNode, lvs_volumes: Iterable[LVol]
     - a leadership move in flight -> in progress
     - led from S and the volume served there -> active (200, no-op)
     - led from S, the volume not open there -> only the ANA step
+    - S not online -> refused (409, never 412: a forced retry cannot help)
     - T not online -> disaster fail-over when forced, else site offline (412)
     - forced while T is online -> refused (force never acts on a live site)
     - the volume still served on T -> not demoted (409)
@@ -1127,6 +1177,8 @@ def promote_decision(lvol: LVol, owner: StorageNode, lvs_volumes: Iterable[LVol]
     if source == site:
         kind = PROMOTE_ACTIVE if volume_open_on(lvol, owner, site) else PROMOTE_ANA_ONLY
         return PromoteDecision(kind, source)
+    if site not in online_sites:
+        return PromoteDecision(PROMOTE_TARGET_OFFLINE, source)
     if source not in online_sites:
         return PromoteDecision(PROMOTE_DISASTER if force else PROMOTE_SITE_OFFLINE, source)
     if force:
@@ -1193,7 +1245,7 @@ def disaster_move_problems(cluster, owner: StorageNode, volumes: Iterable[LVol],
     created or reopened since)."""
     lvs = owner.lvstore
     problems = []
-    if cluster.lost_site != lost_site or cluster.lost_site_state != LOST_SITE_DONE:
+    if cluster.lost_site != lost_site or cluster.lost_site_state != Cluster.LOST_SITE_DONE:
         problems.append(f"the fence of site {lost_site} is not complete (lost_site="
                         f"{cluster.lost_site!r}, state={cluster.lost_site_state!r})")
     if owner.lvs_active_site != expect:
@@ -1210,12 +1262,6 @@ def disaster_move_problems(cluster, owner: StorageNode, volumes: Iterable[LVol],
     if busy:
         problems.append(f"LVS {lvs}: volumes still active on site {source}: {busy}")
     return problems
-
-
-#: ``Cluster.lost_site_state`` values (Technical Details): the site steps of a
-#: disaster fail-over are running (a retry redoes them), or they are complete.
-LOST_SITE_FENCING = "fencing"
-LOST_SITE_DONE = "done"
 
 
 def demote_site_volumes(db: DBController, cluster_id: str, lost_site: str,
@@ -1265,6 +1311,7 @@ class SyncPromoteResult:
 
 
 _PROMOTE_REFUSALS = {
+    PROMOTE_TARGET_OFFLINE: "site {site} has no online node; it cannot take the leadership",
     PROMOTE_FORCE_ONLINE: "a forced promote acts only on a lost site; site {source} is online",
     PROMOTE_NOT_DEMOTED: "volume(s) not demoted on site {source}",
     PROMOTE_LVS_BUSY: "other volumes of the LVS are still active on site {source}",
@@ -1282,24 +1329,107 @@ def _connection_strings(volumes: list[LVol], site: str) -> dict:
     return out
 
 
-def _promote(db: DBController, volumes: list[LVol], site: str, force: bool) -> SyncPromoteResult:
-    cluster, owners = _volumes_context(db, volumes, site)
-    cluster_id = cluster.get_id()
-    for lvs_name in sorted({lv.lvs_name for lv in volumes}):
-        task = db.get_sync_promote_task(cluster_id, lvs_name)
-        if task is not None and db.sync_promote_task_blocks(task):
-            return SyncPromoteResult(in_progress=True, task_id=task.uuid)
-    sites = online_sites(db, cluster)
-    lvs_volumes = {owner_id: db.get_lvols_by_node_id(owner_id) for owner_id in owners}
-    decisions = [(lv, promote_decision(lv, owners[lv.node_id], lvs_volumes[lv.node_id], site,
-                                       online_sites=sites, force=force))
-                 for lv in volumes]
-    kinds = {d.kind for _, d in decisions}
-    if PROMOTE_IN_PROGRESS in kinds:
-        return SyncPromoteResult(in_progress=True)
+def _report_failed_promotes(db: DBController, volumes: list[LVol], site: str) -> None:
+    """Raise SyncPromoteFailedError for the failed promotes of the request's
+    volumes to ``site`` not reported yet (LVol.sync_promote_failures), taking
+    each off its volume - read fresh, so a failure recorded after the request
+    loaded its volumes is still found. Reported once per volume: to the first
+    promote of that volume to that site."""
+    taken = [(lv.get_id(), entry) for lv in volumes
+             if (entry := db.consume_sync_promote_failure(lv, site)) is not None]
+    if not taken:
+        return
+    reasons = sorted({f"task {entry['task_id']}: {entry['reason']}" for _, entry in taken})
+    raise SyncPromoteFailedError(f"the last promote to site {site} failed: " + "; ".join(reasons),
+                                 [vid for vid, _ in taken], taken[0][1]["task_id"])
+
+
+def _settle_abandoned_moves(owners: Iterable[StorageNode]) -> bool:
+    """Try to settle the ``moving:`` marker of every owner that has one
+    (storage_node_ops.reconcile_lvs_move: a no-op while a promote task owns
+    the move or the grant lock is busy). True when any was settled."""
+    settled = False
+    for owner in owners:
+        if owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX):
+            settled |= storage_node_ops.reconcile_lvs_move(owner.get_id()) is not None
+    return settled
+
+
+#: The monitor tries to settle one owner's abandoned move at most this often:
+#: the reconcile probes every member of both triplets, a silent one at its
+#: RPC timeout.
+_RECONCILE_INTERVAL_SEC = 30
+_reconcile_attempts = TTLCache()
+
+
+def reconcile_abandoned_moves(cluster_id: str) -> None:
+    """Storage-node monitor step: settle every LVS left ``moving:`` by a
+    promote that no longer owns its move (reconcile_lvs_move), each owner on
+    its own - one failing does not keep the others from being retried - and
+    at most once per _RECONCILE_INTERVAL_SEC. DB-only when nothing is
+    moving.
+
+    An owner's reconcile may fail operationally - a member's RPC
+    (RPCException), a precondition that changed under it (PreconditionError,
+    e.g. a lock), a record removed meanwhile (KeyError), the database
+    (fdb.FDBError): logged, retried on a later pass. Anything else is a defect
+    and propagates."""
+    db = DBController()
+    if not db.get_cluster_by_id(cluster_id).sync_replication:
+        return
+    for owner in _lvs_owners(db.get_storage_nodes_by_cluster_id(cluster_id)):
+        if not owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX):
+            continue
+        if _reconcile_attempts.get(owner.get_id(), _RECONCILE_INTERVAL_SEC):
+            continue
+        _reconcile_attempts.put(owner.get_id(), True)
+        try:
+            storage_node_ops.reconcile_lvs_move(owner.get_id())
+        except (RPCException, PreconditionError, KeyError,
+                fdb.FDBError) as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
+            logger.error("LVS %s: reconciling its leadership move failed, retried later: %s",
+                         owner.lvstore, e)
+
+
+def _promote(db: DBController, volumes: list[LVol], site: str, force: bool, *,
+             group=None) -> SyncPromoteResult:
+    for attempt in range(2):
+        # Everything judged fresh on each attempt: a promote may have started
+        # while an abandoned move was being reconciled.
+        cluster, owners = _volumes_context(db, volumes, site, group=group)
+        cluster_id = cluster.get_id()
+        for lvs_name in sorted({lv.lvs_name for lv in volumes}):
+            task = db.get_sync_promote_task(cluster_id, lvs_name)
+            if task is not None and db.sync_promote_task_blocks(task):
+                return SyncPromoteResult(in_progress=True, task_id=task.uuid)
+        _report_failed_promotes(db, volumes, site)
+        sites = online_sites(db, cluster)
+        lvs_volumes = {owner_id: db.get_lvols_by_node_id(owner_id) for owner_id in owners}
+        decisions = [(lv, promote_decision(lv, owners[lv.node_id], lvs_volumes[lv.node_id], site,
+                                           online_sites=sites, force=force))
+                     for lv in volumes]
+        kinds = {d.kind for _, d in decisions}
+        if PROMOTE_IN_PROGRESS not in kinds:
+            break
+        # No promote task of these LVS is in progress, yet a marker is set:
+        # left by one that ended. Settle it, then judge again.
+        moving = [owners[lv.node_id] for lv, d in decisions if d.kind == PROMOTE_IN_PROGRESS]
+        if attempt == 0 and _settle_abandoned_moves({o.get_id(): o for o in moving}.values()):
+            continue
+        markers = sorted({f"LVS {o.lvstore} (owner {o.get_id()}): {o.lvs_active_site}" for o in moving})
+        raise SyncPromoteRefusedError(
+            "a leadership move is not settled and no promote task owns it: " + "; ".join(markers)
+            + " - the storage-node monitor and the next promote retry settling it",
+            sorted(lv.get_id() for lv, d in decisions if d.kind == PROMOTE_IN_PROGRESS))
     first: dict[str, PromoteDecision] = {}
     for _, decision in decisions:
         first.setdefault(decision.kind, decision)
+    if PROMOTE_TARGET_OFFLINE in kinds:
+        # Before the 412 below: a site that cannot take the leadership is
+        # never a reason to escalate to force.
+        raise SyncPromoteRefusedError(
+            _PROMOTE_REFUSALS[PROMOTE_TARGET_OFFLINE].format(site=site, source=""),
+            sorted(lv.get_id() for lv, d in decisions if d.kind == PROMOTE_TARGET_OFFLINE))
     if PROMOTE_SITE_OFFLINE in kinds:
         raise SyncSiteOfflineError(
             f"site {first[PROMOTE_SITE_OFFLINE].source_site} is not online; only a forced "
@@ -1308,7 +1438,7 @@ def _promote(db: DBController, volumes: list[LVol], site: str, force: bool) -> S
         if kind in kinds:
             blocking = sorted({vid for _, d in decisions if d.kind == kind for vid in d.blocking})
             raise SyncPromoteRefusedError(
-                message.format(source=first[kind].source_site)
+                message.format(source=first[kind].source_site, site=site)
                 + (f": {blocking}" if blocking else ""), blocking)
     lost = _lost_site_of_request(db, cluster, site, {d.source_site for _, d in decisions
                                                      if d.kind == PROMOTE_DISASTER})
@@ -1373,7 +1503,12 @@ def sync_promote_lvol(lvol_id: str, site: str, force: bool = False) -> SyncPromo
     runner fences the site before it moves anything. While a site is
     recorded as lost every promote is judged by its disaster gate.
 
-    Raises SyncGateError, SyncPromoteRefusedError (409 rows), SyncSiteOfflineError
+    A promote of the volume to ``site`` that ran and failed is answered once
+    with SyncPromoteFailedError (its reason and task) before anything is
+    queued again; a leadership move a promote left unsettled is reconciled
+    first (reconcile_lvs_move) - still unsettled: SyncPromoteRefusedError.
+
+    Raises SyncGateError, SyncPromoteRefusedError (409 rows), SyncPromoteFailedError, SyncSiteOfflineError
     (412), SyncReplicationUnsupportedError (no sync cluster), SyncReplicationSiteError."""
     db = DBController()
     return _promote(db, [db.get_lvol_by_id(lvol_id)], site, force)
@@ -1384,6 +1519,8 @@ def sync_promote_group(group_id: str, site: str, force: bool = False) -> SyncPro
     ``group_id``, as one promote: the LVS rule holds over the union of their
     LVS, one task moves them all, and the group is done only when every member
     is served on ``site``. SyncGroupMemberError when a member cannot be
-    resolved."""
+    resolved or belongs to another cluster. An empty group is done at once
+    (no connection strings), after the cluster and site checks."""
     db = DBController()
-    return _promote(db, _group_volumes(db, group_id), site, force)
+    group = db.get_consistency_group_by_id(group_id)
+    return _promote(db, _group_volumes(db, group), site, force, group=group)

@@ -108,6 +108,10 @@ def test_sync_replication_event_round_trip():
     assert restored.status == "remote_journal_unsynced"
     assert restored.timestamp_utc == "2026-09-29T10:00:00.000Z"
     assert restored.resolved is False
+    assert restored.observed_live is False
+
+    event.observed_live = True
+    assert SyncReplicationEvent().from_dict(event.to_dict()).observed_live is True
 
 
 def test_sync_replication_event_kinds():

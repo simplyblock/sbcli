@@ -96,7 +96,7 @@ class TestAggregateLvs:
         answers = _set(_synced(), "n1", "d2", status="unknown")
         status = src.aggregate_lvs(LAYOUT, answers, resync_running=True)
         assert status.state == src.STATE_DEGRADED
-        assert status.gate_problems == ("LVS LVS_1: d2 on n1: unknown",)
+        assert status.gate_problems == ("LVS LVS_1: catch-up task running", "LVS LVS_1: d2 on n1: unknown")
 
     @pytest.mark.parametrize("leader_status", ["replica_unsynced", "synced"])
     def test_a_running_catch_up_is_resyncing(self, leader_status):
@@ -104,6 +104,28 @@ class TestAggregateLvs:
         assert src.aggregate_lvs(LAYOUT, answers, resync_running=True).state == src.STATE_RESYNCING
         assert src.aggregate_lvs(LAYOUT, answers, resync_running=False).state == (
             src.STATE_DEGRADED if leader_status != "synced" else src.STATE_HEALTHY)
+
+    def test_a_running_catch_up_fails_the_gate_although_every_answer_is_synced(self):
+        status = src.aggregate_lvs(LAYOUT, _synced(), resync_running=True)
+        assert status.gate_problems == ("LVS LVS_1: catch-up task running",)
+
+    def test_an_asked_member_that_did_not_answer_fails_the_gate(self):
+        # The catch-up node (HA leader) is silent; the non-leaders' synced is
+        # provisional and must not pass the gate.
+        answers = _synced(leader_node="n1")
+        answers["n1"] = None
+        status = src.aggregate_lvs(LAYOUT, answers, resync_running=False)
+        assert status.answering == ("n2", "n3")
+        assert status.gate_problems == ("LVS LVS_1: n1 did not answer",)
+
+    def test_a_member_not_asked_does_not_count(self):
+        answers = _synced()
+        del answers["n3"]    # not ONLINE: never queried
+        assert src.aggregate_lvs(LAYOUT, answers, resync_running=False).gate_problems == ()
+
+    def test_a_silent_node_of_another_lvs_does_not_block_this_one(self):
+        answers = {**_synced(), "x9": None}
+        assert src.aggregate_lvs(LAYOUT, answers, resync_running=False).gate_problems == ()
 
     def test_no_answer_at_all_is_missing_degraded_and_fails_the_gate(self):
         status = src.aggregate_lvs(LAYOUT, {"n1": None}, resync_running=False)
@@ -170,8 +192,13 @@ class TestAggregateLvs:
         assert src.aggregate_lvs(LAYOUT, answers, resync_running=False).lag_seconds == 70
 
 
+LIVE = "live_restored"    # a RESTORED observed live (observed_live=True)
+
+
 def _event(kind, node_id, seq, *, status="", ts="2026-09-30T10:00:00Z", resolved=False):
     event = SyncReplicationEvent()
+    if kind == LIVE:
+        kind, event.observed_live = RESTORED, True
     event.kind = kind
     event.node_id = node_id
     event.receive_seq = seq
@@ -311,7 +338,18 @@ class TestDisasterGate:
         assert len(_problems([_event(DROPPED, "t1", 1)])) == 1
 
     @pytest.mark.parametrize("sequence, blocks", [
-        ([(DROPPED, "t1"), (RESTORED, "t2")], False),     # a later synced of the lost site ends it
+        ([(DROPPED, "t1"), (RESTORED, "t1")], False),     # a later synced of the same node ends it
+        # A collected synced of ANOTHER node is not causally after the drop
+        # (independent collectors, a JC handover inside the lost site) ...
+        ([(DROPPED, "t1"), (RESTORED, "t2")], True),
+        ([(DROPPED, "t2"), (RESTORED, "t1")], True),      # t1's delayed old synced after t2's unsynced
+        # ... a live in-sync observation is, whichever node it came from.
+        ([(DROPPED, "t1"), (LIVE, "t2")], False),
+        ([(DROPPED, "t1"), (DROPPED, "t2"), (LIVE, "t2")], False),
+        ([(LIVE, "t2"), (DROPPED, "t1")], True),          # a new drop after the live restore
+        ([(DROPPED, "t1"), (LIVE, "s1")], True),          # not one of the surviving site
+        ([(DROPPED, "t1"), (DROPPED, "t2"), (RESTORED, "t1")], True),   # only t1 restored
+        ([(DROPPED, "t1"), (DROPPED, "t2"), (RESTORED, "t1"), (RESTORED, "t2")], False),
         ([(RESTORED, "t1"), (DROPPED, "t1")], True),      # a later unsynced re-opens it
         ([(DROPPED, "t1"), (RESTORED, "t1"), (DROPPED, "t2")], True),
         ([(DROPPED, "t1"), (RESTORED, "s1")], True),      # a surviving-site synced never ends it
@@ -323,6 +361,19 @@ class TestDisasterGate:
     def test_the_latest_journal_event_of_the_lost_site_wins(self, sequence, blocks):
         events = [_event(kind, node, seq) for seq, (kind, node) in enumerate(sequence, 1)]
         assert bool(_problems(events)) is blocks
+
+    def test_the_verdict_does_not_depend_on_the_input_order(self):
+        events = [_event(RESTORED, "t1", 3), _event(DROPPED, "t2", 2), _event(DROPPED, "t1", 1)]
+        assert "reported by t2" in _problems(events)[0]
+        assert "reported by t2" in _problems(list(reversed(events)))[0]
+        assert _problems([_event(LIVE, "t2", 4), *events]) == []
+
+    def test_a_drop_marked_resolved_by_another_nodes_restore_still_blocks(self):
+        # The status bookkeeping (resolved flag, journal_restored_seq) ends a
+        # drop by any later restore; the disaster gate does not.
+        covered = {**STATE, "journal_restored_seq": 2}
+        events = [_event(DROPPED, "t1", 1, resolved=True), _event(RESTORED, "t2", 2)]
+        assert _problems(events, covered)
 
     def test_a_legacy_drop_without_receive_seq_is_judged_by_its_flag(self):
         assert _problems([_event(DROPPED, "t1", 0), _event(RESTORED, "t1", 5)])

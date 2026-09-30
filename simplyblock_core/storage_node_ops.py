@@ -13739,7 +13739,7 @@ def _move_lvs_leadership_locked(owner_id, moving_value, final_site, *, current_l
     if cluster.lost_site and taker.site == cluster.lost_site:
         raise LVSMoveChangedError(
             f"LVS {owner.lvstore}: {taker_id} is on the lost site {cluster.lost_site!r}, no grant")
-    fenced_site = cluster.lost_site if cluster.lost_site_state == "done" else ""
+    fenced_site = cluster.lost_site if cluster.lost_site_state == Cluster.LOST_SITE_DONE else ""
     verdict = _lvs_leadership_verdict(owner.lvstore, members, skip_site=fenced_site)
     for node_id in verdict.silent:
         node = members[node_id]
@@ -13842,7 +13842,7 @@ def _reconcile_lvs_move_locked(owner_id, db):
         return None
     target = moving[len(LVS_MOVING_PREFIX):]
     cluster = db.get_cluster_by_id(owner.cluster_id)
-    fenced_site = cluster.lost_site if cluster.lost_site_state == "done" else ""
+    fenced_site = cluster.lost_site if cluster.lost_site_state == Cluster.LOST_SITE_DONE else ""
 
     members = {}
     for node_id in _lvs_member_ids(owner):
@@ -15682,50 +15682,12 @@ def _lvs_grant_lock(cluster_id, lvs_name, *, timeout):
     """Durable per-LVS lock held around every leadership grant of a sync LVS
     that is not the promote's own transaction: leaderless recovery, the forced
     signal change, a leader rebuild (recreate_lvstore) and the move itself.
-    begin_lvs_move checks it inside its transaction, so a grant either sees the
-    ``moving:`` marker (it re-reads the owner after acquiring) or makes the
-    move's transaction refuse. Raises PreconditionError when not acquired
+    The promote's marker transaction (DBController.begin_sync_promote_moves)
+    checks it, so a grant either sees the ``moving:`` marker (it re-reads the
+    owner after acquiring) or makes that transaction refuse. Raises PreconditionError when not acquired
     within ``timeout`` seconds (0 = one attempt)."""
     with snapshot_controller.lvstore_op_lock(cluster_id, _grant_lock_name(lvs_name), timeout=timeout):
         yield
-
-
-def begin_lvs_move(owner_id: str, target_site: str, *, expect: str) -> tuple[bool, str]:
-    """Mark ``owner``'s LVS as moving to ``target_site`` (``moving:<site>``) in
-    one transaction that also requires the grant lock to be free and
-    ``lvs_active_site`` to still be ``expect``. Returns ``(True, "")`` or
-    ``(False, reason)``; nothing is written on False.
-
-    A promote whose gate has more DB-only conditions (volumes demoted, no lost
-    site, ...) must check them in the SAME transaction as the marker write:
-    it reads ``DBController._lvstore_lock_holder_tx(tr, cluster_id,
-    _grant_lock_name(lvs), now)`` inside its own gate transaction instead of
-    calling this after a separate check."""
-    if not target_site or ":" in target_site:
-        raise ValueError(f"invalid target site {target_site!r}")
-    db = DBController()
-    owner = db.get_storage_node_by_id(owner_id)
-    wrote = {"ok": False}
-
-    def _mutate(n):
-        wrote["ok"] = False
-        if n.lvs_active_site != expect:
-            return False
-        n.lvs_active_site = lvs_moving_value(target_site)
-        wrote["ok"] = True
-        return True
-
-    fresh, holder = db.update_unless_lvstore_locked(
-        owner, _mutate, owner.cluster_id, _grant_lock_name(owner.lvstore))
-    if holder:
-        return False, f"a leadership grant for {owner.lvstore} is in progress ({holder})"
-    if fresh is None:
-        return False, f"node {owner_id} not found"
-    if not wrote["ok"]:
-        return False, (f"{owner.lvstore}: lvs_active_site is {fresh.lvs_active_site!r}, "
-                       f"expected {expect!r}")
-    _invalidate_leader_caches(owner.cluster_id, owner.lvstore)
-    return True, ""
 
 
 class _LeaderCandidates(NamedTuple):

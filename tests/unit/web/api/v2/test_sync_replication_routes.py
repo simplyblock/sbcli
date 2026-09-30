@@ -28,7 +28,7 @@ from simplyblock_core.controllers.sync_replication_controller import (
     ClusterSyncStatus, GroupSyncStatus, SyncPromoteResult, VolumeSyncStatus,
 )
 from simplyblock_core.exceptions import (
-    SyncAnaError, SyncGateError, SyncGroupMemberError, SyncLeadershipMovingError, SyncPromoteRefusedError,
+    SyncAnaError, SyncGateError, SyncGroupMemberError, SyncPromoteFailedError, SyncPromoteRefusedError,
     SyncReplicationSiteError, SyncReplicationUnsupportedError, SyncSiteOfflineError,
 )
 from simplyblock_core.utils.nvme import NvmeConnectEntry
@@ -263,13 +263,16 @@ class TestVolumePromote:
         assert response.status_code == 409
         assert _detail(response) == {'message': str(error), 'volumes': error.volumes}
 
-    def test_leadership_moving_is_409(self, client, sync_controller):
-        sync_controller.sync_promote_lvol.side_effect = SyncLeadershipMovingError('LVS_1 is moving')
+    def test_a_failed_promote_is_409_with_its_task_and_volumes(self, client, sync_controller):
+        sync_controller.sync_promote_lvol.side_effect = SyncPromoteFailedError(
+            'the last promote to site site-b failed: task t1: failed: ANA refused', [VOLUME_ID], 't1')
 
         response = client.post(REPLICATION_URL + f'failover?site={SITE}&planned=true')
 
         assert response.status_code == 409
-        assert _detail(response) == {'message': 'LVS_1 is moving'}
+        assert _detail(response) == {
+            'message': 'the last promote to site site-b failed: task t1: failed: ANA refused',
+            'volumes': [VOLUME_ID], 'task_id': 't1'}
 
     def test_site_offline_is_412(self, client, sync_controller):
         sync_controller.sync_promote_lvol.side_effect = SyncSiteOfflineError('site site-a is not online')
@@ -560,6 +563,25 @@ class TestGroup:
         assert response.status_code == 204
         sync_controller.sync_demote_group.assert_called_once_with(GROUP_ID, SITE)
         group_controller.demote_group.assert_not_called()
+
+    def test_an_empty_group_is_204_on_demote_and_200_without_members_on_promote(self, client, sync_controller):
+        sync_controller.sync_demote_group.return_value = []
+        sync_controller.sync_promote_group.return_value = SyncPromoteResult(
+            in_progress=False, connection_strings={})
+
+        assert client.post(GROUP_URL + f'replication/demote?site={SITE}').status_code == 204
+        response = client.post(GROUP_URL + f'replication/failover?site={SITE}&planned=true')
+        assert response.status_code == 200 and response.json() == {'members': []}
+
+    def test_a_failed_group_promote_is_409_with_its_task(self, client, sync_controller):
+        sync_controller.sync_promote_group.side_effect = SyncPromoteFailedError(
+            'the last promote to site site-b failed', [VOLUME_ID, OTHER_VOLUME_ID], 't1')
+
+        response = client.post(GROUP_URL + f'replication/failover?site={SITE}')
+
+        assert response.status_code == 409
+        assert _detail(response)['task_id'] == 't1'
+        assert _detail(response)['volumes'] == [VOLUME_ID, OTHER_VOLUME_ID]
 
     def test_demote_gate_is_409(self, client, sync_controller):
         sync_controller.sync_demote_group.side_effect = SyncGateError('sync-replication planned', ['x'])

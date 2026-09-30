@@ -623,6 +623,16 @@ def _spec_sync_promote(runner, monkeypatch):
     db, cluster, _ = _wire_base(runner, monkeypatch, task)
     cluster.sync_replication = True
     db.get_active_sync_promote_tasks.return_value = [task]
+
+    # Mirror DBController.finish_sync_promote_task's contract on the task: a
+    # task not yet DONE ends DONE with the result (its volumes' outcome is not
+    # this test's concern).
+    def _finish(t, result, outcome):
+        if t.status == JobSchedule.STATUS_DONE:
+            return False
+        t.status, t.function_result = JobSchedule.STATUS_DONE, result
+        return True
+    db.finish_sync_promote_task.side_effect = _finish
     monkeypatch.setattr(runner.tasks_controller, "claim_task", lambda *a, **k: True)
     monkeypatch.setattr(runner.tasks_controller, "task_lease_heartbeat",
                         lambda *a, **k: contextlib.nullcontext())
