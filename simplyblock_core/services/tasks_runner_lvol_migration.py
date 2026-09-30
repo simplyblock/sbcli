@@ -2089,8 +2089,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             _get_target_secondary_node(tgt_node, src_node.get_id())[0],
             _get_target_tertiary_node(tgt_node, src_node.get_id())[0],
         ]):
-            _ret = _make_rpc(_extra_node).bdev_lvol_add_clone(
-                _clone_tgt_composite, tgt_snap_composite)
+            try:
+                _ret = _make_rpc(_extra_node).bdev_lvol_add_clone(
+                    _clone_tgt_composite, tgt_snap_composite)
+            except RPCException as e:
+                logger.warning(
+                    f"add_clone on {_extra_node.get_id()[:8]} failed for final lvol (non-fatal): {e}")
+                continue
             if not _ret:
                 logger.warning(
                     f"add_clone on {_extra_node.get_id()[:8]} failed for final lvol (non-fatal)")

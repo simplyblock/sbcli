@@ -1731,10 +1731,10 @@ class RPCClient:
         }
         if name is not None:
             params["name"] = name
-        return self._request('bdev_lvol_create_hublvol', params)
+        return self._request3('bdev_lvol_create_hublvol', **params)
 
     def bdev_lvol_delete_hublvol(self, lvs):
-        return self._request('bdev_lvol_delete_hublvol', {
+        return self._request3('bdev_lvol_delete_hublvol', **{
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
         })
 
@@ -1840,10 +1840,7 @@ class RPCClient:
             { 'jm1': True, 'remote_jm2': True, 'remote_jm3': False}
         If the state is False, it means JM is not ready, or it has an active replication task.
         """
-        params = {
-            "jm_vuid": jm_vuid,
-        }
-        return self._request("jc_get_jm_status", params)
+        return self._request3("jc_get_jm_status", jm_vuid=jm_vuid)
 
     def jc_disable_replication(self, jm_vuid):
         """Suspend journal replication on the target JM before a leadership flap.
@@ -1868,10 +1865,7 @@ class RPCClient:
                               bdev_group_id=group_id, lvol_vbdev_list=lvol_name_list)
 
     def alceml_set_qos_weights(self, qos_weights):
-        params = {
-            "qos_weights": qos_weights,
-        }
-        return self._request("bdev_distrib_set_qos_weights", params)
+        return self._request3("bdev_distrib_set_qos_weights", qos_weights=qos_weights)
 
     def jm_get_events(self):
         """Fetch every event the JM currently holds.
@@ -1951,11 +1945,7 @@ class RPCClient:
                     In this situation, management must retry this RPC call every 1 minute until compression is
                     complete. (False response)
         """
-        params = {
-            "jm_vuid": jm_vuid,
-            "get_status": True,
-        }
-        return self._request("jc_compression", params)
+        return self._request3("jc_compression", jm_vuid=jm_vuid, get_status=True)
 
     def jc_compression_start(self, jm_vuid):
         params = {
@@ -1976,10 +1966,7 @@ class RPCClient:
         return self._request3("nvmf_get_blocked_ports")
 
     def bdev_raid_get_bdevs(self):
-        params = {
-            "category": "online"
-        }
-        return self._request("bdev_raid_get_bdevs", params)
+        return self._request3("bdev_raid_get_bdevs", category="online")
 
     def rpc_get_methods(self):
         """Names of every RPC method the node's running SPDK app exposes
@@ -1990,10 +1977,7 @@ class RPCClient:
         return self._request3("rpc_get_methods")
 
     def bdev_lvs_dump_tree(self, lvstore_uuid):
-        params = {
-            "uuid": lvstore_uuid
-        }
-        return self._request("bdev_lvs_dump_tree", params)
+        return self._request3("bdev_lvs_dump_tree", uuid=lvstore_uuid)
 
     # -----------------------------------------------------------------------
     # Live volume migration RPCs
@@ -2001,7 +1985,7 @@ class RPCClient:
 
     def bdev_lvol_set_migration_flag(self, name):
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
-        return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
+        return self._request3("bdev_lvol_set_migration_flag", lvol_name=name)
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
                            allow_partial=False):
@@ -2052,7 +2036,7 @@ class RPCClient:
           ``transfer_state``: "No process" | "In progress" | "Failed" | "Done"
           ``offset``:         last written byte offset
         """
-        return self._request("bdev_lvol_transfer_stat", {"lvol_name": name})
+        return self._request3("bdev_lvol_transfer_stat", lvol_name=name)
 
     def bdev_lvol_add_clone(self, lvol_name, parent_snapshot_name):
         """
@@ -2062,17 +2046,15 @@ class RPCClient:
         Must be called on the target node after a successful blob transfer,
         before converting the lvol to a snapshot.
         """
-        return self._request("bdev_lvol_add_clone", {
-            "lvol_name": parent_snapshot_name,
-            "child_name": lvol_name,
-        })
+        return self._request3("bdev_lvol_add_clone",
+                              lvol_name=parent_snapshot_name, child_name=lvol_name)
 
     def bdev_lvol_convert(self, name):
         """
         Convert a writable lvol *name* (composite) into an immutable snapshot
         in-place.  Called on the target node after :meth:`bdev_lvol_add_clone`.
         """
-        return self._request("bdev_lvol_convert", {"lvol_name": name})
+        return self._request3("bdev_lvol_convert", lvol_name=name)
 
     def bdev_lvol_get_lvols(self, lvs_name):
         """
@@ -2081,7 +2063,7 @@ class RPCClient:
         Each entry is a dict that includes at least ``name`` and ``blobid``.
         Used during the final migration step to retrieve the target lvol's blobid.
         """
-        return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
+        return self._request3("bdev_lvol_get_lvols", lvs_name=lvs_name)
 
     def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation):
         """

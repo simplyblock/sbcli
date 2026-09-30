@@ -581,7 +581,11 @@ class StorageNode(BaseNodeObject):
         if rpc_client.bdev_get(bdev_name):
             logger.info(f'Secondary hublvol already exists: {bdev_name}')
         else:
-            ret = rpc_client.bdev_lvol_create_hublvol(lvstore_name)
+            try:
+                ret = rpc_client.bdev_lvol_create_hublvol(lvstore_name)
+            except RPCException as e:
+                logger.error(f'Failed to create secondary hublvol for {lvstore_name}: {e}')
+                return None
             if not ret:
                 logger.error(f'Failed to create secondary hublvol for {lvstore_name}')
                 return None

@@ -488,11 +488,11 @@ class TestBdevNvmeSetOptionsRetries(unittest.TestCase):
         client = RPCClient.__new__(RPCClient)
         captured = {}
 
-        def _fake_request(method, params=None):
-            captured[method] = params
+        def _fake_request3(method, **kwargs):
+            captured[method] = kwargs
             return True
 
-        client._request = _fake_request
+        client._request3 = _fake_request3
 
         client.bdev_nvme_set_options()
         self.assertEqual(captured["bdev_nvme_set_options"]["bdev_retry_count"], 2)

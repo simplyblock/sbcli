@@ -58,6 +58,7 @@ from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.utils import convert_size, lvol_tgt_bdev_name
 from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 
@@ -1045,7 +1046,11 @@ def create_migration(lvol_id, target_node_id,
         _tgt_uuid   = _bdev_info.get('uuid')
 
     # ── 1c. Set migration flag on TGT-prim ────────────────────────────────────
-    if not tgt_rpc.bdev_lvol_set_migration_flag(composite):
+    try:
+        flag_ok = tgt_rpc.bdev_lvol_set_migration_flag(composite)
+    except RPCException:
+        flag_ok = False
+    if not flag_ok:
         logger.warning(f"create_migration: bdev_lvol_set_migration_flag on primary "
                        f"failed for {composite} (may already be flagged)")
 

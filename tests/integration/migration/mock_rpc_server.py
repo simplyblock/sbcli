@@ -330,6 +330,59 @@ def _bdev_lvol_create(s: NodeState, p: dict):
     return composite
 
 
+def _bdev_lvol_create_hublvol(s: NodeState, p: dict):
+    lvs_name = p.get('lvs_name')
+    if lvs_name is not None and lvs_name != s.lvstore:
+        raise _RpcError(-22, f"Unknown lvstore {lvs_name}")
+    name = p.get('name') or 'hublvol'
+    composite = s.composite(name)
+    if composite in s.lvols or composite in s.snapshots:
+        raise _RpcError(-17, f"bdev {composite} already exists")
+    blobid = s.next_blobid()
+    map_id = s.next_map_id()
+    obj_uuid = str(_uuid_mod.uuid4())
+    s.lvols[composite] = {
+        'name': name,
+        'composite': composite,
+        'uuid': obj_uuid,
+        'blobid': blobid,
+        'map_id': map_id,
+        'size_mib': 0,
+        'migration_flag': False,
+        'driver_specific': {
+            'lvol': {
+                'blobid': blobid,
+                'lvs_name': s.lvstore,
+                'base_snapshot': None,
+                'clone': False,
+                'snapshot': False,
+                'num_allocated_clusters': 0,
+            }
+        }
+    }
+    logger.debug("mock bdev_lvol_create_hublvol %s uuid=%s", composite, obj_uuid)
+    return obj_uuid
+
+
+def _bdev_lvol_delete_hublvol(s: NodeState, p: dict):
+    uuid_param = p.get('uuid')
+    composite = None
+    if uuid_param:
+        for c, entry in s.lvols.items():
+            if entry.get('uuid') == uuid_param:
+                composite = c
+                break
+    else:
+        candidate = s.composite('hublvol')
+        if candidate in s.lvols:
+            composite = candidate
+    if composite is None:
+        raise _RpcError(-2, "hublvol not found")
+    del s.lvols[composite]
+    logger.debug("mock bdev_lvol_delete_hublvol %s", composite)
+    return True
+
+
 def _bdev_lvol_delete(s: NodeState, p: dict):
     name = _req(p, 'name')
     sync_flag = bool(p.get('sync', False))
@@ -900,6 +953,8 @@ _DISPATCH = {
     'spdk_get_version':                      _spdk_get_version,
     'bdev_lvol_get_lvstores':                _bdev_lvol_get_lvstores,
     'bdev_lvol_create':                      _bdev_lvol_create,
+    'bdev_lvol_create_hublvol':               _bdev_lvol_create_hublvol,
+    'bdev_lvol_delete_hublvol':               _bdev_lvol_delete_hublvol,
     'bdev_lvol_delete':                      _bdev_lvol_delete,
     'bdev_lvol_get_lvol_delete_status':      _bdev_lvol_get_lvol_delete_status,
     'bdev_lvol_rename':                      _bdev_lvol_rename,
