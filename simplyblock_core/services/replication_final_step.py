@@ -14,6 +14,7 @@ target paths → non_optimized, all source paths → inaccessible).
 """
 from simplyblock_core import db_controller, utils, xfer_timing
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -295,7 +296,13 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     for peer in _online_peers(tgt_node):
       with xfer_timing.phase("final_peer_add_clone", lvol=lvol.get_id(),
                              peer=peer.get_id()):
-        if not peer.rpc_client().bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite):
+        try:
+            add_clone_ok = peer.rpc_client().bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
+        except RPCException as e:
+            logger.warning(
+                f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal): {e}")
+            continue
+        if not add_clone_ok:
             logger.warning(
                 f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal)")
 

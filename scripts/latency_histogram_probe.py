@@ -78,8 +78,12 @@ def main():
     print(f"node={node.get_id()} {node.mgmt_ip}:{node.rpc_port}")
 
     for bdev in args.bdevs:
-        rpc.bdev_enable_histogram(bdev, enable=False)
-        ret = rpc.bdev_enable_histogram(bdev, enable=True, opc=args.opc)
+        try:
+            rpc.bdev_enable_histogram(bdev, enable=False)
+            ret = rpc.bdev_enable_histogram(bdev, enable=True, opc=args.opc)
+        except Exception as exc:
+            print(f"{bdev}: failed to enable histogram: {exc}")
+            continue
         print(f"histogram enabled on {bdev}: {ret}")
 
     prev = {}
@@ -108,7 +112,10 @@ def main():
     finally:
         if not args.keep:
             for bdev in args.bdevs:
-                rpc.bdev_enable_histogram(bdev, enable=False)
+                try:
+                    rpc.bdev_enable_histogram(bdev, enable=False)
+                except Exception as exc:
+                    print(f"{bdev}: failed to disable histogram: {exc}")
             print("histograms disabled")
 
 

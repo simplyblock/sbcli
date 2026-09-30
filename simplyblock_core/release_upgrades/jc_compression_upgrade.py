@@ -30,6 +30,7 @@ from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import ReleaseUpgradeError, UpgradePlugin
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -96,10 +97,19 @@ class JCCompressionUpgrade(UpgradePlugin):
                     raise ReleaseUpgradeError(
                         f"failed to suspend JC compression on node {member.get_id()}, JM: {jm_vuid}")
 
+            def _still_running(member, jm_vuid):
+                try:
+                    return member.rpc_client().jc_compression_get_status(jm_vuid)
+                except RPCException as e:
+                    logger.info(f"JC compression status check failed on node "
+                                f"{member.get_id()}, JM: {jm_vuid} (treating as still "
+                                f"running): {e}")
+                    return True
+
             pending = list(suspended)
             for _ in range(DRAIN_MAX_POLLS):
                 pending = [(member, jm_vuid) for member, jm_vuid in pending
-                           if member.rpc_client().jc_compression_get_status(jm_vuid)]
+                           if _still_running(member, jm_vuid)]
                 if not pending:
                     break
                 logger.info("JC compression still running on: "
