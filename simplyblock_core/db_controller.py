@@ -731,12 +731,14 @@ class DBController(metaclass=Singleton):
                             json.dumps(obj.to_dict(unwrap_secrets=True)).encode(),
                             type(obj), obj, index_list, *obj._watch_keys())
 
-    def _record_sync_event_tx(self, tr, event, index_list):
+    def _record_sync_event_tx(self, tr, event, index_list, expect_seq):
         stored = BaseModel._read_record(tr, event.get_db_id().encode(), SyncReplicationEvent)
         if stored is not None:
             return stored, False
         state_key = self._sync_state_key(event.cluster_id, event.lvs_name)
         state = self._read_sync_state_tx(tr, state_key)
+        if expect_seq is not None and state["seq"] != expect_seq:
+            return event, False
         state["seq"] += 1
         event.receive_seq = state["seq"]
         if event.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED:
@@ -752,7 +754,8 @@ class DBController(metaclass=Singleton):
         tr[state_key] = json.dumps(state).encode()
         return event, True
 
-    def record_sync_replication_event(self, event: SyncReplicationEvent) -> tuple[SyncReplicationEvent, bool]:
+    def record_sync_replication_event(self, event: SyncReplicationEvent, *,
+                                      expect_seq: int | None = None) -> tuple[SyncReplicationEvent, bool]:
         """Persist a sync-replication event with its ``receive_seq``, in ONE
         transaction with the LVS's state key (_SYNC_STATE_PREFIX): the next
         sequence number, the record and the watermarks. The only writer of
@@ -769,10 +772,16 @@ class DBController(metaclass=Singleton):
         already exists is a replay and is returned as stored, with False,
         without a new sequence number - a replayed old restored must not end
         a drop received since.
+
+        With ``expect_seq`` the write is conditional: unless the LVS's last
+        receive_seq is still ``expect_seq`` (no event received since the
+        caller read it), nothing is written and ``(event, False)`` is returned
+        unchanged. For a state the caller observed itself (a live status
+        answer) that a concurrently received event may already contradict.
         """
         index_list = SyncReplicationEvent.active_indexes(self.kv_store)
         event, recorded = fdb.transactional(DBController._record_sync_event_tx)(
-            self, self.kv_store, event, index_list)
+            self, self.kv_store, event, index_list, expect_seq)
         if event.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED:
             self._resolve_covered_sync_events(event.cluster_id, event.lvs_name)
         return event, recorded

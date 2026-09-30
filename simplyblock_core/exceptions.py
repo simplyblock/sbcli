@@ -17,6 +17,16 @@ class SyncReplicationSiteError(PreconditionError):
     site of the cluster, or is given where the cluster has no sites."""
 
 
+class SyncGateError(PreconditionError):
+    """A sync-replication gate refused a promote / demote: the replicas are
+    not (or were not, before a site was lost) fully in sync. ``problems``
+    lists what failed, one line each."""
+
+    def __init__(self, gate: str, problems):
+        self.problems = list(problems)
+        super().__init__(f"{gate} gate failed: " + "; ".join(self.problems))
+
+
 def reject_on_sync_replication(cluster, operation: str) -> None:
     """Raise SyncReplicationUnsupportedError when ``cluster`` is a
     sync-replication cluster."""

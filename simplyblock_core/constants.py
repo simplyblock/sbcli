@@ -865,6 +865,12 @@ SYNC_RESYNC_RETRY_BASE_SEC = 30
 SYNC_RESYNC_RETRY_MAX_SEC = 600
 SYNC_RESYNC_ALERT_RUNS = 5
 
+# Sync-replication status (sync_replication_controller): the status endpoints
+# may serve an answer this many seconds old (the gates never do); one status
+# query per storage node is bounded by the RPC timeout.
+SYNC_STATUS_CACHE_SEC = 5
+SYNC_STATUS_RPC_TIMEOUT_SEC = 5
+
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
