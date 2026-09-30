@@ -900,12 +900,19 @@ def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapSho
     generation is fully replicated for every member yet.
     """
     policy = db.get_replication_policy_by_id(policy_id)
-    if not getattr(policy, "consistency_group", False):
+    volumes = db.get_lvols_by_replication_policy(policy.get_id())
+    # Resolve the generation over the group's MEMBERS, not every volume on the
+    # policy. A group attached with attach_group_policy sets group.policy_id, not
+    # the legacy policy.consistency_group flag, so membership (a volume's group_id)
+    # is the only reliable signal a group exists; and a policy shared with a
+    # single-PVC workload carries a standalone volume that is not in the group's
+    # generation, which would poison the cut ("generation N lacks <standalone>").
+    # This is the same partition the fail-over path applies (_failover_group_members).
+    group_members, _standalone = _group_and_standalone(policy, volumes)
+    if not group_members:
         raise ReplicationConfigError(
             f"Policy {policy.policy_name} has no consistency group")
-
-    volumes = db.get_lvols_by_replication_policy(policy.get_id())
-    seq, covered = _resolve_group_failover_generation(policy, volumes)
+    seq, covered = _resolve_group_failover_generation(policy, group_members)
     if not covered:
         raise ReplicationConfigError(
             f"Policy {policy.policy_name} has no member left to resolve a "

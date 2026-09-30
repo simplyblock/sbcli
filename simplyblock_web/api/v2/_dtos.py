@@ -735,6 +735,7 @@ class ConsistencyGroupDTO(BaseModel):
     name: str
     node_id: util.OptionalUUID = None
     lvs_name: str = ""
+    policy_id: util.OptionalUUID = None
     member_count: int
     last_group_seq: int
 
@@ -748,6 +749,11 @@ class ConsistencyGroupDTO(BaseModel):
             name=model.group_name,
             node_id=UUID(model.node_id) if model.node_id else None,
             lvs_name=model.lvs_name,
+            # The group carries its replication policy (attach_group_policy sets
+            # group.policy_id); expose it so a client can find the group's policy
+            # without the placement/flag heuristic, which a group-first attach
+            # leaves empty.
+            policy_id=UUID(model.policy_id.split('/')[-1]) if model.policy_id else None,
             member_count=current,
             last_group_seq=model.last_group_seq,
         )

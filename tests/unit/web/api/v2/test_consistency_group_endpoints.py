@@ -67,6 +67,30 @@ class TestGroupDelete:
         assert resp.status_code == 409
 
 
+class TestGroupDetail:
+
+    def test_exposes_the_groups_replication_policy(self, client, db, cluster):
+        """The group detail must carry its replication policy id. A group attached
+        with attach_group_policy stores it on group.policy_id, and the group drill's
+        recovery-point read is keyed on the policy, so a client needs to read the
+        policy off the group rather than infer it from placement (empty on a
+        group-first attach)."""
+        db.get_consistency_group_by_id.return_value = \
+            factories.make_consistency_group(policy_id=factories.REPLICATION_POLICY_ID)
+        resp = client.get(f'{BASE}/')
+        assert resp.status_code == 200
+        assert resp.json()["policy_id"] == factories.REPLICATION_POLICY_ID
+
+    def test_policy_id_is_null_for_an_unattached_group(self, client, db, cluster):
+        """A standalone group with no policy attached reports a null policy id, not
+        a fabricated one."""
+        db.get_consistency_group_by_id.return_value = \
+            factories.make_consistency_group(policy_id="")
+        resp = client.get(f'{BASE}/')
+        assert resp.status_code == 200
+        assert resp.json()["policy_id"] is None
+
+
 class TestGroupReplicationStatus:
 
     def test_rolls_up_member_status(self, client, db, cluster, lvol_controller, monkeypatch):
