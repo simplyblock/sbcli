@@ -76,7 +76,9 @@ class _LblkOutageMatrix(_LblkBase):
         "graceful_shutdown",
         "container_stop",
         "short_network_interrupt",
+        "short_network_interrupt_fio_worker",
         "interface_full_network_interrupt",
+        "interface_full_network_interrupt_fio_worker",
         "node_network_isolation",
         # Straight after its own generic form, and ahead of anything
         # reboot-based: this one uses a mechanism that works, so it
@@ -155,7 +157,29 @@ class _LblkOutageMatrix(_LblkBase):
     FIO_WORKER_OUTAGES = {
         "storage_node_reboot_fio_worker": "storage_node_reboot",
         "node_network_isolation_fio_worker": "node_network_isolation",
+        "short_network_interrupt_fio_worker": "short_network_interrupt",
+        "interface_full_network_interrupt_fio_worker":
+            "interface_full_network_interrupt",
     }
+
+    #: Of those, the ones where the client must end up on a DIFFERENT node.
+    #:
+    #: Only two of the four outages actually evict. A node stops being Ready
+    #: after ~40s of missed heartbeats, but the default
+    #: `node.kubernetes.io/unreachable` toleration then holds its pods for a
+    #: further 300s -- so 420s of isolation moves them and 120s does not, and
+    #: a drain moves them by definition. Requiring a move after the short
+    #: cuts would fail a cluster that behaved perfectly.
+    FIO_WORKER_MOVE_OUTAGES = (
+        "storage_node_reboot_fio_worker",
+        "node_network_isolation_fio_worker",
+    )
+
+    #: How long the client may take to be doing IO again after a cut that did
+    #: not move it. Short: nothing has to be scheduled or reattached here, the
+    #: Job only has to restart a container, so minutes would be hiding a
+    #: problem rather than allowing for one.
+    FIO_RESUME_SEC = 300
 
     #: Outages the live-FIO client cannot survive on the node being broken, so
     #: the reserved node sits these out.
@@ -1269,6 +1293,35 @@ class _LblkOutageMatrix(_LblkBase):
     #: that never went through the loop, such as the smoke paths.
     _fio_nodes_before = None
 
+    @staticmethod
+    def _latency_ceiling_seconds():
+        """FIO_MAX_LATENCY as a number, or None if it cannot be read.
+
+        Parsed rather than duplicated. The value is deliberately a single
+        constant in utils.fio_defaults and has already been 20s and 40s; 5s
+        is the target with dev. Anything here that compared against a written
+        down number would silently start lying the day it changes.
+        """
+        m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(us|ms|s|m)?\s*",
+                         str(FIO_MAX_LATENCY))
+        if not m:
+            return None
+        scale = {"us": 1e-6, "ms": 1e-3, "s": 1, "m": 60, None: 1}
+        return float(m.group(1)) * scale[m.group(2)]
+
+    def _cut_seconds(self, outage_type):
+        """How long *outage_type* takes the client's network away, or None.
+
+        Only meaningful for the cut-based outages. A drain or a reboot has no
+        single duration worth comparing against a per-IO ceiling.
+        """
+        base = self.FIO_WORKER_OUTAGES.get(outage_type, outage_type)
+        return {
+            "short_network_interrupt": self.SHORT_NETWORK_OUTAGE_SEC,
+            "interface_full_network_interrupt": self.NETWORK_OUTAGE_SEC,
+            "node_network_isolation": self.NODE_ISOLATION_SEC,
+        }.get(base)
+
     def _fio_job_nodes(self, handles):
         """Which node each live FIO job is on right now. K8s only.
 
@@ -1316,7 +1369,7 @@ class _LblkOutageMatrix(_LblkBase):
                 # healthy -- a false failure on the availability gate, which
                 # is worse than having no gate. Ask the client instead.
                 alive = self._docker_fio_running(job)
-            if outage_type in self.FIO_WORKER_OUTAGES:
+            if outage_type in self.FIO_WORKER_MOVE_OUTAGES:
                 # The whole point of this cycle. Being moved is the pass
                 # condition, not a tolerated side effect, so it is asserted
                 # rather than waited out: a replacement must exist, it must
@@ -1338,6 +1391,71 @@ class _LblkOutageMatrix(_LblkBase):
                         "cycle -- the outage took its node on purpose.",
                         outage_type, name, was_on, landed)
                     continue
+            elif outage_type in self.FIO_WORKER_OUTAGES:
+                # A cut too short to evict anything, aimed at the client's own
+                # node. Whether FIO can survive it is not a judgement call: it
+                # is the cut length against FIO_MAX_LATENCY, which fails the
+                # job outright when one IO exceeds it. Derived rather than
+                # written down, because the ceiling is a moving number -- 40s
+                # today, 20s not long ago, and 5s is what we are aiming at
+                # with dev. At 5s every cut here outlasts it and this branch
+                # has to keep meaning the right thing without being edited.
+                #
+                # No ceiling saves a client whose OWN network is cut: its IO
+                # cannot complete while it has no path, so beyond the ceiling
+                # stopping is physics, not a defect. The 5s target is a claim
+                # about clients OUTSIDE the blast radius, and the generic
+                # lanes are where that gets tested.
+                cut = self._cut_seconds(outage_type)
+                ceiling = self._latency_ceiling_seconds()
+                # Unknown either way means 'do not claim it should have
+                # survived'. Asserting survival on a guess would fail a
+                # healthy cluster; requiring recovery never does.
+                expect_stop = (cut is None or not ceiling
+                               or cut > ceiling)
+                if alive:
+                    if expect_stop:
+                        self.logger.warning(
+                            "[matrix] %s: live FIO %s survived a %ss cut "
+                            "even though the %s ceiling should have failed "
+                            "it. Worth knowing -- either the IO in flight was "
+                            "luckier than expected or the ceiling is not "
+                            "being applied.", outage_type, name, cut,
+                            FIO_MAX_LATENCY)
+                    else:
+                        self.logger.info(
+                            "[matrix] %s: live FIO %s rode out a %ss cut, "
+                            "inside the %s ceiling.",
+                            outage_type, name, cut, FIO_MAX_LATENCY)
+                    continue
+                if not expect_stop:
+                    raise LblkPreconditionError(
+                        f"[matrix] {outage_type}: live FIO {name} stopped "
+                        f"during a {cut}s cut of its own node, which is "
+                        f"INSIDE the {FIO_MAX_LATENCY} ceiling. It should "
+                        f"have ridden this out, so this is a real loss of "
+                        f"availability rather than our own timeout firing.")
+                self.logger.info(
+                    "[matrix] %s: live FIO %s stopped during a %ss cut, "
+                    "which the %s ceiling makes expected. Waiting up to %ds "
+                    "for IO to resume.", outage_type, name, cut,
+                    FIO_MAX_LATENCY, self.FIO_RESUME_SEC)
+                deadline = time.time() + self.FIO_RESUME_SEC
+                while time.time() < deadline:
+                    sleep_n_sec(15)
+                    if self._k8s_fio_running(handle):
+                        self.logger.info("[matrix] %s: live FIO %s is "
+                                         "running again.", outage_type, name)
+                        break
+                else:
+                    raise LblkPreconditionError(
+                        f"[matrix] {outage_type}: live FIO {name} stopped "
+                        f"during the cut and was still not running "
+                        f"{self.FIO_RESUME_SEC}s after it ended. Stopping is "
+                        f"expected -- the cut outlasts the "
+                        f"{FIO_MAX_LATENCY} ceiling -- but the Job should "
+                        f"have restarted it once the network came back.")
+                continue
             if not alive and outage_type in self.DRAINING_OUTAGES:
                 # The drain asked for this. Give the Job controller a moment
                 # to place the replacement, then judge it on whether IO
