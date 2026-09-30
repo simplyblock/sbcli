@@ -579,6 +579,7 @@ jobs:
             run_remote_with_retry "$ip" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
+              rm -f /tmp/fio_*.log || true;
               mp='${NFS_MOUNTPOINT}';
               if mountpoint -q \"\$mp\"; then umount -f \"\$mp\" || umount \"\$mp\"; else
                 if mount | grep -q \" \$mp \"; then umount -f \"\$mp\" || umount \"\$mp\" || true; fi

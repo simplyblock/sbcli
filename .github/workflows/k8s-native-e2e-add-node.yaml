@@ -636,6 +636,7 @@ jobs:
             run_remote_with_retry "${ip}" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
+              rm -f /tmp/fio_*.log || true;
               # Disconnect stale NVMe-oF connections from previous runs
               for nqn in \$(nvme list-subsys -o json 2>/dev/null | jq -r '.Subsystems[]?.NQN // empty' | grep lvol || true); do
                 nvme disconnect -n \"\$nqn\" || true;

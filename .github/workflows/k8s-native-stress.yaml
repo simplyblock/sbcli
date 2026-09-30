@@ -473,6 +473,7 @@ jobs:
             run_remote_with_retry "${ip}" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
+              rm -f /tmp/fio_*.log || true;
               # Unmount test mount dirs BEFORE NVMe disconnect (device busy otherwise).
               # Try umount unconditionally — if not mounted it just fails silently.
               for mp in /mnt/test_location/*; do
