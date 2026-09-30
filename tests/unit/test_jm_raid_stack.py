@@ -29,7 +29,7 @@ class TestCreateJmStackOnRaid(unittest.TestCase):
         rpc = MagicMock()
         rpc.bdev_raid_create.return_value = True
         rpc.bdev_jm_create.return_value = True
-        rpc.get_bdevs.return_value = [{"block_size": 512, "num_blocks": 1000}]
+        rpc.bdev_get.return_value = {"block_size": 512, "num_blocks": 1000}
 
         snode = MagicMock()
         snode.get_id.return_value = "n1"

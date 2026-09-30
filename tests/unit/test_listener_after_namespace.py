@@ -38,9 +38,9 @@ class ListenerOrderingTest(unittest.TestCase):
         self.rpc.nvmf_subsystem_add_ns2.return_value = ("3", None)
         self.rpc.nvmf_subsystem_add_listener.return_value = (True, None)
         self.rpc.subsystem_create.return_value = True
-        self.rpc.get_bdevs.return_value = [
-            {"uuid": "lvol-bdev-uuid",
-             "driver_specific": {"lvol": {"blobid": 33}}}]
+        self.rpc.bdev_get.return_value = {
+            "uuid": "lvol-bdev-uuid",
+            "driver_specific": {"lvol": {"blobid": 33}}}
 
         nic = MagicMock(name="nic")
         nic.ip4_address = "192.168.10.11"

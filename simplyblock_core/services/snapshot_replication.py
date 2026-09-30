@@ -113,11 +113,11 @@ def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
     cur = snapshot.snap_bdev
     deepest = None
     for _ in range(64):
-        ret = rpc.get_bdevs(cur)
+        ret = rpc.bdev_get(cur)
         if not ret:
             return ("blocked", None,
                     f"chain bdev {cur} not readable on {snode.get_id()}")
-        base = ((ret[0].get("driver_specific") or {}).get("lvol") or {}).get("base_snapshot")
+        base = ((ret.get("driver_specific") or {}).get("lvol") or {}).get("base_snapshot")
         if not base:
             # Chain root: a self-contained blob, transferable in full.
             return ("pending", deepest, "") if deepest else ("ok", None, "")
@@ -630,10 +630,10 @@ def process_snap_replicate_start(task, snapshot):
     # The receiving volume's map id rides in every write's LBA (see above); the
     # hub uses it to route the data into the receiving volume. Without it the
     # transfer cannot land.
-    ret = remote_lv_node.rpc_client().get_bdevs(remote_lv.top_bdev)
+    ret = remote_lv_node.rpc_client().bdev_get(remote_lv.top_bdev)
     try:
-        remote_map_id = ret[0]["driver_specific"]["lvol"]["map_id"]
-    except (TypeError, KeyError, IndexError):
+        remote_map_id = ret["driver_specific"]["lvol"]["map_id"]
+    except (TypeError, KeyError):
         remote_map_id = None
     if not remote_map_id:
         logger.error(f"map_id of receiving lvol {remote_lv.top_bdev} not found on "
@@ -789,8 +789,8 @@ def _landing_volume_snapshot_members(remote_lv):
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         try:
-            ret = node.rpc_client().get_bdevs(remote_lv.top_bdev)
-            if ret and ret[0].get("driver_specific", {}).get("lvol", {}).get("snapshot"):
+            ret = node.rpc_client().bdev_get(remote_lv.top_bdev)
+            if ret and ret.get("driver_specific", {}).get("lvol", {}).get("snapshot"):
                 members.append(node.get_id())
         except Exception as e:                            # noqa: BLE001
             logger.warning("Could not read landing volume %s on %s: %s",
@@ -940,12 +940,11 @@ def _successor_is_chained_to(successor, predecessor_target_uuid):
         remote_snode = db.get_storage_node_by_id(successor_copy.lvol.node_id)
         if remote_snode.status != StorageNode.STATUS_ONLINE:
             return False
-        for bdev in (remote_snode.rpc_client().get_bdevs(successor_copy.snap_bdev) or []):
+        bdev = remote_snode.rpc_client().bdev_get(successor_copy.snap_bdev)
+        if bdev:
             driver = (bdev.get("driver_specific") or {}).get("lvol") or {}
-            if not driver.get("clone"):
-                continue
-            if driver.get("base_snapshot") in (predecessor_copy.snap_bdev,
-                                               predecessor_copy.snap_uuid):
+            if driver.get("clone") and driver.get("base_snapshot") in (
+                    predecessor_copy.snap_bdev, predecessor_copy.snap_uuid):
                 logger.info("Snapshot %s is chained onto %s in SPDK but the DB link is "
                             "missing; pruning on the SPDK verdict",
                             successor_copy.get_id(), predecessor_target_uuid)

@@ -111,7 +111,7 @@ def _restart_owns_lvs(primary_node, db_controller=None) -> bool:
 def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
     present = (
             ((bdev_names is not None) and (name in bdev_names)) or
-            (rpc_client is not None and (rpc_client.get_bdevs(name) is not None))
+            (rpc_client is not None and (rpc_client.bdev_get(name) is not None))
     )
     logger.log(INFO if present else ERROR, f"Checking bdev: {name} ... " + ('ok' if present else 'failed'))
     return present
@@ -748,7 +748,7 @@ def _check_node_lvstore(
             devices[dev.get_id()] = dev
 
     for distr in distribs_list:
-        if node.rpc_client().get_bdevs(distr):
+        if node.rpc_client().bdev_get(distr):
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info("Checking distr JM names:")
             if distr in node_distribs_list:
@@ -849,7 +849,7 @@ def _check_node_lvstore(
             logger.info(f"Checking distr bdev : {distr} ... not found")
             return False
     if raid:
-        if node.rpc_client().get_bdevs(raid):
+        if node.rpc_client().bdev_get(raid):
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
             logger.info(f"Checking raid bdev: {raid} ... not found")
@@ -1015,7 +1015,7 @@ def check_node(node_id, with_devices=True):
                     connected_jms.append(remote_device.get_id())
                     continue
 
-                bdev_info = rpc_client.get_bdevs(name)
+                bdev_info = rpc_client.bdev_get(name)
                 logger.log(INFO if bdev_info else ERROR,
                            f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
                 node_remote_devices_check &= bool(bdev_info)
@@ -1034,7 +1034,7 @@ def check_node(node_id, with_devices=True):
                         logger.info(f"IP Address: {addr}:{port}")
 
                     if bdev_info:
-                        logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+                        logger.info(f"multipath policy: {bdev_info['driver_specific']['mp_policy']}")
 
             for jm_id in snode.jm_ids:
                 logger.info(f"Checking connection to JM device {jm_id}")
@@ -1208,7 +1208,7 @@ def check_remote_device(device_id, target_node=None):
             logger.info(f"Checking device: {device_id}")
             rpc_client = node.rpc_client(timeout=8, retry=1)
             name = f'remote_{device.alceml_bdev}n1'
-            bdev_info = rpc_client.get_bdevs(name)
+            bdev_info = rpc_client.bdev_get(name)
             logger.log(DEBUG if bdev_info else ERROR, f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
             result &= bool(bdev_info)
             controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{device.alceml_bdev}')
@@ -1224,7 +1224,7 @@ def check_remote_device(device_id, target_node=None):
                     logger.info(f"IP Address: {addr}:{port}")
 
                 if bdev_info:
-                    logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+                    logger.info(f"multipath policy: {bdev_info['driver_specific']['mp_policy']}")
 
     return result
 
@@ -1302,11 +1302,11 @@ def check_snap(snap_id):
         return False
 
     snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
-    check_primary = snode.rpc_client().get_bdevs(snap.snap_bdev)
+    check_primary = snode.rpc_client().bdev_get(snap.snap_bdev)
     logger.info(f"Checking snap bdev: {snap.snap_bdev} on node: {snap.lvol.node_id} is {bool(check_primary)}")
     if snap.lvol.ha_type != "single" and snode.secondary_node_id:
         secondary_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        check_secondary = secondary_node.rpc_client().get_bdevs(snap.snap_bdev)
+        check_secondary = secondary_node.rpc_client().bdev_get(snap.snap_bdev)
         logger.info(f"Checking snap bdev: {snap.snap_bdev} on node: {snode.secondary_node_id} is {bool(check_secondary)}")
         return check_primary and check_secondary
     return check_primary

@@ -96,15 +96,13 @@ class TestConnectToRemoteJmDevs(unittest.TestCase):
         mock_db.get_jm_device_by_id.side_effect = _get_jm_dev
 
         mock_rpc = MagicMock()
-        mock_rpc.get_bdevs.return_value = existing_bdevs
+        mock_rpc.bdev_list.return_value = existing_bdevs
         # After connect_device succeeds, the expected remote bdev is "found".
-        # Simulate that by always returning a non-empty list when asked about
-        # a specific bdev.
-        def _get_bdevs(name=None):
-            if name is None:
-                return existing_bdevs
-            return [{"name": name}]
-        mock_rpc.get_bdevs.side_effect = _get_bdevs
+        # Simulate that by always returning a bdev when asked about a
+        # specific name.
+        def _bdev_get(name=None):
+            return {"name": name}
+        mock_rpc.bdev_get.side_effect = _bdev_get
 
         return mock_db, mock_rpc
 
@@ -393,13 +391,13 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
         node_rpc = MagicMock()
         node_rpc.bdev_nvme_controller_list.return_value = None
         # Since SFAM-2774 connect_device has no bdev_names snapshot param; it
-        # probes get_bdevs("<name>n1") as the already-connected fast path. That
+        # probes bdev_get("<name>n1") as the already-connected fast path. That
         # probe must MISS ("remote-faken1") to force the attach path this test
         # exercises, while the post-attach verification of the bdev the attach
         # returned ("remote-fake-n1") must HIT.
-        node_rpc.get_bdevs.side_effect = (
+        node_rpc.bdev_get.side_effect = (
             lambda name=None, *a, **kw:
-            [] if name == "remote-faken1" else [{"name": "remote-fake-n1"}])
+            None if name == "remote-faken1" else {"name": "remote-fake-n1"})
         def _rpc_client(*_args, **kwargs):
             if "timeout" in kwargs:
                 return attach_rpc

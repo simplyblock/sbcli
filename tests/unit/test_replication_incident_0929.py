@@ -243,8 +243,8 @@ class TestNeverTransferIntoASnapshot(unittest.TestCase):
         def node(nid, status, is_snap):
             n = MagicMock(status=status)
             n.get_id.return_value = nid
-            n.rpc_client.return_value.get_bdevs.return_value = [
-                {"driver_specific": {"lvol": {"snapshot": is_snap}}}]
+            n.rpc_client.return_value.bdev_get.return_value = \
+                {"driver_specific": {"lvol": {"snapshot": is_snap}}}
             return n
         nodes = {"n-p": node("n-p", "online", True), "n-s": node("n-s", "online", False),
                  "n-t": node("n-t", "offline", True)}

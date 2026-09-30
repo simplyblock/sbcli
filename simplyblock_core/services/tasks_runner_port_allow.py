@@ -108,7 +108,7 @@ def _hublvol_verified_open(peer_node, primary_node):
             return False
 
         ns_name = primary_node.hublvol.bdev_name + "n1"
-        bdev_resp = rpc.get_bdevs(ns_name)
+        bdev_resp = rpc.bdev_get(ns_name)
         return bool(bdev_resp)
     except Exception as e:
         logger.warning(

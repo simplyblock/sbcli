@@ -75,16 +75,16 @@ class _Snap:
 
 
 class _RPC:
-    """get_bdevs returning each blob's base_snapshot -- the chain topology."""
+    """bdev_get returning each blob's base_snapshot -- the chain topology."""
 
     def __init__(self, bases):
         self._bases = bases      # {bdev_name: base bdev short name or None}
 
-    def get_bdevs(self, name):
+    def bdev_get(self, name):
         if name not in self._bases:
             return None
         base = self._bases[name]
-        return [{"driver_specific": {"lvol": {"base_snapshot": base}}}]
+        return {"driver_specific": {"lvol": {"base_snapshot": base}}}
 
 
 class _Node:
@@ -680,7 +680,7 @@ def test_clone_register_confirms_the_bdev_before_add_ns():
     assert "not appear within 20s" in src[reg:], \
         "clone_register must be followed by a bdev confirmation poll"
     poll = src.index("not appear within 20s", reg)
-    assert "get_bdevs" in src[reg:poll], "the poll must probe get_bdevs"
+    assert "bdev_get" in src[reg:poll], "the poll must probe bdev_get"
 
 
 def test_retired_landing_records_are_record_only_deletions():
@@ -840,9 +840,6 @@ class _RollbackRPC:
         self.removed_ns.append(nsid)
         self.ns = [n for n in self.ns if n.get("nsid") != nsid]
         return True
-
-    def get_bdevs(self, name):
-        return [{"name": name}]
 
     def bdev_get(self, name):
         return {"name": name}

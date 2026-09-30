@@ -429,7 +429,7 @@ def _bytes_to_mib(nbytes):
 
 
 # Sentinel distinguishing "caller has no answer, query fresh" from a
-# caller-supplied get_bdevs() result -- including an explicit [] (confirmed
+# caller-supplied bdev_get() result -- including an explicit None (confirmed
 # absent). Used by _log_spdk_bdev_size and _setup_snap_transfer to avoid
 # repeating an RPC round-trip the caller already paid for.
 _BDEV_INFO_UNSET = object()
@@ -441,19 +441,19 @@ def _log_spdk_bdev_size(rpc, composite_name, label, bdev_info=_BDEV_INFO_UNSET):
     Reports num_blocks × block_size → actual_mib and sectors@512 (the sector
     count the client sees via the NVMe namespace).  Never raises.
 
-    ``bdev_info``: pass an already-fetched get_bdevs() result to log against
+    ``bdev_info``: pass an already-fetched bdev_get() result to log against
     it instead of paying for a second identical RPC round-trip -- callers
     that are about to query (or just queried) the same composite for their
     own purposes should pass that result through here.
     """
     _MIB = 1048576
     try:
-        info = rpc.get_bdevs(composite_name) if bdev_info is _BDEV_INFO_UNSET else bdev_info
+        info = rpc.bdev_get(composite_name) if bdev_info is _BDEV_INFO_UNSET else bdev_info
         if not info:
             logger.warning(
                 f"[BDEV SIZE] {label}: {composite_name} — bdev not found in SPDK")
             return None
-        b = info[0]  # type: ignore[index]
+        b = info
         num_blocks   = b.get('num_blocks', 0)
         block_size   = b.get('block_size', 512)
         actual_bytes = num_blocks * block_size
@@ -853,7 +853,7 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
                 migration_controller.cleanup_subsystem_or_ns(_nqn, lvol_uuid, subsystem_created_on_target, tgt_rpc)
             except Exception as e:
                 logger.warning(f"cleanup target subsystem {_nqn}: {e}")
-        if tgt_composite and tgt_rpc.get_bdevs(tgt_composite):
+        if tgt_composite and tgt_rpc.bdev_get(tgt_composite):
             try:
                 _delete_bdev_blocking(tgt_composite, tgt_rpc,
                                       secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc,
@@ -890,7 +890,7 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     Returns a transfer-dict on success or (None, error_string) on failure.
     Callers are responsible for rolling back any previously launched transfers.
 
-    ``existing_bdev_info``: every caller already runs its own get_bdevs(tgt_composite)
+    ``existing_bdev_info``: every caller already runs its own bdev_get(tgt_composite)
     pre-check (to decide whether to reuse an owned bdev or clean up a stale one)
     immediately before calling this function, which then repeated the identical
     query for its own reuse-vs-create decision -- two RPC round-trips for the
@@ -927,7 +927,7 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     # Pre-cleanup skips deletion of owned bdevs so we can reuse them here on retry
     # rather than paying the create cost again.
     if existing_bdev_info is _BDEV_INFO_UNSET:
-        _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
+        _bdev_info = tgt_rpc.bdev_get(tgt_composite)
     else:
         _bdev_info = existing_bdev_info
     if _bdev_info:
@@ -946,7 +946,7 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore, ndcs=_ndcs, npcs=_npcs)
         if not ret:
             return None, f"Failed to create target lvol for snap {snap_uuid}"
-        _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
+        _bdev_info = tgt_rpc.bdev_get(tgt_composite)
         _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] post-create",
                            bdev_info=_bdev_info)
         if migration is not None and tgt_composite not in migration.target_snap_bdevs:
@@ -968,9 +968,9 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             except Exception as e:
                 logger.warning(f"cleanup target lvol {tgt_composite} (non-fatal): {e}")
             return None, f"Could not get bdev info for {tgt_composite} after creation"
-        snap_blobid = _bdev_info[0]['driver_specific']['lvol']['blobid']  # type: ignore[index]
-        snap_uuid_on_tgt = _bdev_info[0]['uuid']  # type: ignore[index]
-        if sec_rpc.get_bdevs(tgt_composite):
+        snap_blobid = _bdev_info['driver_specific']['lvol']['blobid']
+        snap_uuid_on_tgt = _bdev_info['uuid']
+        if sec_rpc.bdev_get(tgt_composite):
             sec_registered = True
             logger.info(f"Secondary already has {tgt_composite}; skipping registration")
         else:
@@ -987,7 +987,7 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
                 return None, f"bdev_lvol_register on secondary failed for snap {snap_uuid}"
             sec_registered = True
         if tgt_ter and ter_rpc:
-            if ter_rpc.get_bdevs(tgt_composite):
+            if ter_rpc.bdev_get(tgt_composite):
                 ter_registered = True
             else:
                 ret_ter = ter_rpc.bdev_lvol_register(
@@ -1353,7 +1353,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 # Pre-existing (immutable) bdevs were caught by the pre-scan above and
                 # excluded from unprocessed. Anything still found here is a writable
                 # leftover from a previous failed attempt — delete and retry.
-                _existing_bdev = tgt_rpc.get_bdevs(tgt_composite)
+                _existing_bdev = tgt_rpc.bdev_get(tgt_composite)
                 if _existing_bdev:
                     if tgt_composite in (migration.target_snap_bdevs or []):
                         logger.info(
@@ -1366,8 +1366,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                                                   all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
                                                   lvs_name=tgt_node.lvstore)
                             for _ in range(10):
-                                if not tgt_rpc.get_bdevs(tgt_composite):
-                                    _existing_bdev = []
+                                if not tgt_rpc.bdev_get(tgt_composite):
+                                    _existing_bdev = None
                                     break
                                 time.sleep(0.2)
                             else:
@@ -1578,7 +1578,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Pre-cleanup: if a bdev exists on the target it is a writable leftover
         # from a previous crashed run — intermediate snaps are always freshly
         # created by this migration so they can never be pre-existing.
-        _existing_bdev = tgt_rpc.get_bdevs(tgt_composite)
+        _existing_bdev = tgt_rpc.bdev_get(tgt_composite)
         if _existing_bdev:
             if tgt_composite in (migration.target_snap_bdevs or []):
                 logger.info(
@@ -1591,8 +1591,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                                           all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
                                           lvs_name=tgt_node.lvstore)
                     for _ in range(10):
-                        if not tgt_rpc.get_bdevs(tgt_composite):
-                            _existing_bdev = []
+                        if not tgt_rpc.bdev_get(tgt_composite):
+                            _existing_bdev = None
                             break
                         time.sleep(0.2)
                     else:
@@ -1678,10 +1678,10 @@ def _get_lvol_delta_bytes(src_rpc, composite_name):
     failure so callers can treat an unknown delta conservatively.
     """
     try:
-        info = src_rpc.get_bdevs(composite_name)
+        info = src_rpc.bdev_get(composite_name)
         if not info:
             return None
-        lvol_data = info[0].get('driver_specific', {}).get('lvol', {})
+        lvol_data = info.get('driver_specific', {}).get('lvol', {})
         num_alloc = lvol_data.get('num_allocated_clusters')
         if num_alloc is None:
             return None
@@ -2307,7 +2307,7 @@ def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None, t
                 f"{actual_lvs!r} (caller did not supply source routing info); skipping delete")
             continue
 
-        if not _rpc.get_bdevs(composite):
+        if not _rpc.bdev_get(composite):
             logger.info(
                 f"Intermediate snap bdev {composite} absent; skipping SPDK delete")
         else:
@@ -2795,10 +2795,19 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
         # restarting) we assume the bdev may still exist and attempt the delete anyway.
         # _delete_bdev_blocking uses execute_on_leader_with_failover so the request is
         # routed to the current LVS leader even when the primary is down.
+        #
+        # RPCRemoteError (the node answered, the RPC itself failed for a reason
+        # other than "gone" -- bdev_get already maps ENODEV to None) is NOT
+        # treated as "primary unreachable": CLEANUP_TARGET failures don't charge
+        # the retry budget (see the phase dispatch above), so unconditionally
+        # assuming presence here retries forever whenever the node stays
+        # reachable but erroring, never just offline.
         _bdev_to_delete = tgt_lvol_composite or _pre_bdev
         if _bdev_to_delete:
             try:
-                _bdev_present = bool(tgt_rpc.get_bdevs(_bdev_to_delete))
+                _bdev_present = bool(tgt_rpc.bdev_get(_bdev_to_delete))
+            except RPCRemoteError:
+                _bdev_present = False  # reachable, but nothing confirms a delete is needed
             except Exception:
                 _bdev_present = True  # primary unreachable; attempt delete via leader failover
             if _bdev_present:
@@ -2864,7 +2873,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
         for _n in (_short_m, _short_base, _am_name):
             _cand = f"{_lvstore}/{_n}"
             try:
-                if tgt_rpc.get_bdevs(_cand):
+                if tgt_rpc.bdev_get(_cand):
                     bdev_name = _cand
                     break
             except Exception:
@@ -3303,7 +3312,7 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _g_sec_rpc = _make_rpc(_g_tgt_sec) if _g_tgt_sec else None
         _g_ter_rpc = _make_rpc(_g_tgt_ter) if _g_tgt_ter else None
 
-        _existing_bdev = tgt_rpc.get_bdevs(tgt_composite)
+        _existing_bdev = tgt_rpc.bdev_get(tgt_composite)
         if _existing_bdev:
             if tgt_composite in (migration.target_snap_bdevs or []):
                 logger.info(
@@ -3456,7 +3465,7 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc, 
         _g_sec_rpc = _make_rpc(_g_tgt_sec) if _g_tgt_sec else None
         _g_ter_rpc = _make_rpc(_g_tgt_ter) if _g_tgt_ter else None
 
-        _existing_bdev = tgt_rpc.get_bdevs(tgt_composite)
+        _existing_bdev = tgt_rpc.bdev_get(tgt_composite)
         if _existing_bdev:
             if tgt_composite in (migration.target_snap_bdevs or []):
                 logger.info(

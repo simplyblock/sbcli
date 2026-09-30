@@ -486,7 +486,7 @@ class StorageNode(BaseNodeObject):
                     ana_state="optimized",
             )
         except RPCException:
-            if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
+            if hublvol_uuid is not None and rpc_client.bdev_get(hublvol_uuid):
                 rpc_client.bdev_lvol_delete_hublvol(self.hublvol.nqn)
 
             if self.hublvol and rpc_client.subsystem_get(self.hublvol.nqn):
@@ -527,7 +527,7 @@ class StorageNode(BaseNodeObject):
         rpc_client = self.rpc_client()
         transfer_hub_uuid = None
         try:
-            existing = rpc_client.get_bdevs(self.transfer_hublvol.bdev_name)
+            existing = rpc_client.bdev_get(self.transfer_hublvol.bdev_name)
             if not existing:
                 transfer_hub_uuid = rpc_client.bdev_lvol_create_hublvol(
                     self.lvstore, name=self.transfer_hublvol.hublvol_name)
@@ -536,7 +536,7 @@ class StorageNode(BaseNodeObject):
                 logger.info(
                     f"_ensure_hub_attached: created  name={self.transfer_hublvol.bdev_name} uuid={transfer_hub_uuid}")
             else:
-                transfer_hub_uuid = existing[0].get('uuid', '') if existing else ''
+                transfer_hub_uuid = existing.get('uuid', '')
                 logger.info(f"_ensure_hub_attached: reusing existing {self.transfer_hublvol.bdev_name}")
 
             self.transfer_hublvol.uuid = transfer_hub_uuid
@@ -551,7 +551,7 @@ class StorageNode(BaseNodeObject):
                     ana_state="optimized",
             )
         except RPCException:
-            if transfer_hub_uuid is not None and rpc_client.get_bdevs(transfer_hub_uuid):
+            if transfer_hub_uuid is not None and rpc_client.bdev_get(transfer_hub_uuid):
                 rpc_client.bdev_lvol_delete_hublvol(transfer_hub_uuid)
 
             if self.transfer_hublvol and rpc_client.subsystem_get(self.transfer_hublvol.nqn):
@@ -578,7 +578,7 @@ class StorageNode(BaseNodeObject):
 
         bdev_name = f'{lvstore_name}/hublvol'
         # Check if hublvol already exists for this LVStore on this node
-        if rpc_client.get_bdevs(bdev_name):
+        if rpc_client.bdev_get(bdev_name):
             logger.info(f'Secondary hublvol already exists: {bdev_name}')
         else:
             ret = rpc_client.bdev_lvol_create_hublvol(lvstore_name)
@@ -633,7 +633,7 @@ class StorageNode(BaseNodeObject):
         logger.info('Adopting hublvol %s on %s', bdev_name, self.get_id())
         rpc_client = self.rpc_client()
 
-        if not rpc_client.get_bdevs(bdev_name):
+        if not rpc_client.bdev_get(bdev_name):
             if not rpc_client.bdev_lvol_create_hublvol(lvstore_name):
                 raise RPCException(f'Failed to create adopted hublvol for {lvstore_name}')
         else:
@@ -665,7 +665,7 @@ class StorageNode(BaseNodeObject):
             rpc_client = self.rpc_client()
 
             try:
-                if not rpc_client.get_bdevs(self.hublvol.bdev_name):
+                if not rpc_client.bdev_get(self.hublvol.bdev_name):
                     ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
                     if not ret:
                         logger.error(f'Failed to recreate hublvol on {self.get_id()}')
@@ -772,7 +772,7 @@ class StorageNode(BaseNodeObject):
         # NQN/port/UUID) — see create_secondary_hublvol.
         remote_bdev = f"{lvs_node.hublvol.bdev_name}n1"
 
-        if not rpc_client.get_bdevs(remote_bdev):
+        if not rpc_client.bdev_get(remote_bdev):
             # All hublvol NVMe-oF attach/detach now flows through a single
             # cross-process coordinator (FDB-locked, cooldown-gated,
             # detach-and-wait-gone). Previously two services could fire
@@ -816,7 +816,7 @@ class StorageNode(BaseNodeObject):
             # the in-window add_ns — the wait below covers that.
             return True
 
-        if not rpc_client.get_bdevs(remote_bdev):
+        if not rpc_client.bdev_get(remote_bdev):
             # Attach done (either just now or pre-staged with attach_only)
             # but the namespace bdev has not surfaced yet — the target's
             # add_ns may have completed only milliseconds ago and the AER
@@ -825,7 +825,7 @@ class StorageNode(BaseNodeObject):
             # the arbiter and fails loudly if the bdev is truly absent).
             for _ in range(10):
                 time.sleep(0.1)
-                if rpc_client.get_bdevs(remote_bdev):
+                if rpc_client.bdev_get(remote_bdev):
                     break
             else:
                 logger.warning(

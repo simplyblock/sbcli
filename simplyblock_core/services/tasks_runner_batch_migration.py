@@ -438,8 +438,8 @@ def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_
             # otherwise fail every time. bdev_lvol_get_bdevs reports
             # is_snapshot on the primary; treat that as "already done" and
             # just advance the predecessor pointer.
-            _existing = tgt_rpc.get_bdevs(tgt_composite)
-            if _existing and _existing[0].get('driver_specific', {}).get('lvol', {}).get('is_snapshot'):
+            _existing = tgt_rpc.bdev_get(tgt_composite)
+            if _existing and _existing.get('driver_specific', {}).get('lvol', {}).get('is_snapshot'):
                 pred_composite = tgt_composite
                 continue
 

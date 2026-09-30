@@ -193,11 +193,11 @@ def ensure_hublvol_active_active(rpc, ctrl_name, node_id="?", role="?",
     tries = HUBLVOL_MP_POLICY_WAIT_TRIES if wait else 1
     for attempt in range(tries):
         try:
-            if rpc.get_bdevs(bdev_name):
+            if rpc.bdev_get(bdev_name):
                 break
         except Exception as e:
             logger.warning(
-                "hublvol %s on %s (%s): get_bdevs(%s) raised %s; leaving "
+                "hublvol %s on %s (%s): bdev_get(%s) raised %s; leaving "
                 "multipath policy at SPDK default",
                 ctrl_name, node_id, role, bdev_name, e)
             return False

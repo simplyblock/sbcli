@@ -392,7 +392,7 @@ def check_node(snode):
             if snode.jm_device and snode.jm_device.get_id():
                 jm_device = snode.jm_device
                 logger.info(f"Node JM: {jm_device.get_id()}")
-                if rpc_client.get_bdevs(jm_device.jm_bdev):
+                if rpc_client.bdev_get(jm_device.jm_bdev):
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                     connected_jms.append(jm_device.get_id())
                 else:

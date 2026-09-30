@@ -816,23 +816,15 @@ class RPCClient:
         }
         return self._request2("bdev_lvol_delete", params)
 
-    def get_bdevs(self, name=None, all_bdevs=False):
-        """Filtered by default. An unfiltered dump serializes EVERY bdev on
-        the SPDK app thread and scales with lvol+snapshot count — run
-        20260725 (~21k object bdevs): 18s+ per dump, KATO starved, JC/JM
-        exclusions, node aborts. Cold paths that genuinely need the full
-        inventory (node-add on a near-empty node) must declare it with
-        ``all_bdevs=True``; anything periodic must pass a ``name`` or use
-        ``bdev_nvme_controller_list`` (scales with attached controllers)."""
-        if name:
-            return self._request("bdev_get_bdevs", {"name": name})
-        if not all_bdevs:
-            logger.warning(
-                "unfiltered bdev_get_bdevs without all_bdevs=True — full "
-                "dumps wedge the SPDK app thread at scale; pass a name, use "
-                "bdev_nvme_controller_list, or declare all_bdevs=True "
-                "(cold paths only)")
-        return self._request("bdev_get_bdevs", None)
+    def bdev_list(self) -> list[dict]:
+        """Every bdev on the SPDK app thread. Scales with lvol+snapshot
+        count, not device count — run 20260725 (~21k object bdevs): 18s+ per
+        dump, KATO starved, JC/JM exclusions, node aborts. Reserve this for
+        cold paths that genuinely need the full inventory (node-add on a
+        near-empty node); anything periodic must use ``bdev_get`` (single
+        name) or ``bdev_nvme_controller_list`` (scales with attached
+        controllers) instead."""
+        return self._request3("bdev_get_bdevs")
 
     def bdev_get(self, name) -> dict | None:
         """Single bdev lookup by exact name, mirroring ``subsystem_get``.
@@ -1001,12 +993,9 @@ class RPCClient:
             //  This node (device) number, in the group, defined by ha_comm_addrs.
           "ha_inode_self": 1
         """
-        try:
-            ret = self.get_bdevs(name)
-            if ret:
-                return ret
-        except Exception:
-            pass
+        ret = self.bdev_get(name)
+        if ret:
+            return ret
         params = {
             "name": name,
             "jm_names": ",".join(jm_names),
@@ -1132,12 +1121,9 @@ class RPCClient:
         return self._request("bdev_get_iostat", params)
 
     def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4, superblock=False):
-        try:
-            ret = self.get_bdevs(name)
-            if ret:
-                return ret
-        except Exception:
-            pass
+        ret = self.bdev_get(name)
+        if ret:
+            return ret
         params = {
             "name": name,
             "raid_level": raid_level,
