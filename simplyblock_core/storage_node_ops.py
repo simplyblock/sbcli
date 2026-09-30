@@ -8951,6 +8951,16 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
 
+    # A node the removal has already shut down has nothing left to stop, and
+    # this function's first write (in_shutdown) would knock it out of the
+    # removal status that owns it -- set_node_status then refuses the final
+    # OFFLINE, and the node is left in_shutdown. A worker drain or a bulk stop
+    # that reaches such a node is therefore a no-op, reported as done.
+    if snode.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        logger.info(f"Node {node_id} is {snode.status}: already shut down by its "
+                    f"removal; nothing to do")
+        return True
+
     # Expansion lock: while the cluster is IN_EXPANSION the role rebalance
     # is re-wiring sec/tert stacks across nodes — losing any node mid-move
     # leaves half-applied topology. Shutdowns are disabled until the
