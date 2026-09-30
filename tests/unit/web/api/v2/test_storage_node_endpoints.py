@@ -258,3 +258,39 @@ class TestStorageNodeStats:
         assert response.status_code == 200
         storage_node_ops.get_node_iostats_history.assert_called_once_with(
             STORAGE_NODE_ID, '10', parse_sizes=False, with_sizes=True)
+
+
+class TestRemovalSteps:
+    """The removal's three steps as endpoints: prepare-removal (and its
+    progress), verify-drained, then the node DELETE (above)."""
+
+    def test_prepare_removal_starts_the_first_step(self, client, storage_node, monkeypatch):
+        from simplyblock_web.api.v2.cluster import storage_node as module
+        calls = []
+        monkeypatch.setattr(module.node_drain_steps, 'prepare_node_for_removal',
+                            lambda nid, force_remove=False: calls.append((nid, force_remove)) or {})
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/prepare-removal', params={'force_remove': True})
+
+        assert response.status_code == 202
+        assert calls == [(STORAGE_NODE_ID, True)]
+
+    def test_prepare_removal_progress_reports_the_node_status(self, client, storage_node, monkeypatch):
+        from simplyblock_web.api.v2.cluster import storage_node as module
+        monkeypatch.setattr(module.node_drain_steps, 'prepare_progress', lambda nid: {
+            'done': False, 'total': 3, 'completed': 1, 'failed': 0,
+            'message': '1 of 3 devices rebuilt onto peers', 'node_status': 'migrating_devices'})
+
+        body = client.get(f'{BASE}/{STORAGE_NODE_ID}/prepare-removal').json()
+
+        assert body['node_status'] == 'migrating_devices'
+        assert body['done'] is False and body['completed'] == 1
+
+    def test_verify_drained_lists_what_is_left(self, client, storage_node, monkeypatch):
+        from simplyblock_web.api.v2.cluster import storage_node as module
+        monkeypatch.setattr(module.node_drain_steps, 'verify_node_drained', lambda nid: {
+            'drained': False, 'lvols': ['lv-1'], 'snapshots': []})
+
+        body = client.post(f'{BASE}/{STORAGE_NODE_ID}/verify-drained').json()
+
+        assert body == {'drained': False, 'lvols': ['lv-1'], 'snapshots': []}
