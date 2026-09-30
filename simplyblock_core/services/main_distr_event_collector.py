@@ -4,12 +4,17 @@ import time
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import constants, db_controller, rpc_client, utils, distr_controller
-from simplyblock_core.controllers import events_controller, device_controller
+from simplyblock_core import (
+    constants,
+    db_controller,
+    distr_controller,
+    rpc_client,
+    utils,
+)
+from simplyblock_core.controllers import device_controller, events_controller
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)

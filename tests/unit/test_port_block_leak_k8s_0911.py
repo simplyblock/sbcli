@@ -35,7 +35,6 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import storage_node_monitor
 from simplyblock_core.utils import port_block
 
-
 # --------------------------------------------------------------------------
 # 3. is_port_blocked parsed the wrong shape
 # --------------------------------------------------------------------------

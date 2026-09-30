@@ -25,17 +25,16 @@ by seeding volumes in FDB before the restart runs.
 
 import pytest
 
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import storage_node_ops
-
+from simplyblock_core.models.storage_node import StorageNode
 from tests.integration.ftt2.conftest import (
-    set_node_offline,
-    set_node_unreachable_fabric_healthy,
-    set_node_no_fabric,
-    set_node_down_fabric_healthy,
-    prepare_node_for_restart,
     create_test_lvol,
     patch_externals,
+    prepare_node_for_restart,
+    set_node_down_fabric_healthy,
+    set_node_no_fabric,
+    set_node_offline,
+    set_node_unreachable_fabric_healthy,
 )
 
 RESTART_NODE = 0

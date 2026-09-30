@@ -47,13 +47,11 @@ from uuid import UUID
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import (
-    BaseModel, ConfigDict, Field, HttpUrl, SecretStr, TypeAdapter)
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, TypeAdapter
 
 from simplyblock_core.kms import KMS
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 from simplyblock_core.utils.secrets import unwrap_secret
-
 
 logger = logging.getLogger()
 

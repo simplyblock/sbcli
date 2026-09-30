@@ -32,7 +32,6 @@ import yaml
 from simplyblock_core.services import __main__ as dispatcher
 from simplyblock_core.services import task_runners
 
-
 SERVICES_DIR = pathlib.Path(dispatcher.__file__).parent
 REPO_ROOT = SERVICES_DIR.parent.parent
 

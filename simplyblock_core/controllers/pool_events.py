@@ -1,8 +1,8 @@
 import logging
 
+from simplyblock_core import constants, utils
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
-from simplyblock_core import utils, constants
 
 logger = logging.getLogger()
 

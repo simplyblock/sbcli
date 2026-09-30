@@ -1,6 +1,5 @@
 from simplyblock_core.db_controller import DBController
 
-
 CLUSTER_ID = "10293de0-b91c-4618-b17a-5c3e688686f4"
 MISMATCHES = [
     ("dbdda8a9-040a-4415-9f83-6236d3d7e552", "376d710d-de8a-4817-ba8d-cb87be45c933"),

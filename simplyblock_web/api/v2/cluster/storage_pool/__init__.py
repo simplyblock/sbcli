@@ -6,19 +6,18 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import pool_controller
 from simplyblock_core import utils as core_utils
-from simplyblock_core.utils.helpers import single_or_none
+from simplyblock_core.controllers import pool_controller
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool as PoolModel
+from simplyblock_core.utils.helpers import single_or_none
 
 from ... import util as util
 from ..._dependencies import Cluster, StoragePool
-from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
-from .volume import api as volume_api
-from .snapshot import api as snapshot_api
 from ..._dtos import StoragePoolDTO
-
+from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
+from .snapshot import api as snapshot_api
+from .volume import api as volume_api
 
 api = APIRouter()
 db = DBController()

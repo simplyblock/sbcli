@@ -54,7 +54,7 @@ import random
 import string
 import threading
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 
 from e2e_tests.cluster_test_base import generate_random_sequence
@@ -3483,7 +3483,9 @@ class DeviceAddAfterBootstrapUnderLoadDocker(_DeviceAddAfterBootstrapBase, TestL
 #  K8s-native concrete test classes (PVC + FIO K8s Jobs)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest  # noqa: E402
+from stress_test.continuous_k8s_native_failover import (
+    K8sNativeFailoverTest,  # noqa: E402
+)
 
 
 class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):

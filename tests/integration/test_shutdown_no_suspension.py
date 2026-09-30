@@ -29,9 +29,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

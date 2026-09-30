@@ -10,12 +10,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import simplyblock_core.services.task_runner_base as trb
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
-import simplyblock_core.services.task_runner_base as trb
 
 
 def _task(**params):
@@ -445,7 +445,9 @@ def _expanded_cluster(runner, phase):
 
 
 def test_cluster_expand_completes_and_queues_device_migration(cluster_expand):
-    from simplyblock_core.controllers.cluster_expansion.planner import EXPAND_PHASE_COMPLETED
+    from simplyblock_core.controllers.cluster_expansion.planner import (
+        EXPAND_PHASE_COMPLETED,
+    )
     from simplyblock_core.models.nvme_device import NVMeDevice
 
     _expanded_cluster(cluster_expand, EXPAND_PHASE_COMPLETED)

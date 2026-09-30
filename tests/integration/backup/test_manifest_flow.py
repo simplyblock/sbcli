@@ -7,9 +7,9 @@ away, and rebuild usable Backup records from the manifests alone.
 Only boto3 is mocked -- it is an external service client. The database is real.
 """
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
-from uuid import UUID
 
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
@@ -21,7 +21,6 @@ from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
-
 
 # Every id a manifest carries is a UUID, so the objects these tests build are
 # given real ones rather than readable stand-ins.

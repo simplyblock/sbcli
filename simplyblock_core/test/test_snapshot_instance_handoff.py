@@ -16,8 +16,8 @@ from typing import Any
 
 import pytest
 
-from simplyblock_core.services import snapshot_monitor as sm
 from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.services import snapshot_monitor as sm
 
 
 class _LvolRef:

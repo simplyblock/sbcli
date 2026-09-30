@@ -14,7 +14,6 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_monitor as sm
 
-
 LVOL_ID = "LV1"
 
 

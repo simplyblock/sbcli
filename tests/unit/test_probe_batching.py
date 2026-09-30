@@ -11,8 +11,8 @@ locally, falling back to per-device filtered probes when the inventory fails.
 import types
 
 from simplyblock_core import storage_node_ops
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 
 
 class TestFetchBdevNameSet:

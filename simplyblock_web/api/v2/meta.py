@@ -1,9 +1,8 @@
+import fdb
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse, Response
-import fdb
 
 from simplyblock_core.db_controller import DBController
-
 
 api = APIRouter()
 

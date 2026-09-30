@@ -7,17 +7,16 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import tasks_controller
-from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 from simplyblock_core import storage_node_ops
+from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 
 from ... import util as util
 from ..._dependencies import Cluster, StorageNode
+from ..._dtos import StorageNodeDTO, TaskDTO
 from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .device import api as device_api
-from ..._dtos import StorageNodeDTO, TaskDTO
-
 
 api = APIRouter()
 db = DBController()
@@ -244,8 +243,8 @@ def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
 @instance_api.post('/shutdown', name='clusters:storage-nodes:shutdown', status_code=202, responses={202: {"content": None}, 409: {"description": "Shutdown preconditions not met; retry later or use force"}})
 def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
     if not force:
-        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
         from simplyblock_core.db_controller import DBController
+        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
         allowed, reason = _check_ftt_allows_node_removal(storage_node.get_id(), DBController())
         if not allowed:
             raise ValueError(reason)

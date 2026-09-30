@@ -1,15 +1,11 @@
 import logging
 
-from flask import Blueprint
+from flask import Blueprint, Response
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
+
+from simplyblock_core import db_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core import db_controller
-
-
-from prometheus_client import generate_latest
-from flask import Response
-from prometheus_client import Gauge, CollectorRegistry
-
 
 logger = logging.getLogger(__name__)
 

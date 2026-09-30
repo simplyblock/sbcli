@@ -29,7 +29,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from deploy_single_node_lblk import (  # noqa: E402
-    CONFIGS, SBCTL, deploy, ssh_exec, terminate,
+    CONFIGS,
+    SBCTL,
+    deploy,
+    ssh_exec,
+    terminate,
 )
 
 LVOL_COUNT = 2

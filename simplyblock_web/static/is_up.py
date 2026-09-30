@@ -1,7 +1,6 @@
 
 from kubernetes import client, config
 
-
 namespace='default'
 deployment_name='dep_name'
 pod_name = 'python-interact-deployment'

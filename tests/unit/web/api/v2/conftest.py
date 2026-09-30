@@ -21,13 +21,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from simplyblock_core.db_controller import DBController
-
 import simplyblock_web.api.v2 as v2
 import simplyblock_web.api.v2._auth as auth_module
 import simplyblock_web.api.v2._dependencies as dependencies_module
 import simplyblock_web.api.v2._dtos as dtos_module
 import simplyblock_web.api.v2.cluster as cluster_module
+import simplyblock_web.api.v2.cluster.alert as alert_module
 import simplyblock_web.api.v2.cluster.backup as backup_module
 import simplyblock_web.api.v2.cluster.replication as replication_module
 import simplyblock_web.api.v2.cluster.storage_node as storage_node_module
@@ -38,10 +37,9 @@ import simplyblock_web.api.v2.cluster.storage_pool.volume as volume_module
 import simplyblock_web.api.v2.cluster.storage_pool.volume.replication as volume_replication_module
 import simplyblock_web.api.v2.cluster.subsystem.migration as migration_module
 import simplyblock_web.api.v2.cluster.task as task_module
-import simplyblock_web.api.v2.cluster.alert as alert_module
 import simplyblock_web.api.v2.management_node as management_node_module
 import simplyblock_web.api.v2.metrics as metrics_module
-
+from simplyblock_core.db_controller import DBController
 from tests.unit.web.api.v2 import _factories as factories
 
 

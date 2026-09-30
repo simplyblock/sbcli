@@ -18,7 +18,6 @@ from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 
-
 # Every id a manifest carries is a UUID, so the objects these tests build are
 # given real ones rather than readable stand-ins.
 CLUSTER_ID = "c1000000-0000-4000-8000-000000000001"

@@ -25,7 +25,6 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services import tasks_runner_backup
 
-
 CLUSTER_ID = "cluster-1"
 OWN_BUCKET = "simplyblock-backup-cluster-1"
 FOREIGN_BUCKET = "someone-elses-bucket"

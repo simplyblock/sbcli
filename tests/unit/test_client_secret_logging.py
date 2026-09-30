@@ -7,8 +7,8 @@ import pytest
 from pydantic import SecretStr
 
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.utils.secrets import MASK
 from simplyblock_core.snode_client import SNodeClient
+from simplyblock_core.utils.secrets import MASK
 
 
 def _make_json_response(payload):

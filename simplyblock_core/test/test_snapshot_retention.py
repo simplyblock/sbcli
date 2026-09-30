@@ -2,8 +2,12 @@
 import pytest
 
 from simplyblock_core.snapshot_retention import (
-    RetentionScheduleError, RetentionTier, describe, horizon_sec,
-    parse_schedule, select_retained,
+    RetentionScheduleError,
+    RetentionTier,
+    describe,
+    horizon_sec,
+    parse_schedule,
+    select_retained,
 )
 
 HOUR = 3600
@@ -108,6 +112,7 @@ def test_prune_consults_the_schedule_before_the_flat_count():
     """_prune_internal_snapshots must ask the policy's schedule which
     snapshots survive; the flat keep-count is only the fallback."""
     import inspect
+
     from simplyblock_core.services import snapshot_replication as sr
     src = inspect.getsource(sr._prune_internal_snapshots)
     assert "_retention_schedule_for" in src
@@ -118,6 +123,7 @@ def test_prune_consults_the_schedule_before_the_flat_count():
 
 def test_invalid_schedule_falls_back_instead_of_crashing_the_runner():
     import inspect
+
     from simplyblock_core.services import snapshot_replication as sr
     src = inspect.getsource(sr._retention_schedule_for)
     assert "RetentionScheduleError" in src and "return []" in src
@@ -125,6 +131,7 @@ def test_invalid_schedule_falls_back_instead_of_crashing_the_runner():
 
 def test_policy_rejects_an_invalid_schedule_at_ingress():
     import inspect
+
     from simplyblock_core.controllers import replication_policy_controller as rpc
     src = inspect.getsource(rpc.add_policy)
     assert "parse_schedule" in src, "the policy must validate the schedule when set"
@@ -135,6 +142,7 @@ def test_failover_generation_walks_back_through_history():
     """generation=0 is the newest point-in-time; higher values step back, and
     asking for more generations than exist is an error, not a silent newest."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc._last_replicated_target_snapshot)
     assert "generation" in src

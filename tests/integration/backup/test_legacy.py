@@ -21,9 +21,9 @@ Tests cover:
 All external dependencies (FDB, RPC) are mocked.
 """
 
+import time
 import unittest
 from unittest.mock import MagicMock, patch
-import time
 
 import pytest
 
@@ -33,11 +33,10 @@ from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCConnectionError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -408,8 +407,8 @@ class TestCreateS3Bdev(unittest.TestCase):
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
 
-        from simplyblock_core.models.backup_config import BackupConfig
         from simplyblock_core.controllers.backup.device import create_s3_bdev
+        from simplyblock_core.models.backup_config import BackupConfig
         node = _node()
         # A genuine pre-BackupConfig dict: no region, local_testing standing in
         # for four separate decisions.
@@ -1117,8 +1116,9 @@ class TestSnapshotAddWithBackup(unittest.TestCase):
     @patch("simplyblock_core.controllers.snapshot_controller.db_controller")
     def test_add_signature_accepts_backup(self, mock_db, mock_events):
         """Verify snapshot_controller.add accepts backup parameter."""
-        from simplyblock_core.controllers.snapshot_controller import add
         import inspect
+
+        from simplyblock_core.controllers.snapshot_controller import add
         sig = inspect.signature(add)
         self.assertIn("backup", sig.parameters)
         self.assertEqual(sig.parameters["backup"].default, False)

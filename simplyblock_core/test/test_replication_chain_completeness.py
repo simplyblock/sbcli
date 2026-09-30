@@ -278,6 +278,7 @@ def test_no_backward_task_for_a_policy_managed_clone():
     same snapshots and the cutover's target-side gate starves (2026-08-21,
     two of five case-4 cutovers dead on max retry)."""
     import inspect
+
     from simplyblock_core.controllers import snapshot_controller as sc
     src = inspect.getsource(sc.add)
     gate = 'if lvol.cloned_from_snap and not getattr(lvol, "replication_policy_id", "")'
@@ -599,6 +600,7 @@ def test_interrupted_landing_volume_is_adopted_or_cleared():
     look for a record already wearing the derived name and adopt it (online),
     wait for it (in_deletion), or clear it (half-created)."""
     import inspect
+
     from simplyblock_core.services import snapshot_replication as sr
     src = inspect.getsource(sr)
     probe = src.index('rep_name = f"REP_{snapshot.snap_name}"')
@@ -619,6 +621,7 @@ def test_failover_guard_matches_nqn_and_nsid_not_nqn_alone():
     while reporting success. The guard must compare the FULL preserved
     identity: nqn AND ns_id."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
     # The guard now resolves the copy through the replication record, because
@@ -641,6 +644,7 @@ def test_namespaced_siblings_replicate_to_the_same_target_node():
     -- each advertising the same NQN with only part of the namespaces.
     Siblings must inherit the node their subsystem already replicates to."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.add_lvol_ha)
     assert "_sibling_replication_node" in src,         "namespaced siblings must share a replication node"
@@ -669,6 +673,7 @@ def test_clone_register_confirms_the_bdev_before_add_ns():
     (PVC-expand) and the case-3 eviction. The stack build must poll the bdev
     into existence before the namespace add runs."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc._create_bdev_stack)
     reg = src.index("bdev_lvol_clone_register")
@@ -687,6 +692,7 @@ def test_retired_landing_records_are_record_only_deletions():
     naive top_bdev fallback delete would have destroyed the replicated
     snapshot's data)."""
     import inspect
+
     from simplyblock_core.services import lvol_monitor as lm
     src = inspect.getsource(lm.check_node)
     guard = src.index("if not lvol.bdev_stack:")
@@ -700,6 +706,7 @@ def test_retirement_tears_down_plumbing_without_delete_lvol():
     record to in_deletion for the monitor's async machinery, so any
     interruption before remove() strands the record."""
     import inspect
+
     from simplyblock_core.services import snapshot_replication as sr
     src = inspect.getsource(sr)
     empty = src.index("remote_lv.bdev_stack = []")
@@ -717,6 +724,7 @@ def test_shared_subsystem_survives_one_members_teardown():
     landed). Delete-on-empty must first prove no other live volume claims
     the NQN."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc._remove_lvol_subsys_from_node)
     guard = src.index("other")
@@ -886,6 +894,7 @@ def test_failover_rollback_covers_every_placed_node_with_ids():
     node_id), whose 'except KeyError: return True' swallowed the mismatch --
     so it reported success while deleting nothing."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc._create_target_lvol_clone)
     assert "placed_nodes" in src, "rollback must track every node that got the copy"
@@ -909,6 +918,7 @@ def test_policy_attach_also_keeps_a_subsystem_on_one_target_node():
     Both entry points must consult the sibling rule, and _create_target_lvol_clone
     re-checks it at creation time as the last line of defence."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
 
     src = inspect.getsource(lc.replication_start)

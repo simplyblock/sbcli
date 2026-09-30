@@ -14,8 +14,8 @@ from typing import NoReturn
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import events_controller, snapshot_controller
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services.task_runner_base import (
