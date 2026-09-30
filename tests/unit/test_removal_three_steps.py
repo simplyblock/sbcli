@@ -86,6 +86,21 @@ class TestStatusLeavesARebuiltRemovalNodeOut(unittest.TestCase):
         status, _ = self._verdicts(_cluster(npcs=2), self._online(5) + [leaving])
         assert status == Cluster.STATUS_ACTIVE
 
+    def test_k1_the_removals_own_shutdown_is_already_the_removals(self):
+        # prepare_node_for_removal shuts the node down while it is still
+        # pending_removal: its devices go unavailable before it reaches
+        # migrating_devices. That must not read as an outage beside the removal.
+        leaving = _node("x", "10.0.9.9", StorageNode.STATUS_PENDING_REMOVAL,
+                        (NVMeDevice.STATUS_UNAVAILABLE,))
+        status, without = self._verdicts(_cluster(npcs=1), self._online(4) + [leaving])
+        assert status == Cluster.STATUS_DEGRADED
+        assert without == Cluster.STATUS_ACTIVE
+
+    def test_a_serving_pending_removal_node_counts_as_online(self):
+        leaving = _node("x", "10.0.9.9", StorageNode.STATUS_PENDING_REMOVAL)
+        status, without = self._verdicts(_cluster(npcs=1), self._online(4) + [leaving])
+        assert (status, without) == (Cluster.STATUS_ACTIVE, Cluster.STATUS_ACTIVE)
+
     def test_another_outage_is_not_blamed_on_the_removal(self):
         leaving = _node("x", "10.0.9.9", StorageNode.STATUS_MIGRATING_DEVICES,
                         (NVMeDevice.STATUS_FAILED,))
