@@ -553,7 +553,7 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
             cluster_id, node.get_id(), bdev_name, primary_node.get_id())
 
 
-def check_snapshot_capacity(pool, cluster, lvol, all_lvols=None, all_snaps=None):
+def check_snapshot_capacity(pool, cluster, lvol, all_snaps=None):
     """Admission control for taking a snapshot, at pool AND cluster level.
 
     A new snapshot immediately owns the source volume's utilized bytes (the
@@ -587,13 +587,7 @@ def check_snapshot_capacity(pool, cluster, lvol, all_lvols=None, all_snaps=None)
                 f"LVol size: {utils.humanbytes(size)} must be below this limit")
 
     if pool.pool_max_size > 0:
-        # Only load the full lvol/snapshot sets when a pool size limit is set
-        # (the capacity sum). Unlimited pools — the common case — skip both scans.
-        if not all_lvols:
-            all_lvols = db_controller.get_mini_lvols()
-        if not all_snaps:
-            all_snaps = db_controller.get_mini_snapshots()
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             return (f"Cannot take snapshot: pool capacity would reach "
                     f"{utils.humanbytes(total + size)} of "
@@ -735,8 +729,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     # the source volume's UTILIZED size (see check_snapshot_capacity). This
     # replaces the former extra pool check at the source's full provisioned
     # size, which rejected snapshots the capacity model actually allows.
-    cap_error = check_snapshot_capacity(pool, cluster, lvol,
-                                        all_lvols=all_lvols, all_snaps=all_snaps)
+    cap_error = check_snapshot_capacity(pool, cluster, lvol, all_snaps=all_snaps)
     if cap_error:
         logger.error(cap_error)
         return False, cap_error
@@ -1432,11 +1425,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
-    # all_snaps only feeds the pool-capacity sum below (get_random_vuid no
-    # longer dedupes); minis suffice and the load is skipped entirely for
-    # unlimited pools instead of full-scanning every snapshot per clone.
-    if not all_snaps and pool.pool_max_size > 0:
-        all_snaps = db_controller.get_mini_snapshots()
     if not all_lvols:
         all_lvols = db_controller.get_mini_lvols()
     size = snap.size
@@ -1446,7 +1434,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, msg
 
     if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
