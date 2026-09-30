@@ -719,6 +719,17 @@ def _nvmf_get_subsystems(s: NodeState, p: dict):
     return list(s.subsystems.values())
 
 
+def _nvmf_subsystem_get_listeners(s: NodeState, p: dict):
+    nqn = _req(p, 'nqn')
+    if nqn not in s.subsystems:
+        raise _RpcError(-2, f"subsystem {nqn} not found")
+    listeners = []
+    for entry in s.subsystems[nqn]['listen_addresses']:
+        address = {k: v for k, v in entry.items() if k != 'ana_state'}
+        listeners.append({'address': address, 'ana_state': entry.get('ana_state', 'optimized')})
+    return listeners
+
+
 def _nvmf_subsystem_add_listener(s: NodeState, p: dict):
     nqn = _req(p, 'nqn')
     listen_address = _req(p, 'listen_address')
@@ -908,6 +919,7 @@ _DISPATCH = {
     'nvmf_create_subsystem':                 _nvmf_create_subsystem,
     'nvmf_delete_subsystem':                 _nvmf_delete_subsystem,
     'nvmf_get_subsystems':                   _nvmf_get_subsystems,
+    'nvmf_subsystem_get_listeners':          _nvmf_subsystem_get_listeners,
     'nvmf_subsystem_add_listener':           _nvmf_subsystem_add_listener,
     'nvmf_subsystem_add_ns':                 _nvmf_subsystem_add_ns,
     'nvmf_subsystem_remove_ns':              _nvmf_subsystem_remove_ns,

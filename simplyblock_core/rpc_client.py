@@ -438,7 +438,7 @@ class RPCClient:
             raise
 
     def subsystem_delete(self, nqn):
-        return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
+        return self._request3("nvmf_delete_subsystem", nqn=nqn)
 
     def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1, max_namespaces=32, allow_any_host=True):
         params = {
@@ -449,7 +449,7 @@ class RPCClient:
             "ana_reporting": True,
             "max_namespaces": max_namespaces,
             "model_number": model_number}
-        return self._request("nvmf_create_subsystem", params)
+        return self._request3("nvmf_create_subsystem", **params)
 
     def keyring_file_add_key(self, name: str, path: str, *, allow_existing: bool = False):
         """Register a file-based key in SPDK's keyring by path.
@@ -490,7 +490,7 @@ class RPCClient:
             params["dhchap_ctrlr_key"] = dhchap_ctrlr_key
         if dhchap_group:
             params["dhchap_group"] = dhchap_group
-        return self._request("nvmf_subsystem_add_host", params)
+        return self._request3("nvmf_subsystem_add_host", **params)
 
     def subsystem_remove_host(self, nqn, host):
         return self._request3("nvmf_subsystem_remove_host", nqn=nqn, host=host)
@@ -529,7 +529,7 @@ class RPCClient:
         }
         if trtype=="TCP":
             params.update({"c2h_success": True,"sock_priority": 0})
-        return self._request("nvmf_create_transport", params)
+        return self._request3("nvmf_create_transport", **params)
 
     def sock_impl_set_options(self, bind_to_device=None):
         params = {
@@ -564,7 +564,7 @@ class RPCClient:
 
         if ana_state:
             params["ana_state"] = ana_state
-        return self._request("nvmf_subsystem_add_listener", params)
+        return self._request3("nvmf_subsystem_add_listener", **params)
 
     def bdev_nvme_controller_list(self, name=None) -> list[dict]:
         """Every attached NVMe-oF controller, or -- filtered by ``name`` --
@@ -708,10 +708,7 @@ class RPCClient:
         return ret, err
 
     def nvmf_subsystem_remove_ns(self, nqn, nsid):
-        params = {
-            "nqn": nqn,
-            "nsid": nsid}
-        return self._request("nvmf_subsystem_remove_ns", params)
+        return self._request3("nvmf_subsystem_remove_ns", nqn=nqn, nsid=nsid)
 
     def nvmf_subsystem_ns_update(self, nqn, nsid, bdev_name):
         """Atomically swap the bdev backing *nsid* in *nqn* for *bdev_name*.
@@ -765,11 +762,10 @@ class RPCClient:
         if anagrpid is not None:
             params['anagrpid'] = int(anagrpid)
 
-        return self._request("nvmf_subsystem_listener_set_ana_state", params)
+        return self._request3("nvmf_subsystem_listener_set_ana_state", **params)
 
     def get_device_stats(self, uuid):
-        params = {"name": uuid}
-        return self._request("bdev_get_iostat", params)
+        return self._request3("bdev_get_iostat", name=uuid)
 
     def reset_device(self, device_name):
         return self._request3("bdev_nvme_reset_controller", name=device_name)
@@ -782,7 +778,7 @@ class RPCClient:
             "clear_method": clear_method,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
         }
-        return self._request("bdev_lvol_create_lvstore", params)
+        return self._request3("bdev_lvol_create_lvstore", **params)
 
     def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, ndcs=0, npcs=0, uuid=None):
         params = {
@@ -800,7 +796,7 @@ class RPCClient:
             })
         if uuid:
             params["uuid"] = uuid
-        return self._request("bdev_lvol_create", params)
+        return self._request3("bdev_lvol_create", **params)
 
     def delete_lvol(self, name, sync=False, special_delete=False):
         params = {
@@ -835,11 +831,7 @@ class RPCClient:
             raise
 
     def resize_lvol(self, lvol_bdev, blockcnt):
-        params = {
-            "lvol_bdev": lvol_bdev,
-            "blockcnt": blockcnt
-        }
-        return self._request("ultra21_lvol_set", params)
+        return self._request3("ultra21_lvol_set", lvol_bdev=lvol_bdev, blockcnt=blockcnt)
 
     def resize_clone(self, clone_bdev, blockcnt):
         return self._request3("ultra21_lvol_set", clone_bdev=clone_bdev, blockcnt=blockcnt)
