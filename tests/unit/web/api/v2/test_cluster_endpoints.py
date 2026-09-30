@@ -2,6 +2,7 @@
 
 import pytest
 
+from simplyblock_core.models.cluster import Cluster
 from tests.unit.web.api.v2._factories import CLUSTER_ID, EVENT_ID, make_event
 
 # max_subsys and spdk_vcpu_count are capacity decisions with real
@@ -31,6 +32,27 @@ class TestListClusters:
         (body,) = client.get('/api/v2/clusters/').json()
 
         assert body['secret'] == 'cluster-secret'
+
+
+# ClusterDTO.status is a hand-listed Literal; every persisted status must serialize.
+ALL_CLUSTER_STATUSES = [
+    getattr(Cluster, name) for name in dir(Cluster)
+    if name.startswith('STATUS_') and isinstance(getattr(Cluster, name), str)
+    and name != 'STATUS_CODE_MAP'
+]
+
+
+class TestClusterStatusSerialization:
+
+    @pytest.mark.parametrize('status', ALL_CLUSTER_STATUSES)
+    def test_every_core_status_serializes(self, client, db, cluster, status):
+        cluster.status = status
+
+        response = client.get('/api/v2/clusters/')
+
+        assert response.status_code == 200
+        (body,) = response.json()
+        assert body['status'] == status
 
 
 class TestCreateCluster:

@@ -58,6 +58,7 @@ ClusterStatus = Literal[
     "unready",
     "in_activation",
     "in_expansion",
+    "in_shrink",
 ]
 
 StoragePoolStatus = Literal["active", "inactive"]
