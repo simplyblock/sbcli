@@ -732,13 +732,13 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
     def _client(self):
         from simplyblock_core.rpc_client import RPCClient
         c = RPCClient.__new__(RPCClient)
-        c._request = MagicMock(return_value=True)
+        c._request3 = MagicMock(return_value=True)
         return c
 
     def test_without_dhchap_only_pollers_mask_sent(self):
         client = self._client()
         client.nvmf_set_config("0x1")
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["poll_groups_mask"], "0x1")
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
@@ -748,7 +748,7 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
         client.nvmf_set_config("0x3",
                                dhchap_digests=["sha256", "sha384", "sha512"],
                                dhchap_dhgroups=["ffdhe2048"])
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertEqual(params["poll_groups_mask"], "0x3")
         self.assertEqual(params["dhchap_digests"], ["sha256", "sha384", "sha512"])
         self.assertEqual(params["dhchap_dhgroups"], ["ffdhe2048"])
@@ -760,7 +760,7 @@ class TestNvmfSetConfigDhchapParams(unittest.TestCase):
         client.nvmf_set_config("0x1",
                                dhchap_digests=constants.DHCHAP_DIGESTS,
                                dhchap_dhgroups=[constants.DHCHAP_DHGROUP])
-        params = client._request.call_args[0][1]
+        params = client._request3.call_args.kwargs
         self.assertIn("sha256", params["dhchap_digests"])
         self.assertIn("sha384", params["dhchap_digests"])
         self.assertIn("sha512", params["dhchap_digests"])
@@ -864,10 +864,10 @@ class TestSubsystemRemoveHost(unittest.TestCase):
     def test_remove_host_params(self):
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
+        client._request3 = MagicMock(return_value=True)
         client.subsystem_remove_host("nqn:sub", "nqn:host")
-        client._request.assert_called_once_with("nvmf_subsystem_remove_host",
-                                                 {"nqn": "nqn:sub", "host": "nqn:host"})
+        client._request3.assert_called_once_with("nvmf_subsystem_remove_host",
+                                                  nqn="nqn:sub", host="nqn:host")
 
 
 # ---------------------------------------------------------------------------

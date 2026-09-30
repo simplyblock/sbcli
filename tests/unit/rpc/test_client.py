@@ -114,33 +114,33 @@ class TestBdevDistribCreate(unittest.TestCase):
     def _args(self):
         return ("distrib_1", 7001, 2, 1, 1000, 4096, ["jm1"], 4096)
 
-    @patch.object(RPCClient, "_request3")
-    def test_existing_bdev_short_circuits_create(self, mock_req):
-        mock_req.return_value = [{"name": "distrib_1"}]
+    @patch.object(RPCClient, "bdev_get")
+    def test_existing_bdev_short_circuits_create(self, mock_probe):
+        mock_probe.return_value = {"name": "distrib_1"}
         client = _make_client()
 
-        with patch.object(client, "_request") as mock_request:
+        with patch.object(client, "_request3") as mock_request:
             result = client.bdev_distrib_create(*self._args())
 
         self.assertEqual(result["name"], "distrib_1")
         mock_request.assert_not_called()
 
-    @patch.object(RPCClient, "_request3")
-    def test_probe_miss_falls_through_to_create(self, mock_req):
-        mock_req.return_value = []
+    @patch.object(RPCClient, "bdev_get")
+    def test_probe_miss_falls_through_to_create(self, mock_probe):
+        mock_probe.return_value = None
         client = _make_client()
 
-        with patch.object(client, "_request", return_value=True) as mock_request:
+        with patch.object(client, "_request3", return_value=True) as mock_request:
             self.assertTrue(client.bdev_distrib_create(*self._args()))
 
         mock_request.assert_called_once()
 
-    @patch.object(RPCClient, "_request3")
-    def test_probe_rpc_error_propagates_instead_of_creating(self, mock_req):
-        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
+    @patch.object(RPCClient, "bdev_get")
+    def test_probe_rpc_error_propagates_instead_of_creating(self, mock_probe):
+        mock_probe.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
         client = _make_client()
 
-        with patch.object(client, "_request") as mock_request:
+        with patch.object(client, "_request3") as mock_request:
             with self.assertRaises(RPCException):
                 client.bdev_distrib_create(*self._args())
 
@@ -329,7 +329,7 @@ class TestBdevLvolS3Merge(unittest.TestCase):
 
 class TestBdevLvolS3MergeStat(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request")
+    @patch.object(RPCClient, "_request3")
     def test_merge_stat_calls_request_with_ids(self, mock_req):
         mock_req.return_value = {"transfer_state": "In progress"}
         client = _make_client()
@@ -337,7 +337,7 @@ class TestBdevLvolS3MergeStat(unittest.TestCase):
         result = client.bdev_lvol_s3_merge_stat(1, 2)
 
         self.assertEqual(result["transfer_state"], "In progress")
-        mock_req.assert_called_once_with("bdev_lvol_s3_merge_stat", {"s3_id": 1, "old_s3_id": 2})
+        mock_req.assert_called_once_with("bdev_lvol_s3_merge_stat", s3_id=1, old_s3_id=2)
 
 
 if __name__ == "__main__":

@@ -290,8 +290,8 @@ def _transfer_params(**kwargs):
         def __init__(self):
             self.sent: tuple = ()
 
-        def _request(self, method, params=None, request_timeout=None):
-            self.sent = (method, params)
+        def _request3(self, method, **kwargs):
+            self.sent = (method, kwargs)
             return True
 
     c = _C()

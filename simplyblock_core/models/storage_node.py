@@ -844,7 +844,13 @@ class StorageNode(BaseNodeObject):
                          lvs_node.lvstore, self.get_id())
             return False
 
-        if not rpc_client.bdev_lvol_connect_hublvol(lvs_node.lvstore, remote_bdev):
+        try:
+            connected = rpc_client.bdev_lvol_connect_hublvol(lvs_node.lvstore, remote_bdev)
+        except RPCException as e:
+            logger.error("bdev_lvol_connect_hublvol failed for %s on %s: %s",
+                         lvs_node.lvstore, self.get_id(), e)
+            return False
+        if not connected:
             logger.error("bdev_lvol_connect_hublvol failed for %s on %s",
                          lvs_node.lvstore, self.get_id())
             return False

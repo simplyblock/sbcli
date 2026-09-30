@@ -165,28 +165,28 @@ class TestFallbackOverhead(unittest.TestCase):
 # bdev_alceml_create RPC params
 # ---------------------------------------------------------------------------
 class TestBdevAlcemlCreateRPC(unittest.TestCase):
-    @patch.object(RPCClient, "_request")
+    @patch.object(RPCClient, "_request3")
     def test_no_checksum_params_when_method_zero(self, mock_req):
         mock_req.return_value = True
         client = _make_rpc_client()
         client.bdev_alceml_create("alc_x", "nvme0", "uuid-1")
-        params = mock_req.call_args[0][1]
+        params = mock_req.call_args.kwargs
         self.assertNotIn("checksum_validation_method", params)
         self.assertNotIn("cache_size", params)
         self.assertNotIn("cache_eviction_threshold", params)
 
-    @patch.object(RPCClient, "_request")
+    @patch.object(RPCClient, "_request3")
     def test_method_1_only_emits_method_field(self, mock_req):
         mock_req.return_value = True
         client = _make_rpc_client()
         client.bdev_alceml_create("alc_x", "nvme0", "uuid-1", checksum_method=1)
-        params = mock_req.call_args[0][1]
+        params = mock_req.call_args.kwargs
         self.assertEqual(params["checksum_validation_method"], 1)
         # Defaults of 0 must not be sent so the data plane uses its own defaults.
         self.assertNotIn("cache_size", params)
         self.assertNotIn("cache_eviction_threshold", params)
 
-    @patch.object(RPCClient, "_request")
+    @patch.object(RPCClient, "_request3")
     def test_method_2_with_explicit_cache_overrides(self, mock_req):
         mock_req.return_value = True
         client = _make_rpc_client()
@@ -194,12 +194,12 @@ class TestBdevAlcemlCreateRPC(unittest.TestCase):
             "alc_x", "nvme0", "uuid-1",
             checksum_method=2, cache_size=1500, cache_eviction_threshold=85,
         )
-        params = mock_req.call_args[0][1]
+        params = mock_req.call_args.kwargs
         self.assertEqual(params["checksum_validation_method"], 2)
         self.assertEqual(params["cache_size"], 1500)
         self.assertEqual(params["cache_eviction_threshold"], 85)
 
-    @patch.object(RPCClient, "_request")
+    @patch.object(RPCClient, "_request3")
     def test_existing_params_unchanged(self, mock_req):
         # Regression guard: the new kwargs must not perturb the well-known params
         # the data plane expects.
@@ -210,7 +210,7 @@ class TestBdevAlcemlCreateRPC(unittest.TestCase):
             pba_init_mode=2, pba_page_size=2 * 1024 * 1024,
             write_protection=True, full_page_unmap=True, checksum_method=1,
         )
-        params = mock_req.call_args[0][1]
+        params = mock_req.call_args.kwargs
         self.assertEqual(params["name"], "alc_x")
         self.assertEqual(params["cntr_path"], "nvme0")
         self.assertEqual(params["uuid"], "uuid-1")
