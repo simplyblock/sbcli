@@ -94,7 +94,7 @@ from simplyblock_core.controllers import (
     migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.exceptions import ChainLockTimeout, MigrationConflictError, PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -900,10 +900,12 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
 # ---------------------------------------------------------------------------
 
 
-# Sentinel distinguishing "caller has no answer, query fresh" from a caller-
-# supplied get_bdevs() result (including an explicit [], i.e. "confirmed
-# absent") for _setup_snap_transfer's existing_bdev_info param below.
-_BDEV_INFO_UNSET = object()
+# _setup_snap_transfer's existing_bdev_info uses the _BDEV_INFO_UNSET sentinel
+# defined above _log_spdk_bdev_size. It must stay the only one: a second
+# `_BDEV_INFO_UNSET = object()` here rebound the name after that function's
+# default was bound to the first, so its `bdev_info is _BDEV_INFO_UNSET` check
+# failed on every defaulted call and logged "'object' object is not
+# subscriptable" instead of the size (2026-09-30).
 
 
 def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
@@ -1663,7 +1665,12 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
         )
         logger.info(f"Intermediate snapshot triggered: {_reason}")
         _plan_len_before = len(migration.snap_migration_plan or [])
-        _take_intermediate_snapshot(migration)
+        if _take_intermediate_snapshot(migration) == _SNAP_BUSY:
+            # Transient: suspend (via error_message) without charging the
+            # retry budget toward cleanup_target.
+            migration.error_message = "intermediate snapshot deferred: chain lock busy"
+            migration.write_to_db(db.kv_store)
+            return False, True, None
         plan = migration.snap_migration_plan
         if not plan:
             return False, True, "Intermediate snapshot failed"
@@ -1872,22 +1879,37 @@ def _get_lvol_delta_bytes(src_rpc, composite_name):
         return None
 
 
+_SNAP_TAKEN = 'taken'
+_SNAP_SKIPPED = 'skipped'
+_SNAP_BUSY = 'busy'
+
+
 def _take_intermediate_snapshot(migration):
     """
     Take an additional "shrink" snapshot from the live lvol on the source node
     to reduce the delta that must be frozen during PHASE_LVOL_MIGRATE.
+
+    Returns _SNAP_TAKEN; _SNAP_SKIPPED when the snapshot could not be taken
+    and the rounds are closed (carry on without one); or _SNAP_BUSY when the
+    chain lock is held by another operation -- nothing changed, retry later.
+    A lock timeout used to escape from here uncaught and kill the whole
+    runner (2026-09-30, run 26).
     """
     snap_name = f"_mig_{migration.uuid[:8]}_r{migration.intermediate_snap_rounds}"
     logger.info(
         f"[IO-FREEZE] {_now_ms()} intermediate snapshot starting: "
         f"lvol={migration.lvol_id} round={migration.intermediate_snap_rounds} name={snap_name}")
-    snap_uuid, err = snapshot_controller.add(
-        migration.lvol_id, snap_name, bypass_migration_check=True)
+    try:
+        snap_uuid, err = snapshot_controller.add(
+            migration.lvol_id, snap_name, bypass_migration_check=True)
+    except ChainLockTimeout as e:
+        logger.warning(f"Intermediate snapshot deferred, chain busy: {e}")
+        return _SNAP_BUSY
     if err:
         logger.warning(f"Intermediate snapshot failed (proceeding without): {err}")
         migration.intermediate_snap_rounds = migration.max_intermediate_snap_rounds
         migration.write_to_db(db.kv_store)
-        return
+        return _SNAP_SKIPPED
 
     logger.info(
         f"[IO-RESUME] {_now_ms()} intermediate snapshot done: "
@@ -1900,6 +1922,7 @@ def _take_intermediate_snapshot(migration):
         f"Intermediate snapshot taken: {snap_name} "
         f"(round {migration.intermediate_snap_rounds}/{migration.max_intermediate_snap_rounds})"
     )
+    return _SNAP_TAKEN
 
 
 def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
@@ -3732,22 +3755,39 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc,
         ctx = {}
         migration.transfer_context = {}
 
-    # Take the intermediate snapshot if not already in flight.
+    # Take the intermediate snapshot if not already in flight -- unless this
+    # round's snapshot was already taken and only its transfer failed. Then the
+    # same snapshot is transferred again: taking a fresh one on every retry
+    # froze the volume each time, piled a new snapshot onto a source that was
+    # already timing out, and ran the round counter to "10/3" (2026-09-30,
+    # run 26: 36 snapshots in two minutes on one lvstore).
     if ctx.get('stage') != 'intermediate_transfer':
-        _plan_len_before = len(migration.snap_migration_plan or [])
-        _take_intermediate_snapshot(migration)
-        plan = migration.snap_migration_plan
-        if not plan:
-            return False, True, "Group intermediate: _take_intermediate_snapshot failed"
-        if len(plan) == _plan_len_before:
-            # Not taken (see the solo loop): nothing to transfer, and plan[-1]
-            # is an already-migrated planned snapshot, not an intermediate.
-            logger.info("Group intermediate: no snapshot taken; proceeding without one")
-            migration.transfer_context = {'stage': 'intermediate_done'}
-            migration.write_to_db(db.kv_store)
-            return True, False, None
-        snap_uuid = plan[-1]
-        snap_index = len(plan) - 1
+        plan = migration.snap_migration_plan or []
+        retry_uuid = ctx.get('snap_uuid') if ctx.get('stage') == 'intermediate_retry' else None
+        if retry_uuid and retry_uuid in plan:
+            snap_uuid = retry_uuid
+            snap_index = plan.index(retry_uuid)
+            logger.info(
+                f"Group intermediate: retrying the transfer of {snap_uuid} "
+                f"(round {migration.intermediate_snap_rounds}); no new snapshot")
+        else:
+            _plan_len_before = len(plan)
+            if _take_intermediate_snapshot(migration) == _SNAP_BUSY:
+                migration.error_message = "intermediate snapshot deferred: chain lock busy"
+                migration.write_to_db(db.kv_store)
+                return False, True, None
+            plan = migration.snap_migration_plan
+            if not plan:
+                return False, True, "Group intermediate: _take_intermediate_snapshot failed"
+            if len(plan) == _plan_len_before:
+                # Not taken (see the solo loop): nothing to transfer, and plan[-1]
+                # is an already-migrated planned snapshot, not an intermediate.
+                logger.info("Group intermediate: no snapshot taken; proceeding without one")
+                migration.transfer_context = {'stage': 'intermediate_done'}
+                migration.write_to_db(db.kv_store)
+                return True, False, None
+            snap_uuid = plan[-1]
+            snap_index = len(plan) - 1
 
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
@@ -3839,14 +3879,15 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc,
     if not t.get('transfer_done'):
         result = src_rpc.bdev_lvol_transfer_stat(src_composite)
         if result is None:
-            migration.transfer_context = {}
+            migration.transfer_context = {'stage': 'intermediate_retry', 'snap_uuid': snap_uuid}
             migration.write_to_db(db.kv_store)
             return False, True, f"bdev_lvol_transfer_stat returned None for {snap_uuid}"
         state = result.get('transfer_state', 'No process')
         if state == 'In progress':
             return False, False, None
         if state in ('Failed', 'No process'):
-            migration.transfer_context = {}
+            # Keep the snapshot: the retry transfers it again (see above).
+            migration.transfer_context = {'stage': 'intermediate_retry', 'snap_uuid': snap_uuid}
             migration.write_to_db(db.kv_store)
             return False, True, f"Intermediate transfer {state} for {snap_uuid}"
         t['transfer_done'] = True

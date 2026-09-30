@@ -819,7 +819,12 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         # This call moves real data and can legitimately run longer than the
         # 5s blanket timeout _make_rpc()/src_rpc uses for every other RPC in
         # this file -- use a dedicated, longer-timeout client just for it.
-        final_step_rpc = src_node.rpc_client(timeout=15, retry=2)
+        #
+        # 20s, above SPDK's own 15s bound on the step: the answer is then
+        # SPDK's verdict. At 15s this client gave up first, called the step
+        # failed while SPDK went on to finish it, and every retry failed on
+        # bdev_lvol_convert (2026-09-30, run 21).
+        final_step_rpc = src_node.rpc_client(timeout=20, retry=2)
         ret = final_step_rpc.bdev_lvol_batch_transfer_final_step(
             lvol_names, lvol_ids, snapshot_names,
             constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")

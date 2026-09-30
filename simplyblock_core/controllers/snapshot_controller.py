@@ -16,7 +16,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
     migration_controller
 
 from simplyblock_core import constants, utils
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import ChainLockTimeout, PreconditionError
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -424,7 +424,7 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True,
                 chain_root)
             yield
             return
-        raise PreconditionError(
+        raise ChainLockTimeout(
             f"Timed out acquiring chain lock on {chain_root} "
             f"(for {object_uuid})")
     stop = threading.Event()
