@@ -1042,7 +1042,7 @@ def get_node_nvmf_ports(cluster_id):
         if node.rpc_port > 0:
             used_ports.add(node.rpc_port)
         # Collect per-lvstore ports
-        for lvs_name, ports in (node.lvstore_ports or {}).items():
+        for ports in (node.lvstore_ports or {}).values():
             if isinstance(ports, dict):
                 for p in ports.values():
                     if isinstance(p, int) and p > 0:
