@@ -189,7 +189,13 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--blk-names',
-        help='Comma separated list of block device names to use, like sdb,sdc (requires --lblk)',
+        help='Comma separated list of block devices to use (requires --lblk). An entry is a '
+             'kernel name (sdb), a kernel path (/dev/sdb), or a persistent /dev/disk name '
+             '(/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0, '
+             '/dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba). A persistent name '
+             'is what an unattended deployment should pass: a kernel name states a position '
+             "in this boot's enumeration order, so a host that probes its controllers in "
+             'another order hands it to another disk',
         type=str,
         default='',
         dest='blk_names',
@@ -197,7 +203,8 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--blk-names-exclude',
-        help='Comma separated list of block device names to exclude, like sda (requires --lblk)',
+        help='Comma separated list of block devices to exclude (requires --lblk), in any of '
+             'the spellings --blk-names takes',
         type=str,
         default='',
         dest='blk_names_exclude',

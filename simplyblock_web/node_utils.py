@@ -1,6 +1,7 @@
 
 import json
 import logging
+import os
 import re
 
 import boto3
@@ -176,62 +177,88 @@ def _disk_holders(name: str) -> list[str]:
     return sorted(set(holders))
 
 
-def _disk_by_id_path(name: str) -> str:
-    """Preferred stable /dev/disk/by-id symlink for a whole disk: wwn-* first,
-    then any other non-partition link. Empty when none exists."""
-    import os
-    by_id_dir = "/dev/disk/by-id"
-    target = f"/dev/{name}"
-    candidates: list[str] = []
-    try:
-        for entry in os.listdir(by_id_dir):
-            if "-part" in entry:
-                continue
-            path = os.path.join(by_id_dir, entry)
-            try:
-                if os.path.realpath(path) == target:
-                    candidates.append(path)
-            except OSError:
-                continue
-    except OSError:
-        return ""
-    if not candidates:
-        return ""
-    candidates.sort(key=lambda p: (0 if "/wwn-" in p.replace("\\", "/") else 1, p))
-    return candidates[0]
+DEV_ROOT = "/dev"
+
+# The /dev/disk directories a persistent name is taken from, in the order a
+# device's preferred link is looked for.
+#
+# The ones left out are left out for the same reason. by-uuid and by-label name
+# the filesystem on the device, which mkfs writes and which moves to whatever
+# disk an image is restored onto; by-path names the slot the device is plugged
+# into, which is the enclosure's enumeration order rather than the device's own
+# name and hands its link to the replacement when a disk is swapped. All of them
+# survive a reboot and none of them identifies the device, so recording one
+# would answer the wrong question stably.
+PERSISTENT_LINK_DIRS = ("by-partuuid", "by-id")
+
+# by-id links built from an identifier the device reports about itself, rather
+# than from strings assembled around it.
+#
+# The distinction is what separates the links a real machine offers for one
+# device. A namespace publishes its EUI or its UUID, and beside them two links
+# built from the controller's model and serial, one of them with an index
+# appended -- and that index counts the namespaces in the order they were found,
+# which is the same kind of ordering the kernel name already is. A SCSI device's
+# NAA designator arrives as a wwn- link, so the SCSI case needs no rule of its
+# own.
+_SELF_REPORTED_PREFIXES = ("wwn-", "nvme-eui.", "nvme-uuid.")
 
 
-def _partition_by_id_path(name: str, partuuid: str) -> str:
-    """Preferred stable path for a partition: /dev/disk/by-partuuid/<uuid>
-    (stable across disk renames and unaffected by by-id link churn), falling
-    back to a /dev/disk/by-id/*-part* symlink. Empty when none exists."""
-    import os
-    if partuuid:
-        path = f"/dev/disk/by-partuuid/{partuuid.lower()}"
+def _persistent_link_rank(link: str) -> int:
+    """How much of the device's own identity a link carries, lower is better.
+
+    A partition's by-partuuid link comes first because the identifier is
+    written in the partition table on the device itself: it survives the disk
+    being re-exported under another serial, which a hypervisor or an enclosure
+    swap does and which renames every by-id link the partition has.
+    """
+    directory = os.path.basename(os.path.dirname(link))
+    if directory == "by-partuuid":
+        return 0
+    if directory == "by-id" and os.path.basename(link).startswith(_SELF_REPORTED_PREFIXES):
+        return 1
+    return 2
+
+
+def read_persistent_links(dev_root: str = DEV_ROOT) -> dict[str, list[str]]:
+    """Every persistent /dev/disk link the host publishes, by kernel name.
+
+    A kernel name is a position in one boot's enumeration order, not an
+    identity: on the lab workers the disk the kernel calls sdb is the one the
+    hypervisor calls drive-scsi0, and sda is drive-scsi2, so a host that probes
+    its controllers in another order hands each kernel name to another disk.
+    These links are built from what the device reports, and follow it.
+
+    Every link is kept and not only the preferred one, because the side that
+    records a device and the side that looks it up again run different code on
+    different machines: a lookup matched against one side's ranking would miss
+    a device that is present under another of its own names. Each device's list
+    is ordered best first, so ``[0]`` is the one to write down.
+
+    A missing directory is not a failure. A host whose udev publishes nothing
+    has no persistent names, which every caller already handles, and failing
+    here would take down a configure on a machine whose disks are all readable.
+    Nothing is opened and no target is stat'd: the link is read and the name it
+    ends in is recorded, so a link udev left behind when a device was removed
+    lands under a key nobody asks about.
+    """
+    links: dict[str, list[str]] = {}
+    for link_dir in PERSISTENT_LINK_DIRS:
+        directory = os.path.join(dev_root, "disk", link_dir)
         try:
-            if os.path.realpath(path) == f"/dev/{name}":
-                return path
+            names = os.listdir(directory)
         except OSError:
-            pass
-    by_id_dir = "/dev/disk/by-id"
-    target = f"/dev/{name}"
-    candidates: list[str] = []
-    try:
-        for entry in os.listdir(by_id_dir):
-            if "-part" not in entry:
-                continue
-            path = os.path.join(by_id_dir, entry)
+            continue
+        for name in names:
+            path = os.path.join(directory, name)
             try:
-                if os.path.realpath(path) == target:
-                    candidates.append(path)
+                target = os.readlink(path)
             except OSError:
                 continue
-    except OSError:
-        return ""
-    if not candidates:
-        return ""
-    candidates.sort(key=lambda p: (0 if "/wwn-" in p.replace("\\", "/") else 1, p))
-    return candidates[0]
+            links.setdefault(os.path.basename(target), []).append(path)
+    for paths in links.values():
+        paths.sort(key=lambda p: (_persistent_link_rank(p), p))
+    return links
 
 
 def _partition_holders(disk_name: str, part_name: str) -> list[str]:
@@ -301,13 +328,17 @@ def get_block_devices_info() -> list[dict]:
 
     root_disks = _root_disk_names()
     hostname = socket.gethostname()
+    # Read once for the whole host: every device's links sit in the same two
+    # directories, so a reading per device would walk them again for each disk.
+    persistent = read_persistent_links()
     devices: list[dict] = []
     for dev in data.get("blockdevices", []):
         if dev.get("type") != "disk":
             continue
         name = dev.get("name", "")
         children = dev.get("children") or []
-        by_id_path = _disk_by_id_path(name)
+        by_id_paths = persistent.get(name, [])
+        by_id_path = by_id_paths[0] if by_id_paths else ""
         serial = (dev.get("serial") or "").strip()
         wwn = (dev.get("wwn") or "").strip()
         if not serial:
@@ -335,6 +366,7 @@ def get_block_devices_info() -> list[dict]:
             "holders": _disk_holders(name),
             "is_root_disk": name in root_disks,
             "by_id_path": by_id_path,
+            "by_id_paths": by_id_paths,
             "numa_node": numa_node,
         })
         for child in children:
@@ -342,6 +374,7 @@ def get_block_devices_info() -> list[dict]:
                 continue
             part_name = child.get("name", "")
             partuuid = (child.get("partuuid") or "").strip()
+            part_paths = persistent.get(part_name, [])
             part_synthetic = False
             if partuuid:
                 part_serial = f"{serial}-part-{partuuid.lower()}"
@@ -368,7 +401,8 @@ def get_block_devices_info() -> list[dict]:
                 "mounted_in_subtree": _subtree_mounted(child),
                 "holders": _partition_holders(name, part_name),
                 "is_root_disk": part_name in root_disks,
-                "by_id_path": _partition_by_id_path(part_name, partuuid),
+                "by_id_path": part_paths[0] if part_paths else "",
+                "by_id_paths": part_paths,
                 "numa_node": numa_node,
             })
     logger.debug("function:get_block_devices_info end")

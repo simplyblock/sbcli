@@ -1790,6 +1790,52 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
     return nvmes
 
 
+def device_selectors(dev) -> set:
+    """Every spelling one block device answers to in a selection.
+
+    Three kinds, and the caller does not have to say which it is using. The
+    kernel name (``sdb``) and the kernel path (``/dev/sdb``) name a position in
+    this boot's enumeration order. The persistent /dev/disk links name the
+    device: on the lab workers, the disk the kernel calls sdb is the one the
+    hypervisor calls drive-scsi0 and sda is drive-scsi2, so a host that probes
+    its controllers in another order hands each kernel name to another disk
+    while the links follow the devices.
+
+    Every link the device answers to is a selector, not only the preferred one.
+    The side that records a device and the side that looks it up again run
+    different code on different machines, and a lookup matched against one
+    side's ranking would miss a device present under another of its own names.
+    ``by_id_path`` is included beside ``by_id_paths`` so an inventory taken
+    before the second existed still resolves.
+    """
+    selectors = {dev.get("name", ""), dev.get("device_path", ""),
+                 dev.get("by_id_path", "")}
+    selectors.update(dev.get("by_id_paths") or [])
+    selectors.discard("")
+    return selectors
+
+
+def _index_by_selector(devices) -> dict:
+    """Devices indexed by every spelling each one answers to."""
+    return {selector: dev for dev in devices for selector in device_selectors(dev)}
+
+
+def _unique_devices(devices) -> list:
+    """The devices given, in order, with a device named twice kept once.
+
+    A selection may name one device by two of its spellings -- its kernel name
+    and one of its links -- and taking it twice would fail the duplicate-serial
+    check below with a message about identity rather than about the selection.
+    """
+    seen, out = set(), []
+    for dev in devices:
+        if id(dev) in seen:
+            continue
+        seen.add(id(dev))
+        out.append(dev)
+    return out
+
+
 def filter_eligible_block_devices(devices, include_names=None, exclude_names=None,
                                   include_serials=None, force_format=False):
     """Eligibility filter for the lblk cluster mode (pure — unit-testable).
@@ -1804,12 +1850,17 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
     add-node); a partition only needs to be idle — its siblings may be in
     use by the OS or other software.
 
-    Selection is one of: ``include_names`` (explicitly requested names must
+    Selection is one of: ``include_names`` (explicitly requested devices must
     exist AND be eligible — a busy requested device is a hard error),
     ``exclude_names`` (all eligible minus these), ``include_serials``
     (matched against the serial/WWN identity). Without a selection, every
     eligible whole disk is taken (partitions are never auto-selected — they
     must be requested explicitly by name or serial).
+
+    The two name channels take any spelling a device answers to: its kernel
+    name, its kernel path, or one of the persistent /dev/disk links udev
+    published for it. ``device_selectors`` is where that set is built, and says
+    why the last is the spelling a deployment records.
 
     Returns ``(eligible_devices, rejected)`` where rejected is a list of
     ``(device_dict, reason)``. Raises ValueError on a requested-but-
@@ -1847,14 +1898,18 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
         else:
             eligible.append(dev)
 
-    by_name = {d["name"]: d for d in eligible}
-    rejected_by_name = {d["name"]: r for d, r in rejected}
+    by_selector = _index_by_selector(eligible)
+    rejected_by_selector = {
+        selector: reason
+        for dev, reason in rejected
+        for selector in device_selectors(dev)
+    }
     if include_names:
-        missing = include_names - set(by_name)
+        missing = sorted(include_names - set(by_selector))
         if missing:
-            details = {n: rejected_by_name.get(n, "not present") for n in sorted(missing)}
+            details = {n: rejected_by_selector.get(n, "not present") for n in missing}
             raise ValueError(f"requested block devices are not eligible: {details}")
-        selected = [by_name[n] for n in sorted(include_names)]
+        selected = _unique_devices(by_selector[n] for n in sorted(include_names))
     elif include_serials:
         by_serial = {d["serial"]: d for d in eligible}
         missing_serials = include_serials - set(by_serial)
@@ -1866,7 +1921,8 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
         # Auto-selection takes whole disks only: silently absorbing idle
         # partitions of otherwise-used disks would be a data-loss trap.
         selected = [d for d in eligible
-                    if d["name"] not in exclude_names and d.get("type") == "disk"]
+                    if not (device_selectors(d) & exclude_names)
+                    and d.get("type") == "disk"]
 
     serials = [d["serial"] for d in selected]
     dupes = {s for s in serials if serials.count(s) > 1}
