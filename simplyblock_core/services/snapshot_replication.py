@@ -1,3 +1,4 @@
+import logging
 import time
 import uuid
 
@@ -217,6 +218,14 @@ def _finish_completed_transfer(task, snapshot, offset):
     cutover's convergence loop waits on -- so it must run as soon as the
     transfer is known to be finished, not on some later pass.
     """
+    # The data is on the landing volume now. Record it BEFORE finishing: the
+    # finish converts the landing volume into a snapshot node by node, and a
+    # retry after a partial finish must resume the finish, never re-send into
+    # a volume that is already a snapshot on some members (see
+    # _resume_finish).
+    if not task.function_params.get("transfer_done"):
+        task.function_params["transfer_done"] = True
+        task.write_to_db()
     # submit -> Done, measured. NOT a throughput: see fix_xfer_latency notes.
     xfer_timing.gap("transfer_complete",
                     task.function_params.get("xfer_submit_t"),
@@ -231,10 +240,77 @@ def _finish_completed_transfer(task, snapshot, offset):
         task.function_params["end_time"] = int(time.time())
         task.write_to_db()
     else:
-        task.function_result = "complete repl failed, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
+        _suspend_for_retry(task, "complete repl failed, retrying", backoff=True)
+    return True
+
+
+def _backoff_seconds(retry):
+    """Delay before the next attempt after a failure that touched the target."""
+    return min(constants.REPL_RETRY_BACKOFF_BASE_SEC * (2 ** min(retry, 6)),
+               constants.REPL_RETRY_BACKOFF_MAX_SEC)
+
+
+def _suspend_for_retry(task, msg, backoff=False, count=True, level=logging.WARNING):
+    """Suspend *task* for another attempt, and say why.
+
+    Every retry is logged: several of these paths used to count a retry
+    silently, so a volume could run all its tasks into max retry without one
+    line in the log naming the reason (2026-09-29: LVS_1 on the source kept
+    losing its leader; vm-a's tasks gave up unseen, and a fail-over later
+    found nothing on the target).
+
+    ``backoff`` delays the next attempt after a failure that involved the
+    target (a failed transfer or finish): an immediate retry repeats whatever
+    the target did, and on 2026-09-29 each retry into a half-converted landing
+    volume fenced the target LVS again, 14 times in 11 minutes.
+
+    ``count`` is False for waiting conditions that are not a fault of the
+    transfer (no leader on the source right now): those do not spend retries,
+    or a leaderless window of half a minute is enough to kill every task.
+    """
+    logger.log(level, "Replication task %s (snapshot %s): %s",
+               task.uuid, task.function_params.get("snapshot_id"), msg)
+    task.function_result = msg
+    task.function_params["last_error"] = msg
+    task.status = JobSchedule.STATUS_SUSPENDED
+    if count:
         task.retry += 1
+    if backoff:
+        task.function_params["not_before"] = int(time.time()) + _backoff_seconds(task.retry)
+    task.write_to_db()
+
+
+def _resume_finish(task, snapshot):
+    """Finish a transfer that already completed; True if this handled the task.
+
+    A finish that failed half-way (converted on the primary, failed on the
+    secondary) leaves the landing volume a snapshot on some members. Starting
+    over re-sent the transfer into it: every write failed, and the target LVS
+    dropped its leadership and fenced its ports on each attempt (2026-09-29,
+    LVS_1 on site A, 14 times). The data is complete, so resume the finish
+    instead: chain and convert where it has not happened yet.
+    """
+    if not task.function_params.get("transfer_done"):
+        return False
+    remote_lv_id = task.function_params.get("remote_lvol_id")
+    remote_lv = None
+    if remote_lv_id:
+        try:
+            remote_lv = db.get_lvol_by_id(remote_lv_id)
+        except KeyError:
+            remote_lv = None
+    if remote_lv is None or remote_lv.status == LVol.STATUS_IN_DELETION:
+        # The landing volume is gone: nothing to resume, start over.
+        logger.warning("Replication task %s: landing volume %s is gone; "
+                       "starting the transfer over", task.uuid, remote_lv_id)
+        for key in ("transfer_done", "converted_nodes", "remote_lvol_id", "offset"):
+            task.function_params.pop(key, None)
         task.write_to_db()
+        return False
+    logger.info("Replication task %s: transfer of %s already completed; "
+                "resuming the finish (converted on: %s)", task.uuid,
+                snapshot.get_id(), task.function_params.get("converted_nodes") or "none")
+    _finish_completed_transfer(task, snapshot, task.function_params.get("offset"))
     return True
 
 
@@ -455,10 +531,7 @@ def process_snap_replicate_start(task, snapshot):
                 task.function_params["remote_lvol_id"] = existing.get_id()
                 task.write_to_db()
             elif existing.status == LVol.STATUS_IN_DELETION:
-                task.function_result = f"stale landing volume {rep_name} still deleting, retrying"
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.retry += 1
-                task.write_to_db()
+                _suspend_for_retry(task, f"stale landing volume {rep_name} still deleting, retrying")
                 return
             else:
                 logger.warning(f"Deleting half-created landing volume "
@@ -468,10 +541,7 @@ def process_snap_replicate_start(task, snapshot):
                     lvol_controller.delete_lvol(existing, force_delete=True)
                 except Exception as e:
                     logger.error(f"Failed to clear stale landing volume {rep_name}: {e}")
-                task.function_result = "cleared stale landing volume, retrying"
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.retry += 1
-                task.write_to_db()
+                _suspend_for_retry(task, f"cleared stale landing volume {rep_name}, retrying")
                 return
 
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
@@ -499,10 +569,11 @@ def process_snap_replicate_start(task, snapshot):
     # return to the recorded node on its own after an outage.
     remote_lv_node = _receiving_leader_node(remote_lv)
     if remote_lv_node is None:
-        task.function_result = "No online LVS leader on the target, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        # Waiting, not failing: the target's leadership is not this transfer's
+        # fault, and counting it let a leaderless window kill the task.
+        _suspend_for_retry(task, f"No online LVS leader on the target "
+                                 f"({remote_lv.lvs_name}), retrying",
+                           backoff=True, count=False)
         return
 
     # 2 attach the TARGET NODE'S TRANSFER HUBLVOL on the source. Transfers must
@@ -520,10 +591,8 @@ def process_snap_replicate_start(task, snapshot):
         _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
     if hub_err:
         logger.error(f"Transfer hub attach failed: {hub_err}")
-        task.function_result = "transfer hub attach failed, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        _suspend_for_retry(task, f"transfer hub attach failed: {hub_err}, retrying",
+                           backoff=True)
         return
 
     # The receiving volume's map id rides in every write's LBA (see above); the
@@ -537,10 +606,7 @@ def process_snap_replicate_start(task, snapshot):
     if not remote_map_id:
         logger.error(f"map_id of receiving lvol {remote_lv.top_bdev} not found on "
                      f"{remote_lv.node_id}; not starting a transfer that cannot land")
-        task.function_result = "receiving lvol map_id unavailable, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        _suspend_for_retry(task, "receiving lvol map_id unavailable, retrying")
         return
 
     # NOTE deliberately NO bdev_lvol_set_migration_flag here: the flag drives the
@@ -550,10 +616,9 @@ def process_snap_replicate_start(task, snapshot):
     # The hub rejects receive IO on a non-leader ("receive io for hublvol in
     # nonleader mode"); do not start a transfer that cannot land.
     if not _require_lvs_leader(remote_lv_node, remote_lv.lvs_name, "transfer receive"):
-        task.function_result = "target node not LVS leader, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        _suspend_for_retry(task, f"target node {remote_lv_node.get_id()} not LVS "
+                                 f"leader of {remote_lv.lvs_name}, retrying",
+                           backoff=True, count=False)
         return
 
     allow_partial = _partial_transfer_decision(
@@ -1221,8 +1286,14 @@ def process_snap_replicate_finish(task, snapshot):
         if not _other_active_transfers_to_node(task, remote_snode.get_id()):
             xfer_timing.stamp("hub_detach", snap=snapshot.get_id(),
                               lvol=snapshot.lvol.get_id())
-            _src_node.rpc_client().bdev_nvme_detach_controller(
-                remote_snode.transfer_hublvol.bdev_name)
+            # Non-fatal: a resumed finish (see _resume_finish) finds the hub
+            # already detached by the first attempt.
+            try:
+                _src_node.rpc_client().bdev_nvme_detach_controller(
+                    remote_snode.transfer_hublvol.bdev_name)
+            except Exception as e:                        # noqa: BLE001
+                logger.warning("Transfer hub detach on %s failed (non-fatal): %s",
+                               _src_node.get_id(), e)
     replicate_to_source = task.function_params["replicate_to_source"]
     if "replicate_as_snap_instance" in task.function_params:
         replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
@@ -1252,8 +1323,21 @@ def process_snap_replicate_finish(task, snapshot):
     # skipped here: adding the same clone entry twice is not idempotent.
     _prechained = _prechained_nodes_for(task, remote_lv)
 
+    # Nodes on which an earlier attempt of this finish already converted the
+    # landing volume (see _resume_finish): chaining or converting them again
+    # is not idempotent, so skip them and carry on with the rest.
+    converted = list(task.function_params.get("converted_nodes") or [])
+
+    def _mark_converted(node):
+        converted.append(node.get_id())
+        task.function_params["converted_nodes"] = converted
+        task.write_to_db()
+
     # chain snaps on primary
-    if target_prev_snap and remote_snode.get_id() not in _prechained:
+    if remote_snode.get_id() in converted:
+        logger.info("Landing volume %s is already converted on %s; skipping "
+                    "its chain and convert", remote_lv.top_bdev, remote_snode.get_id())
+    elif target_prev_snap and remote_snode.get_id() not in _prechained:
         logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
         with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
                                lvol=snapshot.lvol.get_id(), node="primary"):
@@ -1268,16 +1352,21 @@ def process_snap_replicate_finish(task, snapshot):
                     remote_snode.get_id())
 
     # convert to snapshot on primary
-    with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
-                           lvol=snapshot.lvol.get_id(), node="primary"):
-        ret = remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
-    if not ret:
-        logger.error("Failed to convert to snapshot on primary node")
-        return False
+    if remote_snode.get_id() not in converted:
+        with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
+                               lvol=snapshot.lvol.get_id(), node="primary"):
+            ret = remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+        if not ret:
+            logger.error("Failed to convert to snapshot on primary node")
+            return False
+        _mark_converted(remote_snode)
 
     # chain snaps on secondary
     sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
-    if sec_node.status == StorageNode.STATUS_ONLINE:
+    if sec_node.status == StorageNode.STATUS_ONLINE and sec_node.get_id() in converted:
+        logger.info("Landing volume %s is already converted on %s; skipping "
+                    "its chain and convert", remote_lv.top_bdev, sec_node.get_id())
+    elif sec_node.status == StorageNode.STATUS_ONLINE:
         if target_prev_snap and sec_node.get_id() not in _prechained:
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
             with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
@@ -1299,6 +1388,7 @@ def process_snap_replicate_finish(task, snapshot):
         if not ret:
             logger.error("Failed to convert to snapshot on secondary node")
             return False
+        _mark_converted(sec_node)
 
     new_snapshot_uuid = str(uuid.uuid4())
 
@@ -1400,6 +1490,10 @@ def task_runner(task: JobSchedule):
         task.write_to_db(db.kv_store)
         return True
 
+    if (task.status == JobSchedule.STATUS_SUSPENDED and not task.canceled
+            and int(time.time()) < int(task.function_params.get("not_before") or 0)):
+        return False
+
     try:
         db.get_storage_node_by_id(snapshot.lvol.node_id)
     except KeyError:
@@ -1413,16 +1507,23 @@ def task_runner(task: JobSchedule):
     # duration of its outage even though the promoted peer holds the snapshot.
     snode = _source_leader_node(snapshot)
     if snode is None:
-        task.function_result = "no online source LVS leader, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db(db.kv_store)
+        # Waiting, not failing (see _suspend_for_retry): on 2026-09-29 this
+        # path spent every retry of vm-a's tasks within seconds while LVS_1 on
+        # the source flapped, silently, and the volume stopped replicating.
+        _suspend_for_retry(task, f"no online source LVS leader for "
+                                 f"{snapshot.lvol.lvs_name}, retrying",
+                           backoff=True, count=False)
         return False
 
     if task.retry >= task.max_retry or task.canceled is True:
-        task.function_result = "max retry reached"
+        # Carry the last real reason: "max retry reached" alone names none.
+        last = task.function_params.get("last_error")
+        task.function_result = (f"max retry reached ({task.retry}/{task.max_retry}) after: {last}"
+                                if last else "max retry reached")
         if task.canceled is True:
             task.function_result = "task cancelled"
+        logger.error("Replication task %s (snapshot %s) gave up: %s",
+                     task.uuid, snapshot.get_id(), task.function_result)
 
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
@@ -1463,7 +1564,8 @@ def task_runner(task: JobSchedule):
 
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-        process_snap_replicate_start(task, snapshot)
+        if not _resume_finish(task, snapshot):
+            process_snap_replicate_start(task, snapshot)
 
     elif task.status == JobSchedule.STATUS_RUNNING:
         snode = _source_leader_node(snapshot) or db.get_storage_node_by_id(snapshot.lvol.node_id)
@@ -1481,10 +1583,7 @@ def task_runner(task: JobSchedule):
         status = ret["transfer_state"]
         offset = ret["offset"]
         if status == "No process":
-            task.function_result = f"Status: {status}, offset:{offset}, retrying"
-            task.status = JobSchedule.STATUS_NEW
-            task.retry += 1
-            task.write_to_db()
+            _suspend_for_retry(task, f"Status: {status}, offset:{offset}, retrying")
             return False
         if status == "In progress":
             task.function_result = f"Status: {status}, offset:{offset}"
@@ -1492,10 +1591,8 @@ def task_runner(task: JobSchedule):
             task.write_to_db()
             return True
         if status == "Failed":
-            task.function_result = f"Status: {status}, offset:{offset}, retrying"
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.retry += 1
-            task.write_to_db()
+            _suspend_for_retry(task, f"transfer failed at offset {offset}, retrying",
+                               backoff=True)
             return False
         if status == "Done":
             return _finish_completed_transfer(task, snapshot, offset)
