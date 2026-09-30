@@ -48,6 +48,23 @@ DEFAULT_CHURN_OFFSET = "5G"
 DEFAULT_CHURN_SIZE = "4G"
 DEFAULT_CHURN_RUNTIME = 120
 
+#: How to ask for root without assuming the target has sudo.
+#:
+#: Every command here used to start with a bare ``sudo``. On docker the target
+#: is a client VM where that is right; on k8s the target is a POD, and the
+#: block pod's image has no sudo at all. Run 20260929-205137 shows what that
+#: cost: the stamp pass answered ``sh: sudo: not found`` and every one of the
+#: eleven verify passes after it reported "verified clean" without fio having
+#: run a single time. Resolving sudo at run time costs nothing where it exists
+#: and works where it does not.
+SUDO = "$(command -v sudo || true)"
+
+#: What fio prints whatever the outcome. Absence of ALL of these means fio did
+#: not run -- the command was not found, the pod was gone, the exec failed --
+#: which is emphatically not the same as a clean verify, and is exactly how
+#: the sudo bug above stayed invisible for a whole lane.
+FIO_RAN_MARKERS = ("fio-", "run status", "err=", "ioengine")
+
 #: fio prints these when verification fails. Distinct from the md5 markers in
 #: CommonUtils: anything here is a hard failure, never a warning.
 CORRUPTION_MARKERS = (
@@ -114,16 +131,37 @@ class RawDeviceVerifier:
         low = (text or "").lower()
         return [m for m in CORRUPTION_MARKERS if m in low]
 
+    def _assert_fio_ran(self, blob, node, device, phase):
+        """Refuse to draw any conclusion from output fio did not produce.
+
+        The corruption and IO-error checks below both work by looking for
+        something in fio's output. Both therefore read silence as success,
+        and silence is what you get when the command never started. That is
+        not a hypothetical: the whole raw lane reported clean for eleven
+        cycles on nothing but ``sh: sudo: not found``.
+        """
+        low = (blob or "").lower()
+        if any(m in low for m in FIO_RAN_MARKERS):
+            return
+        raise RuntimeError(
+            f"[raw-verify] fio did not run for the {phase} pass on {device} "
+            f"at {node}: its output carries none of {FIO_RAN_MARKERS}, so "
+            f"there is nothing to draw a conclusion from. This is the raw "
+            f"lane failing to execute, NOT a statement about the data -- "
+            f"treating it as a pass is how a silent no-op looks green.\n"
+            f"{self._excerpt(blob)}")
+
     # ── phases ───────────────────────────────────────────────────────────
     def stamp(self, node, device, region_size=DEFAULT_VERIFY_REGION,
               name="stamp", bs="256k"):
         """Lay down the crc32c-verified region. Writes only, no verify pass."""
         self._assert_device(node, device)
-        cmd = (f"sudo fio {_verify_job(name, region_size, bs=bs)} "
+        cmd = (f"{SUDO} fio {_verify_job(name, region_size, bs=bs)} "
                f"--filename={device} --do_verify=0")
         self.logger.info("[raw-verify] stamping %s on %s (%s)",
                          device, node, region_size)
         out, err = self._run(node, cmd)
+        self._assert_fio_ran(out + err, node, device, "stamp")
         hits = self._find_corruption(out + err)
         if hits:
             # A write pass should never report verification problems.
@@ -143,13 +181,14 @@ class RawDeviceVerifier:
         would be the test's own doing.
         """
         self._assert_device(node, device)
-        cmd = (f"sudo fio --name=churn {FIO_COMMON} --filename={device} "
+        cmd = (f"{SUDO} fio --name=churn {FIO_COMMON} --filename={device} "
                f"--rw=randrw --rwmixread={rwmixread} --bs={bs} "
                f"--iodepth={iodepth} --offset={offset} --size={size} "
                f"--time_based=1 --runtime={runtime}")
         self.logger.info("[raw-verify] churning %s on %s (offset=%s size=%s "
                          "runtime=%ss)", device, node, offset, size, runtime)
         out, err = self._run(node, cmd, timeout=runtime + 600)
+        self._assert_fio_ran(out + err, node, device, "churn")
         return out + err
 
     def verify(self, node, device, region_size=DEFAULT_VERIFY_REGION,
@@ -160,13 +199,14 @@ class RawDeviceVerifier:
         supporting evidence.
         """
         self._assert_device(node, device)
-        cmd = (f"sudo fio {_verify_job(name, region_size, bs=bs)} "
+        cmd = (f"{SUDO} fio {_verify_job(name, region_size, bs=bs)} "
                f"--filename={device} --verify_only --verify_fatal=1")
         where = f" ({context})" if context else ""
         self.logger.info("[raw-verify] verifying %s on %s%s",
                          device, node, where)
         out, err = self._run(node, cmd)
         blob = out + err
+        self._assert_fio_ran(blob, node, device, "verify")
 
         hits = self._find_corruption(blob)
         if hits:
