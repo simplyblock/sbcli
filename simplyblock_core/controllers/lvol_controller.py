@@ -4285,12 +4285,25 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                 "LVol %s must replicate to %s to keep subsystem %s whole, "
                 "though that node is the origin of its snapshot",
                 lvol.get_id(), sibling_node_id, lvol.nqn)
+        chain_node_id = "" if sibling_node_id else _chain_counterpart_node(
+            db_controller, lvol, replication_cluster_id)
         if sibling_node_id:
             logger.info(
                 "Replicating on node %s: it is where subsystem %s already "
                 "replicates (co-locating the group's snapshots on one LVS)",
                 sibling_node_id, lvol.nqn)
             lvol.replication_node_id = sibling_node_id
+            lvol.write_to_db()
+        elif chain_node_id:
+            # The destination already holds this volume's chain (it came from
+            # there: a relocate or fail-over back). Replicating anywhere else
+            # re-ships the whole chain, and the copies collide with the
+            # originals' names on that cluster (2026-09-29). This node lets
+            # the backlog link the existing snapshots and ship only the delta,
+            # like replication_failback does.
+            logger.info("Replicating on node %s: it holds the chain of %s on the "
+                        "destination, so only the delta is shipped", chain_node_id, lvol.get_id())
+            lvol.replication_node_id = chain_node_id
             lvol.write_to_db()
         else:
             random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
@@ -4306,11 +4319,21 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     logger.info("Setting LVol do_replicate: True")
 
     all_snaps = db_controller.get_snapshots()
+    # A copy counts when it is on the replication node's lvstore (any member
+    # of it), not only when its volume was created on that very node: the
+    # chain is shared by the lvstore, and an HA peer may have created it.
+    try:
+        _repl_lvs = db_controller.get_storage_node_by_id(lvol.replication_node_id).lvstore
+    except KeyError:
+        _repl_lvs = ""
     for snap in replication_backlog(db_controller, lvol, all_snaps):
         if not snap.target_replicated_snap_uuid:
             matched = False
             for sn in all_snaps:
-                if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
+                if (sn.data_uuid == snap.data_uuid and sn.get_id() != snap.get_id()
+                        and (sn.lvol.node_id == lvol.replication_node_id
+                             or (_repl_lvs and sn.lvol.lvs_name == _repl_lvs
+                                 and sn.cluster_id != snap.cluster_id))):
                     snap = db_controller.get_snapshot_by_id(snap.get_id())
                     snap.target_replicated_snap_uuid = sn.get_id()
                     snap.write_to_db()
@@ -4337,6 +4360,35 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                 if task:
                     snapshot_events.replication_task_created(snap)
     return True
+
+
+def _chain_counterpart_node(db_controller, lvol, replication_cluster_id):
+    """The online node of *replication_cluster_id* holding the newest copy of
+    a snapshot of *lvol*'s chain (matched by data_uuid), or "".
+
+    The copy's lvstore decides: its current leader among the lvstore's online
+    members, else the node the copy's volume was created on.
+    """
+    try:
+        all_snaps = db_controller.get_snapshots()
+        backlog = replication_backlog(db_controller, lvol, all_snaps)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Chain lookup for %s failed: %s", lvol.get_id(), e)
+        return ""
+    wanted = {s.data_uuid for s in backlog if s.data_uuid}
+    if not wanted:
+        return ""
+    copies = [s for s in all_snaps
+              if s.cluster_id == replication_cluster_id and s.data_uuid in wanted
+              and s.status != SnapShot.STATUS_IN_DELETION and s.lvol]
+    for copy in sorted(copies, key=lambda s: s.created_at, reverse=True):
+        try:
+            node = db_controller.get_storage_node_by_id(copy.lvol.node_id)
+        except KeyError:
+            continue
+        if node.status == StorageNode.STATUS_ONLINE:
+            return node.get_id()
+    return ""
 
 
 def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
