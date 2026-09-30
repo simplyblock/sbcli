@@ -93,7 +93,7 @@ class TestConnectToHublvolLvsNode(unittest.TestCase):
 
         # snode.rpc_client() returns a MagicMock that records calls
         self.rpc = MagicMock()
-        self.rpc.get_bdevs.return_value = [{"name": "LVS_6207/hublvoln1"}]
+        self.rpc.bdev_get.return_value = {"name": "LVS_6207/hublvoln1"}
         self.rpc.bdev_lvol_set_lvs_opts.return_value = True
         self.rpc.bdev_lvol_connect_hublvol.return_value = True
         self.snode.rpc_client = MagicMock(return_value=self.rpc)
@@ -136,8 +136,8 @@ class TestConnectToHublvolLvsNode(unittest.TestCase):
 
     def test_lvs_node_routes_remote_bdev_lookup(self):
         """The pre-attach bdev existence check must look up by lvs_node's bdev name."""
-        # Force the get_bdevs branch to confirm what name is checked.
-        self.rpc.get_bdevs.return_value = []  # bdev not present → triggers coordinator
+        # Force the bdev_get branch to confirm what name is checked.
+        self.rpc.bdev_get.return_value = None  # bdev not present → triggers coordinator
         with patch(
             "simplyblock_core.utils.hublvol_reconnect.HublvolReconnectCoordinator"
         ) as mock_coord_cls:
@@ -148,8 +148,8 @@ class TestConnectToHublvolLvsNode(unittest.TestCase):
                 self.peer, failover_node=None, role="tertiary",
                 lvs_node=self.lvs_node,
             )
-        # The first get_bdevs call was the existence check on remote_bdev
-        first_call = self.rpc.get_bdevs.call_args_list[0]
+        # The first bdev_get call was the existence check on remote_bdev
+        first_call = self.rpc.bdev_get.call_args_list[0]
         args, _kw = first_call
         self.assertEqual(
             args[0], "LVS_6207/hublvoln1",
@@ -181,7 +181,7 @@ class TestBackwardCompat(unittest.TestCase):
                              hub_port=4427,
                              lvol_subsys_port=4420)
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = [{"name": "LVS_3261/hublvoln1"}]
+        rpc.bdev_get.return_value = {"name": "LVS_3261/hublvoln1"}
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_connect_hublvol.return_value = True
         node.rpc_client = MagicMock(return_value=rpc)
@@ -432,7 +432,7 @@ class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.return_value = [
             {"lvs leadership": True, "uuid": "u", "lvs_primary": False}
         ]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True

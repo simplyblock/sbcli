@@ -1,4 +1,4 @@
-"""Unit tests for RPCClient wrapper methods (e.g. get_bdevs, subsystem_list,
+"""Unit tests for RPCClient wrapper methods (e.g. bdev_list, subsystem_list,
 subsystem_get). Coverage is partial — add cases here as wrappers grow."""
 
 import errno
@@ -21,29 +21,20 @@ def _make_client(**kwargs):
         return RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=0, **kwargs)
 
 
-class TestGetBdevs(unittest.TestCase):
+class TestBdevList(unittest.TestCase):
 
-    @patch.object(RPCClient, "_request")
-    def test_get_bdevs_calls_request_each_time(self, mock_req):
+    @patch.object(RPCClient, "_request3")
+    def test_bdev_list_calls_request_each_time(self, mock_req):
         mock_req.return_value = [{"name": "bdev0"}]
         client = _make_client()
 
-        r1 = client.get_bdevs()
-        r2 = client.get_bdevs()
+        r1 = client.bdev_list()
+        r2 = client.bdev_list()
 
-        # get_bdevs uses _request directly (no caching)
+        # bdev_list uses _request3 directly (no caching)
         self.assertEqual(mock_req.call_count, 2)
         self.assertEqual(r1, r2)
-
-    @patch.object(RPCClient, "_request")
-    def test_get_bdevs_with_name_separate_from_all(self, mock_req):
-        mock_req.side_effect = [["all"], ["one"]]
-        client = _make_client()
-
-        client.get_bdevs()
-        client.get_bdevs(name="bdev0")
-
-        self.assertEqual(mock_req.call_count, 2)
+        mock_req.assert_called_with("bdev_get_bdevs")
 
 
 class TestBdevGet(unittest.TestCase):
@@ -78,6 +69,84 @@ class TestBdevGet(unittest.TestCase):
         client = _make_client()
         with self.assertRaises(RPCException):
             client.bdev_get("LVS_1/LVOL_1")
+
+
+class TestBdevDistribCreate(unittest.TestCase):
+    """bdev_distrib_create probes bdev_get for idempotency before creating.
+    A transport/RPC failure on that probe must propagate, not be read as
+    "does not exist yet" -- silently falling through to create on top of an
+    unknown state is the bug this pins."""
+
+    def _args(self):
+        return ("distrib_1", 7001, 2, 1, 1000, 4096, ["jm1"], 4096)
+
+    @patch.object(RPCClient, "_request3")
+    def test_existing_bdev_short_circuits_create(self, mock_req):
+        mock_req.return_value = [{"name": "distrib_1"}]
+        client = _make_client()
+
+        with patch.object(client, "_request") as mock_request:
+            result = client.bdev_distrib_create(*self._args())
+
+        self.assertEqual(result["name"], "distrib_1")
+        mock_request.assert_not_called()
+
+    @patch.object(RPCClient, "_request3")
+    def test_probe_miss_falls_through_to_create(self, mock_req):
+        mock_req.return_value = []
+        client = _make_client()
+
+        with patch.object(client, "_request", return_value=True) as mock_request:
+            self.assertTrue(client.bdev_distrib_create(*self._args()))
+
+        mock_request.assert_called_once()
+
+    @patch.object(RPCClient, "_request3")
+    def test_probe_rpc_error_propagates_instead_of_creating(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
+        client = _make_client()
+
+        with patch.object(client, "_request") as mock_request:
+            with self.assertRaises(RPCException):
+                client.bdev_distrib_create(*self._args())
+
+        mock_request.assert_not_called()
+
+
+class TestBdevRaidCreate(unittest.TestCase):
+    """Same idempotency-probe contract as bdev_distrib_create."""
+
+    @patch.object(RPCClient, "_request3")
+    def test_existing_bdev_short_circuits_create(self, mock_req):
+        mock_req.return_value = [{"name": "raid_1"}]
+        client = _make_client()
+
+        with patch.object(client, "_request") as mock_request:
+            result = client.bdev_raid_create("raid_1", ["a", "b"], "1")
+
+        self.assertEqual(result["name"], "raid_1")
+        mock_request.assert_not_called()
+
+    @patch.object(RPCClient, "_request3")
+    def test_probe_miss_falls_through_to_create(self, mock_req):
+        mock_req.return_value = []
+        client = _make_client()
+
+        with patch.object(client, "_request", return_value=True) as mock_request:
+            self.assertTrue(client.bdev_raid_create("raid_1", ["a", "b"], "1"))
+
+        mock_request.assert_called_once()
+
+    @patch.object(RPCClient, "_request3")
+    def test_probe_rpc_error_propagates_instead_of_creating(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
+        client = _make_client()
+
+        with patch.object(client, "_request") as mock_request:
+            with self.assertRaises(RPCException):
+                client.bdev_raid_create("raid_1", ["a", "b"], "1")
+
+        mock_request.assert_not_called()
 
 
 class TestSubsystem(unittest.TestCase):

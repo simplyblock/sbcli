@@ -201,7 +201,7 @@ def _is_target_remote_controller_healthy(device_obj, event_node_obj):
     if not healthy:
         return False
 
-    return bool(event_node_obj.rpc_client().get_bdevs(remote_bdev))
+    return bool(event_node_obj.rpc_client().bdev_get(remote_bdev))
 
 
 def remove_remote_device_from_node(node_id, device_id):

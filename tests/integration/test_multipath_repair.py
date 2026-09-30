@@ -510,8 +510,8 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
         mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
-        # RPCClient.get_bdevs / subsystem_list must not hit the network.
-        mock_rpc_cls.return_value.get_bdevs.return_value = []
+        # RPCClient.bdev_get / subsystem_list must not hit the network.
+        mock_rpc_cls.return_value.bdev_get.return_value = None
         mock_rpc_cls.return_value.subsystem_list.return_value = []
 
         # Now call check_node -- we want to verify repair is called
@@ -565,7 +565,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
         mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
-        mock_rpc_cls.return_value.get_bdevs.return_value = []
+        mock_rpc_cls.return_value.bdev_get.return_value = None
         mock_rpc_cls.return_value.subsystem_list.return_value = []
 
         health_check_service.check_node(snode)
@@ -628,7 +628,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
         mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
-        mock_rpc_cls.return_value.get_bdevs.return_value = []
+        mock_rpc_cls.return_value.bdev_get.return_value = None
         mock_rpc_cls.return_value.subsystem_list.return_value = []
 
         health_check_service.check_node(snode)
@@ -698,10 +698,8 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         controller_resp = _controller_list_response("10.0.0.50", alternate_ips=[])
         rpc.bdev_nvme_controller_list.return_value = controller_resp
 
-        # get_bdevs returns something so node_bdev is populated
-        rpc.get_bdevs.return_value = [
-            {"name": "hublvol0n1", "aliases": []},
-        ]
+        # bdev_get returns something so node_bdev is populated
+        rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
         rpc.bdev_lvol_get_lvstores.return_value = [{
             "name": "lvs_primary",
@@ -769,9 +767,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         controller_resp = _controller_list_response(
             "10.0.0.50", alternate_ips=["10.0.0.51"])
         rpc.bdev_nvme_controller_list.return_value = controller_resp
-        rpc.get_bdevs.return_value = [
-            {"name": "hublvol0n1", "aliases": []},
-        ]
+        rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
         rpc.bdev_lvol_get_lvstores.return_value = [{
             "name": "lvs_primary",
@@ -840,7 +836,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         # Only first RDMA NIC attached; second RDMA NIC missing
         controller_resp = _controller_list_response("10.0.0.50", alternate_ips=[])
         rpc.bdev_nvme_controller_list.return_value = controller_resp
-        rpc.get_bdevs.return_value = [{"name": "hublvol0n1", "aliases": []}]
+        rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
         rpc.bdev_lvol_get_lvstores.return_value = [{
             "name": "lvs_primary",

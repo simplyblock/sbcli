@@ -20,7 +20,7 @@ def main():
         ret, err = rpc.bdev_nvme_controller_list_2(ctrl)
         print(f"ctrl={ctrl} ret={ret} err={err}")
     for bdev in BDEVS:
-        ret = rpc.get_bdevs(bdev)
+        ret = rpc.bdev_get(bdev)
         print(f"bdev={bdev} present={bool(ret)}")
 
 

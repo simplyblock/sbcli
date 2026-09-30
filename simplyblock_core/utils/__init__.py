@@ -1427,11 +1427,7 @@ def addNvmeDevices(rpc_client, snode, devs):
             nvme_controller = ctr_map[pcie]
             nvme_bdevs = []
             # Node-add cold path: full dump is fine, the node carries no lvols yet.
-            bdevs = rpc_client.get_bdevs(all_bdevs=True)
-            if bdevs is None:
-                # None is an RPC failure (timeout / non-200), not an empty
-                # list; fail loudly instead of crashing on a None iteration.
-                raise Exception(f"get_bdevs failed on {rpc_client.host}")
+            bdevs = rpc_client.bdev_list()
             for bdev in bdevs:
                 if bdev['name'].startswith(nvme_controller):
                     nvme_bdevs.append(bdev['name'])
@@ -1444,8 +1440,7 @@ def addNvmeDevices(rpc_client, snode, devs):
             rpc_client.bdev_examine(nvme_bdev)
             rpc_client.bdev_wait_for_examine()
 
-            ret = rpc_client.get_bdevs(nvme_bdev)
-            nvme_dict = ret[0]
+            nvme_dict = rpc_client.bdev_get(nvme_bdev)
             nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
             model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
@@ -1568,7 +1563,7 @@ def addAioDevices(rpc_client, snode, blk_entries):
     next_physical_label = snode.physical_label
     for entry in blk_entries:
         bdev_name = aio_bdev_name_for_serial(entry["serial"])
-        ret = rpc_client.get_bdevs(bdev_name)
+        ret = rpc_client.bdev_get(bdev_name)
         if not ret:
             # Prefer the by-id path as the filename so a udev rename between
             # resolution and create cannot swap devices under us.
@@ -1581,10 +1576,9 @@ def addAioDevices(rpc_client, snode, blk_entries):
         rpc_client.bdev_examine(bdev_name)
         rpc_client.bdev_wait_for_examine()
 
-        ret = rpc_client.get_bdevs(bdev_name)
-        if not ret:
+        bdev = rpc_client.bdev_get(bdev_name)
+        if not bdev:
             raise Exception(f"AIO bdev {bdev_name} not found after create on {rpc_client.host}")
-        bdev = ret[0]
         total_size = bdev['block_size'] * bdev['num_blocks']
         if total_size == 0:
             logger.warning(f"Skipping zero-size block device {entry['name']} ({bdev_name})")

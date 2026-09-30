@@ -13,7 +13,7 @@ for target_id, dev_id in MISMATCHES:
     target = db.get_storage_node_by_id(target_id)
     dev = db.get_storage_device_by_id(dev_id)
     expected_bdev = f"remote_{dev.alceml_bdev}n1"
-    if not target.rpc_client().get_bdevs(expected_bdev):
+    if not target.rpc_client().bdev_get(expected_bdev):
         print(f"skip target={target_id} dev={dev_id}: {expected_bdev} not found in SPDK")
         continue
 

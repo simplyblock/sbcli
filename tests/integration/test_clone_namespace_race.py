@@ -95,22 +95,24 @@ def _rpc_client():
     mock.nvmf_subsystem_add_ns2.return_value = (7, None)
     mock.ultra21_util_get_malloc_stats.return_value = {}
 
-    # get_bdevs() is called twice with different signatures:
-    #   - no args (in _create_bdev_stack) -> the full node bdev list, each
-    #     entry having 'name'/'aliases'. Names must NOT match the clone's
-    #     top_bdev or the clone create would be skipped.
-    #   - a specific bdev name (final lookup) -> the created lvol bdev with
-    #     its blobid.
+    # bdev_get(name) is called at least twice against the same name:
+    #   - the idempotency probe in _create_bdev_stack, which must come back
+    #     ``None`` (not yet created) or the clone create would be skipped.
+    #   - the final lookup after the bdev is created -> the created lvol
+    #     bdev with its blobid.
     final_bdev = {"uuid": "lvol-bdev-uuid", "name": "lvol-bdev-uuid",
                   "aliases": [],
                   "driver_specific": {"lvol": {"blobid": 12345}}}
 
-    def _get_bdevs(name=None):
-        if name:
-            return [final_bdev]
-        return [{"name": "some-other-bdev", "aliases": []}]
+    _bdev_get_calls = []
 
-    mock.get_bdevs.side_effect = _get_bdevs
+    def _bdev_get(name=None):
+        _bdev_get_calls.append(name)
+        if len(_bdev_get_calls) == 1:
+            return None
+        return final_bdev
+
+    mock.bdev_get.side_effect = _bdev_get
     # _remove_bdev_stack's bdev_lvol_clone branch calls this.
     mock.delete_lvol.return_value = (True, None)
     return mock

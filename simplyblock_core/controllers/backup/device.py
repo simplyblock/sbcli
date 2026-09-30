@@ -78,7 +78,7 @@ def create_restore_s3_bdev(node: StorageNode, config: BackupConfig, name: str) -
     bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
 
     try:
-        if rpc_client.get_bdevs(name):
+        if rpc_client.bdev_get(name):
             logger.info("Reusing restore S3 device %s on node %s", name, node.get_id())
         else:
             rpc_client.bdev_s3_create(

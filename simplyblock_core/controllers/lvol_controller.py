@@ -89,7 +89,7 @@ def lvol_bdev_absent_on_node(lvol, snode) -> bool:
 def _create_crypto_lvol(rpc_client, lvol, cluster):
     name = lvol.crypto_bdev
     base_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-    ret = rpc_client.get_bdevs(base_name)
+    ret = rpc_client.bdev_get(base_name)
     if not ret:
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
@@ -98,7 +98,7 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
     # activation/restart pass, skip the key + crypto-bdev creates. SPDK
     # rejects duplicate creates with hard errors that would otherwise
     # break re-activation convergence.
-    if rpc_client.get_bdevs(name):
+    if rpc_client.bdev_get(name):
         logger.info("crypto LVol %s already exists, skipping create", name)
         return True
 
@@ -1224,7 +1224,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
         # membership test, but O(1) instead of serializing every bdev on the
         # node into the response (the dump grows with lvol count and was the
         # single largest cost of mass creates).
-        if rpc_client.get_bdevs(name):
+        if rpc_client.bdev_get(name):
             continue
 
         ret = None
@@ -1253,7 +1253,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                     # failed).  The idempotency probe above uses the bare
                     # stack name which doesn't resolve for lvol bdevs
                     # (SPDK registers them as lvstore/lvol_name).
-                    existing = rpc_client.get_bdevs(
+                    existing = rpc_client.bdev_get(
                         f"{lvol.lvs_name}/{name}")
                     if existing:
                         ret = existing
@@ -1265,7 +1265,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
             if is_primary:
                 ret = rpc_client.lvol_clone(**params)
                 if not ret:
-                    existing = rpc_client.get_bdevs(
+                    existing = rpc_client.bdev_get(
                         f"{lvol.lvs_name}/{name}")
                     if existing:
                         ret = existing
@@ -1284,7 +1284,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                     # bdev is really there before letting add_ns proceed.
                     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
                     for _ in range(40):
-                        if rpc_client.get_bdevs(bdev_name):
+                        if rpc_client.bdev_get(bdev_name):
                             break
                         time.sleep(0.5)
                     else:
@@ -1698,9 +1698,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 # carry the source cluster's values. The bdev_lvol_clone just
                 # created has its own uuid/blobid - read them back so the caller
                 # can pass correct values to bdev_lvol_clone_register on HA peers.
-                actual = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+                actual = rpc_client.bdev_get(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
                 if actual:
-                    return actual[0], None
+                    return actual, None
                 return {'uuid': lvol.lvol_uuid,
                         'driver_specific': {'lvol': {'blobid': lvol.blobid}}}, None
 
@@ -1806,9 +1806,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return {'uuid': lvol.lvol_uuid,
                 'driver_specific': {'lvol': {'blobid': lvol.blobid}}}, None
 
-    ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-    if ret:
-        lvol_bdev = ret[0]
+    lvol_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+    if lvol_bdev:
         return lvol_bdev, None
     else:
         return False, "Failed to get lvol bdev"

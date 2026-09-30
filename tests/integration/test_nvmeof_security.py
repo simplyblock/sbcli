@@ -1070,14 +1070,12 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         # The inflight-IO drain check on the leader must not time out.
         mock_rpc_inst.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc_inst.jc_suspend_compression.return_value = (True, None)
-        # Post-examine verification scans get_bdevs() for each expected lvol
+        # Post-examine verification scans bdev_get() for each expected lvol
         # (by uuid or lvs/bdev alias); without this the check aborts.
-        mock_rpc_inst.get_bdevs.return_value = [
-            {"name": lvol_secured.uuid,
-             "aliases": [f"{lvol_secured.lvs_name}/{lvol_secured.lvol_bdev}"]},
-            {"name": lvol_open.uuid,
-             "aliases": [f"{lvol_open.lvs_name}/{lvol_open.lvol_bdev}"]},
-        ]
+        mock_rpc_inst.bdev_get.return_value = {
+            "name": lvol_secured.uuid,
+            "aliases": [f"{lvol_secured.lvs_name}/{lvol_secured.lvol_bdev}"],
+        }
         MockRPC.return_value = mock_rpc_inst
 
         with patch.object(sec_node, 'connect_to_hublvol'):
@@ -1132,7 +1130,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc.nvmf_subsystem_add_ns.return_value = 1
         mock_rpc.nvmf_subsystem_add_listener.return_value = (True, None)
         mock_rpc.ultra21_util_get_malloc_stats.return_value = {}
-        mock_rpc.get_bdevs.return_value = [{"uuid": "u1", "driver_specific": {}}]
+        mock_rpc.bdev_get.return_value = {"uuid": "u1", "driver_specific": {}}
 
         with patch("simplyblock_core.models.storage_node.RPCClient",
                     return_value=mock_rpc):

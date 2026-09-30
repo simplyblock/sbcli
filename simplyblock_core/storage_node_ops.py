@@ -237,7 +237,7 @@ def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
 def _rpc_bdev_exists(rpc_client, name):
     """True iff a bdev with the given name is visible to SPDK."""
     try:
-        ret = rpc_client.get_bdevs(name)
+        ret = rpc_client.bdev_get(name)
         return bool(ret)
     except Exception:
         return False
@@ -849,7 +849,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
     # paths must not dump the whole table to check one name.
     if not is_multipath:
         bdev_name = f"{name}n1"
-        if rpc_client.get_bdevs(bdev_name):
+        if rpc_client.bdev_get(bdev_name):
             logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev_name}")
             return bdev_name
 
@@ -964,7 +964,7 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
             raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
-            ret = rpc_client.get_bdevs(bdev_name)
+            ret = rpc_client.bdev_get(bdev_name)
             if ret:
                 bdev_found = True
                 break
@@ -1020,7 +1020,7 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
                     "Controller %s still missing paths after attach: %s (now %d/%d)",
                     name, still_missing, len(now_attached), len(expected_ips))
 
-    if rpc_client.get_bdevs(bdev_name):
+    if rpc_client.bdev_get(bdev_name):
         return bdev_name
     return None
 
@@ -1197,9 +1197,7 @@ def get_next_physical_device_order(snode, exclude_node_id=None):
 def _search_for_partitions(rpc_client, nvme_device):
     partitioned_devices = []
     # Node-add cold path: full dump is fine here, the node carries no lvols yet.
-    bdevs = rpc_client.get_bdevs(all_bdevs=True)
-    if bdevs is None:
-        raise RPCException(f"get_bdevs failed on {rpc_client.host}")
+    bdevs = rpc_client.bdev_list()
     for bdev in bdevs:
         name = bdev['name']
         if name.startswith(f"{nvme_device.nvme_bdev}p"):
@@ -1349,7 +1347,11 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
 
-        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+        pt_bdev_info = rpc_client.bdev_get(pt_name)
+        if pt_bdev_info is None:
+            logger.error(f"Failed to read back pt bdev: {pt_name}")
+            return False
+        pt_spdk_uuid = pt_bdev_info["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -1371,12 +1373,12 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
         IP = next((iface.ip4_address for iface in snode.data_nics if iface.ip4_address), "")
         multipath = False
 
-    ret = rpc_client.get_bdevs(raid_bdev)
+    ret = rpc_client.bdev_get(raid_bdev)
 
     return JMDevice({
         'uuid': alceml_id,
         'device_name': jm_bdev,
-        'size': ret[0]["block_size"] * ret[0]["num_blocks"],
+        'size': ret["block_size"] * ret["num_blocks"],
         'status': JMDevice.STATUS_ONLINE,
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
@@ -1441,7 +1443,11 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
         if not ret:
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
-        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+        pt_bdev_info = rpc_client.bdev_get(pt_name)
+        if pt_bdev_info is None:
+            logger.error(f"Failed to read back pt bdev: {pt_name}")
+            return False
+        pt_spdk_uuid = pt_bdev_info["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -1532,7 +1538,11 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return None
 
-    pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+    pt_bdev_info = rpc_client.bdev_get(pt_name)
+    if pt_bdev_info is None:
+        logger.error(f"Failed to read back pt bdev: {pt_name}")
+        return None
+    pt_spdk_uuid = pt_bdev_info["aliases"][0]
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
@@ -1672,12 +1682,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     # create jm device
     jm_devices = []
     # Node-add cold path: full dump is fine here, the node carries no lvols yet.
-    bdevs = snode.rpc_client().get_bdevs(all_bdevs=True)
-    if bdevs is None:
-        # None means the RPC failed (timeout / non-200), not "no bdevs".
-        # Without this guard the comprehension below crashes with an opaque
-        # TypeError; raise a clear, catchable error instead.
-        raise RPCException(f"get_bdevs failed on node {snode.get_id()}")
+    bdevs = snode.rpc_client().bdev_list()
     bdevs_names = [d['name'] for d in bdevs]
     for nvme in new_devices:
         if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
@@ -1787,7 +1792,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
     if jm_device.jm_nvme_bdev_list:
         if len(jm_device.jm_nvme_bdev_list) == 1:
-            ret = rpc_client.get_bdevs(jm_device.jm_nvme_bdev_list[0])
+            ret = rpc_client.bdev_get(jm_device.jm_nvme_bdev_list[0])
             if not ret:
                 logger.error(f"BDev not found: {jm_device.jm_nvme_bdev_list[0]}")
                 jm_device.status = JMDevice.STATUS_REMOVED
@@ -1802,7 +1807,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
         jm_bdevs_found = []
         for bdev_name in jm_device.jm_nvme_bdev_list:
-            ret = rpc_client.get_bdevs(bdev_name)
+            ret = rpc_client.bdev_get(bdev_name)
             if ret:
                 logger.info(f"JM bdev found: {bdev_name}")
                 jm_bdevs_found.append(bdev_name)
@@ -1859,7 +1864,11 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
                 return False
 
-            pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+            pt_bdev_info = rpc_client.bdev_get(pt_name)
+            if pt_bdev_info is None:
+                logger.error(f"Failed to read back pt bdev: {pt_name}")
+                return False
+            pt_spdk_uuid = pt_bdev_info["aliases"][0]
             jm_device.pt_bdev_uuid = pt_spdk_uuid
             subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
             logger.info("creating subsystem %s", subsystem_nqn)
@@ -2003,9 +2012,9 @@ def _connect_to_remote_devs(
         # (2026-07-10 activation regression, all deploys after SFAM-2774).
         # Devices without the new field fall back to the name-based probe.
         if dev.pt_bdev_uuid:
-            ret = rpc_client.get_bdevs(dev.pt_bdev_uuid)
+            ret = rpc_client.bdev_get(dev.pt_bdev_uuid)
             if ret:
-                name = ret[0]["name"]
+                name = ret["name"]
                 # A remote attach must resolve to the attached nvme bdev,
                 # never to a local base bdev that shares the table.
                 if name.startswith("remote_"):
@@ -2016,7 +2025,7 @@ def _connect_to_remote_devs(
                     dev.pt_bdev_uuid, dev.get_id(), name, this_node.get_id())
         expected = f"remote_{dev.alceml_bdev}n1"
         try:
-            return expected if rpc_client.get_bdevs(expected) else ""
+            return expected if rpc_client.bdev_get(expected) else ""
         except Exception:
             return ""
 
@@ -2052,7 +2061,7 @@ def _connect_to_remote_devs(
     for dev, remote_bdev in pending.values():
         if not remote_bdev.remote_bdev and dev.get_id() in existing_remote_devices:
             existing_remote_device = existing_remote_devices[dev.get_id()]
-            if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+            if existing_remote_device.remote_bdev and rpc_client.bdev_get(existing_remote_device.remote_bdev):
                 remote_bdev.remote_bdev = existing_remote_device.remote_bdev
         if not remote_bdev.remote_bdev:
             logger.error(f"Failed to connect to remote device {dev.alceml_name}")
@@ -2103,7 +2112,7 @@ def _connect_to_remote_devs(
                     continue
             else:
                 try:
-                    if not rpc_client.get_bdevs(expected_bdev):
+                    if not rpc_client.bdev_get(expected_bdev):
                         continue
                 except Exception:
                     continue
@@ -2256,7 +2265,7 @@ def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
                     out[bdev] = dev
             else:
                 try:
-                    if not rpc_client.get_bdevs(bdev):
+                    if not rpc_client.bdev_get(bdev):
                         out[bdev] = dev
                 except Exception:
                     out[bdev] = dev
@@ -2319,7 +2328,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode):
             if _sweep_bdev_names is not None:
                 if expected_bdev not in _sweep_bdev_names:
                     continue
-            elif not rpc_client.get_bdevs(expected_bdev):
+            elif not rpc_client.bdev_get(expected_bdev):
                 continue
             remote_dev = remote_by_id.get(dev.get_id())
             if remote_dev:
@@ -2515,7 +2524,7 @@ def verify_jm_mesh_coverage(cluster_id, repair=True):
             if owner is not None and owner.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
-                present = bool(rpc_client.get_bdevs(remote_bdev))
+                present = bool(rpc_client.bdev_get(remote_bdev))
             except Exception:
                 present = False
             if not present:
@@ -2536,7 +2545,7 @@ def verify_jm_mesh_coverage(cluster_id, repair=True):
                     for entry in (fresh.remote_jm_devices or []):
                         if entry.node_id == owner_id and entry.remote_bdev:
                             try:
-                                fixed = bool(rpc_client.get_bdevs(entry.remote_bdev))
+                                fixed = bool(rpc_client.bdev_get(entry.remote_bdev))
                             except Exception:
                                 fixed = False
                             break
@@ -2705,15 +2714,15 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
             # otherwise every closure would share the loop's final values by
             # the time Retrying actually invokes it (ruff B023).
             for _ in range(1 if connect_failed else 10):
-                if remote_device.remote_bdev and rpc_client.get_bdevs(remote_device.remote_bdev):
+                if remote_device.remote_bdev and rpc_client.bdev_get(remote_device.remote_bdev):
                     return
-                if rpc_client.get_bdevs(expected_bdev):
+                if rpc_client.bdev_get(expected_bdev):
                     remote_device.remote_bdev = expected_bdev
                     return
                 time.sleep(0.5)
             if not remote_device.remote_bdev and org_dev.get_id() in existing_remote_jm_devices:
                 existing_remote_device = existing_remote_jm_devices[org_dev.get_id()]
-                if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+                if existing_remote_device.remote_bdev and rpc_client.bdev_get(existing_remote_device.remote_bdev):
                     remote_device.remote_bdev = existing_remote_device.remote_bdev
 
         try:
@@ -6400,7 +6409,7 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # call made -- never one already serving some other
                     # legitimate purpose (e.g. a hosted-replica JC membership).
                     try:
-                        pre_existing = bool(node.rpc_client().get_bdevs(expected_bdev))
+                        pre_existing = bool(node.rpc_client().bdev_get(expected_bdev))
                     except Exception:
                         pre_existing = False
                     try:
@@ -10371,7 +10380,7 @@ def _check_hublvol_connected(snode: StorageNode, peer_node):
         rpc_client = snode.rpc_client(timeout=5, retry=1)
         if peer_node.hublvol and peer_node.hublvol.bdev_name:
             remote_bdev = f"{peer_node.hublvol.bdev_name}n1"
-            bdevs = rpc_client.get_bdevs(remote_bdev)
+            bdevs = rpc_client.bdev_get(remote_bdev)
             if bdevs:
                 logger.info("HubLVol to %s is still connected from %s",
                             peer_node.get_id(), snode.get_id())
@@ -11273,7 +11282,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             def _lvol_bdev_registered(lv):
                 for candidate in (lv.lvol_uuid, f"{lv.lvs_name}/{lv.lvol_bdev}"):
                     try:
-                        if snode_rpc_client.get_bdevs(candidate):
+                        if snode_rpc_client.bdev_get(candidate):
                             return True
                     except Exception:
                         pass
@@ -14154,7 +14163,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
     # costs seconds of SPDK app-thread time on large clusters.
     def _stack_bdev_exists(bdev_name):
         try:
-            return bool(rpc_client.get_bdevs(bdev_name))
+            return bool(rpc_client.bdev_get(bdev_name))
         except Exception:
             return False
 

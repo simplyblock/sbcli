@@ -346,7 +346,7 @@ class TestRpcMethodShape(unittest.TestCase):
 
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
-        with patch.object(c, "get_bdevs", return_value=None), \
+        with patch.object(c, "bdev_get", return_value=None), \
              patch.object(c, "_request", return_value=True) as mock_req:
             c.bdev_distrib_create(
                 name="distrib_42", vuid=42, ndcs=1, npcs=1,
@@ -363,7 +363,7 @@ class TestRpcMethodShape(unittest.TestCase):
 
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
-        with patch.object(c, "get_bdevs", return_value=None), \
+        with patch.object(c, "bdev_get", return_value=None), \
              patch.object(c, "_request", return_value=True) as mock_req:
             c.bdev_distrib_create(
                 name="distrib_42", vuid=42, ndcs=1, npcs=1,

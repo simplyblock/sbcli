@@ -232,7 +232,7 @@ class TestSecondaryPromotion(unittest.TestCase):
         # recreate_lvstore exits cleanly instead of falling through to _kill_app.
         mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
         mock_rpc.bdev_lvol_set_lvs_opts.return_value = True
-        mock_rpc.get_bdevs.return_value = [{"name": "lvol-uuid-vol-1", "aliases": []}]
+        mock_rpc.bdev_get.return_value = {"name": "lvol-uuid-vol-1", "aliases": []}
         mock_rpc.jc_suspend_compression.return_value = (True, None)
         mock_rpc.jc_compression_get_status.return_value = False
         mock_rpc.bdev_distrib_force_to_non_leader.return_value = True
@@ -308,13 +308,13 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.bdev_wait_for_examine.return_value = True
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc.jc_suspend_compression.return_value = (True, None)
-        # Post-examine lvol-bdev verification scans get_bdevs() for each
+        # Post-examine lvol-bdev verification scans bdev_get() for each
         # expected lvol (by uuid or lvs/bdev alias); default MagicMock isn't
-        # iterable as a bdev list, so supply the expected entry here.
-        mock_rpc.get_bdevs.return_value = [
-            {"name": lvol.lvol_uuid,
-             "aliases": [f"{lvol.lvs_name}/{lvol.lvol_bdev}"]},
-        ]
+        # a real bdev dict, so supply the expected entry here.
+        mock_rpc.bdev_get.return_value = {
+            "name": lvol.lvol_uuid,
+            "aliases": [f"{lvol.lvs_name}/{lvol.lvol_bdev}"],
+        }
         mock_rpc_cls.return_value = mock_rpc
 
         for n in [primary, secondary]:
@@ -379,13 +379,13 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc.jc_suspend_compression.return_value = (True, None)
         # Post-examine verification in recreate_lvstore_on_non_leader scans
-        # get_bdevs() for each expected lvol (by uuid or lvs/bdev alias). The
-        # default MagicMock isn't iterable as a bdev list, so the check fails
+        # bdev_get() for each expected lvol (by uuid or lvs/bdev alias). The
+        # default MagicMock isn't a real bdev dict, so the check fails
         # before the hublvol assertion. Return the expected lvol bdev here.
-        mock_rpc.get_bdevs.return_value = [
-            {"name": lvol.lvol_uuid,
-             "aliases": [f"{lvol.lvs_name}/{lvol.lvol_bdev}"]},
-        ]
+        mock_rpc.bdev_get.return_value = {
+            "name": lvol.lvol_uuid,
+            "aliases": [f"{lvol.lvs_name}/{lvol.lvol_bdev}"],
+        }
         mock_rpc_cls.return_value = mock_rpc
 
         for n in [primary, secondary]:
@@ -469,7 +469,7 @@ class TestPrimaryEscalation(unittest.TestCase):
         # recreate_lvstore exits cleanly instead of falling through to _kill_app.
         mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
         mock_rpc.bdev_lvol_set_lvs_opts.return_value = True
-        mock_rpc.get_bdevs.return_value = [{"name": "lvol-uuid-vol-1", "aliases": []}]
+        mock_rpc.bdev_get.return_value = {"name": "lvol-uuid-vol-1", "aliases": []}
         mock_rpc.jc_suspend_compression.return_value = (True, None)
         mock_rpc.jc_compression_get_status.return_value = False
         mock_rpc.bdev_distrib_force_to_non_leader.return_value = True

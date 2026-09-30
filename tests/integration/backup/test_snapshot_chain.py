@@ -18,7 +18,7 @@ it; cloning parents a new volume's blob on the snapshot cloned from; inflating
 folds every ancestor into the volume's live blob, so the next snapshot taken
 from it stands alone while those already taken keep their parents.
 
-Only the data plane is mocked -- ``lvol_create_snapshot`` and ``get_bdevs``,
+Only the data plane is mocked -- ``lvol_create_snapshot`` and ``bdev_get``,
 which is the whole RPC surface of the non-HA snapshot path
 (``snapshot_controller.py:751-769``). Cloning is seeded rather than driven
 through ``snapshot_controller.clone``: that path pulls in subsystem allocation,
@@ -230,10 +230,10 @@ def topology(ensure_db):
 
     rpc = MagicMock()
     rpc.lvol_create_snapshot.return_value = True
-    rpc.get_bdevs.side_effect = lambda *_, **__: [{
+    rpc.bdev_get.side_effect = lambda *_, **__: {
         "uuid": str(uuid_mod.uuid4()),
         "driver_specific": {"lvol": {"blobid": 1, "num_allocated_clusters": 1}},
-    }]
+    }
 
     with patch.object(StorageNode, "rpc_client", lambda *_, **__: rpc):
         yield Topology(db, cluster, pool, node)

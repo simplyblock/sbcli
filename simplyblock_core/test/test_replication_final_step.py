@@ -28,8 +28,8 @@ class _RPC:
         self.ana_groups = []
 
     # hub attach fast-path: pretend the remote bdev already exists
-    def get_bdevs(self, name=None):
-        return [{"name": name or "x"}]
+    def bdev_get(self, name=None):
+        return {"name": name or "x"}
 
     def bdev_nvme_attach_controller(self, *a, **k):
         return ["ok"]

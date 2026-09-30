@@ -252,7 +252,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         # RPC client mock
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True
@@ -342,7 +342,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True
@@ -439,7 +439,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True
@@ -506,7 +506,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_lvol_get_leader.return_value = True
@@ -585,7 +585,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
         rpc = MagicMock()
         rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True

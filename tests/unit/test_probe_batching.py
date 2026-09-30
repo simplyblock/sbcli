@@ -38,16 +38,15 @@ class TestFetchBdevNameSet:
         assert storage_node_ops._fetch_bdev_name_set(
             types.SimpleNamespace(bdev_nvme_controller_list=list)) is None
 
-    def test_never_calls_unfiltered_get_bdevs(self):
+    def test_never_calls_unfiltered_bdev_list(self):
         # The regression this guards: the batch probe must NEVER pay the
         # full bdev dump (app-thread serialization scales with object count).
-        def dump_forbidden(name=None, all_bdevs=False):
+        def dump_forbidden(name=None):
             if name is None:
                 raise AssertionError("unfiltered bdev dump on the batch path")
-            return []
         rpc = types.SimpleNamespace(
             bdev_nvme_controller_list=lambda: [{"name": "remote_a1"}],
-            get_bdevs=dump_forbidden)
+            bdev_get=dump_forbidden)
         assert storage_node_ops._fetch_bdev_name_set(rpc) == {
             "remote_a1", "remote_a1n1"}
 
@@ -69,10 +68,10 @@ class _CountingRpc:
         # Controller name = namespace bdev name minus the trailing "n1".
         return [{"name": n[:-2]} for n in sorted(self.present)]
 
-    def get_bdevs(self, name=None, all_bdevs=False):
+    def bdev_get(self, name=None):
         assert name is not None, "unfiltered bdev dump on a sweep path"
         self.filtered_calls += 1
-        return [{"name": name}] if name in self.present else []
+        return {"name": name} if name in self.present else None
 
 
 def _coverage_env(monkeypatch, rpc):

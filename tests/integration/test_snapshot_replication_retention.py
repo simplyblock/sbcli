@@ -180,8 +180,8 @@ def _seed(db, monkeypatch, source_snaps, existing_targets, chain=None,
     _write_node(db, TARGET_NODE_ID, target_node_status)
 
     class _RPC:
-        def get_bdevs(self, name=None):
-            return [b for b in target_bdevs if b.get("name") == name]
+        def bdev_get(self, name=None):
+            return next((b for b in target_bdevs if b.get("name") == name), None)
 
     monkeypatch.setattr(StorageNode, "rpc_client", lambda self, **kwargs: _RPC())
 
