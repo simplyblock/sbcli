@@ -6178,11 +6178,20 @@ def _relocate_replicas_hosted_on(removed_node: StorageNode):
     fallback for the cases the planner deliberately does not take
     (FD disabled, dedicated secondary nodes, a peer that is not ONLINE)."""
     db_controller = DBController()
+    before = _replica_pointers(removed_node.cluster_id, db_controller)
 
     handled = _plan_driven_relocation(removed_node, db_controller)
-    if handled is not None:
-        return handled
+    if handled is None:
+        handled = _relocate_replicas_one_by_one(removed_node, db_controller)
+    if handled:
+        moved = [pid for pid, ptrs in _replica_pointers(removed_node.cluster_id, db_controller).items()
+                 if before.get(pid) != ptrs]
+        _rewindow_moved_replica_subsystems(moved, db_controller)
+    return handled
 
+
+def _relocate_replicas_one_by_one(removed_node, db_controller):
+    """The per-replica fallback for the cases the global planner declines."""
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     if removed_node.lvstore_stack_secondary:
         if not _relocate_one_replica(removed_node, removed_node.lvstore_stack_secondary, "secondary"):
@@ -6194,6 +6203,132 @@ def _relocate_replicas_hosted_on(removed_node: StorageNode):
             return False
 
     return True
+
+
+def _replica_pointers(cluster_id, db_controller):
+    """``{primary_id: (secondary_node_id, tertiary_node_id)}`` for every node
+    with an lvstore -- compared before and after phase 3b to tell which
+    primaries' replicas actually moved."""
+    return {n.get_id(): (n.secondary_node_id, n.tertiary_node_id)
+            for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+            if n.lvstore}
+
+
+def _rewindow_moved_replica_subsystems(primary_ids, db_controller):
+    """Move a relocated replica's volume subsystems out of a cntlid window
+    another path of the same volume owns.
+
+    A cascade reuses a stack: the node that held an lvstore as tertiary
+    becomes its secondary, and its subsystems -- created for the tertiary
+    path, in window 2000 -- are kept, because the build only creates the ones
+    that are missing. The new tertiary is placed at 2000 by its position in
+    ``lvol.nodes``, so the first time it restarts and recreates its
+    subsystems, two paths of every volume on that lvstore share a cntlid
+    window, and the host rejects one of them as a duplicate controller.
+    (Run 50, 2026-10-01: LVS_2, wzkz2 kept 2000 as the new secondary.)
+
+    Here, once every move has landed and ``lvol.nodes`` is final, such a
+    subsystem is recreated in the window its position owns. Only when the
+    volume keeps two other live paths while it is gone -- the leader and the
+    other replica -- so the client loses one standby path for a moment and
+    nothing else. A subsystem that collides with no one is left alone, even
+    if it is not in its position's window: moving it would be churn, and a
+    restart will place it correctly. Best-effort: anything not fixed is
+    logged, and the removal goes on.
+    """
+    for pid in primary_ids:
+        try:
+            primary = db_controller.get_storage_node_by_id(pid)
+        except KeyError:
+            continue
+        by_node_nqn: dict = {}
+        for lvol in db_controller.get_lvols_by_node_id(pid):
+            if lvol.status in (LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION):
+                continue
+            nodes = list(getattr(lvol, "nodes", None) or [])
+            for idx, nid in enumerate(nodes):
+                if idx == 0 or not nid:
+                    continue
+                by_node_nqn.setdefault((nid, lvol.nqn), []).append((lvol, idx))
+        windows: dict = {}
+        for (nid, nqn), members in by_node_nqn.items():
+            try:
+                node = db_controller.get_storage_node_by_id(nid)
+            except KeyError:
+                continue
+            if node.status != StorageNode.STATUS_ONLINE:
+                continue
+            lvol, idx = members[0]
+            try:
+                sub = node.rpc_client(timeout=5, retry=1).subsystem_get(nqn)
+            except Exception as e:
+                logger.warning(f"[REMOVAL] could not read {nqn} on {nid} ({e}); not re-windowing it")
+                continue
+            if isinstance(sub, dict) and sub.get("min_cntlid") is not None:
+                windows[(nid, nqn)] = (int(sub["min_cntlid"]), idx, node, members)
+        for (nid, nqn), (have, idx, node, members) in windows.items():
+            want = lvol_controller.lvol_min_cntlid(idx)
+            if have == want:
+                continue
+            lvol = members[0][0]
+            others = [n for n in (lvol.nodes or []) if n and n != nid]
+            owned_by_others = {lvol_controller.lvol_min_cntlid(i)
+                               for i, n in enumerate(lvol.nodes or []) if n and n != nid}
+            held_by_others = {w for (onid, onqn), (w, _i, _n, _m) in windows.items()
+                              if onqn == nqn and onid != nid}
+            if have not in owned_by_others | held_by_others:
+                continue
+            if want in held_by_others:
+                logger.warning(
+                    f"[REMOVAL] {nqn} on {nid} sits in window {have}, another path owns it, "
+                    f"and its own window {want} is held by another path; leaving it")
+                continue
+            live_others = 0
+            for onid in others:
+                try:
+                    if db_controller.get_storage_node_by_id(onid).status == StorageNode.STATUS_ONLINE:
+                        live_others += 1
+                except KeyError:
+                    pass
+            if live_others < 2:
+                logger.warning(
+                    f"[REMOVAL] {nqn} on {nid} sits in window {have}, which another path of "
+                    f"the volume owns, but the volume has {live_others} other live path(s); "
+                    f"not dropping this one to fix it")
+                continue
+            logger.info(
+                f"[REMOVAL] re-windowing {nqn} on {nid} ({primary.lvstore}): cntlid window "
+                f"{have} -> {want} (a reused stack kept its previous role's window)")
+            if not _recreate_subsystem_in_window(node, nqn, want, [m[0] for m in members]):
+                logger.error(
+                    f"[REMOVAL] re-windowing {nqn} on {nid} failed; the volume runs without "
+                    f"this path until the node's next restart recreates it")
+
+
+def _recreate_subsystem_in_window(node, nqn, min_cntlid, lvols):
+    """Delete ``nqn`` on ``node`` and create it again in ``min_cntlid``'s window,
+    with every volume of it re-registered (namespace, then a non-optimized
+    listener -- the node is not the leader). A shared subsystem carries
+    several volumes, and deleting it drops all of their namespaces."""
+    rpc = node.rpc_client(timeout=10, retry=2)
+    first = lvols[0]
+    try:
+        rpc.subsystem_delete(nqn)
+        rpc.subsystem_create(nqn, first.ha_type, first.uuid, min_cntlid,
+                             max_namespaces=first.max_namespace_per_subsys,
+                             allow_any_host=not bool(first.allowed_hosts))
+    except Exception as e:
+        logger.error(f"[REMOVAL] recreating {nqn} on {node.get_id()} raised: {e}")
+        return False
+    ok = True
+    for lvol in lvols:
+        if lvol.allowed_hosts:
+            _reapply_allowed_hosts(lvol, node, rpc)
+        added, msg = add_lvol_thread(lvol, node, lvol_ana_state="non_optimized")
+        if not added:
+            logger.error(f"[REMOVAL] re-registering {lvol.get_id()} in {nqn} on {node.get_id()}: {msg}")
+            ok = False
+    return ok
 
 
 def _relocation_planner_inputs(removed_node: StorageNode, db_controller,
