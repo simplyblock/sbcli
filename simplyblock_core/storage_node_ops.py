@@ -5827,9 +5827,47 @@ def replica_stack_violations(nodes, stack_present):
     return missing
 
 
+def replica_role_violations(nodes, role_held):
+    """Hosted replicas whose role in SPDK is not the role the DB records.
+
+    ``role_held(node, lvstore)`` answers "secondary" / "tertiary" from the
+    lvstore's own ``lvs_tertiary`` flag, or None when it cannot tell (absent,
+    unreachable, or currently the leader after a failover -- none of which is
+    a role disagreement).
+
+    Every pointer and back-reference can agree and still describe roles the
+    data plane does not hold: a cascading relocation built the old tertiary
+    as tertiary while recording it as the secondary, and the fresh tertiary
+    the other way round (run 50, 2026-10-01, LVS_2). The health check then
+    wired hublvol paths by the DB's roles, against a secondary that had never
+    created its hublvol, and failed every cycle. Nothing in the removal looked.
+
+    A node recorded in BOTH roles of one primary holds a single physical stack
+    for the two, so it has no one expected role and is skipped.
+
+    Returns ``(node_id, lvstore, owner_primary_id, recorded, held)`` tuples.
+    """
+    by_id = {n.get_id(): n for n in nodes}
+    wrong = []
+    for node in nodes:
+        sec_owner = getattr(node, "lvstore_stack_secondary", "")
+        ter_owner = getattr(node, "lvstore_stack_tertiary", "")
+        for owner_id, recorded in ((sec_owner, "secondary"), (ter_owner, "tertiary")):
+            if not owner_id or sec_owner == ter_owner:
+                continue
+            owner = by_id.get(owner_id)
+            if owner is None or not owner.lvstore:
+                continue
+            held = role_held(node, owner.lvstore)
+            if held is not None and held != recorded:
+                wrong.append((node.get_id(), owner.lvstore, owner_id, recorded, held))
+    return wrong
+
+
 def _verify_replica_stacks(cluster_id, db_controller, context=""):
     """Probe every online node's hosted replica stacks and log any that are
-    missing. Returns the violation list (empty when the invariant holds).
+    missing, or that hold a role other than the one recorded for them.
+    Returns the missing-stack list (empty when that invariant holds).
 
     An unreachable node is NOT reported as a violation: absence of proof is
     not proof of absence, and a probe that cries wolf on a transient RPC
@@ -5837,15 +5875,32 @@ def _verify_replica_stacks(cluster_id, db_controller, context=""):
     """
     nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
              if n.status == StorageNode.STATUS_ONLINE]
+    probed: dict = {}
+
+    def _probe(node, lvstore):
+        key = (node.get_id(), lvstore)
+        if key not in probed:
+            try:
+                ret = node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore)
+                probed[key] = ret[0] if isinstance(ret, list) and ret else (ret or {})
+            except RPCException as e:
+                logger.warning(
+                    f"[REMOVAL] could not probe {lvstore} on {node.get_id()} "
+                    f"({e}); not counting it as missing")
+                probed[key] = None
+        return probed[key]
 
     def stack_present(node, lvstore):
-        try:
-            return bool(node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore))
-        except RPCException as e:
-            logger.warning(
-                f"[REMOVAL] could not probe {lvstore} on {node.get_id()} "
-                f"({e}); not counting it as missing")
-            return True
+        info = _probe(node, lvstore)
+        return info is None or bool(info)
+
+    def role_held(node, lvstore):
+        info = _probe(node, lvstore)
+        if not isinstance(info, dict) or "lvs_tertiary" not in info:
+            return None
+        if info.get("lvs leadership"):
+            return None
+        return "tertiary" if info["lvs_tertiary"] else "secondary"
 
     violations = replica_stack_violations(nodes, stack_present)
     for node_id, lvstore, owner_id, role in violations:
@@ -5857,6 +5912,11 @@ def _verify_replica_stacks(cluster_id, db_controller, context=""):
         logger.info(
             f"[REMOVAL] replica-stack invariant holds{context}: every hosted "
             f"replica claimed by a back-reference is physically present")
+    for node_id, lvstore, owner_id, recorded, held in replica_role_violations(nodes, role_held):
+        logger.error(
+            f"[REMOVAL] REPLICA ROLE MISMATCH{context}: {node_id} is recorded as "
+            f"{recorded} of {owner_id} but holds {lvstore} as {held} -- hublvol "
+            f"paths wired by the recorded roles will not connect")
     return violations
 
 
@@ -6368,7 +6428,7 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     # Build the replica on the new node. The primary is online and remains the
     # leader, so recreate_lvstore_on_non_leader wires distribs/raid/lvstore,
     # role + ANA, and the hublvol connection exactly as the restart path does.
-    ret = recreate_lvstore_on_non_leader(new_node, primary, primary)
+    ret = recreate_lvstore_on_non_leader(new_node, primary, primary, role=role)
     if not ret:
         logger.error(
             f"[REMOVAL] failed to rebuild {role} replica of {primary_id} on {new_id}, will retry")
@@ -6561,7 +6621,8 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
             new_host = db_controller.get_storage_node_by_id(new_host_id)
 
         try:
-            built = recreate_lvstore_on_non_leader(new_host, occupant_primary, occupant_primary)
+            built = recreate_lvstore_on_non_leader(new_host, occupant_primary, occupant_primary,
+                                                   role=role)
         except Exception as e:
             logger.error(
                 f"[REMOVAL] splice: failed to build {role} replica of "
@@ -11218,16 +11279,59 @@ def _derive_lvstore_ports(snode, primary_node, db_controller):
     return ports
 
 
-def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False, force=False):
+def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False, force=False,
+                                   role=None):
     """Per-LVS-locked wrapper: serialize recreate of ``primary_node.lvstore``
     only against a concurrent recreate of the SAME LVS. Activation-mode
-    (globally blocked, serves no IO) bypasses the lock — see recreate_all_lvstores."""
+    (globally blocked, serves no IO) bypasses the lock — see recreate_all_lvstores.
+
+    ``role`` ("secondary" / "tertiary") is the role ``snode`` is being built
+    for; see _non_leader_role."""
     if activation_mode:
         return _recreate_lvstore_on_non_leader_impl(
-            snode, leader_node, primary_node, activation_mode=True, force=force)
+            snode, leader_node, primary_node, activation_mode=True, force=force, role=role)
     with _recreate_lvstore_lock(primary_node.lvstore):
         return _recreate_lvstore_on_non_leader_impl(
-            snode, leader_node, primary_node, activation_mode=False, force=force)
+            snode, leader_node, primary_node, activation_mode=False, force=force, role=role)
+
+
+def _non_leader_role(snode, primary_node, role=None):
+    """The role ``snode`` holds for ``primary_node.lvstore``: the one the caller
+    names, else the one the primary's pointers give it.
+
+    The pointers are right for a node restart, where the topology is settled.
+    They are wrong for a removal's replica relocation, which updates them only
+    after the build: in a cascade (secondary moved onto the old tertiary, the
+    tertiary onto a fresh node) every build read the pre-move pointers, so the
+    old tertiary was given role=tertiary while becoming the secondary, the
+    fresh node role=secondary while becoming the tertiary, and the data plane
+    ended up the reverse of the DB (run 50, 2026-10-01, LVS_2). A relocation
+    knows the role it is building, and passes it.
+    """
+    if role is None:
+        return "tertiary" if primary_node.tertiary_node_id == snode.get_id() else "secondary"
+    if role not in ("secondary", "tertiary"):
+        raise ValueError(f"not a non-leader role: {role!r}")
+    return role
+
+
+def _non_leader_min_cntlid(lvol, snode):
+    """cntlid window for ``snode``'s path to ``lvol``, from lvol_controller's
+    single source of truth (the node's position in ``lvol.nodes``).
+
+    The build used to hard-code 1000 for a secondary and 2000 for a tertiary.
+    That only agrees with the path list while roles and positions match, and a
+    relocation breaks the match: it builds on a node ``lvol.nodes`` does not
+    name yet (the list is re-pointed only after the build), possibly while
+    another replica of the same volume still owns the window the role would
+    pick -- the old tertiary that became the secondary keeps its
+    tertiary-window subsystems. Such a node gets the next window above every
+    assigned path, so it cannot collide with any of them.
+    """
+    nodes = getattr(lvol, "nodes", None) or []
+    if snode.get_id() in nodes[1:]:
+        return lvol_controller.lvol_min_cntlid(nodes.index(snode.get_id()))
+    return lvol_controller.lvol_min_cntlid(max(len(nodes), 1))
 
 
 #: Cap on concurrent lvol subsystem registrations against a single SPDK.
@@ -11504,7 +11608,8 @@ def ensure_nvme_options(snode, context=""):
     return False, drift
 
 
-def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primary_node, activation_mode=False, force=False):
+def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primary_node, activation_mode=False, force=False,
+                                         role=None):
     """Recreate a non-leader LVS on snode.
 
     Per design: runs for secondary when primary is online, or for tertiary always.
@@ -11523,7 +11628,12 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         activation_mode: when True, skip all peer operations (port blocking,
             hublvol creation/connection, leader demotion).  Used during
             cluster_activate() where not all LVS are ready yet.
+        role: "secondary" / "tertiary", the role snode is being built for;
+            derived from the primary's pointers when not given -- see
+            _non_leader_role.
     """
+    role = _non_leader_role(snode, primary_node, role)
+    is_tertiary = role == "tertiary"
     db_controller = DBController()
     snode_rpc_client = snode.rpc_client()
 
@@ -11616,11 +11726,8 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             # LVS_11 on worker-1) until a later topology-correct call
             # happened to repair it. Every LVS must hold a unique role
             # per node at all times.
-            activation_role = ("tertiary"
-                               if primary_node.tertiary_node_id == snode.get_id()
-                               else "secondary")
             snode.connect_to_hublvol(primary_node, failover_node=None,
-                                     role=activation_role)
+                                     role=role)
         except Exception as e:
             logger.error("Error establishing hublvol: %s", e)
             # return False
@@ -11639,13 +11746,23 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                 snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
 
     ### 2- create lvols nvmf subsystems (idempotent: skip existing)
-    is_tertiary = (primary_node.tertiary_node_id == snode.get_id())
-    min_cntlid = 2000 if is_tertiary else 1000
     for lvol in lvol_list:
         allow_any = not bool(lvol.allowed_hosts)
-        if snode_rpc_client.subsystem_get(lvol.nqn):
+        min_cntlid = _non_leader_min_cntlid(lvol, snode)
+        existing = snode_rpc_client.subsystem_get(lvol.nqn)
+        if existing:
             logger.info("subsystem %s already exists on %s, skipping create",
                         lvol.nqn, snode.get_id())
+            # A reused stack -- a relocation turning this node's tertiary into
+            # the secondary -- keeps the subsystems its old role created, and
+            # their cntlid window with them. Report it: the window is only
+            # fixed by recreating the subsystem, which drops this path.
+            have = existing.get("min_cntlid") if isinstance(existing, dict) else None
+            if have is not None and have != min_cntlid:
+                logger.warning(
+                    "subsystem %s on %s kept cntlid window %s from its previous role; "
+                    "its path is %s (%s) now, whose window is %s",
+                    lvol.nqn, snode.get_id(), have, role, primary_node.lvstore, min_cntlid)
         else:
             logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
             snode_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
