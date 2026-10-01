@@ -178,5 +178,80 @@ class TestPhase3cReportsAReplicaHoldingTheWrongRole(unittest.TestCase):
         self.assertEqual(sum("REPLICA ROLE MISMATCH" in m for m in logs.output), 2)
 
 
+class TestReusedStackIsReWindowed(unittest.TestCase):
+    """After the cascade, wzkz2 is LVS_2's secondary (position 1, window 1000)
+    but kept the subsystems it created as tertiary, in 2000 -- the window
+    htthx's position owns. htthx was built at 3000. Only wzkz2 is moved."""
+
+    def _setup(self, *, htthx_status=StorageNode.STATUS_ONLINE, wzkz2_window=2000,
+               shared=False):
+        tt9v7 = _node("tt9v7", lvstore="LVS_2", secondary_id="wzkz2", tertiary_id="htthx")
+        wzkz2 = _node("wzkz2")
+        htthx = _node("htthx", status=htthx_status)
+        lvols = [_lvol("tt9v7", ["tt9v7", "wzkz2", "htthx"], lvol_id="v1", nqn="nqn:a")]
+        if shared:
+            lvols.append(_lvol("tt9v7", ["tt9v7", "wzkz2", "htthx"], lvol_id="v2", nqn="nqn:a"))
+        for lv in lvols:
+            lv.status = "online"
+            lv.allowed_hosts = []
+            lv.max_namespace_per_subsys = 5 if shared else 1
+        windows = {"wzkz2": wzkz2_window, "htthx": 3000}
+        rpcs = {}
+        for n in (tt9v7, wzkz2, htthx):
+            rpc = MagicMock()
+            rpc.subsystem_get.return_value = {"nqn": "nqn:a", "min_cntlid": windows.get(n.get_id(), 1)}
+            n.rpc_client = MagicMock(return_value=rpc)
+            rpcs[n.get_id()] = rpc
+        db = FakeDB(_cluster(npcs=2, ndcs=2, ft=2), [tt9v7, wzkz2, htthx], lvols={"tt9v7": lvols})
+        return db, rpcs, lvols
+
+    def _run(self, db):
+        with patch.object(sno, "add_lvol_thread", return_value=(True, None)) as add:
+            sno._rewindow_moved_replica_subsystems(["tt9v7"], db)
+        return add
+
+    def test_the_old_tertiary_turned_secondary_moves_to_its_own_window(self):
+        db, rpcs, _ = self._setup()
+        add = self._run(db)
+        rpcs["wzkz2"].subsystem_delete.assert_called_once_with("nqn:a")
+        self.assertEqual(rpcs["wzkz2"].subsystem_create.call_args.args[3], 1000)
+        add.assert_called_once()
+        self.assertEqual(add.call_args.kwargs["lvol_ana_state"], "non_optimized")
+        rpcs["htthx"].subsystem_delete.assert_not_called()
+
+    def test_a_volume_without_two_other_live_paths_keeps_the_path(self):
+        db, rpcs, _ = self._setup(htthx_status=StorageNode.STATUS_OFFLINE)
+        self._run(db)
+        rpcs["wzkz2"].subsystem_delete.assert_not_called()
+
+    def test_a_subsystem_already_in_its_window_is_left_alone(self):
+        db, rpcs, _ = self._setup(wzkz2_window=1000)
+        self._run(db)
+        rpcs["wzkz2"].subsystem_delete.assert_not_called()
+
+    def test_a_shared_subsystem_is_recreated_once_with_every_volume_back(self):
+        db, rpcs, lvols = self._setup(shared=True)
+        add = self._run(db)
+        rpcs["wzkz2"].subsystem_delete.assert_called_once_with("nqn:a")
+        rpcs["wzkz2"].subsystem_create.assert_called_once()
+        self.assertEqual(sorted(c.args[0].get_id() for c in add.call_args_list), ["v1", "v2"])
+
+    def test_only_primaries_whose_replicas_moved_are_re_windowed(self):
+        removed = _node("v7ppl", status=StorageNode.STATUS_IN_REMOVAL, stack_secondary="tt9v7")
+        tt9v7 = _node("tt9v7", lvstore="LVS_2", secondary_id="v7ppl", tertiary_id="wzkz2")
+        other = _node("jj7dr", lvstore="LVS_19", secondary_id="wzkz2", tertiary_id="htthx")
+        db = FakeDB(_cluster(npcs=2, ndcs=2, ft=2), [removed, tt9v7, other])
+
+        def _plan(_removed, _db):
+            tt9v7.secondary_node_id = "wzkz2"
+            return True
+
+        with patch.object(sno, "DBController", return_value=db), \
+             patch.object(sno, "_plan_driven_relocation", side_effect=_plan), \
+             patch.object(sno, "_rewindow_moved_replica_subsystems") as rewindow:
+            self.assertTrue(sno._relocate_replicas_hosted_on(removed))
+        rewindow.assert_called_once_with(["tt9v7"], db)
+
+
 if __name__ == "__main__":
     unittest.main()
