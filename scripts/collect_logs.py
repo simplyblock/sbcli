@@ -1142,9 +1142,21 @@ def main():
     # ── 3. Management-node IP ────────────────────────────────────────────────
 
     print("\n[2] Resolving management node …")
+    in_cluster = bool(os.environ.get("KUBERNETES_SERVICE_HOST"))
     if args.mgmt_ip:
         mgmt_ip = args.mgmt_ip
         print(f"    Using provided IP : {mgmt_ip}")
+    elif args.mode == "kubernetes" and in_cluster:
+        # Run from a pod of the control plane (the documented way on
+        # Kubernetes): the management-node record carries no reachable
+        # address there (0.0.0.0), and Graylog and OpenSearch are Services
+        # in the control plane's namespace. Resolved by DNS, not by IP
+        # (2026-10-01: the collector reported "0 documents" for a window
+        # OpenSearch held 1.6 million documents of, because it had asked
+        # http://0.0.0.0:9200).
+        ns = args.namespace or "simplyblock"
+        mgmt_ip = f"in-cluster services ({ns})"
+        print(f"    In-cluster run: using the Graylog and OpenSearch Services in namespace {ns}")
     else:
         cp_nodes = sbctl_json("control-plane", "list")
         if not cp_nodes:
@@ -1153,7 +1165,11 @@ def main():
         mgmt_ip = cp_nodes[0]["IP"]
         print(f"    Management IP : {mgmt_ip}  ({len(cp_nodes)} node(s) total)")
 
-    if args.mode == "kubernetes":
+    if args.mode == "kubernetes" and in_cluster and not args.mgmt_ip:
+        ns = args.namespace or "simplyblock"
+        graylog_base = f"http://simplyblock-graylog.{ns}.svc:9000/api"
+        opensearch_base = f"http://opensearch-cluster-master.{ns}.svc:9200"
+    elif args.mode == "kubernetes":
         graylog_base = f"http://{mgmt_ip}:9000/api"
         opensearch_base = f"http://{mgmt_ip}:9200"
     else:

@@ -760,13 +760,14 @@ def _counterpart_on_destination(snapshot, remote_node):
     snapshot). Only a copy on the destination's own lvstore counts: a chain
     can only be built on a snapshot in the same lvstore.
     """
-    if not snapshot.data_uuid or not remote_node.lvstore:
+    lvstore = getattr(remote_node, "lvstore", "")
+    if not snapshot.data_uuid or not lvstore:
         return None
     for cand in db.get_snapshots(remote_node.cluster_id):
         if (cand.get_id() != snapshot.get_id()
                 and cand.data_uuid == snapshot.data_uuid
                 and cand.status != SnapShot.STATUS_IN_DELETION
-                and cand.lvol and cand.lvol.lvs_name == remote_node.lvstore):
+                and cand.lvol and cand.lvol.lvs_name == lvstore):
             return cand
     return None
 
@@ -1125,18 +1126,17 @@ def _previous_replicated_snapshot(snapshot, replicate_to_source):
     replicated point)."""
     attr = ("source_replicated_snap_uuid" if replicate_to_source
             else "target_replicated_snap_uuid")
-    if snapshot.snap_ref_id:
-        try:
-            referenced = db.get_snapshot_by_id(snapshot.snap_ref_id)
-        except KeyError as e:
-            logger.error("snap_ref_id %s unresolvable: %s", snapshot.snap_ref_id, e)
-        else:
-            if getattr(referenced, attr, ""):
-                return referenced
-            logger.info(
-                "Referenced predecessor %s of %s has no copy on the remote side "
-                "yet; looking for an older replicated sibling instead",
-                referenced.get_id(), snapshot.get_id())
+    # The newest older replicated SIBLING is the predecessor, and it must be
+    # looked for FIRST: snapshot_controller.add stamps snap_ref_id on EVERY
+    # snapshot of a cloned volume, naming the clone lineage's ORIGIN, not the
+    # snapshot before this one. Honouring that reference ahead of the siblings
+    # chained every delta of a failed-over volume onto the fail-over point
+    # instead of onto the previous copy -- a star, not a chain. A partial
+    # transfer carries only the delta against the predecessor on the source,
+    # so each copy on the destination held "fail-over point + one 5-minute
+    # delta" and nothing in between; the next relocate cloned from such a copy
+    # and the guest found a file system with holes (2026-10-01, wp-db on the
+    # real test bed: XFS metadata CRC errors, MariaDB would not start).
     prev = None
     for s in db.get_snapshots_by_node_id(snapshot.lvol.node_id):
         if (s.lvol.get_id() == snapshot.lvol.get_id()
@@ -1163,17 +1163,30 @@ def _previous_replicated_snapshot(snapshot, replicate_to_source):
     except (KeyError, AttributeError):
         pass
     parent_uuid = getattr(lvol, "cloned_from_snap", "")
-    if not parent_uuid:
-        return None
-    try:
-        parent = db.get_snapshot_by_id(parent_uuid)
-    except KeyError as e:
-        logger.error("clone parent %s unresolvable: %s", parent_uuid, e)
-        return None
-    if getattr(parent, attr, ""):
+    parent = None
+    if parent_uuid:
+        try:
+            parent = db.get_snapshot_by_id(parent_uuid)
+        except KeyError as e:
+            logger.error("clone parent %s unresolvable: %s", parent_uuid, e)
+            return None
+    if parent is not None and getattr(parent, attr, ""):
         logger.info("Chain parent for %s is the clone's origin snapshot %s",
                     snapshot.get_id(), parent.get_id())
         return parent
+    # Last: a referenced snapshot (snap_ref_id). For a clone it names the
+    # lineage's origin, which the clone parent above already covers; it is
+    # consulted only when nothing else resolved, and only when replicated.
+    if snapshot.snap_ref_id and snapshot.snap_ref_id != parent_uuid:
+        try:
+            referenced = db.get_snapshot_by_id(snapshot.snap_ref_id)
+        except KeyError as e:
+            logger.error("snap_ref_id %s unresolvable: %s", snapshot.snap_ref_id, e)
+            return None
+        if getattr(referenced, attr, ""):
+            logger.info("Chain parent for %s is its referenced snapshot %s",
+                        snapshot.get_id(), referenced.get_id())
+            return referenced
     return None
 
 

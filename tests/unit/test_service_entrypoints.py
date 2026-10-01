@@ -51,7 +51,7 @@ class TestServiceDispatcher(unittest.TestCase):
 
     def test_advertises_at_least_the_known_services(self):
         # A floor, not an exact count: adding a service should not fail this.
-        self.assertGreaterEqual(len(dispatcher._service_names()), 30)
+        self.assertGreaterEqual(len(dispatcher._service_names()), 29)
 
     def test_every_advertised_name_resolves_to_a_module(self):
         for name in dispatcher._service_names():

@@ -32,6 +32,35 @@ class TestListBackups:
         db.get_backups.assert_called_once_with(CLUSTER_ID)
 
 
+class TestWatchBackups:
+    """Regression: 2026-10-01-backup-inventory-empty. The list served no
+    ``?watch=true``, so a client that streams backups (the Kubernetes operator's
+    StorageBackup inventory) got a plain JSON list where it expected events."""
+
+    def test_list_dispatches_watch_backups(self, client, backup, backup_controller, watch_stream):
+        backup_controller.watch_backups.return_value = watch_stream([backup])
+
+        response = client.get(f'{BASE}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert BACKUP_ID in response.text
+        backup_controller.watch_backups.assert_called_once_with(CLUSTER_ID)
+
+    def test_policy_list_dispatches_watch_policies(
+            self, client, backup_policy, backup_controller, watch_stream):
+        backup_controller.watch_policies.return_value = watch_stream([backup_policy])
+
+        response = client.get(f'{BASE}/backup-policies/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert POLICY_ID in response.text
+        backup_controller.watch_policies.assert_called_once_with(CLUSTER_ID)
+
+
 class TestCreateBackup:
 
     def test_backs_up_snapshot(self, client, db, cluster, backup_controller):

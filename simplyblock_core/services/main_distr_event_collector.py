@@ -182,7 +182,7 @@ def _is_target_remote_controller_healthy(device_obj, event_node_obj):
         remote_bdev = f"remote_{device_obj.alceml_bdev}n1"
 
     ctrl_name = remote_bdev.removesuffix("n1")
-    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(ctrl_name)
+    ret = event_node_obj.rpc_client().bdev_nvme_controller_list(ctrl_name)
     if not ret:
         return False
 
@@ -249,16 +249,15 @@ def process_device_event(event, logger):
                 if device_obj.bdev_type == "aio":
                     # AIO devices have no nvme controller — probe the base
                     # bdev instead: bdev gone => the late event is real.
-                    ret, err = event_node_obj.rpc_client().get_bdevs_2(device_obj.nvme_bdev)
-                    controller_missing = bool(err) or not ret
+                    controller_missing = event_node_obj.rpc_client().bdev_get(device_obj.nvme_bdev) is None
                 else:
-                    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
-                    controller_missing = bool(err) and err['code'] == 22
+                    controller_missing = not event_node_obj.rpc_client().bdev_nvme_controller_list(
+                        device_obj.nvme_controller)
                 if controller_missing:
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, checking controller filed")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s'
                 else:
-                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, error checking controller: {err}, skipping")
+                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, controller/bdev still present, skipping")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s_skipping'
                     return
 
@@ -756,7 +755,11 @@ def ensure_collectors(nodes):
             key = f"{node_id}:{source}"
             thread = threads_maps.get(key)
             if thread is None or thread.is_alive() is False:
-                t = threading.Thread(target=target, args=(node_id,))
+                t = threading.Thread(
+                    target=target,
+                    args=(node_id,),
+                    daemon=True,  # prevents main thread failures from keeping the process alive
+                )
                 t.start()
                 threads_maps[key] = t
 

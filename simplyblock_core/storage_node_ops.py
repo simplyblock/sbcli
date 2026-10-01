@@ -84,7 +84,6 @@ from simplyblock_core.rpc_client import (
 )
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import (
-    addNvmeDevices,
     dial_backoff,
     hublvol_reconnect,
     port_block,
@@ -4275,7 +4274,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             else:
                 ssds = snode.ssd_pcie
 
-            nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
+            nvme_devs = utils.addNvmeDevices(rpc_client, snode, ssds)
         if nvme_devs:
 
             for nvme in nvme_devs:
@@ -8374,7 +8373,7 @@ def _restart_storage_node_impl(
                 if ssd in node_info['spdk_pcie_list']:
                     ssds.append(ssd)
 
-        nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
+        nvme_devs = utils.addNvmeDevices(rpc_client, snode, ssds)
         if not nvme_devs:
             logger.error("No NVMe devices was found!")
             return False

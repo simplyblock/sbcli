@@ -25,6 +25,7 @@ from simplyblock_core.models.backup_config import (
     BackupLocation,
     S3Credentials,
 )
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -35,6 +36,14 @@ db_controller = DBController()
 
 def _generate_backup_id():
     return str(uuid4())
+
+
+async def watch_backups(cluster_id):
+    """Stream backup changes for one cluster (same scope as the list endpoint)."""
+    async for batch in db_controller.watch(
+            Backup, scope=(cluster_id,),
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
 
 
 def get_latest_backup_for_lvol(lvol_id):

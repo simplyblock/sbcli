@@ -2328,15 +2328,37 @@ def _run_periodic_housekeeping(cluster_id):
 
 
 def loop_for_node(snode):
-    # global logger
-    # logger = logging.getLogger()
-    # logger_handler = logging.StreamHandler(stream=sys.stdout)
-    # logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
-    # logger.addHandler(logger_handler)
+    # Not catching errors: Failures should propagate to avoid cross-loop failures from sticking
     while True:
         check_node(snode)
         logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+
+
+#: Replacing a dead per-node thread recovers a transaction that timed out, but
+#: not an FDB client that has wedged: `db` is process-global, so a replacement
+#: thread inherits the same client and dies the same way. Past this many
+#: replacements of one node's thread inside the window, stop replacing and let
+#: the failure leave main() — the process exits and the orchestrator restarts
+#: us with a fresh client.
+THREAD_RESPAWN_WINDOW_SEC = 120
+THREAD_RESPAWN_CEILING = 5
+
+# node_id -> times this monitor replaced that node's thread, newest last.
+_thread_respawns: dict[str, list[float]] = {}
+
+
+def _record_thread_respawn(node_id) -> int:
+    """Note a replacement of ``node_id``'s thread and return how many fall
+    inside THREAD_RESPAWN_WINDOW_SEC."""
+    now = time.time()
+    recent = [
+        at for at in _thread_respawns.get(node_id, [])
+        if now - at < THREAD_RESPAWN_WINDOW_SEC
+    ]
+    recent.append(now)
+    _thread_respawns[node_id] = recent
+    return len(recent)
 
 
 def main():
@@ -2344,12 +2366,6 @@ def main():
     threads_maps: dict[str, threading.Thread] = {}
 
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()
@@ -2361,8 +2377,19 @@ def main():
             for node in nodes:
                 node_id = node.get_id()
                 if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                    if node_id in threads_maps:
+                        respawns = _record_thread_respawn(node_id)
+                        if respawns > THREAD_RESPAWN_CEILING:
+                            raise RuntimeError(
+                                f"node {node_id}: monitor thread died {respawns} times in "
+                                f"{THREAD_RESPAWN_WINDOW_SEC}s, exiting so the orchestrator "
+                                "restarts this service with a fresh FDB client")
                     logger.info(f"Creating thread for node {node_id}")
-                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t = threading.Thread(
+                        target=loop_for_node,
+                        args=(node,),
+                        daemon=True,  # prevents main thread failures from keeping the process alive
+                    )
                     t.start()
                     threads_maps[node_id] = t
                     logger.debug(threads_maps[node_id])

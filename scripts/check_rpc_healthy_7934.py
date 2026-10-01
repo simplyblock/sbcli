@@ -17,8 +17,11 @@ def main():
     rpc = node.rpc_client()
     print(f"node={node.get_id()} {node.mgmt_ip}:{node.rpc_port}")
     for ctrl in CTRLS:
-        ret, err = rpc.bdev_nvme_controller_list_2(ctrl)
-        print(f"ctrl={ctrl} ret={ret} err={err}")
+        try:
+            ret = rpc.bdev_nvme_controller_list(ctrl)
+            print(f"ctrl={ctrl} ret={ret}")
+        except Exception as exc:
+            print(f"ctrl={ctrl} error={exc}")
     for bdev in BDEVS:
         ret = rpc.bdev_get(bdev)
         print(f"bdev={bdev} present={bool(ret)}")
