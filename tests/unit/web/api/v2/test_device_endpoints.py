@@ -2,6 +2,8 @@
 
 import pytest
 
+from simplyblock_core.models.nvme_device import NVMeDevice
+from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import CLUSTER_ID, DEVICE_ID, STORAGE_NODE_ID
 
 BASE = f'/api/v2/clusters/{CLUSTER_ID}/storage-nodes/{STORAGE_NODE_ID}/devices'
@@ -56,6 +58,115 @@ class TestGetDevice:
         response = client.get(f'{BASE}/{DEVICE_ID}/')
 
         assert response.status_code == 404
+
+    def test_new_device_is_serializable(self, client, db, device):
+        """A detected-but-not-added device has no cluster map slot or listener."""
+        device.status = NVMeDevice.STATUS_NEW
+        device.cluster_device_order = -1
+        device.nvmf_ip = ''
+
+        response = client.get(f'{BASE}/{DEVICE_ID}/')
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['cluster_device_order'] is None
+        assert body['nvmf_ips'] == []
+
+
+NEW_DEVICE_ID = 'abcdabcd-abcd-abcd-abcd-abcdabcdabcd'
+
+
+class TestAddDevice:
+
+    def test_add(self, client, device, device_controller):
+        device.status = NVMeDevice.STATUS_NEW
+        device_controller.add_device.return_value = DEVICE_ID
+
+        response = client.post(f'{BASE}/{DEVICE_ID}/add')
+
+        assert response.status_code == 204
+        device_controller.add_device.assert_called_once_with(DEVICE_ID)
+
+    def test_already_online_is_a_noop(self, client, device, device_controller):
+        response = client.post(f'{BASE}/{DEVICE_ID}/add')
+
+        assert response.status_code == 204
+        device_controller.add_device.assert_not_called()
+
+    def test_wrong_status_conflicts(self, client, device, device_controller):
+        device.status = NVMeDevice.STATUS_FAILED
+
+        response = client.post(f'{BASE}/{DEVICE_ID}/add')
+
+        assert response.status_code == 409
+        device_controller.add_device.assert_not_called()
+
+    def test_raises_on_failure(self, client, device, device_controller):
+        device.status = NVMeDevice.STATUS_NEW
+        device_controller.add_device.return_value = False
+
+        with pytest.raises(ValueError):
+            client.post(f'{BASE}/{DEVICE_ID}/add')
+
+
+class TestReplaceDevice:
+
+    @pytest.fixture()
+    def failed_device(self, device):
+        device.status = NVMeDevice.STATUS_FAILED_AND_MIGRATED
+        return device
+
+    def test_returns_new_device_id(self, client, db, failed_device, device_controller):
+        device_controller.new_device_from_failed.return_value = NEW_DEVICE_ID
+
+        response = client.post(f'{BASE}/{DEVICE_ID}/replace')
+
+        assert response.status_code == 201
+        assert response.json() == NEW_DEVICE_ID
+        assert response.headers['location'] == f'{BASE}/{NEW_DEVICE_ID}/'
+        device_controller.new_device_from_failed.assert_called_once_with(DEVICE_ID)
+
+    def test_full_response_format_serializes_the_new_device(
+            self, client, db, failed_device, device_controller):
+        device_controller.new_device_from_failed.return_value = NEW_DEVICE_ID
+        # As new_device_from_failed leaves it: no cluster map slot, no NVMe-oF
+        # listener yet. Both are what the DTO has to tolerate.
+        db.get_storage_device_by_id.return_value = factories.make_device(
+            uuid=NEW_DEVICE_ID,
+            status=NVMeDevice.STATUS_NEW,
+            cluster_device_order=-1,
+            nvmf_ip='',
+        )
+
+        response = client.post(
+            f'{BASE}/{DEVICE_ID}/replace', params={'response-format': 'full'})
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body['id'] == NEW_DEVICE_ID
+        assert body['status'] == NVMeDevice.STATUS_NEW
+        assert body['cluster_device_order'] is None
+        assert body['nvmf_ips'] == []
+
+    def test_wrong_status_conflicts(self, client, db, device, device_controller):
+        response = client.post(f'{BASE}/{DEVICE_ID}/replace')
+
+        assert response.status_code == 409
+        device_controller.new_device_from_failed.assert_not_called()
+
+    def test_already_replaced_conflicts(self, client, db, failed_device, device_controller):
+        failed_device.serial_number = 'SN0001_failed'
+
+        response = client.post(f'{BASE}/{DEVICE_ID}/replace')
+
+        assert response.status_code == 409
+        device_controller.new_device_from_failed.assert_not_called()
+
+    def test_raises_on_failure(self, client, db, failed_device, device_controller):
+        device_controller.new_device_from_failed.return_value = False
+
+        with pytest.raises(ValueError):
+            client.post(f'{BASE}/{DEVICE_ID}/replace')
 
 
 class TestDeviceActions:

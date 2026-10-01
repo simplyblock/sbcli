@@ -285,6 +285,18 @@ class TestClusterStats:
         assert body['message'] == 'started'
         cluster_ops.get_log_events.assert_called_once_with(CLUSTER_ID, 10)
 
+    def test_logs_report_an_unassigned_storage_id_as_null(self, client, cluster, cluster_ops):
+        cluster_ops.get_log_events.return_value = [
+            make_event(storage_id=-1, object_dict={'cluster_device_order': -1}),
+            make_event(storage_id=-1, object_dict={'cluster_device_order': 3}),
+            make_event(storage_id=7),
+        ]
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/logs')
+
+        assert response.status_code == 200
+        assert [entry['storage_id'] for entry in response.json()] == [None, 3, 7]
+
     def test_logs_dispatches_watch_events(self, client, cluster, cluster_ops, watch_stream):
         cluster_ops.watch_events.return_value = watch_stream([make_event()])
 
