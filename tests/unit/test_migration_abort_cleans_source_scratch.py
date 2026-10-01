@@ -109,7 +109,7 @@ class TestItNeverTrapsTheRollback(unittest.TestCase):
         migration = MagicMock()
         migration.intermediate_snaps = ["bad", "good"]
         db = MagicMock()
-        db.get_snapshot_by_id.side_effect = lambda u: _snap(u)
+        db.get_snapshot_by_id.side_effect = _snap
         with patch.object(runner, "db", db), \
              patch.object(runner.snapshot_controller, "delete", side_effect=_delete):
             runner._delete_source_intermediates(migration)

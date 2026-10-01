@@ -110,7 +110,7 @@ def test_a_failed_transfer_is_resent_without_a_new_snapshot():
     assert m.transfer_context == {'stage': 'intermediate_retry', 'snap_uuid': 'snap-r0'}
 
     # 2. The retry sends the same snapshot again; nothing new is taken.
-    done, suspend, error = _run(m, src_rpc, tgt_rpc, take, setup)
+    _run(m, src_rpc, tgt_rpc, take, setup)
     take.assert_not_called()
     args, _ = setup.call_args
     assert args[1] == 1, "the retry must reuse the failed snapshot's plan index"

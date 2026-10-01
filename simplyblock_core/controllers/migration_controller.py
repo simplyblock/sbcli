@@ -1784,7 +1784,14 @@ def create_batch_migration(lvol_id, target_node_id,
             active_source_node_id = db.get_migration_by_id(
                 member_records[0]["migration_id"]).active_source_node_id or source_node_id
         except KeyError:
-            pass
+            # The member record was written a moment ago by create_migration,
+            # so this means it was removed underneath us. The group falls back
+            # to the primary as its source; say so, since that is the wrong
+            # node to read from whenever the primary is down.
+            logger.warning(
+                f"create_batch_migration: member migration "
+                f"{member_records[0]['migration_id']} not found; using the primary "
+                f"{source_node_id} as the group's source")
 
     # Compute snap ownership: snap_uuid → lvol_uuid, then remap to migration_id.
     lvol_uuid_to_migration_id = {
