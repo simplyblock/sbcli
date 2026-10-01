@@ -57,6 +57,9 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     # dedicated-secondary-node / physical-label branches.
     n.is_secondary_node = is_secondary_node
     n.physical_label = physical_label
+    # Same hazard: left as a child mock this reads truthy, and the removal
+    # would skip phase 3b believing a drain had already reallocated the
+    # replicas. A node that no drain has touched has it False.
     n.get_id = MagicMock(return_value=node_id)
     n.status = status
     n.cluster_id = "cluster-1"
@@ -168,6 +171,105 @@ class TestRemovePreconditions(unittest.TestCase):
         tc.add_node_removal_task.assert_called_once()
 
 
+    def test_every_departing_status_is_removable(self):
+        """A drain hands the node to the removal in whatever status the drain
+        left it in. The status guard was a hand-written list that named
+        pending_removal and in_removal but not the two the drain added later,
+        so a node that had finished migrating every volume arrived at DELETE
+        in migrating_lvols and was refused as unremovable (2026-09-26). The
+        guard now reads the same set the drain writes, and this pins that the
+        two cannot drift apart again."""
+        for status in StorageNode.DEPARTING_STATUSES:
+            if status == StorageNode.STATUS_REMOVED:
+                continue
+            with self.subTest(status=status):
+                cl = _cluster()
+                nodes = [_node("n1", status=status), _node("n2"), _node("n3")]
+                ret, tc = self._run(FakeDB(cl, nodes))
+                self.assertEqual(
+                    ret, "task-uuid-1",
+                    f"a node in {status} was refused at the status guard")
+                tc.add_node_removal_task.assert_called_once()
+
+    def test_the_live_case_migrating_lvols_specifically(self):
+        cl = _cluster()
+        nodes = [_node("n1", status=StorageNode.STATUS_MIGRATING_LVOLS), _node("n2"), _node("n3")]
+        ret, _ = self._run(FakeDB(cl, nodes))
+        self.assertEqual(ret, "task-uuid-1")
+
+    def test_removed_is_already_removed_not_unremovable(self):
+        """REMOVED is the one departing status a removal must not start from,
+        and it is answered before the status guard, as 'already removed'."""
+        self.assertNotIn(StorageNode.STATUS_REMOVED, storage_node_ops.REMOVABLE_STATUSES)
+        cl = _cluster()
+        nodes = [_node("n1", status=StorageNode.STATUS_REMOVED), _node("n2")]
+        ret, tc = self._run(FakeDB(cl, nodes))
+        self.assertFalse(ret)
+        tc.add_node_removal_task.assert_not_called()
+
+    def test_a_down_node_is_removable(self):
+        """DOWN is the monitor's verdict on a node whose SPDK answers but whose
+        lvol ports it fenced. Removal is how such a node leaves, and its
+        shutdown is allowed (check_node_shutdown_preconditions refuses only
+        RESTARTING and IN_SHUTDOWN), so the removal must not refuse it."""
+        self.assertIn(StorageNode.STATUS_DOWN, storage_node_ops.REMOVABLE_STATUSES)
+        cl = _cluster()
+        nodes = [_node("n1", status=StorageNode.STATUS_DOWN), _node("n2")]
+        ret, tc = self._run(FakeDB(cl, nodes))
+        self.assertEqual(ret, "task-uuid-1")
+        tc.add_node_removal_task.assert_called_once()
+
+    def test_removable_statuses_cover_every_departing_status_but_removed(self):
+        """The set relationship itself, so a status added to DEPARTING_STATUSES
+        is removable by construction rather than by remembering to list it."""
+        departing = set(StorageNode.DEPARTING_STATUSES) - {StorageNode.STATUS_REMOVED}
+        self.assertTrue(
+            departing <= set(storage_node_ops.REMOVABLE_STATUSES),
+            f"departing but not removable: {departing - set(storage_node_ops.REMOVABLE_STATUSES)}")
+
+    def test_a_departing_node_keeps_its_status_when_the_removal_is_queued(self):
+        """pending_removal is where a removal STARTS, and the machine only moves
+        forward: pending_removal -> migrating_devices -> migrating_lvols ->
+        in_removal -> removed. A node the drain hands over is already at
+        migrating_lvols. Stamping it pending_removal at queue time rewound it
+        to the start, and the orchestrator then tried to shut down a node with
+        no SPDK left to stop, and refused every attempt (2026-09-26)."""
+        for status in (StorageNode.STATUS_MIGRATING_DEVICES,
+                       StorageNode.STATUS_MIGRATING_LVOLS,
+                       StorageNode.STATUS_IN_REMOVAL,
+                       StorageNode.STATUS_PENDING_REMOVAL):
+            with self.subTest(status=status):
+                cl = _cluster()
+                nodes = [_node("n1", status=status), _node("n2"), _node("n3")]
+                with patch.object(storage_node_ops, "set_node_status") as stamp:
+                    with patch.object(storage_node_ops, "DBController", return_value=FakeDB(cl, nodes)),                          patch.object(storage_node_ops, "shutdown_storage_node", return_value=True),                          patch.object(storage_node_ops, "tasks_controller") as tc,                          patch.object(storage_node_ops, "_check_ftt_allows_node_removal", return_value=(True, "")),                          patch.object(storage_node_ops, "_check_replica_relocation_feasible", return_value=(True, "")):
+                        tc.get_active_node_removal_task.return_value = False
+                        tc.get_active_node_tasks.return_value = []
+                        tc.get_active_node_restart_task.return_value = []
+                        tc.get_active_lvol_migration.return_value = []
+                        tc.add_node_removal_task.return_value = "task-uuid-1"
+                        ret = storage_node_ops.remove_storage_node("n1")
+                self.assertEqual(ret, "task-uuid-1")
+                for call in stamp.call_args_list:
+                    self.assertNotEqual(
+                        call.args[1], StorageNode.STATUS_PENDING_REMOVAL,
+                        f"a node in {status} was moved back to pending_removal")
+
+    def test_a_node_that_has_not_started_departing_is_moved_onto_pending_removal(self):
+        """The forward move the previous test forbids is still the right one
+        for a node that is only now being asked to leave."""
+        cl = _cluster()
+        nodes = [_node("n1", status=StorageNode.STATUS_OFFLINE), _node("n2"), _node("n3")]
+        with patch.object(storage_node_ops, "set_node_status") as stamp:
+            with patch.object(storage_node_ops, "DBController", return_value=FakeDB(cl, nodes)),                  patch.object(storage_node_ops, "shutdown_storage_node", return_value=True),                  patch.object(storage_node_ops, "tasks_controller") as tc,                  patch.object(storage_node_ops, "_check_ftt_allows_node_removal", return_value=(True, "")),                  patch.object(storage_node_ops, "_check_replica_relocation_feasible", return_value=(True, "")):
+                tc.get_active_node_removal_task.return_value = False
+                tc.get_active_node_tasks.return_value = []
+                tc.get_active_node_restart_task.return_value = []
+                tc.get_active_lvol_migration.return_value = []
+                tc.add_node_removal_task.return_value = "task-uuid-1"
+                storage_node_ops.remove_storage_node("n1")
+        stamp.assert_any_call("n1", StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
+
     def test_removed_peer_is_ignored(self):
         cl = _cluster()
         nodes = [_node("n1"), _node("n2"),
@@ -175,13 +277,16 @@ class TestRemovePreconditions(unittest.TestCase):
         ret, _ = self._run(FakeDB(cl, nodes))
         self.assertEqual(ret, "task-uuid-1")
 
-    def test_reject_lvols_present(self):
+    def test_accepts_lvols_present_and_drains_them(self):
+        """Volumes used to be a hard refusal, with the operator expected to
+        migrate them first. That is impossible for an OFFLINE node -- nothing
+        can read from its primary -- so the removal drains them itself now."""
         cl = _cluster()
         nodes = [_node("n1"), _node("n2")]
         db = FakeDB(cl, nodes, lvols={"n1": [MagicMock()]})
         ret, tc = self._run(db)
-        self.assertFalse(ret)
-        tc.add_node_removal_task.assert_not_called()
+        self.assertTrue(ret)
+        tc.add_node_removal_task.assert_called_once()
 
     def test_reject_snapshots_present(self):
         cl = _cluster()
@@ -784,7 +889,7 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
     def test_repoints_old_host_to_new_host(self):
         cl = _cluster()
         db = FakeDB(cl, [], lvols={"p1": [_lvol("p1", ["p1", "old"])]})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="secondary")
         lvol = db.lvols["p1"][0]
         self.assertEqual(lvol.nodes, ["p1", "new"])
         lvol.write_to_db.assert_called_once()
@@ -792,15 +897,15 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
     def test_leaves_unrelated_hosts_untouched(self):
         cl = _cluster()
         db = FakeDB(cl, [], lvols={"p1": [_lvol("p1", ["p1", "old", "tert"])]})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="secondary")
         self.assertEqual(db.lvols["p1"][0].nodes, ["p1", "new", "tert"])
 
-    def test_no_op_when_old_host_not_present(self):
-        # e.g. a tertiary-only move must not touch an lvol with no tertiary.
+    def test_no_op_when_lvol_has_no_such_slot(self):
+        # A tertiary move must not touch an lvol with no tertiary path.
         cl = _cluster()
         lvol = _lvol("p1", ["p1", "sec"])
         db = FakeDB(cl, [], lvols={"p1": [lvol]})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="tertiary")
         self.assertEqual(lvol.nodes, ["p1", "sec"])
         lvol.write_to_db.assert_not_called()
 
@@ -808,7 +913,7 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
         cl = _cluster()
         lvols = [_lvol("p1", ["p1", "old"]) for _ in range(3)]
         db = FakeDB(cl, [], lvols={"p1": lvols})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="secondary")
         for lvol in lvols:
             self.assertEqual(lvol.nodes, ["p1", "new"])
 
@@ -817,9 +922,49 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
         cl = _cluster()
         lvol = _lvol("p1", ["p1", "new"])
         db = FakeDB(cl, [], lvols={"p1": [lvol]})
-        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db, role="secondary")
         self.assertEqual(lvol.nodes, ["p1", "new"])
         lvol.write_to_db.assert_not_called()
+
+    def test_chained_moves_on_one_primary_keep_both_paths(self):
+        # Live on 2026-09-28 (third CRD removal, 4 survivors): the planner
+        # moved p1's secondary K -> T and then its tertiary T -> X. A
+        # by-value rewrite turned [p1, K, T] into [p1, T, T] and then
+        # [p1, X, X]: the real secondary T vanished from the client's path
+        # list and X was listed twice. The rewrite is by role slot.
+        cl = _cluster()
+        lvol = _lvol("p1", ["p1", "K", "T"])
+        db = FakeDB(cl, [], lvols={"p1": [lvol]})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "K", "T", db, role="secondary")
+        self.assertEqual(lvol.nodes, ["p1", "T", "T"])
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "T", "X", db, role="tertiary")
+        self.assertEqual(lvol.nodes, ["p1", "T", "X"])
+
+    def test_the_reverse_chain_order_is_just_as_safe(self):
+        cl = _cluster()
+        lvol = _lvol("p1", ["p1", "K", "T"])
+        db = FakeDB(cl, [], lvols={"p1": [lvol]})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "T", "X", db, role="tertiary")
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "K", "T", db, role="secondary")
+        self.assertEqual(lvol.nodes, ["p1", "T", "X"])
+
+    def test_a_stale_slot_is_repaired_to_the_new_host(self):
+        # A list already corrupted by the old by-value rewrite: the slot
+        # names neither the host the role is leaving nor the one it lands
+        # on. The role's host IS new_host now, so the slot is set to it.
+        cl = _cluster()
+        lvol = _lvol("p1", ["p1", "X", "X"])
+        db = FakeDB(cl, [], lvols={"p1": [lvol]})
+        with self.assertLogs(storage_node_ops.logger, level="WARNING"):
+            storage_node_ops._update_lvol_nodes_for_replica_move("p1", "T", "N", db, role="secondary")
+        self.assertEqual(lvol.nodes, ["p1", "N", "X"])
+        lvol.write_to_db.assert_called_once()
+
+    def test_role_is_required(self):
+        cl = _cluster()
+        db = FakeDB(cl, [], lvols={"p1": [_lvol("p1", ["p1", "old"])]})
+        with self.assertRaises(TypeError):
+            storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -1899,11 +2044,12 @@ class TestDecommissionDevices(unittest.TestCase):
              patch.object(storage_node_ops, "device_controller", dc):
             ret = storage_node_ops._decommission_node_devices(removed)
 
-        # Each device is driven ONLINE -> REMOVED -> FAILED (queuing failure
-        # migration on the surviving nodes). The completion gate's early
-        # `return False` is currently commented out, so the first pass reports
-        # True rather than waiting for FAILED_AND_MIGRATED.
-        self.assertTrue(ret)
+        # Each device is driven ONLINE -> REMOVED -> FAILED, which QUEUES the
+        # failure migration on the surviving nodes. Queued is not migrated, so
+        # the first pass must report "not done" and be retried -- the gate used
+        # to fall through to an unconditional True, declaring the removal
+        # complete while every migration was still outstanding.
+        self.assertFalse(ret)
         dc.remove_jm_device.assert_called_once()
         self.assertEqual(dc.device_set_state.call_count, 2)
         self.assertEqual(dc.device_set_failed.call_count, 2)
@@ -2520,6 +2666,134 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["set_node_status"].assert_not_called()
         mocks["_decommission_node_devices"].assert_called_once_with(node)
 
+    def test_phase1_shuts_down_only_a_node_that_is_still_running(self):
+        """"Is this node still running" is answered yes by ONLINE and SUSPENDED
+        and by nothing else a removal starts from. remove_storage_node shuts an
+        ONLINE/SUSPENDED node down itself before stamping PENDING_REMOVAL, and
+        a drain stops the node in its own step before moving anything, so a
+        PENDING_REMOVAL or MIGRATING_* node here has already had its shutdown.
+        Widening this to the draining statuses made phase 1 re-shut-down a
+        node with no SPDK left, which shutdown_storage_node refuses without
+        force -- so the removal failed on every retry (2026-09-26)."""
+        expect_shutdown = {
+            StorageNode.STATUS_ONLINE: True,
+            StorageNode.STATUS_SUSPENDED: True,
+            StorageNode.STATUS_PENDING_REMOVAL: False,
+            StorageNode.STATUS_MIGRATING_DEVICES: False,
+            StorageNode.STATUS_MIGRATING_LVOLS: False,
+            StorageNode.STATUS_OFFLINE: False,
+        }
+        for status, wanted in expect_shutdown.items():
+            with self.subTest(status=status):
+                cl = _cluster()
+                node = _node("n1", status=status)
+                db = FakeDB(cl, [node])
+                with self._patch_all() as mocks:
+                    mocks["DBController"].return_value = db
+                    mocks["_decommission_node_devices"].return_value = True
+                    mocks["_relocate_replicas_hosted_on"].return_value = True
+                    storage_node_ops.node_removal_orchestrate("n1")
+                self.assertEqual(
+                    mocks["shutdown_storage_node"].called, wanted,
+                    f"{status}: shutdown {'not ' if wanted else ''}attempted")
+
+    def test_phase3b_always_runs_and_only_after_phase3a(self):
+        """Phase 3b has one owner and one position: here, after 3a.
+
+        3b re-homes the replicas this node hosts for others, and it needs
+        somewhere to put them. On a cluster whose replica slots are all
+        occupied the only free slot is the one 3a makes by tearing down this
+        node's OWN replicas -- so 3b run without 3a has nowhere to move to,
+        walks the ring of occupants and refuses on a cycle.
+
+        A drain briefly ran 3b as its own step and set a flag to let the
+        removal skip it; that is what put 3b outside the ordering it depends
+        on (2026-09-26, a 7-node FTT2 cluster where every node was the next
+        one's secondary). There is no flag and no skip: the order is the
+        invariant.
+        """
+        cl = _cluster()
+        node = _node("n1")
+        db = FakeDB(cl, [node])
+        order = []
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["_decommission_node_devices"].return_value = True
+            mocks["_teardown_replicas_of_primary"].side_effect = (
+                lambda *a, **k: order.append("3a") or True)
+            mocks["_relocate_replicas_hosted_on"].side_effect = (
+                lambda *a, **k: order.append("3b") or True)
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertTrue(ret)
+        mocks["_relocate_replicas_hosted_on"].assert_called_once()
+        self.assertEqual(
+            order, ["3a", "3b"],
+            "3b must run after 3a -- it relies on 3a having freed this node's "
+            f"own replica slots, got {order}")
+
+    def _stamps(self, start_status):
+        """The removal statuses the orchestrator writes for a node that enters
+        it in *start_status*, in order. FakeDB never changes the node's status
+        (set_node_status is mocked), so every stamp decision is made against
+        the entry status -- exactly the re-entry case."""
+        cl = _cluster()
+        node = _node("n1", status=start_status)
+        db = FakeDB(cl, [node])
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["_decommission_node_devices"].return_value = True
+            mocks["_relocate_replicas_hosted_on"].return_value = True
+            storage_node_ops.node_removal_orchestrate("n1")
+        return [c.args[1] for c in mocks["set_node_status"].call_args_list
+                if c.args[1] in StorageNode.REMOVAL_STATUS_ORDER]
+
+    def test_a_removal_entered_from_online_walks_the_machine_forward(self):
+        stamps = self._stamps(StorageNode.STATUS_ONLINE)
+        order = StorageNode.REMOVAL_STATUS_ORDER
+        idx = [order.index(st) for st in stamps]
+        self.assertEqual(idx, sorted(idx), f"statuses were stamped out of order: {stamps}")
+        self.assertIn(StorageNode.STATUS_MIGRATING_DEVICES, stamps)
+        self.assertIn(StorageNode.STATUS_IN_REMOVAL, stamps)
+
+    def test_re_entry_after_in_removal_does_not_rewind_the_node(self):
+        """Every retry pass re-enters the orchestrator from the top. Each phase
+        stamped its status whenever the node was not already in it, so a pass
+        after in_removal wrote migrating_devices, then migrating_lvols, then
+        in_removal again -- three status events and three peer broadcasts per
+        10s tick, and a status that read as 'still migrating' for a node whose
+        migration finished long ago (2026-09-28 review)."""
+        stamps = self._stamps(StorageNode.STATUS_IN_REMOVAL)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_DEVICES, stamps)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_LVOLS, stamps)
+        self.assertNotIn(StorageNode.STATUS_IN_REMOVAL, stamps,
+                         "in_removal re-stamped on a node already in it")
+
+    def test_a_node_the_drain_handed_over_keeps_its_place(self):
+        """The Kubernetes drain hands the node over at migrating_lvols: shut
+        down, devices rebuilt, volumes moved. The first pass must not stamp it
+        back to migrating_devices."""
+        stamps = self._stamps(StorageNode.STATUS_MIGRATING_LVOLS)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_DEVICES, stamps)
+        self.assertNotIn(StorageNode.STATUS_MIGRATING_LVOLS, stamps)
+        self.assertIn(StorageNode.STATUS_IN_REMOVAL, stamps)
+
+    def test_phase3b_runs_even_when_this_node_hosts_nothing(self):
+        """3b also re-solves the whole post-removal placement, repairing
+        diversity violations elsewhere in the cluster. A node that happens to
+        host no replica must still get that pass."""
+        cl = _cluster()
+        node = _node("n1")  # hosts nothing
+        db = FakeDB(cl, [node])
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["_decommission_node_devices"].return_value = True
+            mocks["_relocate_replicas_hosted_on"].return_value = True
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertTrue(ret)
+        mocks["_relocate_replicas_hosted_on"].assert_called_once()
+
     def test_already_removed_reports_incomplete_if_phase5_fails_again(self):
         # The regression this guards: a prior attempt raised mid phase 5
         # after the status flip had already committed. The retry must
@@ -2560,10 +2834,18 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["_teardown_replicas_of_primary"].assert_called_once()
         mocks["_relocate_replicas_hosted_on"].assert_called_once()
         mocks["_finalize_node_removal"].assert_called_once()
-        # Two transitions: IN_REMOVAL right after shutdown (so other code /
-        # monitors can see the node is mid-removal, not still ONLINE), then
-        # REMOVED once phase 4 finalizes.
+        # Four transitions, one per step an operator can be waiting on.
+        # MIGRATING_DEVICES and MIGRATING_LVOLS are both pre-teardown -- nothing
+        # destructive has happened yet, so a removal abandoned in either leaves
+        # the node intact -- but they are separate statuses because the two
+        # steps fail for entirely different reasons, and while they shared one
+        # status a stalled removal could not say which of them it was stuck in.
+        # IN_REMOVAL follows once teardown begins (so monitors can see the node
+        # is mid-removal, not still ONLINE), then REMOVED once phase 4
+        # finalizes.
         self.assertEqual(mocks["set_node_status"].call_args_list, [
+            call("n1", StorageNode.STATUS_MIGRATING_DEVICES, caused_by="remove"),
+            call("n1", StorageNode.STATUS_MIGRATING_LVOLS, caused_by="remove"),
             call("n1", StorageNode.STATUS_IN_REMOVAL, caused_by="remove"),
             call("n1", StorageNode.STATUS_REMOVED, caused_by="remove"),
         ])
@@ -2622,6 +2904,54 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
 # entries for a node with no SPDK process left to back them (2026-08-13,
 # found live after a removal).
 # ---------------------------------------------------------------------------
+
+
+class TestAdvanceRemovalStatus(unittest.TestCase):
+    """The one owner of 'the machine only moves forward'."""
+
+    def _advance(self, current, target):
+        node = MagicMock()
+        node.status = current
+        db = MagicMock()
+        db.get_storage_node_by_id.return_value = node
+        with patch.object(storage_node_ops, "set_node_status") as stamp:
+            wrote = storage_node_ops.advance_removal_status("n1", target, db_controller=db)
+        return wrote, stamp
+
+    def test_moves_forward(self):
+        wrote, stamp = self._advance(StorageNode.STATUS_MIGRATING_DEVICES,
+                                     StorageNode.STATUS_MIGRATING_LVOLS)
+        self.assertTrue(wrote)
+        stamp.assert_called_once_with("n1", StorageNode.STATUS_MIGRATING_LVOLS, caused_by="remove")
+
+    def test_never_moves_backward_or_sideways(self):
+        for current, target in ((StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_MIGRATING_DEVICES),
+                                (StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.STATUS_MIGRATING_LVOLS),
+                                (StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL)):
+            with self.subTest(current=current, target=target):
+                wrote, stamp = self._advance(current, target)
+                self.assertFalse(wrote)
+                stamp.assert_not_called()
+
+    def test_statuses_outside_the_machine_count_as_before_its_start(self):
+        """ONLINE is the ordinary entry; REMOVED_FAILED is a re-driven removal,
+        which legitimately starts over and must be allowed to."""
+        for current in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_OFFLINE,
+                        StorageNode.STATUS_REMOVED_FAILED):
+            with self.subTest(current=current):
+                wrote, _ = self._advance(current, StorageNode.STATUS_MIGRATING_DEVICES)
+                self.assertTrue(wrote)
+
+    def test_only_removal_statuses_can_be_advanced_to(self):
+        with self.assertRaises(ValueError):
+            self._advance(StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
+
+    def test_the_order_is_the_machine(self):
+        self.assertEqual(StorageNode.REMOVAL_STATUS_ORDER, (
+            StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_MIGRATING_DEVICES,
+            StorageNode.STATUS_MIGRATING_LVOLS, StorageNode.STATUS_IN_REMOVAL,
+            StorageNode.STATUS_REMOVED))
+
 
 class TestFinalizeNodeRemovalClearsLvstorePorts(unittest.TestCase):
 

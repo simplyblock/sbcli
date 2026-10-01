@@ -76,6 +76,9 @@ StorageNodeStatus = Literal[
     "down",
     "in_removal",
     "pending_removal",
+    "migrating_devices",
+    "migrating_lvols",
+    "removed_failed",
 ]
 
 TaskStatus = Literal["new", "running", "suspended", "done"]
@@ -139,6 +142,14 @@ class ClusterDTO(BaseModel):
     nqn: str
     status: ClusterStatus
     is_re_balancing: bool
+    # Device/balancing tasks only; is_re_balancing also counts volume migrations.
+    is_data_rebalancing: bool = False
+    active_lvol_migrations: int = 0
+    # A node removal is in progress; the status beside it is the calculated
+    # one (in_shrink is no longer set as a status).
+    is_shrinking: bool = False
+    # The status is degraded only because of the node being removed.
+    is_degraded_by_removal: bool = False
     block_size: util.Unsigned
     distr_ndcs: int
     distr_npcs: int
@@ -171,6 +182,10 @@ class ClusterDTO(BaseModel):
             nqn=model.nqn,
             status=cast(ClusterStatus, model.status),
             is_re_balancing=model.is_re_balancing,
+            is_data_rebalancing=model.is_data_rebalancing,
+            active_lvol_migrations=model.active_lvol_migrations,
+            is_shrinking=model.is_shrinking,
+            is_degraded_by_removal=model.is_degraded_by_removal,
             block_size=model.blk_size,
             distr_ndcs=model.distr_ndcs,
             distr_npcs=model.distr_npcs,
@@ -389,6 +404,9 @@ class StorageNodeDTO(BaseModel):
     id: UUID
     cluster_id: UUID
     secondary_node_id: UUID | None
+    # The node's second HA replica. A drain prefers migration targets whose
+    # replica set does not include the node being removed.
+    tertiary_node_id: UUID | None = None
     status: StorageNodeStatus
     uptime: timedelta | None
     hostname: str
@@ -420,6 +438,7 @@ class StorageNodeDTO(BaseModel):
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
             secondary_node_id=UUID(model.secondary_node_id) if model.secondary_node_id else None,
+            tertiary_node_id=UUID(model.tertiary_node_id) if model.tertiary_node_id else None,
             status=cast(StorageNodeStatus, model.status),
             uptime=model.uptime(),
             hostname=model.hostname,
@@ -851,6 +870,7 @@ class MigrationDTO(BaseModel):
     id: UUID
     lvol_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     phase: str
     status: str
@@ -871,6 +891,7 @@ class MigrationDTO(BaseModel):
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             phase=model.phase,
             status=model.status,
@@ -891,6 +912,7 @@ class BatchMigrationDTO(BaseModel):
     id: UUID
     cluster_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     target_nqn: str
     phase: str
@@ -905,6 +927,7 @@ class BatchMigrationDTO(BaseModel):
             id=UUID(model.uuid),
             cluster_id=model.cluster_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             target_nqn=model.target_nqn,
             phase=model.phase,

@@ -219,6 +219,36 @@ LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC = int(
     os.getenv("LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC", "86400"))
 
 TASK_EXEC_INTERVAL_SEC = 10
+
+#: Ceiling on how long a node-removal task may sit suspend-and-retrying on one
+#: of its waits (device failure-migration today; volume drain once that lands)
+#: before the removal gives up and the node goes to STATUS_REMOVED_FAILED.
+#: Expressed as wall-clock and converted to a retry count against the runner's
+#: tick, because the meaningful budget is "how long may a removal hang", not
+#: "how many passes". Deliberately generous: these waits legitimately run for
+#: hours on a node holding real data, and a ceiling that fires early would
+#: fail removals that were merely slow.
+#: NOTE: this is a whole-task backstop, not a per-step bound -- the
+#: orchestrator has no persisted step cursor yet, so it cannot attribute
+#: elapsed retries to a particular wait. Per-step budgets arrive with it.
+NODE_REMOVAL_MAX_WAIT_SEC = 6 * 3600
+NODE_REMOVAL_MAX_RETRY = NODE_REMOVAL_MAX_WAIT_SEC // TASK_EXEC_INTERVAL_SEC
+
+#: Node drain: how many times one volume-migration unit is retried against the
+#: SAME target before the drain gives up on that target and tries another.
+NODE_DRAIN_MAX_RESTARTS_PER_TARGET = 10
+#: Pacing between those attempts. The removal runner ticks every few seconds;
+#: a migration that has just failed does not succeed by being re-issued
+#: immediately, and hammering it would burn the whole per-target budget in
+#: under a minute. Matches the standalone retry-on-failure pacing.
+NODE_DRAIN_RETRY_WAIT_SEC = 300
+
+#: How long the post-shutdown condition re-check may keep failing before the
+#: removal gives up. Its own budget, not the whole-removal one: a drain may
+#: legitimately run for hours, but a peer that has not come back within this
+#: window is not coming back on the removal timescale, and waiting the full
+#: budget out holds a shut-down node hostage to it.
+NODE_REMOVAL_CONDITION_WAIT_SEC = 30 * 60
 TASK_EXEC_RETRY_COUNT = 8
 # Shorter interval + lower ceiling for node/device restart tasks.  Restart
 # tasks are time-critical (cluster is degraded until the node is back) and
@@ -736,7 +766,6 @@ TRANSPORT_RETRY=1
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
-LVOL_CLUSTER_RATIO=1
 
 # Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
 # layer, independent of cluster raw capacity or number_of_distribs. 250 TiB.
@@ -857,6 +886,14 @@ LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rou
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
 LVOL_MIG_TRANSFER_BATCH_SIZE = 256
+
+#: `sbctl volume migrate-continue --retry-on-failure`: once a migration (or
+#: batch group) reaches a terminal FAILED status (not cancelled) with
+#: retry_on_failure set, wait this long before attempting a brand-new
+#: migration (full precreate + start) for the same lvol/target, so a
+#: transient condition -- a bouncing target node, an in-flight rebalance --
+#: has time to clear before the precondition checks are retried.
+LVOL_MIG_RETRY_ON_FAILURE_WAIT_SEC = 300
 
 #: How long a deferred lvol register task tolerates a missing lvol record
 #: before treating it as obsolete. add_lvol_ha queues the task in its

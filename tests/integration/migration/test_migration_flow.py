@@ -584,11 +584,16 @@ class TestHASecondaryRegistration:
         lvol = ctx.lvol("l1")
         sec_uuid = ctx.node_uuid("tgt-sec")
 
-        # Put secondary into a bad state (not online and not offline)
-        set_node_status(sec_uuid, "in_restart")
-
         mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None
+
+        # Put secondary into a bad state (not online and not offline) AFTER the
+        # migration started, as the docstring says. A replica already
+        # restarting at create time is refused up front by create_migration
+        # (_refuse_restarting_target_replicas; see
+        # tests/unit/test_migration_restarting_replica.py) -- this test is
+        # about the runner suspending, not about create.
+        set_node_status(sec_uuid, "in_restart")
 
         from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
         from tests.integration.migration.conftest import _find_migration_task
