@@ -330,6 +330,7 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
 | the LVS's leadership is left moving by a promote that ended | reconciled first; still moving: 409 (`volumes`) with the owner and marker |
 | S has no online node (a move or a disaster fail-over is needed) | 409 (never 412) |
 | LVS led from S and the volume served there | 200 with the connection entries (no-op) |
+| LVS led from S, the volume not open there, no member of the LVS's triplet on S `ONLINE` | 409 (as "S has no online node": no path could open) |
 | LVS led from S, the volume not open there (e.g. a sibling left behind by an earlier move) | ANA-only promote queued: 409 in progress, then 200 |
 | T online, the volume not demoted on T | 409 (`volumes`) |
 | T online, the volume demoted, another volume of the LVS still served on T | 409 with that list (`volumes`) |
@@ -339,7 +340,12 @@ The promote table, for a volume whose LVS is led from site T, promoted on S:
 | forced while T is online, or a node of T may still run SPDK (ONLINE / DOWN / RESTARTING / IN_CREATION) | 409 - force never acts on a live site |
 | gate fails | 409 with `problems` (never 412) |
 
-- A site is "online" when it has an `ONLINE` node and is not the cluster's lost site.
+- A site is "online" when it has an `ONLINE` node and is not the cluster's lost site. That decides the
+  move and the disaster rows; the ANA-only row needs an `ONLINE` member of **this LVS's** triplet on S
+  (another node of S opens none of its paths).
+- Opening the volume on S sets its ANA state on every `ONLINE` member of the LVS's triplet there. An
+  opening that sets no path at all (the triplet went down after the call was queued) fails the promote
+  task: nothing is recorded, the failure is reported to the next call, never a 200.
 - While a site is recorded as lost, **every** promote is judged by the disaster gate (the planned gate
   needs both sites).
 - The promote task does the whole promote in one pass and always ends DONE, **also when it failed**;

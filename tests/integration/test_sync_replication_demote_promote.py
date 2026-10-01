@@ -466,6 +466,59 @@ class TestPromoteRunner:
         assert db.get_lvol_by_id(sibling.get_id()).sync_active_site == SITE_B
         assert _states(spdk, b, sibling) == ["optimized", "non_optimized", "non_optimized"]
 
+    def _led_from_s_with_a_closed_sibling(self, db, spdk, gate, moves):
+        """LVS_1 moved to B by an earlier promote; a sibling left closed on B."""
+        cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
+        moves.leader["LVS_1"] = owner
+        assert _run(db, task_id)
+        sibling = _another(db, spdk, cluster, owner, pool, a, b, active_site=SITE_A, demoted=[SITE_A])
+        return cluster, a, b, owner, sibling, task_id
+
+    def test_the_ana_step_without_an_online_member_of_the_lvs_triplet_on_s_is_refused(
+            self, db, spdk, gate, moves):
+        """Another node of B online does not open this LVS's paths: 409, no
+        task, nothing recorded (never a 200 for a volume never opened)."""
+        cluster, a, b, owner, sibling, task_id = self._led_from_s_with_a_closed_sibling(
+            db, spdk, gate, moves)
+        stack._seed_node(db, cluster, "b3", SITE_B)
+        for node in b:
+            _update(db, node, status=StorageNode.STATUS_OFFLINE)
+        with pytest.raises(SyncPromoteRefusedError, match=f"site {SITE_B} has no online node") as exc:
+            src.sync_promote_lvol(sibling.get_id(), SITE_B)
+        assert not isinstance(exc.value, SyncSiteOfflineError)
+        assert exc.value.volumes == [sibling.get_id()]
+        assert db.get_sync_promote_task(cluster.get_id(), "LVS_1").uuid == task_id
+        fresh = db.get_lvol_by_id(sibling.get_id())
+        assert (fresh.sync_active_site, fresh.sync_demoted_sites) == (SITE_A, [SITE_A])
+
+    def test_an_ana_step_whose_triplet_went_offline_after_the_enqueue_records_nothing(
+            self, db, spdk, gate, moves):
+        """The race the decision cannot see: the open sets no path, so the task
+        fails - reported once, then the table refuses - never a 200."""
+        cluster, a, b, owner, sibling, _ = self._led_from_s_with_a_closed_sibling(
+            db, spdk, gate, moves)
+        result = src.sync_promote_lvol(sibling.get_id(), SITE_B)
+        assert result.in_progress
+        before = {n.get_id(): dict(spdk[n.get_id()].groups) for n in b}
+        for node in b:
+            _update(db, node, status=StorageNode.STATUS_OFFLINE)
+        moves.calls.clear()
+        _run(db, result.task_id)
+        task = _task(db, result.task_id)
+        assert task.status == JobSchedule.STATUS_DONE
+        assert task.function_result.startswith("failed:") and "set no path" in task.function_result
+        assert moves.calls == []
+        assert {n.get_id(): dict(spdk[n.get_id()].groups) for n in b} == before
+        fresh = db.get_lvol_by_id(sibling.get_id())
+        assert (fresh.sync_active_site, fresh.sync_demoted_sites) == (SITE_A, [SITE_A])
+        assert fresh.sync_promote_failures[SITE_B]["task_id"] == result.task_id
+        with pytest.raises(SyncPromoteFailedError) as exc:      # reported once
+            src.sync_promote_lvol(sibling.get_id(), SITE_B)
+        assert exc.value.task_id == result.task_id
+        assert db.get_sync_promote_task(cluster.get_id(), "LVS_1").uuid == result.task_id
+        with pytest.raises(SyncPromoteRefusedError, match=f"site {SITE_B} has no online node"):
+            src.sync_promote_lvol(sibling.get_id(), SITE_B)
+
     def test_an_ana_only_task_whose_gate_turned_false_opens_nothing(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner

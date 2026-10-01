@@ -1005,10 +1005,13 @@ def set_site_ana_strict(lvol: LVol, nodes: list[StorageNode], *, open_site: bool
 
     A close skips members whose SPDK is down (OFFLINE / REMOVED); an open
     touches ONLINE members only - a member that is not online gets the right
-    state from the site rule when it comes back. The caller holds the LVS's
+    state from the site rule when it comes back. An open that set no path at
+    all (no ONLINE member, or none with a listener) fails too: nothing was
+    opened, so nothing may be recorded as served. The caller holds the LVS's
     site-rule lock (storage_node_ops.sync_site_rule_locks)."""
     if not lvol.ns_id:
         raise SyncAnaError(f"volume {lvol.get_id()} has no namespace id")
+    paths = 0
     for index, node in enumerate(nodes):
         node_id = node.get_id()
         if open_site:
@@ -1034,7 +1037,11 @@ def set_site_ana_strict(lvol: LVol, nodes: list[StorageNode], *, open_site: bool
                 raise SyncAnaError(f"ANA {state} of {where} failed: {e}") from e
             if not done:
                 raise SyncAnaError(f"ANA {state} of {where} refused")
+            paths += 1
             logger.info("ANA: %s -> %s", where, state)
+    if open_site and not paths:
+        raise SyncAnaError(f"ANA open of {lvol.get_id()} set no path: none of "
+                           f"{[n.get_id() for n in nodes]} is online with a listener for it")
 
 
 def _group_volumes(db: DBController, group) -> list[LVol]:
@@ -1164,13 +1171,16 @@ class PromoteDecision(NamedTuple):
 
 
 def promote_decision(lvol: LVol, owner: StorageNode, lvs_volumes: Iterable[LVol], site: str, *,
-                     online_sites: set[str], force: bool) -> PromoteDecision:
+                     online_sites: set[str], online_nodes: set[str], force: bool) -> PromoteDecision:
     """The promote table for ``lvol`` to ``site`` (S). T is the site its LVS is
     led from; ``online_sites`` the sites with an online node that are not the
-    cluster's lost site; ``lvs_volumes`` every volume of the LVS.
+    cluster's lost site; ``online_nodes`` the ids of the ONLINE nodes (the lost
+    site's too); ``lvs_volumes`` every volume of the LVS.
 
     - a leadership move in flight -> in progress
     - led from S and the volume served there -> active (200, no-op)
+    - led from S, the volume not open there, no member of the LVS's triplet
+      on S online -> refused (409, as "S not online": no path could open)
     - led from S, the volume not open there -> only the ANA step
     - S not online -> refused (409, never 412: a forced retry cannot help)
     - T not online -> disaster fail-over when forced, else site offline (412)
@@ -1183,8 +1193,11 @@ def promote_decision(lvol: LVol, owner: StorageNode, lvs_volumes: Iterable[LVol]
         return PromoteDecision(PROMOTE_IN_PROGRESS)
     source = storage_node_ops.lvs_active_site_of(owner)
     if source == site:
-        kind = PROMOTE_ACTIVE if volume_open_on(lvol, owner, site) else PROMOTE_ANA_ONLY
-        return PromoteDecision(kind, source)
+        if volume_open_on(lvol, owner, site):
+            return PromoteDecision(PROMOTE_ACTIVE, source)
+        if online_nodes.isdisjoint(lvs_site_triplet(owner, site)):
+            return PromoteDecision(PROMOTE_TARGET_OFFLINE, source)
+        return PromoteDecision(PROMOTE_ANA_ONLY, source)
     if site not in online_sites:
         return PromoteDecision(PROMOTE_TARGET_OFFLINE, source)
     if source not in online_sites:
@@ -1222,10 +1235,10 @@ def promote_move_problems(cluster, owner: StorageNode, volumes: Iterable[LVol], 
     return problems
 
 
-def online_sites(db: DBController, cluster) -> set[str]:
-    """The sites with an online storage node, the cluster's lost site
-    excepted."""
-    return {n.site for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())
+def online_sites(nodes: Iterable[StorageNode], cluster) -> set[str]:
+    """The sites of ``nodes`` (the cluster's) with an online storage node, the
+    cluster's lost site excepted."""
+    return {n.site for n in nodes
             if n.site and n.status == StorageNode.STATUS_ONLINE and n.site != cluster.lost_site}
 
 
@@ -1319,7 +1332,9 @@ class SyncPromoteResult:
 
 
 _PROMOTE_REFUSALS = {
-    PROMOTE_TARGET_OFFLINE: "site {site} has no online node; it cannot take the leadership",
+    PROMOTE_TARGET_OFFLINE: ("site {site} has no online node to serve the volume: a move needs one "
+                             "to take the leadership, the ANA step one of the LVS's triplet there "
+                             "to open a path"),
     PROMOTE_FORCE_ONLINE: "a forced promote acts only on a lost site; site {source} is online",
     PROMOTE_NOT_DEMOTED: "volume(s) not demoted on site {source}",
     PROMOTE_LVS_BUSY: "other volumes of the LVS are still active on site {source}",
@@ -1411,10 +1426,12 @@ def _promote(db: DBController, volumes: list[LVol], site: str, force: bool, *,
             if task is not None and db.sync_promote_task_blocks(task):
                 return SyncPromoteResult(in_progress=True, task_id=task.uuid)
         _report_failed_promotes(db, volumes, site)
-        sites = online_sites(db, cluster)
+        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+        sites = online_sites(nodes, cluster)
+        online_ids = {n.get_id() for n in nodes if n.status == StorageNode.STATUS_ONLINE}
         lvs_volumes = {owner_id: db.get_lvols_by_node_id(owner_id) for owner_id in owners}
         decisions = [(lv, promote_decision(lv, owners[lv.node_id], lvs_volumes[lv.node_id], site,
-                                           online_sites=sites, force=force))
+                                           online_sites=sites, online_nodes=online_ids, force=force))
                      for lv in volumes]
         kinds = {d.kind for _, d in decisions}
         if PROMOTE_IN_PROGRESS not in kinds:

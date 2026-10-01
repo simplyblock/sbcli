@@ -53,12 +53,13 @@ def _lvol(uuid="v1", **fields):
 
 
 BOTH = {SITE_A, SITE_B}
+ALL_NODES = {"p", "s", "t", "rp", "rs", "rt"}
 
 
-def _decide(lvol, owner=None, others=(), site=SITE_B, online=BOTH, force=False):
+def _decide(lvol, owner=None, others=(), site=SITE_B, online=BOTH, force=False, nodes=ALL_NODES):
     owner = owner or _owner()
     return src.promote_decision(lvol, owner, [lvol, *others], site, online_sites=set(online),
-                                force=force)
+                                online_nodes=set(nodes), force=force)
 
 
 class TestRecordView:
@@ -138,12 +139,37 @@ class TestPromoteDecision:
         d = _decide(_lvol(sync_demoted_sites=demoted), online=online, force=force)
         assert d == src.PromoteDecision(src.PROMOTE_TARGET_OFFLINE, SITE_A)
 
-    def test_a_target_site_offline_does_not_change_the_rows_led_from_it(self):
+    def test_a_volume_served_on_the_site_it_is_led_from_stays_a_no_op_while_offline(self):
+        """200 is the result of the open that served it, not a probe of its
+        paths (docs: Role is not accessibility)."""
         owner = _owner(lvs_active_site=SITE_B)
         served = _lvol(sync_active_site=SITE_B, sync_demoted_sites=[SITE_A])
+        assert _decide(served, owner, online={SITE_A}, nodes={"p"}).kind == src.PROMOTE_ACTIVE
+
+    @pytest.mark.parametrize("online", [BOTH, {SITE_A}])
+    def test_the_ana_step_without_an_online_member_of_the_lvs_triplet_there_is_refused(self, online):
+        """Judged by this LVS's triplet on S, not by the site: another node of S
+        online opens no path of this volume."""
+        owner = _owner(lvs_active_site=SITE_B)
         closed = _lvol(sync_active_site=SITE_A, sync_demoted_sites=[SITE_A])
-        assert _decide(served, owner, online={SITE_A}).kind == src.PROMOTE_ACTIVE
-        assert _decide(closed, owner, online={SITE_A}).kind == src.PROMOTE_ANA_ONLY
+        other_of_s = "b3"
+        d = _decide(closed, owner, online=online, nodes={"p", "s", "t", other_of_s})
+        assert d == src.PromoteDecision(src.PROMOTE_TARGET_OFFLINE, SITE_B)
+
+    @pytest.mark.parametrize("member", ["rp", "rs", "rt"])
+    def test_one_online_member_of_the_lvs_triplet_there_is_enough_for_the_ana_step(self, member):
+        """Decision table only: the rows led from S read the triplet's nodes,
+        not ``online_sites`` (which leaves out a recorded lost site - that
+        promote is refused later, by _lost_site_of_request)."""
+        owner = _owner(lvs_active_site=SITE_B)
+        closed = _lvol(sync_active_site=SITE_A, sync_demoted_sites=[SITE_A])
+        assert _decide(closed, owner, online={SITE_A}, nodes={member}).kind == src.PROMOTE_ANA_ONLY
+
+    def test_the_ana_step_reads_a_triplet_without_tertiary(self):
+        owner = _owner(lvs_active_site=SITE_B, tertiary_node_id="", remote_tertiary_node_id="")
+        closed = _lvol(sync_active_site=SITE_A, sync_demoted_sites=[SITE_A])
+        assert _decide(closed, owner, nodes={"p", "s", "t"}).kind == src.PROMOTE_TARGET_OFFLINE
+        assert _decide(closed, owner, nodes={"rs"}).kind == src.PROMOTE_ANA_ONLY
 
     def test_a_move_in_flight_is_in_progress(self):
         d = _decide(_lvol(sync_demoted_sites=[SITE_A]), _owner(lvs_active_site="moving:site-b"))
@@ -243,6 +269,44 @@ class TestStrictAna:
         nodes = self._nodes({"rs": StorageNode.STATUS_UNREACHABLE})
         src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
         assert self._calls(nodes)["rs"] == []
+
+    @pytest.mark.parametrize("statuses", [
+        {"rp": StorageNode.STATUS_OFFLINE, "rs": StorageNode.STATUS_OFFLINE,
+         "rt": StorageNode.STATUS_OFFLINE},
+        {"rp": StorageNode.STATUS_UNREACHABLE, "rs": StorageNode.STATUS_RESTARTING,
+         "rt": StorageNode.STATUS_REMOVED},
+    ])
+    def test_an_open_without_an_online_member_fails(self, statuses):
+        nodes = self._nodes(statuses)
+        with pytest.raises(SyncAnaError, match="set no path"):
+            src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
+        assert all(calls == [] for calls in self._calls(nodes).values())
+
+    def test_an_open_whose_online_members_have_no_listener_fails(self):
+        nodes = self._nodes()
+        for nid in ("rp", "rs", "rt"):
+            nodes[nid].data_nics = []
+        with pytest.raises(SyncAnaError, match="set no path"):
+            src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
+        assert all(calls == [] for calls in self._calls(nodes).values())
+
+    def test_an_open_of_no_member_fails(self):
+        with pytest.raises(SyncAnaError, match="set no path"):
+            src.set_site_ana_strict(_lvol(), [], open_site=True)
+
+    def test_one_online_secondary_is_an_open(self):
+        nodes = self._nodes({"rp": StorageNode.STATUS_OFFLINE, "rt": StorageNode.STATUS_OFFLINE})
+        src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
+        calls = self._calls(nodes)
+        assert (calls["rp"], calls["rs"], calls["rt"]) == ([], ["non_optimized"], [])
+
+    @pytest.mark.parametrize("triplet", [True, False])
+    def test_a_close_of_a_triplet_whose_spdk_is_down_everywhere_is_no_error(self, triplet):
+        down = {nid: StorageNode.STATUS_OFFLINE for nid in ("p", "s", "t")}
+        nodes = self._nodes(down)
+        src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_A) if triplet else [],
+                                open_site=False)
+        assert all(calls == [] for calls in self._calls(nodes).values())
 
     @pytest.mark.parametrize("failure", ["false", "raise"])
     def test_any_failed_path_fails_the_call(self, failure):
