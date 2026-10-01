@@ -321,8 +321,8 @@ class DrainStepProgress(BaseModel):
 class DrainVerification(BaseModel):
     """Whether the node still hosts anything, before its DELETE."""
     drained: bool
-    lvols: List[str] = []
-    snapshots: List[str] = []
+    lvols: builtins.list[str] = []
+    snapshots: builtins.list[str] = []
 
 
 @instance_api.post(
