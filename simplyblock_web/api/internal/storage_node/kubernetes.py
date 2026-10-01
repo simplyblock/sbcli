@@ -293,6 +293,7 @@ class SPDKParams(BaseModel):
     firewall_port: int | None = Field(constants.FW_PORT_START)
     cluster_id: str
     mcp_max_unavailable: int | None = Field(None)
+    disable_imds: bool = Field(False)
 
 
 @api.post('/spdk_process_start', responses={
@@ -406,6 +407,7 @@ def spdk_process_start(body: SPDKParams):
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
             'FW_PORT': body.firewall_port,
+            'DISABLE_IMDS': body.disable_imds,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,

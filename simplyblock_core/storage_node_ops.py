@@ -3934,7 +3934,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                           else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
                 total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
-                mcp_max_unavailable=mcp_max_unavailable)
+                mcp_max_unavailable=mcp_max_unavailable,
+                disable_imds=cluster.s3_needs_no_instance_metadata())
             time.sleep(5)
 
         except Exception as e:
@@ -7307,7 +7308,8 @@ def _restart_storage_node_impl(
                       else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
             total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
-            spdk_proxy_image=snode.spdk_proxy_image)
+            spdk_proxy_image=snode.spdk_proxy_image,
+            disable_imds=cluster.s3_needs_no_instance_metadata())
 
     except Exception as e:
         logger.error(e)
