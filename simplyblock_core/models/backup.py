@@ -8,6 +8,8 @@ from simplyblock_core.models.indices import Index
 
 class Backup(BaseModel):
 
+    _WATCHED = True
+
     # get_id() is "<cluster>/<uuid>", so a caller holding only the uuid cannot
     # point-read the record; `uuid` is the index that lets it.
     _INDEXES: ClassVar[tuple] = (
@@ -67,6 +69,9 @@ class Backup(BaseModel):
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
 
+    def watch_scope(self):
+        return (self.cluster_id,)
+
     def get_location(self) -> BackupLocation:
         """Validate and return where this backup's objects live.
 
@@ -102,6 +107,8 @@ class BackupChainLock(BaseModel):
 
 class BackupPolicy(BaseModel):
 
+    _WATCHED = True
+
     _INDEXES: ClassVar[tuple] = (
         Index('uuid'),
     )
@@ -123,6 +130,9 @@ class BackupPolicy(BaseModel):
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
+
+    def watch_scope(self):
+        return (self.cluster_id,)
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.UTC))

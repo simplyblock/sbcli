@@ -18,6 +18,7 @@ from simplyblock_core.controllers.backup.controller import (
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
+from simplyblock_core.models.cluster import Cluster
 
 logger = logging.getLogger()
 
@@ -59,6 +60,14 @@ def _parse_schedule(schedule_str):
         if tiers[i][0] <= tiers[i - 1][0]:
             raise ValueError("Schedule tier intervals must be strictly increasing")
     return tiers
+
+
+async def watch_policies(cluster_id):
+    """Stream backup policy changes for one cluster (same scope as the list endpoint)."""
+    async for batch in db_controller.watch(
+            BackupPolicy, scope=(cluster_id,),
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
 
 
 def add_policy(cluster_id, name, max_versions=0, max_age="", schedule=""):
