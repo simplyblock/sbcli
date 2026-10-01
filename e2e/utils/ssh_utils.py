@@ -3483,6 +3483,63 @@ class SshUtils:
 
         return all_ok
 
+    def fetch_io_dumps(self, storage_node_ip, storage_node_id, logs_path):
+        """Pull /etc/simplyblock/io_dump off a storage node, if it has one.
+
+        Written by distrib (ultra `main-dump-io` and later) when an RPC such as
+        events_update hangs for more than ten seconds. The directory is created
+        by distrib itself and lives on the host mount, so it survives a
+        container crash and restart -- which is also why nothing else cleans it
+        and why it is worth taking a copy before the cluster goes away.
+
+        Returns the number of files collected. Never raises: this runs in
+        teardown alongside the other dumps, and a diagnostic that cannot be
+        fetched must not turn a passing test red.
+        """
+        node_id_short = str(storage_node_id)[:8]
+        dest = f"{logs_path}/{storage_node_ip}_{node_id_short}/io_dump"
+        try:
+            listing, _err = self.exec_command(
+                storage_node_ip,
+                "sudo find /etc/simplyblock/io_dump -maxdepth 1 -type f "
+                "-printf '%f\\n' 2>/dev/null || true",
+                supress_logs=True)
+            names = [n.strip() for n in (listing or "").splitlines() if n.strip()]
+            if not names:
+                self.logger.info(
+                    "[io_dump] %s: no /etc/simplyblock/io_dump content "
+                    "(expected unless the spdk image carries the dump-io "
+                    "change)", storage_node_ip)
+                return 0
+            os.makedirs(dest, exist_ok=True)
+            self.logger.info("[io_dump] %s: collecting %d file(s) -> %s",
+                             storage_node_ip, len(names), dest)
+            got = 0
+            for name in names:
+                try:
+                    # read_file rather than scp: the suite reaches these nodes
+                    # through one ssh path already, and these dumps are small.
+                    data = self.read_file(
+                        storage_node_ip, f"/etc/simplyblock/io_dump/{name}")
+                    if not data:
+                        continue
+                    with open(os.path.join(dest, name), "w") as fh:
+                        fh.write(data)
+                    got += 1
+                except Exception as exc:              # noqa: BLE001
+                    self.logger.warning("[io_dump] %s: could not fetch %s: %s",
+                                        storage_node_ip, name, str(exc)[:120])
+            if got:
+                self.logger.warning(
+                    "[io_dump] %s: collected %d IO dump(s). These are only "
+                    "written when an RPC hung for >10s, so their presence is "
+                    "itself a finding.", storage_node_ip, got)
+            return got
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[io_dump] %s: collection failed: %s",
+                                storage_node_ip, str(exc)[:160])
+            return 0
+
     def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path,
                            validate_async=False, error_sink=None):
         # 0) Find ALL SPDK containers on this host (dual-node hosts have 2)

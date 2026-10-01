@@ -2222,6 +2222,21 @@ class TestClusterBase:
                         )
                     except Exception as e:
                         self.logger.warning(f"[node_dump] fetch_distrib_logs failed for {node_id}: {e}")
+                    # IO dumps, beside the distrib logs. Written by distrib when
+                    # an RPC such as events_update hangs for more than ten
+                    # seconds, and collected by nothing until now -- so on every
+                    # run before this they were written to the node and thrown
+                    # away with the cluster. Separate try: a missing io_dump is
+                    # the normal case on an image without the dump-io change,
+                    # and must not stop the distrib logs being kept.
+                    try:
+                        self.ssh_obj.fetch_io_dumps(
+                            storage_node_ip=node_ip,
+                            storage_node_id=node_id,
+                            logs_path=dump_dir,
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"[node_dump] fetch_io_dumps failed for {node_id}: {e}")
                 elif phase == "both":
                     self.logger.info(
                         f"[node_dump] fetch_distrib_logs SKIPPED for {node_id} "
