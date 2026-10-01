@@ -268,6 +268,31 @@ def _handle_snap_copy_barrier(group, member_migrations, tgt_node, tgt_rpc):
     return True, None
 
 
+def _group_source_nodes(group):
+    """``(primary_src_node, src_node)`` for a group: the primary the volumes
+    belong to, and the node the migration actually reads from.
+
+    They differ for the whole of a node removal: the drained primary is shut
+    down before its volumes move, and create_batch_migration pins an online
+    replica as ``group.active_source_node_id``. The solo runner has read that
+    field since the drain work landed; the orchestrator kept loading
+    ``source_node_id``, so its liveness guard saw the stopped primary
+    (status migrating_lvols), suspended five times and failed the group on
+    every target the operator offered (2026-09-28, run 6: four targets burnt,
+    "1 of 6 volumes migrated" for good). RPCs, the liveness guard and the
+    hub go to ``src_node``; lvstore names and the replica set are the
+    primary's, so those keep using ``primary_src_node``.
+
+    Raises KeyError when either node record is missing."""
+    primary = db.get_storage_node_by_id(group.source_node_id)
+    active_id = getattr(group, "active_source_node_id", "")
+    if not isinstance(active_id, str) or not active_id:
+        active_id = group.source_node_id
+    if active_id == group.source_node_id:
+        return primary, primary
+    return primary, db.get_storage_node_by_id(active_id)
+
+
 def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rpc,
                             primary_src_node=None):
     """
@@ -798,7 +823,12 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         # This call moves real data and can legitimately run longer than the
         # 5s blanket timeout _make_rpc()/src_rpc uses for every other RPC in
         # this file -- use a dedicated, longer-timeout client just for it.
-        final_step_rpc = src_node.rpc_client(timeout=15, retry=2)
+        #
+        # 20s, above SPDK's own 15s bound on the step: the answer is then
+        # SPDK's verdict. At 15s this client gave up first, called the step
+        # failed while SPDK went on to finish it, and every retry failed on
+        # bdev_lvol_convert (2026-09-30, run 21).
+        final_step_rpc = src_node.rpc_client(timeout=20, retry=2)
         ret = final_step_rpc.bdev_lvol_batch_transfer_final_step(
             lvol_names, lvol_ids, snapshot_names,
             constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
@@ -844,36 +874,25 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             group.intermediate_more_needed = []
             group.write_to_db(db.kv_store)
 
-            # bdev_lvol_set_migration_flag drives the distrib-level special_io
-            # machinery for the target bdev (see snapshot_replication.py's
-            # comment on the same flag); it's only ever set once, at initial
-            # target-bdev creation (migration_controller.create_migration).
-            # A failed/aborted final_step attempt may clear it on the target,
-            # so re-assert it on every member's target bdev before retrying —
-            # otherwise the retry's cutover could run without the target
-            # being treated as migration-aware.
-            tgt_sec_node, _ = _get_target_secondary_node(tgt_node, src_node.get_id())
-            tgt_ter_node, _ = _get_target_tertiary_node(tgt_node, src_node.get_id())
-            tgt_sec_rpc_reflag = _make_rpc(tgt_sec_node) if tgt_sec_node else None
-            tgt_ter_rpc_reflag = _make_rpc(tgt_ter_node) if tgt_ter_node else None
-            for m in member_migrations:
-                try:
-                    m_lvol = db.get_lvol_by_id(m.lvol_id)
-                    m_tgt_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(m_lvol.lvol_bdev)}"
-                except KeyError:
-                    continue
-                if not tgt_rpc.bdev_lvol_set_migration_flag(m_tgt_composite):
-                    logger.warning(
-                        f"Group {group.uuid[:8]}: re-assert migration flag on primary "
-                        f"failed for {m_tgt_composite} (may already be flagged)")
-                for _extra_rpc in (tgt_sec_rpc_reflag, tgt_ter_rpc_reflag):
-                    if _extra_rpc:
-                        try:
-                            _extra_rpc.bdev_lvol_set_migration_flag(m_tgt_composite)
-                        except Exception as e:
-                            logger.warning(
-                                f"Group {group.uuid[:8]}: re-assert migration flag on "
-                                f"replica failed for {m_tgt_composite} (non-fatal): {e}")
+            # bdev_lvol_set_migration_flag used to be re-asserted here, on every
+            # member's target bdev (primary + secondary + tertiary), on every
+            # failed-cutover retry. DISABLED as of 2026-09-28: this call drives
+            # SPDK's leadership-sensitive special_io machinery, and re-firing it
+            # once per retry gives a live leadership race (check-then-act across
+            # a separate RPC round-trip -- see set_migration_flag_on_primary's
+            # docstring) one more roll every time. Live node-removal runs traced
+            # this session showed the reassert landing squarely on nodes whose
+            # leadership had just moved, triggering spdk_lvs_queued_failed_IO ->
+            # self-demotion -> port block -> the node reported "down", failing
+            # the round and forcing yet another retry (and another reassert) --
+            # solo migrations, which only ever set the flag once at creation,
+            # never hit this. Skipping the reassert trades that frequent,
+            # self-inflicted failure for a narrower, pre-existing risk: if a
+            # failed final_step attempt genuinely cleared the flag on the
+            # target, a later successful cutover could run against a target
+            # not marked migration-aware. This is a stopgap pending the real
+            # fix, which is on the SPDK side (a failed special_io due to
+            # non-leadership should be a clean rejection, not a self-demotion).
 
             logger.warning(
                 f"Group {group.uuid[:8]}: batch_final_step failed; forcing another "
@@ -1203,17 +1222,11 @@ def task_runner(task):
     # time as group.active_source_node_id. All data-plane calls below must use
     # src_node/src_rpc, never primary_src_node.
     try:
-        primary_src_node = db.get_storage_node_by_id(group.source_node_id)
+        primary_src_node, src_node = _group_source_nodes(group)
     except KeyError:
         return _batch_budget_suspend(
-            task, group, group_id, f"source node {group.source_node_id} not found")
-
-    try:
-        src_node = db.get_storage_node_by_id(
-            group.active_source_node_id or group.source_node_id)
-    except KeyError:
-        return _batch_budget_suspend(
-            task, group, group_id, "active source node not found")
+            task, group, group_id,
+            f"source node {group.active_source_node_id or group.source_node_id} not found")
 
     try:
         tgt_node = db.get_storage_node_by_id(group.target_node_id)
@@ -1277,8 +1290,9 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
-        fresh_src = db.get_storage_node_by_id(
-            group.active_source_node_id or group.source_node_id)
+        # The node the migration reads from, not the primary: for the whole of
+        # a drain the primary is stopped and an online replica stands in.
+        fresh_src = db.get_storage_node_by_id(src_node.get_id())
         if fresh_src.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
             logger.warning(
                 f"Group {group_id[:8]}: source node unavailable "

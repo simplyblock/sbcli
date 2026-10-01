@@ -33,7 +33,10 @@ def process_task(task):
         task.function_result = "cluster is in_activation, waiting"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
-        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
+        # Forward only: a node past pending_removal keeps its place while the
+        # activation runs, instead of being rewound to the start.
+        storage_node_ops.advance_removal_status(
+            task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove", db_controller=db)
         return False
 
     if task.status != JobSchedule.STATUS_RUNNING:
@@ -41,8 +44,25 @@ def process_task(task):
         task.write_to_db(db.kv_store)
 
     force_remove = bool(task.function_params.get("force_remove", False))
+    # The cursor reads its position out of the task and writes it back as the
+    # orchestration advances, so a removal that is taking hours can be asked
+    # which step it is on instead of only when it started.
+    cursor = storage_node_ops.RemovalCursor(task)
     try:
-        done = storage_node_ops.node_removal_orchestrate(task.node_id, force_remove=force_remove)
+        done = storage_node_ops.node_removal_orchestrate(
+            task.node_id, force_remove=force_remove, cursor=cursor)
+    except storage_node_ops.RemovalGaveUp as e:
+        # A step reported that retrying cannot help -- every drain target
+        # exhausted, say. Terminal, and distinct from the retry ceiling, which
+        # only catches waits that never end on their own.
+        msg = f"removal failed at step '{cursor.step or 'unknown'}': {e}"
+        logger.error(f"Node-removal task {task.uuid}: {msg}")
+        storage_node_ops.set_node_status(
+            task.node_id, StorageNode.STATUS_REMOVED_FAILED, caused_by="remove")
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
     except Exception as e:
         logger.error(f"Node-removal task {task.uuid} raised: {e}")
         logger.exception(e)
@@ -59,14 +79,37 @@ def process_task(task):
         return True
     else:
         # Incomplete: a phase asked us to retry (typically waiting on migration).
-        task.function_result = "removal in progress, retrying"
         task.retry += 1
+        if 0 < task.max_retry <= task.retry:
+            # Give up and say so. Without this the task retried for ever: the
+            # node never reached a terminal state, nothing surfaced the reason,
+            # and the only signal an operator got was the next removal being
+            # refused with "Task found". The node keeps whatever data could not
+            # be migrated off it, so it is REMOVED_FAILED, not REMOVED.
+            msg = (f"removal gave up after {task.retry} retries "
+                   f"(~{constants.NODE_REMOVAL_MAX_WAIT_SEC // 3600}h) "
+                   f"at step '{cursor.step or 'unknown'}'")
+            logger.error(f"Node-removal task {task.uuid}: {msg}")
+            storage_node_ops.set_node_status(
+                task.node_id, StorageNode.STATUS_REMOVED_FAILED, caused_by="remove")
+            task.function_result = msg
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db.kv_store)
+            return True
+        task.function_result = "removal in progress, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
         return False
 
 
 def main():
+    """Service entry point.
+
+    Guarded, like every sibling runner: this module is imported by unit tests
+    (tests/unit/test_node_removal_wait_ceiling.py), and a bare module-level
+    `while True` meant the import never returned -- it started the daemon
+    inside the test process and hung collection for the whole tier.
+    """
     logger.info("Starting Tasks runner node removal...")
 
     while True:

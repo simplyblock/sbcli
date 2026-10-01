@@ -22,7 +22,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
     migration_controller
 
 from simplyblock_core import constants, utils
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import ChainLockTimeout, PreconditionError
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -450,7 +450,7 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True,
                 chain_root)
             yield
             return
-        raise PreconditionError(
+        raise ChainLockTimeout(
             f"Timed out acquiring chain lock on {chain_root} "
             f"(for {object_uuid})")
     stop = threading.Event()
@@ -1226,6 +1226,21 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
                 all_nodes.append(db_controller.get_storage_node_by_id(snode.tertiary_node_id))
             except KeyError:
                 pass
+
+        # Probe order, not membership: a node the removal has already shut down
+        # cannot answer, so asking it first costs the SnodeAPI retry budget
+        # (3 attempts, ~6s) before the exception is swallowed and we move on.
+        # Live 2026-09-15: every intermediate-snapshot cleanup during a node
+        # drain burned that on the departing node -- "Failed to resolve
+        # ...bd4qf...svc.cluster.local" x3 -- then succeeded immediately
+        # against the secondary, which was the leader all along.
+        #
+        # Ordered rather than filtered so the "detect leader via RPC, no status
+        # checks" contract above still holds: every candidate is still probed,
+        # including a departing one if nothing else answers. Only the sequence
+        # changes, so this cannot pick a different leader than before.
+        all_nodes.sort(
+            key=lambda n: n.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES)
 
         primary_node = None
         for candidate in all_nodes:

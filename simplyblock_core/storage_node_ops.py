@@ -31,13 +31,15 @@ from simplyblock_core.utils import rpc_budget
 from simplyblock_core.utils import hublvol_reconnect
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
+    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller, \
+    migration_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -4518,6 +4520,80 @@ def delete_storage_node(node_id, force=False):
     logger.info("done")
 
 
+#: The statuses a removal may start from. Built from the named sets rather
+#: than listed by hand: the list this replaced named pending_removal and
+#: in_removal but not migrating_devices or migrating_lvols, which were added
+#: later for the drain, so a drained node arrived at DELETE in migrating_lvols
+#: and was refused as unremovable -- after every one of its volumes had been
+#: moved (2026-09-26). Every departing status is one a removal must be able to
+#: continue from; REMOVED is the one exception and is handled before this
+#: check, as "already removed" rather than "not removable".
+REMOVABLE_STATUSES = (
+    StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+    # DOWN: the SPDK is up, the monitor has fenced its lvol ports. It can be
+    # shut down like an ONLINE node (check_node_shutdown_preconditions refuses
+    # only RESTARTING and IN_SHUTDOWN), and removal is how such a node leaves.
+    StorageNode.STATUS_DOWN,
+    StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE,
+    # A removal that gave up is re-drivable (REMOVED_FAILED, in the set): the
+    # operator fixes whatever blocked it and starts again. The old task is
+    # DONE, not active, so the in-flight check above creates a fresh one.
+) + tuple(s for s in StorageNode.DEPARTING_STATUSES if s != StorageNode.STATUS_REMOVED)
+
+
+#: The statuses in which a node's SPDK is still up when its removal starts,
+#: so phase 1 has something to stop. Everything else is either already
+#: stopped by an earlier step (the departing statuses) or not answering
+#: (OFFLINE, UNREACHABLE), where a shutdown could only fail.
+REMOVAL_SHUTS_DOWN_FROM = (
+    StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN)
+
+
+def advance_removal_status(node_id, status, caused_by="remove", db_controller=None):
+    """Stamp *status* on the node only if that moves it forward along
+    StorageNode.REMOVAL_STATUS_ORDER.
+
+    The orchestrator stamps each of its phases as it enters them, and it
+    re-enters on every retry. Stamping unconditionally walked a node backwards
+    -- in_removal -> migrating_devices -> migrating_lvols -> in_removal on each
+    10s tick -- and moved a node the Kubernetes drain had already brought to
+    migrating_lvols back to migrating_devices on the first pass (2026-09-28
+    review). Statuses outside the order count as before its start, so an
+    ONLINE node, or a REMOVED_FAILED one being re-driven, is stamped as before.
+
+    Returns True if a stamp was written.
+    """
+    db_controller = db_controller or DBController()
+    node = db_controller.get_storage_node_by_id(node_id)
+    order = StorageNode.REMOVAL_STATUS_ORDER
+    if status not in order:
+        raise ValueError(f"{status!r} is not a removal status")
+    if node.status in order and order.index(node.status) >= order.index(status):
+        return False
+    set_node_status(node_id, status, caused_by=caused_by)
+    return True
+
+
+def _snapshot_lives_on_node(snap, node_id, db_controller):
+    """Whether a snapshot record still ties ``node_id`` down.
+
+    ``snap.lvol`` is the copy of the volume embedded when the snapshot was
+    taken; it is never updated, so after the volume migrated it still names
+    the old node. The gate used that copy and refused to remove a node whose
+    every volume had already left -- "1 snapshot(s) present" on 2026-09-28,
+    run 8, for a migration-internal intermediate record (``_mig_*``) whose
+    volume was live on another node. The live volume record decides; a
+    migration's own intermediate snapshot is bookkeeping, not user data, and
+    never holds a node."""
+    if str(getattr(snap, "snap_name", "") or "").startswith("_mig_"):
+        return False
+    try:
+        lvol = db_controller.get_lvol_by_id(snap.lvol.uuid)
+    except (KeyError, AttributeError):
+        return snap.lvol.node_id == node_id
+    return lvol.node_id == node_id
+
+
 def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     """Start the online removal of a storage node from its cluster.
 
@@ -4562,9 +4638,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.warning(f"Node already removed: {node_id}")
         return False
 
-    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                            StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_IN_REMOVAL,
-                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE]:
+    if snode.status not in REMOVABLE_STATUSES:
         logger.error(
             f"Can not remove node {node_id}: (current status: {snode.status}).")
         return False
@@ -4574,16 +4648,24 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove node {node_id}: {reason}")
         return False
 
+    # Volumes are no longer a reason to refuse. The removal drains them itself
+    # (see _drain_lvols_from_node), which is the only way a node that is OFFLINE
+    # can be removed at all: its volumes cannot be migrated by hand first when
+    # nothing can read from their primary.
+    #
+    # Refusing here was a deliberate earlier decision -- "LVol migration is no
+    # longer part of node removal", with the operator expected to migrate them
+    # separately. That is reversed on purpose; standalone `volume migrate` keeps
+    # working exactly as before, and removal is simply another caller of it.
     lvols = db_controller.get_lvols_by_node_id(node_id)
     if lvols:
-        logger.error(
-            f"Can not remove node {node_id}: {len(lvols)} LVol(s) present. "
-            f"Migrate or delete them first.")
-        return False
+        logger.info(
+            f"Node {node_id} holds {len(lvols)} LVol(s); the removal will "
+            f"migrate them off before tearing anything down.")
 
     node_snaps = [
         sn for sn in db_controller.get_snapshots()
-        if sn.lvol.node_id == node_id and sn.deleted is False
+        if sn.deleted is False and _snapshot_lives_on_node(sn, node_id, db_controller)
     ]
     if node_snaps:
         logger.error(
@@ -4618,8 +4700,17 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.error(f"Can not remove node {node_id}: {reason}")
         return False
 
-    if snode.status not in [StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_IN_REMOVAL,
-                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+    # Same positive condition the orchestrator's own shutdown step uses (see
+    # "Phase 1 -- shut the node down"), not an exclusion list that has to
+    # enumerate every status a node might already be stopped in. Written the
+    # other way round, this guard and that one disagreed the moment
+    # REMOVED_FAILED existed: re-driving a removal from REMOVED_FAILED fell
+    # through to shutdown_storage_node, which refuses that status outright --
+    # "Node is in removed_failed state; only online/suspended/down can be
+    # gracefully shut down" -- and the re-drive died before it queued anything
+    # (2026-09-15, node a1b050f1). That is the recovery STATUS_REMOVED_FAILED
+    # exists to offer, so it must not be the one status that cannot use it.
+    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
         logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
         ret = shutdown_storage_node(node_id, force=force_remove)
         if isinstance(ret, tuple):
@@ -4632,7 +4723,15 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             return False
         snode = db_controller.get_storage_node_by_id(node_id)
 
-    if snode.status != StorageNode.STATUS_PENDING_REMOVAL:
+    # PENDING_REMOVAL is where a removal STARTS -- pending_removal ->
+    # migrating_devices -> migrating_lvols -> in_removal -> removed -- and the
+    # machine only moves forward. A node the drain hands over is already at
+    # migrating_lvols: shut down, devices rebuilt, volumes moved. Stamping it
+    # pending_removal here rewound it to the start, and the orchestrator then
+    # read "still to be shut down" off a node with no SPDK left to stop and
+    # refused every attempt (2026-09-26). Only a node that has not started
+    # departing is moved onto the first step.
+    if snode.status not in StorageNode.DEPARTING_STATUSES:
         set_node_status(node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
 
     task_id = tasks_controller.add_node_removal_task(
@@ -5005,7 +5104,389 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     return best
 
 
-def node_removal_orchestrate(node_id, force_remove=False):
+def _recheck_removal_conditions(snode, db_controller):
+    """Re-run the admission conditions that can change after the node is down.
+
+    Admission checks these once, before anything happens. Between then and the
+    teardown the removal shuts the node down, rebuilds its devices onto peers
+    and drains its volumes -- minutes to hours during which another node can go
+    offline, the cluster can lose the FTT headroom the removal was admitted on,
+    or the per-domain balance can stop holding. Committing to the teardown on a
+    judgement made before all of that is how a removal proceeds into a cluster
+    that can no longer absorb it.
+
+    Deliberately the same three questions admission asks, not a looser set: a
+    re-check that admitted something admission would have refused would be
+    worse than no re-check at all.
+
+    Returns (ok, reason).
+    """
+    peers = [
+        n for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        if n.get_id() != snode.get_id()
+        and n.status not in (StorageNode.STATUS_REMOVED,
+                             StorageNode.STATUS_REMOVED_FAILED)
+    ]
+    offline = [n.get_id() for n in peers if n.status != StorageNode.STATUS_ONLINE]
+    if offline:
+        return False, f"peer node(s) not online: {', '.join(offline)}"
+
+    allowed, reason = _check_ftt_allows_node_removal(snode.get_id(), db_controller)
+    if not allowed:
+        return False, reason
+
+    from simplyblock_core.controllers.cluster_expansion.preconditions import (
+        check_fd_admission_for_remove)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
+    if not ok:
+        return False, reason
+
+    return True, ""
+
+
+class RemovalGaveUp(Exception):
+    """A removal step ran out of options; the node goes to REMOVED_FAILED.
+
+    Distinct from returning False, which means "not finished, ask me again".
+    This says "asking again will not help" -- every target has been tried, or
+    there was never a legal one. The runner turns it into the terminal status
+    rather than letting the retry ceiling eventually notice.
+    """
+
+
+def _drain_unit_key(lvol):
+    """Volumes sharing an NVMe-oF subsystem move as one unit.
+
+    ``create_batch_migration`` migrates a whole shared-namespace subsystem to a
+    single target, so members of one subsystem cannot be split across nodes;
+    grouping by nqn is what decides batch-vs-single, not a separate flag.
+    """
+    return lvol.nqn or f"lvol:{lvol.get_id()}"
+
+
+def _node_drain_units(snode, db_controller):
+    """The node's live volumes, grouped into the units migration accepts."""
+    units: dict = {}
+    for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+        if lvol.status in (LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION):
+            continue
+        units.setdefault(_drain_unit_key(lvol), []).append(lvol)
+    return units
+
+
+def _pick_drain_target(snode, lvol, tried, db_controller):
+    """Next candidate host for ``lvol``, or None when they are exhausted.
+
+    Reuses the placement the create path already uses -- same subsystem-capacity
+    accounting, same namespace-slot preference, same load weighting -- rather
+    than growing a second notion of "a good node for a volume". Failure-domain
+    diversity is deliberately not a factor: a migrated volume joins the target's
+    EXISTING lvstore, whose replica topology it does not change.
+
+    Excluded: every node already tried for this unit, the departing node
+    itself, and the node currently standing in as the migration's source. The
+    departing node is normally filtered out anyway (drain runs after shutdown,
+    so it is not ONLINE), but saying so here does not rely on that.
+
+    The third exclusion is the one that is easy to miss. The drain runs after
+    the node is down, so the migration reads from a replica instead
+    (migration_controller.resolve_source_node). That replica is a perfectly
+    good-looking placement candidate -- it is ONLINE and has capacity -- but
+    choosing it makes the source and the destination the same node, and
+    create_migration rejects it: "Cannot migrate to node <x>: source primary
+    <y> is offline and <x> is currently serving as the fallback source for this
+    volume" (cluster a6e7569d, 2026-09-15). Asking the resolver rather than
+    re-deriving which replica it will pick keeps one owner of that rule.
+    """
+    exclude = list(tried) + [snode.get_id()]
+    try:
+        exclude.append(migration_controller.resolve_source_node(snode).get_id())
+    except ValueError:
+        # No replica online either. Nothing to exclude, and create_migration
+        # will raise the real, more specific error.
+        pass
+    candidates = lvol_controller._get_next_3_nodes(
+        snode.cluster_id, lvol.size,
+        namespaced=bool(getattr(lvol, "max_namespace_per_subsys", 1) > 1),
+        exclude_ids=exclude)
+    for cand in candidates:
+        cand_id = cand.get_id() if hasattr(cand, "get_id") else cand
+        if cand_id in exclude:
+            continue
+        # Ask before committing. _get_next_3_nodes answers "where would a new
+        # volume go?" -- capacity, subsystem slots, load weighting -- which is
+        # the right question for placement and not the whole question for a
+        # migration. A candidate can be a fine placement and still be refused
+        # by create_migration or the task runner: it may be the node acting as
+        # the source, or its own secondary/tertiary may be in a state that
+        # blocks creation on the target primary, or it may already have a data
+        # migration running.
+        #
+        # Learning that from the exception costs one of this unit's ten
+        # attempts against that target plus NODE_DRAIN_RETRY_WAIT_SEC of wall
+        # clock -- 5 minutes to discover something check_target_viable answers
+        # from the DB for free. Ask first and move to the next candidate.
+        ok, reason = migration_controller.check_target_viable(lvol.get_id(), cand_id)
+        if not ok:
+            logger.info(
+                f"[REMOVAL] {snode.get_id()}: skipping drain target "
+                f"{cand_id[:8]} for {lvol.get_id()[:8]}: {reason}")
+            continue
+        return cand_id
+    return None
+
+
+def _start_drain_unit(snode, key, lvols, state, db_controller):
+    """Begin (or re-begin) one unit's migration. Mutates ``state`` in place."""
+    lvol = lvols[0]
+    tried = state.setdefault("tried", [])
+    target = _pick_drain_target(snode, lvol, tried, db_controller)
+    if target is None:
+        raise RemovalGaveUp(
+            f"no remaining target can host {key} ({len(lvols)} volume(s)); "
+            f"already tried {tried or 'none'}")
+
+    batch = len(lvols) > 1
+    if batch:
+        mig_id, _ = migration_controller.create_batch_migration(lvol.get_id(), target)
+        migration_controller.start_batch_migration(mig_id)
+    else:
+        mig_id, _ = migration_controller.create_migration(lvol.get_id(), target)
+        migration_controller.start_migration(mig_id)
+
+    state.update({"migration_id": mig_id, "batch": batch, "target": target})
+    state.setdefault("restarts", 0)
+    logger.info(
+        f"[REMOVAL] {snode.get_id()}: drain {key} -> {target} "
+        f"({'batch' if batch else 'single'}, migration {mig_id})")
+
+
+def _drain_unit_status(state, db_controller):
+    """Terminal state of a unit's in-flight migration, or None while running."""
+    mig_id = state.get("migration_id")
+    if not mig_id:
+        return None
+    try:
+        if state.get("batch"):
+            status = db_controller.get_migration_group_by_id(mig_id).status
+        else:
+            status = db_controller.get_migration_by_id(mig_id).status
+    except KeyError:
+        # The record is gone. Treat as failed rather than as success: a
+        # migration that left no trace did not demonstrably move anything.
+        return "failed"
+    if status in (LVolMigration.STATUS_DONE,):
+        return "done"
+    if status in (LVolMigration.STATUS_FAILED, LVolMigration.STATUS_CANCELLED):
+        return "failed"
+    return None
+
+
+def _drain_lvols_from_node(snode, cursor, db_controller):
+    """Migrate every volume off ``snode``. True once none remain.
+
+    Returns False while any unit is still in flight -- the caller retries, and
+    the per-unit bookkeeping in ``cursor.data`` means a retry polls what is
+    already running instead of issuing it again.
+
+    Raises RemovalGaveUp when a unit has exhausted every eligible target.
+
+    Escalation per unit: retry the same target up to
+    NODE_DRAIN_MAX_RESTARTS_PER_TARGET times, then move to the next candidate,
+    and only when there is no candidate left does the removal fail. Attempts are
+    paced NODE_DRAIN_RETRY_WAIT_SEC apart -- the runner ticks every few seconds
+    and a migration that just failed will not succeed if re-issued immediately.
+    """
+    units = _node_drain_units(snode, db_controller)
+    if not units:
+        return True
+
+    drain = cursor.data.setdefault("drain", {})
+    now = time.time()
+    outstanding = 0
+
+    for key, lvols in units.items():
+        state = drain.setdefault(key, {})
+        result = _drain_unit_status(state, db_controller)
+
+        if result == "done":
+            # The volume should have left the node; if the enumeration above
+            # still lists it the next pass will simply start a fresh migration.
+            # That needs the finished migration's id cleared, or every later
+            # pass re-reads the same DONE record, counts the unit outstanding
+            # and never starts anything (2026-09-28 review).
+            state["migration_id"] = None
+            outstanding += 1
+            continue
+
+        if result == "failed":
+            state["restarts"] = state.get("restarts", 0) + 1
+            state["migration_id"] = None
+            if state["restarts"] >= constants.NODE_DRAIN_MAX_RESTARTS_PER_TARGET:
+                failed_target = state.get("target")
+                if failed_target:
+                    state.setdefault("tried", []).append(failed_target)
+                state["restarts"] = 0
+                logger.warning(
+                    f"[REMOVAL] {snode.get_id()}: drain {key} failed "
+                    f"{constants.NODE_DRAIN_MAX_RESTARTS_PER_TARGET}x on "
+                    f"{failed_target}; trying another target")
+            state["next_at"] = now + constants.NODE_DRAIN_RETRY_WAIT_SEC
+            outstanding += 1
+            continue
+
+        if result is None and state.get("migration_id"):
+            outstanding += 1          # still running, leave it alone
+            continue
+
+        if now < state.get("next_at", 0):
+            outstanding += 1          # waiting out the pacing interval
+            continue
+
+        _start_drain_unit(snode, key, lvols, state, db_controller)
+        outstanding += 1
+
+    cursor.save()
+    logger.info(
+        f"[REMOVAL] {snode.get_id()}: drain in progress, {outstanding} unit(s) "
+        f"of {len(units)} outstanding")
+    return False
+
+
+#: Ordered removal steps, by the name the cursor records. The orchestrator's
+#: own "phase N" vocabulary is kept in the log lines so existing greps and
+#: incident notes still resolve; these names are what gets persisted, because
+#: "phase 3a" says nothing to anyone reading a stuck task.
+REMOVAL_STEPS = (
+    "shutdown",
+    "recheck_conditions",
+    "migrate_devices",
+    "drain_lvols",
+    "relocation_gate",
+    "teardown_own_replicas",
+    "decommission_jm",
+    "relocate_hosted",
+    "verify_stacks",
+    "finalize",
+    "devices",
+)
+
+
+class RemovalCursor:
+    """Which removal step is in progress, persisted on the task record.
+
+    The orchestrator has always been resumable, but it had no saved position:
+    it re-derived one from ``snode.status`` plus DB state on every entry. That
+    works, and is why re-entry is safe today, but it cannot answer the question
+    an operator actually asks of a removal that is taking hours -- *which* step
+    is it stuck on -- and it gives a step nowhere to keep work in progress.
+
+    So this records the step rather than replacing the guards. Control flow is
+    unchanged: a step that cannot finish still returns False and is retried in
+    place, never stepped over.
+
+    ``data`` is per-step scratch that survives a retry. Nothing uses it yet;
+    volume drain will, to remember the migrations it started so a re-entrant
+    pass polls them instead of issuing them again.
+
+    Lifetime is one removal attempt, not the node: it lives in the task's
+    ``function_params``, so a removal re-driven after REMOVED_FAILED gets a new
+    task and therefore a fresh cursor, with no stale position to clear.
+    """
+
+    def __init__(self, task=None):
+        self._task = task
+        params = (task.function_params if task is not None else None) or {}
+        self.step = params.get("step")
+        # Keyed BY step, not a single bag cleared on transition. The
+        # orchestrator is re-entrant: every pass replays the steps from the top
+        # (recheck -> devices -> drain), so a bag that reset whenever the step
+        # changed was wiped on every pass. The drain then forgot the migration
+        # it had already started and tried to start it again -- "An active
+        # migration for <lvol> already exists targeting a different node"
+        # (2026-09-15, cluster a6e7569d). Per-step namespaces survive that
+        # replay, which is the whole point of persisting them.
+        self._all_data = params.get("step_data") or {}
+        self._entered = params.get("step_entered_at") or {}
+
+    @property
+    def data(self):
+        """Scratch for the current step. Survives both a retry and the
+        orchestrator replaying earlier steps ahead of it."""
+        return self._all_data.setdefault(self.step or "", {})
+
+    @property
+    def entered_at(self):
+        return self._entered.get(self.step or "") or time.time()
+
+    def enter(self, step, message):
+        """Mark ``step`` as the one now running and log it unchanged."""
+        logger.info(message)
+        self.step = step
+        # Stamped once, the first time this step is entered: re-entering on a
+        # later pass must not restart its clock, or a step retried every few
+        # seconds could never age out of its budget.
+        self._entered.setdefault(step, time.time())
+        self._all_data.setdefault(step, {})
+        self._persist()
+
+    def elapsed(self):
+        """Seconds this step has been running, across retries.
+
+        What makes a per-step budget possible at all: the task's own retry
+        count spans the whole removal, so it cannot tell a drain that has
+        legitimately run for hours from a condition check that has been failing
+        for hours and never will pass.
+        """
+        return max(0.0, time.time() - (self.entered_at or time.time()))
+
+    def clear_clock(self):
+        """Forget how long the current step has been waiting.
+
+        Call this the moment a bounded wait SUCCEEDS. The budget these steps
+        are measured against means "this has been unmet continuously for too
+        long", but the clock is stamped on first entry and the orchestrator
+        replays every step on every pass -- so without this it measures
+        "wall time since the removal first reached this step", and every
+        minute spent legitimately elsewhere is charged against the wait.
+
+        That ended a removal on its first good pass (2026-09-15). The
+        condition re-check had passed repeatedly and the drain had just
+        started its migration; the migration briefly fenced the target, the
+        next re-check saw that peer down for ~13 seconds, and because the
+        step clock had been running for 46 minutes -- nearly all of it with
+        the conditions fine, blocked on an unrelated rebalance deadlock --
+        the 30-minute budget was already spent and the removal gave up
+        instantly instead of retrying.
+
+        A step that keeps failing never calls this, so it still ages out.
+        """
+        if self.step and self._entered.pop(self.step, None) is not None:
+            self._persist()
+
+    def _persist(self):
+        if self._task is None:
+            return
+        params = self._task.function_params or {}
+        params["step"] = self.step
+        params["step_data"] = self._all_data
+        params["step_entered_at"] = self._entered
+        self._task.function_params = params
+
+    def save(self):
+        """Persist per-step ``data`` mutated by a step in progress."""
+        self._persist()
+
+
+class _NullCursor(RemovalCursor):
+    """Used when no task is available (direct calls, tests)."""
+
+    def __init__(self):
+        super().__init__(None)
+
+
+def node_removal_orchestrate(node_id, force_remove=False, cursor=None):
     """Idempotent, resumable orchestration driven by tasks_runner_node_removal.
 
     Returns True only when the node has been fully removed (status REMOVED).
@@ -5016,6 +5497,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
     completed work.
     """
     db_controller = DBController()
+    cursor = cursor if cursor is not None else _NullCursor()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
@@ -5045,12 +5527,35 @@ def node_removal_orchestrate(node_id, force_remove=False):
     # here, since the node being removed has just been shut down.
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     prev_cluster_status = cluster.status
-    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
+    # IN_SHRINK is deliberately NOT set yet. It used to cover the whole
+    # orchestration, which made the drain impossible: migration_controller
+    # requires the cluster to be ACTIVE (see its create/start guards), so a
+    # removal that marked the cluster IN_SHRINK up front then asked it to
+    # migrate a volume was refused by its own bookkeeping -- observed live
+    # 2026-09-15, "Cluster ... is not active (status=in_shrink)", 52 retries.
+    #
+    # Nothing before the teardown is destructive: shutdown, the condition
+    # re-check, device rebuild and volume drain all leave a cluster that is
+    # still serving. IN_SHRINK belongs to the phases that actually dismantle
+    # the node, and is set there instead.
+    shrink_marked = False
     try:
         if not already_removed:
             # Phase 1 — shut the node down (graceful). Skipped on re-entry.
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-                logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
+            #
+            # The question is "is this node still running", and only ONLINE and
+            # SUSPENDED answer yes. Every other status a removal can start from
+            # is one where the node is already down: remove_storage_node shuts
+            # an ONLINE/SUSPENDED node down itself before it stamps
+            # PENDING_REMOVAL, so a node seen here as PENDING_REMOVAL has had
+            # its shutdown; a Kubernetes drain stops the node in its own
+            # ShuttingDown step, before any device or volume moves; and
+            # OFFLINE/UNREACHABLE have nothing to stop. shutdown_storage_node
+            # refuses PENDING_REMOVAL without force in any case, so widening
+            # this to the draining statuses -- as it briefly was -- could only
+            # ever fail here, and did, on every retry (2026-09-26).
+            if snode.status in REMOVAL_SHUTS_DOWN_FROM:
+                cursor.enter("shutdown", f"[REMOVAL] {node_id}: phase 1 — shutdown")
                 ret = shutdown_storage_node(node_id, force=force_remove)
                 if isinstance(ret, tuple):
                     ret, reason = ret
@@ -5062,8 +5567,69 @@ def node_removal_orchestrate(node_id, force_remove=False):
                     return False
                 snode = db_controller.get_storage_node_by_id(node_id)
 
-            if snode.status != StorageNode.STATUS_IN_REMOVAL:
-                set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
+            # Re-check the admission conditions now the node is down. Bounded
+            # separately from everything else: a condition that has not come
+            # back within its own budget is not going to, and waiting the whole
+            # removal budget out would hold a shut-down node hostage to a peer
+            # that is never returning.
+            cursor.enter("recheck_conditions",
+                         f"[REMOVAL] {node_id}: re-check removal conditions")
+            ok, reason = _recheck_removal_conditions(snode, db_controller)
+            if not ok:
+                if cursor.elapsed() >= constants.NODE_REMOVAL_CONDITION_WAIT_SEC:
+                    raise RemovalGaveUp(
+                        f"removal conditions still not met after "
+                        f"{constants.NODE_REMOVAL_CONDITION_WAIT_SEC // 60}min: {reason}")
+                logger.info(
+                    f"[REMOVAL] {node_id}: conditions not met ({reason}); "
+                    f"nothing torn down, retrying")
+                return False
+            # Conditions are met: this wait is over. The budget is for a
+            # condition that STAYS unmet, so the next time one fails it starts
+            # a fresh 30 minutes rather than inheriting however long the
+            # removal has been running. See RemovalCursor.clear_clock.
+            cursor.clear_clock()
+
+            # Devices first, then volumes. Rebuilding this node's data onto its
+            # peers is what makes the cluster whole again; the volume drain that
+            # follows reads from replicas either way, because the node is shut
+            # down by now. Only the DEVICE half runs here -- the JM half stays
+            # at phase 2, after 3a, for the reason in
+            # _decommission_node_devices' docstring.
+            advance_removal_status(node_id, StorageNode.STATUS_MIGRATING_DEVICES,
+                                   caused_by="remove", db_controller=db_controller)
+            cursor.enter("migrate_devices",
+                         f"[REMOVAL] {node_id}: migrate devices — fail and rebuild onto peers")
+            if not _fail_and_migrate_node_devices(snode):
+                return False
+            snode = db_controller.get_storage_node_by_id(node_id)
+
+            # Drain — migrate this node's volumes off it before anything is
+            # torn down. Deliberately BEFORE in_removal: nothing here is
+            # destructive, so a drain that cannot finish leaves the node intact
+            # and the removal can be abandoned without damage.
+            #
+            # Stamped separately from the device half so an operator watching
+            # `sbctl sn list` can tell which of the two is running. They used to
+            # share MIGRATING_LVOLS, which meant a removal stuck rebuilding
+            # devices and one stuck migrating volumes were indistinguishable --
+            # and those fail for entirely different reasons.
+            advance_removal_status(node_id, StorageNode.STATUS_MIGRATING_LVOLS,
+                                   caused_by="remove", db_controller=db_controller)
+            cursor.enter("drain_lvols", f"[REMOVAL] {node_id}: drain — migrate volumes off the node")
+            if not _drain_lvols_from_node(snode, cursor, db_controller):
+                return False
+            snode = db_controller.get_storage_node_by_id(node_id)
+
+            # From here on the removal dismantles the node, so the cluster is
+            # genuinely shrinking. Set it now rather than at entry -- see the
+            # note above.
+            if not shrink_marked:
+                cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
+                shrink_marked = True
+
+            advance_removal_status(node_id, StorageNode.STATUS_IN_REMOVAL,
+                                   caused_by="remove", db_controller=db_controller)
 
             # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
             # node's own primary LVS, on the peers that host them (Case A).
@@ -5124,6 +5690,8 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # the peers' back-references -- neither of which it reads -- so
             # 3b recomputes the same answer. Persisting it would add a stale
             # plan to apply against a cluster that has since moved.
+            cursor.enter("relocation_gate",
+                         f"[REMOVAL] {node_id}: phase 0 — prove the relocation is planable")
             feasible, reason = _check_replica_relocation_feasible(snode, db_controller)
             if not feasible:
                 logger.error(
@@ -5133,7 +5701,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
                     f"once the cluster can host the relocation.")
                 return False
 
-            logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
+            cursor.enter("teardown_own_replicas", f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
             if not _teardown_replicas_of_primary(snode):
                 return False
 
@@ -5143,12 +5711,22 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # matters: a replica relocated while a dying JM is still listed
             # in its primary's jm_ids bakes that unreachable member into the
             # new host's construct permanently.
-            logger.info(f"[REMOVAL] {node_id}: phase 2 — decommission JM")
+            cursor.enter("decommission_jm", f"[REMOVAL] {node_id}: phase 2 — decommission JM")
             _decommission_node_jm(snode, replica_peer_ids=replica_peer_ids)
             snode = db_controller.get_storage_node_by_id(node_id)
 
             # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
-            logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
+            #
+            # Always runs, and always after 3a. It briefly had a skip for a
+            # drain that claimed to have done this already, which meant the
+            # reallocation could happen outside the removal -- and therefore
+            # without 3a having freed this node's own replica slots. On a
+            # cluster whose slots are all occupied that left 3b nothing to move
+            # into: it walked the ring of occupants and refused on a cycle.
+            # There is one owner of this step again, and it is here, where the
+            # ordering it depends on is guaranteed.
+            cursor.enter("relocate_hosted",
+                         f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
             if not _relocate_replicas_hosted_on(snode):
                 return False
 
@@ -5158,12 +5736,12 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # physically done and the node is on its way out, so failing would
             # only spin the retry loop against a state it cannot re-drive --
             # but a missing replica must never leave this function silently.
-            logger.info(f"[REMOVAL] {node_id}: phase 3c — verify replica stacks")
+            cursor.enter("verify_stacks", f"[REMOVAL] {node_id}: phase 3c — verify replica stacks")
             _verify_replica_stacks(snode.cluster_id, db_controller,
                                    context=f" after removing {node_id}")
 
             # Phase 4 — finalize (swarm leave, gpt cleanup) and flip to removed.
-            logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
+            cursor.enter("finalize", f"[REMOVAL] {node_id}: phase 4 — finalize")
             _finalize_node_removal(snode)
             set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
             snode = db_controller.get_storage_node_by_id(node_id)
@@ -5173,13 +5751,20 @@ def node_removal_orchestrate(node_id, force_remove=False):
         # Phase 5 — remove + fail devices, then wait for failure-migration to
         # finish. Always attempted, even on resume after status already
         # flipped to REMOVED -- see the already_removed comment above.
-        logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
+        #
+        # Not skipped when a drain already rebuilt the devices: the device loops
+        # inside skip whatever reached failed_and_migrated, so the repeat costs
+        # a walk, and the call also re-runs _decommission_node_jm -- which on
+        # the already_removed resume path is the only JM decommission this
+        # attempt makes, phase 2 having been skipped with the rest of 1-4.
+        cursor.enter("devices", f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
         if not _decommission_node_devices(snode):
             return False
 
         logger.info(f"[REMOVAL] {node_id}: done")
     finally:
-        cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
+        if shrink_marked:
+            cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
     return True
 
 
@@ -5244,7 +5829,7 @@ def _verify_replica_stacks(cluster_id, db_controller, context=""):
     def stack_present(node, lvstore):
         try:
             return bool(node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore))
-        except Exception as e:
+        except RPCException as e:
             logger.warning(
                 f"[REMOVAL] could not probe {lvstore} on {node.get_id()} "
                 f"({e}); not counting it as missing")
@@ -5422,7 +6007,12 @@ def _teardown_lvol_subsystems_on_vacated_peer(peer, primary, db_controller):
                 f"on vacated peer {peer.get_id()} failed: {e}")
 
 
-def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db_controller):
+# Index of each replica role in ``LVol.nodes`` (``[primary, secondary,
+# tertiary]``, as lvol_controller builds it at create time).
+_LVOL_PATH_SLOT = {"secondary": 1, "tertiary": 2}
+
+
+def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db_controller, *, role):
     """Re-point every LVol hosted on ``primary_id`` from ``old_host_id`` to
     ``new_host_id`` in its own ``nodes`` list, once that primary's
     secondary/tertiary replica has been relocated between the two hosts.
@@ -5439,14 +6029,69 @@ def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db
     ``nodes`` naming the just-removed node; the CSI initiator never
     reconnected to the actual new secondary.)
 
+    ``nodes`` is positional -- ``[primary, secondary, tertiary]``, the
+    order lvol_controller builds it in -- so the rewrite addresses the
+    slot of ``role``, never a value. A by-value swap (``old -> new``
+    wherever ``old`` appears) corrupts the list whenever one planned move
+    lands on the host another move of the same primary is about to leave:
+    secondary ``K -> T`` followed by tertiary ``T -> X`` left ``[P, X, X]``
+    -- the real secondary ``T`` gone from the client's path list and ``X``
+    listed twice (2026-09-28, third CRD removal on a 4-survivor cluster;
+    the node-level role fields were correct throughout, because they are
+    per role). Two roles of one primary may legitimately share a host for
+    the duration of such a chain, so ordering the moves cannot prevent it.
+
     Safe to call redundantly (e.g. on a retry after an earlier attempt
-    already applied it): each lvol is only rewritten if ``old_host_id`` is
-    still present in its ``nodes``."""
+    already applied it): an lvol whose slot already names ``new_host_id``
+    is left alone, and an lvol with no such slot (a tertiary move against
+    an lvol that has no tertiary path) is skipped. A slot naming neither
+    host is stale from an earlier by-value rewrite and is repaired -- the
+    role's host IS ``new_host_id`` now, whatever the list said before."""
+    slot = _LVOL_PATH_SLOT[role]
     for lvol in db_controller.get_lvols_by_node_id(primary_id):
         nodes = list(lvol.nodes or [])
-        if old_host_id in nodes:
-            lvol.nodes = [new_host_id if n == old_host_id else n for n in nodes]
-            lvol.write_to_db()
+        if len(nodes) <= slot or nodes[slot] == new_host_id:
+            continue
+        if nodes[slot] != old_host_id:
+            logger.warning(
+                f"lvol {lvol.get_id()} {role} path named {nodes[slot]} instead of "
+                f"{old_host_id}; repointing it to {new_host_id}")
+        nodes[slot] = new_host_id
+        lvol.nodes = nodes
+        lvol.write_to_db()
+
+
+def replica_role_holders(node_id, db_controller):
+    """The surviving nodes that still name ``node_id`` as their secondary or
+    tertiary.
+
+    This is the question "does anything still depend on this node" in the only
+    form that answers it the same way however the dependency went away -- moved
+    by the planner, never there, or cleaned up by something else. Both the
+    removal's phase 3b and the Kubernetes drain's reshuffle step read it, so it
+    lives here rather than being counted once per caller: they decide the same
+    thing (may this node go?) and must not be able to disagree about it.
+    """
+    snode = db_controller.get_storage_node_by_id(node_id)
+    return [
+        peer
+        for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        if peer.get_id() != node_id
+        and node_id in (peer.secondary_node_id, peer.tertiary_node_id)
+    ]
+
+
+def data_devices_pending_migration(snode: StorageNode):
+    """This node's data devices that have not yet been rebuilt onto peers.
+
+    A device is done when it reaches ``failed_and_migrated``; the journal device
+    is not data and is never counted. Empty means phase 5 has nothing left to
+    do, whoever drove it.
+    """
+    return [
+        dev for dev in (snode.nvme_devices or [])
+        if dev.status not in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
+    ]
 
 
 def _relocate_replicas_hosted_on(removed_node: StorageNode):
@@ -5722,7 +6367,7 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     # docstring. Unconditional (not gated on "did we just build it above")
     # so a retry that resumes past the build-skip branch still catches up
     # if an earlier attempt crashed between the build and this step.
-    _update_lvol_nodes_for_replica_move(primary_id, removed_node.get_id(), new_id, db_controller)
+    _update_lvol_nodes_for_replica_move(primary_id, removed_node.get_id(), new_id, db_controller, role=role)
 
     _clear_replica_backref(removed_node, backref)
     return True
@@ -5937,7 +6582,7 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
     # Unconditional (outside the "if not already built" guard above) so a
     # retry that skips straight past that guard still catches up if an
     # earlier attempt crashed between the build and this step.
-    _update_lvol_nodes_for_replica_move(occupant_primary_id, old_host_id, new_host_id, db_controller)
+    _update_lvol_nodes_for_replica_move(occupant_primary_id, old_host_id, new_host_id, db_controller, role=role)
 
     old_host = db_controller.get_storage_node_by_id(old_host_id)
     if getattr(old_host, backref) == occupant_primary_id:
@@ -6046,7 +6691,7 @@ def _release_jm_from_jc(node, name_old) -> bool:
             f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) failed ({re.code}): "
             f"{re}; leaving the bdev in place")
         return False
-    except Exception as e:
+    except RPCException as e:
         logger.error(
             f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) raised: {e}; "
             f"leaving the bdev in place")
@@ -6070,7 +6715,7 @@ def _drop_superseded_jm_bdev(node, name_old, removed_jm_id) -> None:
     controller = name_old.removesuffix("n1")
     try:
         node.rpc_client().bdev_nvme_detach_controller(controller)
-    except Exception as de:
+    except RPCException as de:
         logger.warning(
             f"Failed to detach superseded controller {controller} on {node.get_id()}: {de}")
     node.remote_jm_devices = [
@@ -6165,11 +6810,12 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         #  affected targets=[(1, 'a91a2d46...')]". Harmless only because the
         # missing name short-circuited the call; with a name recorded it would
         # have issued jc_replace_jm at the dead pod this filter exists to
-        # avoid. IN_REMOVAL is listed too, on the same grounds as REMOVED:
-        # such a node is down and its rpc_client cannot resolve.
+        # avoid. Every REMOVAL_SHUT_DOWN status qualifies on the same grounds
+        # as REMOVED: the removal has already stopped that node's SPDK, so its
+        # rpc_client cannot resolve. PENDING_REMOVAL is excluded on purpose --
+        # a node is put in it before the shutdown step runs.
         live_nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
-                      if n.status not in (StorageNode.STATUS_REMOVED,
-                                          StorageNode.STATUS_IN_REMOVAL)
+                      if n.status not in StorageNode.REMOVAL_SHUT_DOWN_STATUSES
                       and n.get_id() != removed_node.get_id()]
 
         def _pick_replacement(primary):
@@ -6512,16 +7158,34 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
 def _decommission_node_devices(removed_node: StorageNode):
     """Remove, fail and migrate every data device on ``removed_node``.
 
-    Drives each device ONLINE/UNAVAILABLE -> REMOVED -> FAILED (which queues the
-    failure-migration tasks on the surviving online nodes), then waits for them
-    all to reach FAILED_AND_MIGRATED. Returns True only once every data device
-    is migrated; False means "still migrating, retry later".
-
     Also (re)runs _decommission_node_jm -- see its own docstring for why this
-    is a defensive no-op here on any task that already ran it as phase 2."""
-    db_controller = DBController()
+    is a defensive no-op here on any task that already ran it as phase 2. That
+    JM call is the whole reason this wrapper exists separately from
+    _fail_and_migrate_node_devices: the device work can run early, but the JM
+    work cannot, because phase 3a must tear down this node's own hosted
+    replicas BEFORE its JM leaves any JC group (a peer hosting that replica
+    runs a JC instance naming the dying JM, and jc_replace_jm's -17 check
+    rejects the batch while it is live -- reproduced 2026-08-25 and 2026-09-02).
+    """
     _decommission_node_jm(removed_node)
+    return _fail_and_migrate_node_devices(removed_node)
 
+
+def _fail_and_migrate_node_devices(removed_node: StorageNode):
+    """Drive every data device off ``removed_node``, JM untouched.
+
+    Each device goes ONLINE/UNAVAILABLE -> REMOVED -> FAILED, which queues the
+    failure-migration tasks on the surviving online nodes, and then this waits
+    for them all to reach FAILED_AND_MIGRATED. Returns True only once every data
+    device is migrated; False means "still migrating, retry later".
+
+    Split out so the removal can rebuild this node's data onto its peers BEFORE
+    draining its volumes, which is the order the data path wants: by then the
+    node is shut down, so every volume migration reads from a replica anyway,
+    and there is nothing to gain from moving volumes while the devices backing
+    their old home are still being rebuilt.
+    """
+    db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     for dev in removed_node.nvme_devices:
         if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
@@ -6537,13 +7201,39 @@ def _decommission_node_devices(removed_node: StorageNode):
             device_controller.device_set_failed(dev.get_id())
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    pending = []
     for dev in removed_node.nvme_devices:
         if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
             continue
+        pending.append(dev.get_id())
         logger.info(
             f"[REMOVAL] {removed_node.get_id()}: device {dev.get_id()} "
             f"status={dev.status}, migration not complete"
         )
+
+    if pending:
+        # Report "not done" so the caller retries, per this function's stated
+        # contract. It never did: the loop above only logged and fell through
+        # to an unconditional `return True`, so phase 5 declared the removal
+        # complete the moment it had QUEUED the failure-migration tasks,
+        # without waiting for any of them.
+        #
+        # Both ends of the contract were already built for the wait --
+        # tasks_runner_node_removal.process_task suspends and revisits the task
+        # on False ("incomplete, retry later ... most commonly: device failure-
+        # migration still in progress"), and node_removal_orchestrate's
+        # already_removed short-circuit re-enters straight at phase 5. Only the
+        # middle was missing.
+        #
+        # Consequence while it was missing (2026-09-11): a removal returned
+        # "done" in ~20s with failure-migration tasks still queued; the next
+        # removal was then refused with "Task found: 4, can not remove storage
+        # node" while the cluster already reported ACTIVE, which reads to an
+        # operator as a spurious refusal rather than as work still in flight.
+        logger.info(
+            f"[REMOVAL] {removed_node.get_id()}: {len(pending)} device(s) still "
+            f"migrating, retry later")
+        return False
 
     return True
 
@@ -6644,6 +7334,18 @@ def restart_storage_node(
     except Exception:
         logger.warning(f"Could not read pre-call status for {node_id}; "
                        f"skipping orphan-RESTARTING cleanup as a precaution")
+
+    # A node the removal has already shut down belongs to the removal until it
+    # is removed (or removed_failed and re-driven). A restart -- even a forced
+    # one: a full-cluster start, the operator's node recycle, `sn restart
+    # --force` -- would bring it back into service in the middle of that, with
+    # its devices failed or migrated, its volumes moving, and its journal and
+    # replicas being dismantled. Refused before anything is touched.
+    if pre_status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        logger.error(
+            f"Refusing to restart {node_id}: it is {pre_status}, part of a node "
+            f"removal that owns it until the node is removed")
+        return False
 
     # Transferable ownership: ensure a persistent NODE_RESTART task exists,
     # claim its lease for this host, and heartbeat it while this process
@@ -8483,6 +9185,16 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
 
+    # A node the removal has already shut down has nothing left to stop, and
+    # this function's first write (in_shutdown) would knock it out of the
+    # removal status that owns it -- set_node_status then refuses the final
+    # OFFLINE, and the node is left in_shutdown. A worker drain or a bulk stop
+    # that reaches such a node is therefore a no-op, reported as done.
+    if snode.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        logger.info(f"Node {node_id} is {snode.status}: already shut down by its "
+                    f"removal; nothing to do")
+        return True
+
     # Expansion lock: while the cluster is IN_EXPANSION the role rebalance
     # is re-wiring sec/tert stacks across nodes — losing any node mid-move
     # leaves half-applied topology. Shutdowns are disabled until the
@@ -8680,7 +9392,13 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
 
     # Step 6: status → offline + ANA failover bookkeeping.
     logger.info("Setting node status to offline")
-    if not set_node_status(node_id, StorageNode.STATUS_OFFLINE):
+    if (not set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+            and db_controller.get_storage_node_by_id(node_id).status
+            not in StorageNode.REMOVAL_SHUT_DOWN_STATUSES):
+        # A removal status that took over while this shutdown ran is kept, and
+        # counts as the shutdown landing: the node is down either way, and the
+        # ANA failover below must still run. Any other refusal fails it.
+        #
         # The FSM refused the flip — typically the record reads RESTARTING,
         # i.e. a restart transition owns this node. SPDK is already killed at
         # this point, but the shutdown has NOT fully committed; reporting
@@ -9268,6 +9986,18 @@ def set_node_status(node_id, status, caused_by="monitor"):
             outcome["from"] = n.status
             return False
         if (status == StorageNode.STATUS_OFFLINE
+                and n.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES):
+            # A removal status after the shutdown already says the node is
+            # down, and it says more: which half of the removal owns it.
+            # OFFLINE would undo that. The shutdown's own final write did
+            # exactly this when a drain stamped MIGRATING_DEVICES while the
+            # shutdown was still running: the node fell back to OFFLINE, the
+            # rebuild of its own distribs was queued on the node itself, and
+            # the removal waited for ever (2026-09-30, runs 19 and 24).
+            outcome["verdict"] = "reject_offline_departing"
+            outcome["from"] = n.status
+            return False
+        if (status == StorageNode.STATUS_OFFLINE
                 and n.status == StorageNode.STATUS_RESTARTING
                 and caused_by not in _ALLOWED_CAUSED_BY_RESTARTING_TO_OFFLINE):
             # Symmetric to the ONLINE guard above: RESTARTING is the restart
@@ -9337,6 +10067,12 @@ def set_node_status(node_id, status, caused_by="monitor"):
             f"Only {_ALLOWED_CAUSED_BY_RESTARTING_TO_OFFLINE} may flip "
             f"a RESTARTING node to OFFLINE."
         )
+        return False
+    if verdict == "reject_offline_departing":
+        logger.warning(
+            f"Keeping {node_id} at {outcome['from']}: the removal owns this node "
+            f"and it is already down; OFFLINE from caused_by={caused_by!r} would "
+            f"undo the removal's status.")
         return False
 
     storage_events.snode_status_change(snode, snode.status, outcome["old_status"], caused_by=caused_by)
@@ -10213,12 +10949,16 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
 #: PENDING_REMOVAL is also deliberately absent. node_removal_orchestrate sets
 #: it *before* phase 1 shuts the node down, so the node is still up and serving
 #: then; treating it as gone would skip a port-block it still needs.
+#: Derived from REMOVAL_SHUT_DOWN_STATUSES, never listed by hand: this tuple
+#: named only IN_REMOVAL out of the removal states, so a peer sitting in
+#: MIGRATING_LVOLS fell through to the JM-quorum path below and was voted
+#: "connected" on 0/0 -- the abstain-from-all case the docstring predicts.
+#: The lvol-migration runner then spent two retry rounds on a SnodeAPI
+#: hostname that no longer resolves (a1b050f1 / bd4qf, 2026-09-15 17:23).
 _PEER_DISCONNECTED_STATUSES = (
     StorageNode.STATUS_OFFLINE,
-    StorageNode.STATUS_REMOVED,
     StorageNode.STATUS_UNREACHABLE,
-    StorageNode.STATUS_IN_REMOVAL,
-)
+) + StorageNode.REMOVAL_SHUT_DOWN_STATUSES
 
 
 def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
@@ -13700,8 +14440,14 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     size = constants.DISTRIB_SIZE_BYTES
     distr_page_size = page_size_in_blocks
     # distr_page_size = (ndcs + npcs) * page_size_in_blocks
-    # cluster_sz = ndcs * page_size_in_blocks
-    cluster_sz = page_size_in_blocks * constants.LVOL_CLUSTER_RATIO
+    # The lvstore cluster is one full stripe of user data: a page per data
+    # chunk. Sizing it to a single page instead made every cluster a fraction
+    # of a stripe, so a one-cluster allocation wrote a partial stripe and the
+    # distribution layer had to read the rest back to compute parity.
+    #
+    # ndcs is the cluster's data-chunk count, so 2+2 gives 4 MiB, 1+x gives
+    # 2 MiB and 4+x gives 8 MiB, off the same 2 MiB page.
+    cluster_sz = page_size_in_blocks * ndcs
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 1

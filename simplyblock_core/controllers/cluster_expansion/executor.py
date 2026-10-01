@@ -270,15 +270,14 @@ class SpdkMoveExecutor(MoveExecutor):
         #    lvol monitor iterate lvol.nodes; leaving the donor listed makes
         #    lvol health fail forever against the torn-down stack — worse,
         #    the monitor keeps recreating empty subsystem shells (0
-        #    namespaces) on the donor after teardown deletes them. Swap
-        #    donor -> recipient now that the recipient's stack and per-lvol
-        #    subsystems exist, and before the donor teardown below.
-        for lvol in db.get_lvols_by_node_id(primary.get_id()):
-            nodes = list(lvol.nodes or [])
-            if move.from_node_id in nodes:
-                lvol.nodes = [move.to_node_id if n == move.from_node_id
-                              else n for n in nodes]
-                lvol.write_to_db()
+        #    namespaces) on the donor after teardown deletes them. Repoint
+        #    the slot to the recipient now that the recipient's stack and
+        #    per-lvol subsystems exist, and before the donor teardown below.
+        #    Shared with node removal's phase 3b: the rewrite is by role
+        #    slot, not by value, so a chain of two moves on one primary
+        #    cannot clobber the other role's path.
+        storage_node_ops._update_lvol_nodes_for_replica_move(
+            primary.get_id(), move.from_node_id, move.to_node_id, db, role=slot)
 
         # 3. Tear down the donor's stack for this LVS. The primary's
         #    pointer was already moved to the recipient in step 1, so we
@@ -373,33 +372,42 @@ def _rotation_order_from_layout(existing_ids, layout):
         cur = nxt
 
 
-def _plan_moves_with_failure_domains(cluster, db_controller,
-                                     existing_nodes, new_snode):
-    """FD-aware fresh plan.
+def _role_moves_from_plan(moves, newcomer_id, ftt):
+    """Translate the placement planner's ordered ``ReplicaMove`` list into
+    the ``RoleMove`` list the expansion executor runs.
 
-    Instead of trusting DB enumeration order, the rotation is recovered
-    from the actual secondary-pointer chain (so the diff stays minimal and
-    donors are named correctly even when DB order differs from the layout
-    the cluster was activated with). The newcomer's insertion point is then
-    chosen by trying each cyclic rotation of that order — cyclic rotations
-    preserve every existing adjacency, so they only vary WHERE the newcomer
-    splices in — and taking the first whose desired layout satisfies the
-    >=1-cross-domain-role invariant. No valid insertion point exists e.g.
-    for FTT1 growing to odd populations (the odd primary would keep no
-    cross-domain role at all); that is refused here, before any move runs.
+    The newcomer's own primary LVS is created first: its secondary and
+    tertiary creates may be sequenced anywhere by ``order_moves`` (they land
+    in whatever slot the ordering has just freed), and a replica of the
+    newcomer's LVS cannot be built before that LVS exists. A replica hosted
+    ON the newcomer needs no such ordering -- a node hosts other primaries'
+    replicas without an lvstore of its own, as the rotation diff always did.
+
+    A scratch hop (a role parked on a temporarily free host to break a
+    rotation cycle) is two ordinary re-homes back to back; the executor
+    needs no notion of it.
     """
-    fd_by_node = {n.get_id(): n.failure_domain for n in existing_nodes}
-    fd_by_node[new_snode.get_id()] = new_snode.failure_domain
+    out = [RoleMove(newcomer_id, ROLE_PRIMARY, "", newcomer_id)]
+    for m in moves:
+        if m.role == ROLE_TERTIARY and ftt < 2:
+            continue
+        if m.from_node_id == m.to_node_id:
+            continue
+        out.append(RoleMove(m.lvs_primary_node_id, m.role,
+                            m.from_node_id, m.to_node_id))
+    return out
 
-    # The flat rotation treats every node as its own host; with multi-slot
-    # hosts that would silently break host-disjointness, so refuse.
-    ips = [n.mgmt_ip for n in existing_nodes] + [new_snode.mgmt_ip]
-    if len(set(ips)) != len(ips):
-        raise RuntimeError(
-            "expansion on failure-domain clusters currently supports one "
-            "storage node per host (multi-slot hosts need the topology "
-            "planner)")
 
+def _plan_moves_by_rotation_shift(existing_nodes, new_snode, fd_by_node, ftt):
+    """The pre-planner layout: splice the newcomer into the actual rotation
+    at the first cyclic insertion point that keeps every LVS at least one
+    cross-domain non-leader role. Cyclic rotations preserve every existing
+    adjacency, so they only vary WHERE the newcomer goes, and the diff stays
+    minimal. Kept as the degraded fallback for topologies where pairwise
+    domain diversity is unreachable (two domains, an odd population with
+    too few domains); returns None when no insertion point satisfies even
+    that floor.
+    """
     layout = {
         n.get_id(): (n.secondary_node_id or "", n.tertiary_node_id or "")
         for n in existing_nodes
@@ -409,11 +417,9 @@ def _plan_moves_with_failure_domains(cluster, db_controller,
     if order is None:
         logger.warning(
             "integrate: secondary-pointer chain is not a single rotation "
-            "cycle (layout drift); planning against DB enumeration order — "
+            "cycle (layout drift); planning against DB enumeration order -- "
             "the plan will also repair the drifted roles")
         order = existing_ids
-
-    ftt = cluster.max_fault_tolerance
     last_violations = None
     for shift in range(len(order)):
         rotated = order[shift:] + order[:shift]
@@ -424,10 +430,98 @@ def _plan_moves_with_failure_domains(cluster, db_controller,
                 [[n] for n in rotated], new_topology, ftt,
                 current_layout=layout)
         last_violations = violations
-    raise RuntimeError(
-        "no newcomer placement satisfies the failure-domain invariant "
-        "(every LVS must keep at least one cross-domain role): "
-        + "; ".join(last_violations or ["<no candidates>"]))
+    logger.warning(
+        "integrate %s: no rotation insertion point keeps every LVS a "
+        "cross-domain role: %s", new_snode.get_id(),
+        "; ".join(last_violations or ["<no candidates>"]))
+    return None
+
+
+def _plan_moves_with_failure_domains(cluster, db_controller,
+                                     existing_nodes, new_snode):
+    """FD-aware plan through the global placement planner.
+
+    The same planner the removal uses (``replica_placement``): it computes
+    the cheapest layout over the post-add node set in which primary,
+    secondary and tertiary of every LVS sit in pairwise-distinct failure
+    domains, and returns the minimum set of rebuilds that reaches it,
+    ordered so each lands on a slot that is free when it runs.
+
+    This used to be a rotation-shift search whose target was only the
+    weaker ">=1 cross-domain role" invariant, so an FTT2 expansion to an odd
+    population always left one LVS with its secondary in its primary's own
+    domain -- even on four or more domains, where a fully diverse layout
+    exists (2026-09-28 review). On three domains that degraded LVS is
+    unavoidable: three roles need three domains and the odd host's tertiary
+    has none left, which the planner proves rather than assumes. That
+    search is kept as the fallback for exactly those cases, where its floor
+    is the best available; a layout that would leave some LVS with NO
+    cross-domain role is still refused before any move runs (e.g. FTT1
+    growing to an odd population, where the odd primary can have none).
+    """
+    from simplyblock_core.controllers import replica_placement
+
+    fd_by_node = {n.get_id(): n.failure_domain for n in existing_nodes}
+    fd_by_node[new_snode.get_id()] = new_snode.failure_domain
+    # The executor re-homes one role per host slot at a time; with
+    # multi-slot hosts the newcomer's roles could share a host with its own
+    # replicas' siblings in ways the hublvol wiring is not tested for, so
+    # refuse -- the planner itself handles host_by_node, this is the
+    # executor's limit, not the planner's.
+    ips = [n.mgmt_ip for n in existing_nodes] + [new_snode.mgmt_ip]
+    if len(set(ips)) != len(ips):
+        raise RuntimeError(
+            "expansion on failure-domain clusters currently supports one "
+            "storage node per host (multi-slot hosts need the topology "
+            "planner)")
+
+    ftt = cluster.max_fault_tolerance if cluster.max_fault_tolerance in (1, 2) else 1
+    node_ids = [n.get_id() for n in existing_nodes] + [new_snode.get_id()]
+    host_by_node = {n.get_id(): n.mgmt_ip for n in existing_nodes}
+    host_by_node[new_snode.get_id()] = new_snode.mgmt_ip
+    label_by_node = {n.get_id(): n.physical_label for n in existing_nodes}
+    label_by_node[new_snode.get_id()] = new_snode.physical_label
+    # The newcomer has no roles yet; leaving it out of current_layout is how
+    # the planner is told "no host" for its secondary and tertiary.
+    current_layout = {
+        n.get_id(): replica_placement.Placement(
+            n.secondary_node_id or "", (n.tertiary_node_id or "") if ftt >= 2 else "")
+        for n in existing_nodes
+    }
+
+    try:
+        plan = replica_placement.plan_diverse_layout(
+            node_ids, fd_by_node, current_layout, ftt,
+            host_by_node=host_by_node, label_by_node=label_by_node)
+    except replica_placement.InfeasiblePlacement as e:
+        raise RuntimeError(
+            f"no host-disjoint placement exists for {new_snode.get_id()}: {e}")
+
+    if plan.full_diversity:
+        moves = replica_placement.plan_moves(
+            current_layout, plan.layout, node_ids, ftt)
+        logger.info(
+            f"integrate {new_snode.get_id()}: replica placement plan -- "
+            f"{replica_placement.describe_plan(plan, moves)}")
+        return _role_moves_from_plan(moves, new_snode.get_id(), ftt)
+
+    # Full diversity is out of reach on this topology. The planner's own
+    # fallback drops the domain constraint entirely, which is below the
+    # floor the expansion has always held; the rotation-shift search holds
+    # exactly that floor, so it decides the degraded case.
+    logger.warning(
+        f"integrate {new_snode.get_id()}: the post-expansion layout cannot "
+        f"be made fully domain-diverse ({'; '.join(plan.notes) or 'no reason recorded'}); "
+        f"falling back to the rotation layout, which keeps every LVS one "
+        f"cross-domain role")
+    for violation in plan.violations:
+        logger.warning(f"integrate {new_snode.get_id()}: {violation}")
+    fallback = _plan_moves_by_rotation_shift(existing_nodes, new_snode, fd_by_node, ftt)
+    if fallback is None:
+        raise RuntimeError(
+            "no newcomer placement satisfies the failure-domain invariant "
+            "(every LVS must keep at least one cross-domain role)")
+    return fallback
 
 
 def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
