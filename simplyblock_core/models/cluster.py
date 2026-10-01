@@ -1,9 +1,11 @@
 import os.path
-from typing import ClassVar
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from pydantic import SecretStr
 
 from simplyblock_core import constants
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
@@ -285,7 +287,6 @@ class Cluster(BaseModel):
     client_data_nic: str = ""
     max_fault_tolerance: int = 1
     backup_config: dict = default_factory(dict)
-    backup_source: str = ""  # active backup source cluster_id ("" = local)
     backup_timeout_seconds: int = 14400  # 4 hours default
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
@@ -314,6 +315,10 @@ class Cluster(BaseModel):
     backup_s3_bucket: str = ""
     backup_s3_region: str = ""
     backup_s3_cred: str = ""
+    # Cluster Virtual IP, this is used for the load balancer,
+    # and it is used for gelf address in the storage nodes' containers.
+    # If not defined, then gelf address will be the first mgmt node's address
+    cluster_vip: str = ""
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
@@ -329,6 +334,62 @@ class Cluster(BaseModel):
         if len(qos_classes) > 1:
             return True
         return False
+
+    def default_backup_bucket_name(self) -> str:
+        """The bucket this cluster backs up to when its configuration names none.
+
+        A config that names no bucket gets the one the bucket name used to be
+        derived from at device-creation time, so a cluster configured before
+        ``bucket_name`` existed keeps addressing the bucket it has been writing
+        to. Callers that configure a bucket per cluster (``StorageCluster``'s
+        ``spec.backup`` has no bucket field at all) never name one, so this is
+        the normal case rather than a fallback.
+        """
+        return f"simplyblock-backup-{self.uuid}"
+
+    def _resolve_backup_config(self, config: Mapping[str, Any]) -> BackupConfig:
+        return BackupConfig.model_validate({
+            "bucket_name": self.default_backup_bucket_name(),
+            **config,
+        })
+
+    def get_backup_config(self) -> BackupConfig:
+        """Validate and return this cluster's volume-backup configuration.
+
+        ``backup_config`` stays an untyped dict on the record because
+        ``BaseModel`` cannot nest pydantic models; validating on read gives the
+        typing without an FDB migration. Stored configs are never rewritten by
+        reading them, so :meth:`default_backup_bucket_name` stays derived rather
+        than frozen into the record.
+
+        Raises:
+            ValueError: The cluster has no backup configuration, or the stored
+                one is not valid. ``ValidationError`` is a ``ValueError``, so one
+                except clause covers both.
+        """
+        if not self.backup_config:
+            raise ValueError(f"Cluster {self.get_id()} has no backup configuration")
+
+        return self._resolve_backup_config(self.backup_config)
+
+    def set_backup_config(self, config: Mapping[str, Any]) -> None:
+        """Validate a raw backup configuration and store it on this record.
+
+        The only way to put a configuration on a cluster. Validating on write as
+        well as on read is what stops a configuration no cluster could act on
+        from being accepted at cluster-create and then failing activation on
+        every node, arbitrarily long after the mistake was made and with nothing
+        in the failure pointing back at it.
+
+        What gets stored is what the caller passed, so an absent ``bucket_name``
+        stays absent and keeps resolving through
+        :meth:`default_backup_bucket_name`.
+
+        Raises:
+            ValueError: The configuration is not one this cluster could act on.
+        """
+        self._resolve_backup_config(config)
+        self.backup_config = dict(config)
 
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:
@@ -374,19 +435,21 @@ class ClusterCreateLock(BaseModel):
     burst, producing 6 separate clusters named "simplyblock-cluster" instead
     of one).
 
-    Keyed by ``name`` so only one create can be in flight for a given name at
-    a time. No heartbeat — add_cluster() is a single synchronous call, not a
-    long-lived section like node-add's mesh wiring — just a generous TTL
-    (``CLUSTER_CREATE_LOCK_TTL_SEC``) so a crashed holder's lock is eventually
-    reclaimable by a genuine retry.
+    Keyed by ``lock_name`` so only one create can be in flight for a given name
+    at a time (not ``name``: that is BaseModel key material — the class-name
+    segment of the FDB key — and shadowing it would write each lock into the
+    keyspace its name spells). No heartbeat — add_cluster() is a single
+    synchronous call, not a long-lived section like node-add's mesh wiring —
+    just a generous TTL (``CLUSTER_CREATE_LOCK_TTL_SEC``) so a crashed holder's
+    lock is eventually reclaimable by a genuine retry.
     """
 
-    name: str = ""
+    lock_name: str = ""
     owner: str = ""
     acquired_at: int = 0
 
     def get_id(self):
-        return self.name or self.uuid
+        return self.lock_name or self.uuid
 
 
 class PortReservation(BaseModel):

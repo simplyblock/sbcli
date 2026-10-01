@@ -16,7 +16,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
 
-
 SECRET_VALUE = "super-secret-token-12345"
 MASK = "**********"
 

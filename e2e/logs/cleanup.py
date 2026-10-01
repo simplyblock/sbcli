@@ -1,6 +1,14 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "paramiko",
+# ]
+# ///
 import os
-import paramiko
 import time
+
+import paramiko
 
 # SSH Configuration
 BASTION_IP = os.getenv("BASTION_IP")

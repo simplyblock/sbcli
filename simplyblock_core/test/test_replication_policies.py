@@ -6,12 +6,17 @@ every `cluster add-replication` overwrote.
 import pytest
 
 from simplyblock_core.controllers import replication_policy_controller as rpc
-from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
+from simplyblock_core.controllers.replication_policy_controller import (
+    ReplicationConfigError,
+)
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.replication import (ConsistencyGroup, ReplicationPolicy,
-                                                 ReplicationTarget)
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot
 
 
@@ -104,8 +109,12 @@ class _FakeDB:
     def get_mini_lvols(self):
         return self._lvols
 
-    def get_snapshots(self):
+    def get_snapshots(self, cluster_id=None):
         return self._snapshots
+
+    def get_snapshots_by_lvol_id(self, lvol_id):
+        return [s for s in self._snapshots
+                if s.lvol and s.lvol.get_id() == lvol_id]
 
     def get_snapshot_by_id(self, uuid):
         if not uuid:
@@ -681,6 +690,7 @@ def test_create_reports_when_the_policy_cannot_be_attached(monkeypatch):
     """A volume that was created but could not be replicated must not look like
     a fully successful create."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller
     src = inspect.getsource(lvol_controller.add_lvol_ha)
     assert "replication policy could not be attached" in src, \
@@ -706,6 +716,7 @@ def test_direct_replication_start_refused_on_a_policy_managed_volume(monkeypatch
 def test_policy_controller_may_drive_the_raw_verbs(monkeypatch):
     """The guard must not lock the policy controller itself out."""
     import inspect
+
     from simplyblock_core.controllers import replication_policy_controller
     attach_src = inspect.getsource(replication_policy_controller.attach_policy)
     detach_src = inspect.getsource(replication_policy_controller.detach_policy)
@@ -718,6 +729,7 @@ def test_failed_over_clone_does_not_inherit_the_source_policy(monkeypatch):
     a policy id that names nothing on the other cluster — and, with the guard on
     replication_start, that would block fail-back entirely."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller
     src = inspect.getsource(lvol_controller._create_target_lvol_clone)
     assert "new_lvol.replication_policy_id = \"\"" in src
@@ -727,6 +739,7 @@ def test_failback_is_not_blocked_by_the_policy_guard(monkeypatch):
     """Fail-back configures the reverse replication itself; it must be allowed to
     drive replication_start even on a policy-managed volume."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller
     src = inspect.getsource(lvol_controller.replication_failback)
     assert src.count("from_policy=True") == 2, \
@@ -777,6 +790,7 @@ def test_volume_without_a_policy_may_still_start_replication_directly(monkeypatc
 
 def test_stop_guard_also_uses_truthiness():
     import inspect
+
     from simplyblock_core.controllers import lvol_controller
     src = inspect.getsource(lvol_controller.replication_stop)
     guard = [ln for ln in src.splitlines() if "replication_policy_id" in ln][0]

@@ -1,7 +1,7 @@
 """A suspended migration must not wait for a node that is being removed.
 
-_cluster_unavailable_state feeds _migration_retry_allowed, which holds a
-device-migration task suspended until something on the list recovers. A node
+migration_task_common.cluster_unavailable_state feeds require_recovery_progress,
+which holds a migration task until something on the list recovers. A node
 under removal never will, so listing it is a wait for an event that cannot
 happen -- and it deadlocked the removal it was waiting on.
 
@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.services import tasks_runner_migration as runner
+from simplyblock_core.services import migration_task_common as runner
 
 
 def _node(node_id, status, dev_status=NVMeDevice.STATUS_ONLINE):
@@ -35,7 +35,7 @@ def _unavailable(nodes):
     db = MagicMock()
     db.get_storage_nodes_by_cluster_id.return_value = nodes
     with patch.object(runner, "db", db):
-        return runner._cluster_unavailable_state("c1")
+        return runner.cluster_unavailable_state("c1")
 
 
 class TestDepartingNodesAreNotWaitedFor(unittest.TestCase):

@@ -64,6 +64,7 @@ class TestOneRuleForBothSides(unittest.TestCase):
 
     def test_the_runner_lookups_use_the_same_rule(self):
         import inspect
+
         import simplyblock_core.services.tasks_runner_lvol_migration as runner
         for fn in (runner._get_target_secondary_node, runner._get_target_tertiary_node):
             body = inspect.getsource(fn)

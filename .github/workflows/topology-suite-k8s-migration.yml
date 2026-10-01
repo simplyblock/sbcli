@@ -74,7 +74,7 @@ on:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
         default: 'br-ex:enp2s0f0'
-      max_lvol:
+      max_subsys:
         description: 'Max logical volume count per storage node'
         required: false
         default: '30'
@@ -214,7 +214,7 @@ jobs:
       new_ssd_pcie: ${{ inputs.new_ssd_pcie || '' }}
       reattach_volume: ${{ inputs.reattach_volume }}
       ifc_names: ${{ inputs.ifc_names || 'br-ex:enp2s0f0' }}
-      max_lvol: ${{ inputs.max_lvol || '30' }}
+      max_subsys: ${{ inputs.max_subsys || '30' }}
       ssh_user: ${{ inputs.ssh_user || 'root' }}
       key_path: ${{ inputs.key_path }}
       send_slack_notification: false

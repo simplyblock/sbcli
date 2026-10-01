@@ -98,6 +98,7 @@ class TestTheCheckCoversTheAdmissionRules(unittest.TestCase):
 
     def test_it_checks_each_documented_rule(self):
         import inspect
+
         from simplyblock_core.controllers import migration_controller as mc
         src = inspect.getsource(mc.check_target_viable)
         for probe in ("STATUS_ONLINE",              # target online
@@ -112,6 +113,7 @@ class TestTheCheckCoversTheAdmissionRules(unittest.TestCase):
     def test_it_is_read_only(self):
         """It runs inside target selection; it must not mutate anything."""
         import inspect
+
         from simplyblock_core.controllers import migration_controller as mc
         fn = mc.check_target_viable
         body = inspect.getsource(fn).replace(fn.__doc__ or "", "")

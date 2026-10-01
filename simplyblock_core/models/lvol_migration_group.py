@@ -39,9 +39,14 @@ from typing import ClassVar
 
 from simplyblock_core import constants
 from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index
 
 
 class LVolMigrationGroup(BaseModel):
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('uuid'),
+    )
 
     PHASE_PRE_CREATED    = 'pre_created'
     PHASE_SNAP_COPY      = 'snap_copy'

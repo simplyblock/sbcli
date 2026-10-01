@@ -19,7 +19,7 @@ Header layout (fio verify.h, struct verify_header):
 import argparse
 import struct
 import sys
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 MAGIC = 0xACCA
 HDR = "<HHIQQII"

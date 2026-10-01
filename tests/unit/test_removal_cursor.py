@@ -136,9 +136,8 @@ class TestOrchestratorStillWorksWithoutACursor(unittest.TestCase):
 class TestGivingUpNamesTheStep(unittest.TestCase):
 
     def test_the_failure_message_says_where_it_stopped(self):
-        task = _task({"step": "relocate_hosted"})
-        task.retry = 99
-        task.max_retry = 100
+        since = runner.time.time() - runner.constants.NODE_REMOVAL_MAX_WAIT_SEC - 1
+        task = _task({"step": "relocate_hosted", runner.INCOMPLETE_SINCE_KEY: since})
         cluster = MagicMock()
         cluster.status = "active"
         db = MagicMock()
@@ -146,9 +145,11 @@ class TestGivingUpNamesTheStep(unittest.TestCase):
         with patch.object(runner, "db", db), \
              patch.object(runner.storage_node_ops, "node_removal_orchestrate",
                           return_value=False), \
-             patch.object(runner.storage_node_ops, "set_node_status") as set_status:
-            runner.process_task(task)
-        self.assertIn("relocate_hosted", task.function_result)
+             patch.object(runner, "checkpoint", side_effect=lambda t, **p: t), \
+             patch.object(runner.storage_node_ops, "set_node_status") as set_status, \
+             self.assertRaises(runner.TaskAbort) as ctx:
+            runner.process_task(task.frozen_view())
+        self.assertIn("relocate_hosted", str(ctx.exception))
         self.assertEqual(set_status.call_args.args[1],
                          StorageNode.STATUS_REMOVED_FAILED)
 

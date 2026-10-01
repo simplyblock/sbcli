@@ -106,6 +106,7 @@ class TestStaleFenceRemediation:
         """Unblocking a peer with no redirect reopens the loop: it promotes on
         the next write and fences itself again, with client IO let back in."""
         import inspect as _i
+
         from simplyblock_core.services import storage_node_monitor
         src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)
         assert "_check_sec_node_hublvol(" in src
@@ -113,10 +114,15 @@ class TestStaleFenceRemediation:
         assert "NOT unblocking" in src
 
     def test_it_stands_down_for_restart_owned_lvs(self):
+        """The db handle is part of the gate, not decoration: the phase for a
+        FOLLOWER restart is stamped on the follower's own record, so checking
+        only the primary would miss the window in which follower ports are
+        legitimately fenced (k8s 2026-09-11)."""
         import inspect as _i
+
         from simplyblock_core.services import storage_node_monitor
         src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)
-        assert "_restart_owns_lvs(owner)" in src
+        assert "_restart_owns_lvs(owner, db)" in src
 
     def test_it_is_gated_on_the_node_being_reachable(self):
         """Was "the node must be ONLINE", which deadlocked: a fence on a
@@ -127,6 +133,7 @@ class TestStaleFenceRemediation:
         admitted now; see test_fence_remediation_down_node.py for the
         behavioural cover and for the gates that did not change."""
         import inspect as _i
+
         from simplyblock_core.models.storage_node import StorageNode
         from simplyblock_core.services import storage_node_monitor
         src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)

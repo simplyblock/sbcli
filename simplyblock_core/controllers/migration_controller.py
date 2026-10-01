@@ -44,11 +44,13 @@ from datetime import datetime
 
 from simplyblock_core import constants
 from simplyblock_core.controllers import migration_events, tasks_controller
-from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
-from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
+from simplyblock_core.controllers.migration_bdev_ops import (
+    delete_bdev_blocking as _delete_bdev_blocking,
+)
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -563,7 +565,9 @@ def check_target_viable(lvol_id, target_node_id):
     # Imported lazily: the runner imports this module, so a module-level import
     # would close the cycle.
     from simplyblock_core.services.tasks_runner_lvol_migration import (
-        _get_target_secondary_node, _get_target_tertiary_node)
+        _get_target_secondary_node,
+        _get_target_tertiary_node,
+    )
     for _get, label in ((_get_target_secondary_node, "secondary"),
                         (_get_target_tertiary_node, "tertiary")):
         try:

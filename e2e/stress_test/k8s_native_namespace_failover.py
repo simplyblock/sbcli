@@ -22,16 +22,15 @@ import random
 import threading
 import time
 import traceback
-from logger_config import setup_logger
-from utils.common_utils import sleep_n_sec
-from utils.ssh_utils import get_parent_device
 
+from logger_config import setup_logger
 from stress_test.continuous_k8s_native_failover import (
-    K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
+    K8sNativeFailoverTest,
     _rand_seq,
 )
-
+from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import get_parent_device
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Class 1: K8sNativeNamespacedFailoverTest
@@ -171,8 +170,8 @@ class K8sNativeNamespacedFailoverTest(K8sNativeFailoverTest):
 
     # ── Override: create_pvcs_with_fio ────────────────────────────────────
 
-    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None,
-                             storage_class: str = None):
+    def create_pvcs_with_fio(self, count: int, node_ids: list[str] | None = None,
+                             storage_class: str | None = None):
         """Create PVCs using namespace-aware StorageClass.
 
         In K8s-Job mode, this is nearly identical to the parent -- the CSI
@@ -1216,8 +1215,8 @@ class K8sNativeMountVerifiedFailoverTest(K8sNativeBasicFailoverTest):
         self._log_mount_result(pvc_name, success, msg, phase)
         return success
 
-    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None,
-                             storage_class: str = None):
+    def create_pvcs_with_fio(self, count: int, node_ids: list[str] | None = None,
+                             storage_class: str | None = None):
         """Create PVCs with mount verification BEFORE starting FIO.
 
         For K8s-Job mode: create PVC → wait bound → verify mount →

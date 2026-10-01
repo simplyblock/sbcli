@@ -19,9 +19,8 @@ Pure logic tests: DB, RPC clients and events are mocked.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.lvol_migration import LVolMigration
-
 import simplyblock_core.services.tasks_runner_lvol_migration as runner
+from simplyblock_core.models.lvol_migration import LVolMigration
 
 WRITABLE = [{"driver_specific": {"lvol": {"is_snapshot": False, "blobid": 7}}, "uuid": "u"}]
 IMMUTABLE = [{"driver_specific": {"lvol": {"is_snapshot": True, "blobid": 7}}, "uuid": "u"}]

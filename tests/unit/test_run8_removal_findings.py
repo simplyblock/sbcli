@@ -16,10 +16,10 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
+import simplyblock_core.services.tasks_runner_lvol_migration as runner
 from simplyblock_core import storage_node_ops
 from simplyblock_core.controllers import migration_controller as ctl
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-import simplyblock_core.services.tasks_runner_lvol_migration as runner
 
 
 def _snap(name, lvol_uuid="lvol-1", embedded_node="n1"):

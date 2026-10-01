@@ -8,16 +8,29 @@ import time
 from pathlib import Path
 
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
-from simplyblock_core import cluster_ops, utils, db_controller, constants
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
-from simplyblock_core import storage_node_ops as storage_ops
+from simplyblock_core import cluster_ops, constants, db_controller, utils
 from simplyblock_core import mgmt_node_ops as mgmt_ops
-from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller, \
-    replication_policy_controller
-from simplyblock_core.controllers import health_controller
-from simplyblock_core.models.pool import Pool
+from simplyblock_core import storage_node_ops as storage_ops
+from simplyblock_core.controllers import (
+    device_controller,
+    fdb_backup_controller,
+    health_controller,
+    lvol_controller,
+    migration_controller,
+    pool_controller,
+    qos_controller,
+    replication_policy_controller,
+    snapshot_controller,
+    tasks_controller,
+)
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import policy as backup_policy
+from simplyblock_core.controllers.backup.chain import BackupChain
+from simplyblock_core.controllers.backup.manifest import ManifestError, parse_export
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_core.models.pool import Pool
 
 
 def range_type(min, max):
@@ -71,6 +84,44 @@ def _format_json(data, *, sort_keys: bool = False) -> str:
 
 def _format_result(data, *, json: bool) -> str:
     return _format_json(data) if json else utils.print_table(data, unwrap_secrets=True)
+
+
+def _format_timestamp(seconds) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds)) if seconds else ""
+
+
+def _s3_credentials(args):
+    """The bucket credentials given on the command line, if any.
+
+    Returns None when neither key is supplied, which means "use the node's
+    instance role" rather than "use empty credentials".
+    """
+    access_key_id = getattr(args, 'access_key_id', None)
+    secret_access_key = getattr(args, 'secret_access_key', None)
+    if not access_key_id and not secret_access_key:
+        return None
+    if not (access_key_id and secret_access_key):
+        raise ValueError(
+            "give both --access-key-id and --secret-access-key, or neither")
+    return S3Credentials(access_key_id=access_key_id,
+                         secret_access_key=secret_access_key)
+
+
+def _bucket_config(args) -> BackupConfig:
+    """A backup configuration assembled from bucket arguments.
+
+    Used by the commands that read a bucket directly rather than through a
+    cluster -- which is the point of them, since after a disaster there may be no
+    cluster left to ask.
+    """
+    return BackupConfig(
+        bucket_name=args.bucket,
+        region=getattr(args, 'region', None) or None,
+        endpoint=getattr(args, 'endpoint', None) or None,
+        verify_tls=not getattr(args, 'no_verify_tls', False),
+        use_path_style=getattr(args, 'path_style', False),
+        credentials=_s3_credentials(args),
+    )
 
 
 class CLIWrapperBase:
@@ -609,6 +660,22 @@ class CLIWrapperBase:
             return False
         return True
 
+    def cluster__build_indices(self, sub_command, args):
+        return cluster_ops.build_indices()
+
+    def cluster__index_state(self, sub_command, args):
+        if args.state:
+            return cluster_ops.switch_index(args.index, args.state)
+
+        data = cluster_ops.list_index_states(args.index)
+        if args.json:
+            return utils.dump_json(data, indent=2)
+        else:
+            return utils.print_table(data)
+
+    def cluster__check_indices(self, sub_command, args):
+        return cluster_ops.check_indices(repair=args.repair)
+
     def cluster__graceful_shutdown(self, sub_command, args):
         cluster_ops.cluster_grace_shutdown(args.cluster_id)
         return True
@@ -803,6 +870,14 @@ class CLIWrapperBase:
             if not isinstance(allowed_hosts, list):
                 print("Error: --allowed-hosts JSON must be a list of host NQN strings")
                 return False
+            # The API validates its own request body, so this file is the one
+            # way an unchecked NQN reaches a volume's allow-list -- and from
+            # there every DTO and backup manifest that carries it.
+            invalid = [nqn for nqn in allowed_hosts
+                       if not isinstance(nqn, str) or utils.NQN_PATTERN.match(nqn) is None]
+            if invalid:
+                print("Error: not host NQNs: " + ", ".join(repr(nqn) for nqn in invalid))
+                return False
 
         results, error = lvol_controller.add_lvol_ha(
             name, size, host_id, ha_type, pool, comp, crypto,
@@ -818,7 +893,8 @@ class CLIWrapperBase:
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
             allowed_hosts=allowed_hosts,
             do_replicate=args.replicate,
-            replication_policy=args.replication_policy)
+            replication_policy=args.replication_policy,
+            consistency_group=getattr(args, 'consistency_group', None))
         if results:
             return results
         else:
@@ -1168,7 +1244,9 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return _format_result(snapshot_controller.list_snapshots(args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details), json=args.json)
+        return _format_result(snapshot_controller.list_snapshots(
+            args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details,
+            consistency_group=getattr(args, 'consistency_group', None)), json=args.json)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)
@@ -1179,6 +1257,104 @@ class CLIWrapperBase:
     def snapshot__clone(self, sub_command, args):
         clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, args.resize, args.namespaced)
         return clone_id if not error else error
+
+    # ----------------------------------------------------------------------- #
+    # Consistency groups (design §6, §7)
+    # ----------------------------------------------------------------------- #
+
+    def _cg_resolve(self, group_id):
+        """Resolve a consistency group by id/uuid, falling back to name."""
+        db = db_controller.DBController()
+        try:
+            return db.get_consistency_group_by_id(group_id)
+        except KeyError:
+            for g in db.get_consistency_groups():
+                if g.group_name == group_id:
+                    return g
+            raise
+
+    def consistency_group__list(self, sub_command, args):
+        db = db_controller.DBController()
+        data = [{
+            "ID": g.get_id(),
+            "Name": g.group_name or "-",
+            "Node": g.node_id[:8] if g.node_id else "-",
+            "LVS": g.lvs_name or "-",
+            "Members": sum(1 for m in (g.members or {}).values()
+                           if m.get("removed_seq", 0) == 0),
+            "Gen": g.last_group_seq,
+            "Policy": g.policy_id.split('/')[-1][:8] if g.policy_id else "-",
+        } for g in db.get_consistency_groups(args.cluster_id)]
+        return _format_result(data, json=args.json)
+
+    def consistency_group__members(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        data = [{
+            "LVol ID": m["lvol_id"],
+            "Joined": m["joined_seq"],
+            "Removed": m["removed_seq"] or "-",
+            "Node": m["node_id"][:8] if m["node_id"] else "-",
+            "LVS": m["lvs_name"] or "-",
+            "Online": "yes" if m["online"] else "no",
+        } for m in cgc.list_members(self._cg_resolve(args.group_id))]
+        return _format_result(data, json=args.json)
+
+    def consistency_group__add_member(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        db = db_controller.DBController()
+        group = self._cg_resolve(args.group_id)
+        try:
+            lvol = db.get_lvol_by_id(args.lvol_id)
+        except KeyError:
+            return f"Volume {args.lvol_id} not found"
+        try:
+            group = cgc.join_existing_volume(group, lvol)
+        except cgc.ConsistencyGroupError as e:
+            return f"Join refused: {e}"
+        return (f"Volume {args.lvol_id} joined consistency group "
+                f"{group.get_id()} (effective from generation "
+                f"{group.last_group_seq + 1})")
+
+    def consistency_group__remove_member(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        group = self._cg_resolve(args.group_id)
+        cgc.detach_existing_volume(group, args.lvol_id)
+        return (f"Volume {args.lvol_id} detached from consistency group "
+                f"{group.get_id()} (prior generations preserved)")
+
+    def consistency_group__snapshot_take(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        ids, err = cgc.create_group_snapshot_for_group(self._cg_resolve(args.group_id))
+        if err:
+            return f"Group snapshot failed: {err}"
+        return utils.print_table([{"Snapshot": s} for s in ids])
+
+    def consistency_group__snapshot_list(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        data = [{
+            "Gen": r["group_seq"],
+            "Created": (time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(r["created_at"]))
+                        if r["created_at"] else "-"),
+            "Expected": r["expected"],
+            "Present": r["present"],
+            "Complete": "yes" if r["complete"] else "no",
+        } for r in cgc.list_generations(self._cg_resolve(args.group_id))]
+        return _format_result(data, json=args.json)
+
+    def consistency_group__snapshot_delete(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        deleted, err = cgc.delete_generation(self._cg_resolve(args.group_id), args.seq)
+        if err:
+            return f"Delete failed: {err}"
+        return f"Deleted generation {args.seq} ({len(deleted)} snapshots)"
+
+    def consistency_group__clone(self, sub_command, args):
+        from simplyblock_core.controllers import consistency_group_controller as cgc
+        created, err = cgc.clone_generation(
+            self._cg_resolve(args.group_id), args.seq, into_name=getattr(args, 'into', None))
+        if err:
+            return f"Clone failed: {err}"
+        return utils.print_table([{"Volume": v} for v in created])
 
     def snapshot__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)
@@ -1220,46 +1396,104 @@ class CLIWrapperBase:
         try:
             lvol_id = backup_controller.restore_backup(
                 args.backup_id, args.lvol_name, args.pool,
-                target_node_id=getattr(args, 'node', None))
-        except (PreconditionError, RuntimeError) as e:
+                target_node_id=getattr(args, 'node', None),
+                s3_credentials=_s3_credentials(args))
+        except (PreconditionError, RuntimeError, ValueError) as e:
             print(f"Error: {e}")
             return False
         print(f"Restoring backup {args.backup_id} into new volume {lvol_id}")
         return True
 
+    def backup__discover(self, sub_command, args):
+        config = _bucket_config(args)
+        try:
+            manifests = backup_controller.discover_backups(config)
+        except (ManifestError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+        if not manifests:
+            print(f"No backups found in {args.bucket}")
+            return False
+        # Each manifest names only its predecessor, so the chain is walked over
+        # the set. A bucket holding a chain that could not be restored -- an
+        # ancestor missing, or a line that disagrees with itself about its
+        # encoding or its encryption -- is worth showing rather than refusing:
+        # that IS the finding a discover is for.
+        def chain_length(manifest):
+            try:
+                return str(len(BackupChain.of_manifests(
+                    manifest, manifests, config.location()).links))
+            except PreconditionError:
+                return "broken"
+
+        # str, not UUID: this row goes through `utils.dump_json` for --json
+        # output, and json.dumps has no encoder for a UUID.
+        return [{
+            "ID": str(m.backup_id),
+            "Volume": m.volume.lvol_name,
+            "Snapshot": m.volume.snapshot_name,
+            "Size": m.size,
+            "Chain": chain_length(m),
+            "Encrypted": "yes" if m.encryption is not None else "no",
+            "Needs KMS": m.encryption.type if m.encryption is not None else "-",
+            "Created": _format_timestamp(m.created_at),
+        } for m in manifests]
+
     def backup__export(self, sub_command, args):
-        data = backup_controller.export_backups(
-            cluster_id=getattr(args, 'cluster_id', None),
-            lvol_name=getattr(args, 'lvol_name', None))
-        if not data:
+        try:
+            export = backup_controller.export_backups(
+                cluster_id=getattr(args, 'cluster_id', None),
+                lvol_name=getattr(args, 'lvol_name', None),
+                backup_id=getattr(args, 'backup_id', None))
+        except (PreconditionError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+
+        count = sum(len(group.manifests) for group in export.groups)
+        if not count:
             print("No completed backups found")
             return False
-        output = _format_json(data)
+
+        output = _format_json(export.model_dump(mode="json"))
         output_file = getattr(args, 'output', None)
         if output_file:
             with open(output_file, 'w') as f:
                 f.write(output)
-            print(f"Exported {len(data)} backup(s) to {output_file}")
+            print(f"Exported {count} backup(s) to {output_file}")
         else:
             print(output)
         return True
 
     def backup__import(self, sub_command, args):
-        try:
-            with open(args.metadata_file, 'r') as f:
-                metadata_list = json.load(f)
-        except Exception as e:
-            print(f"Error reading metadata file: {e}")
+        from_file = getattr(args, 'from_file', None)
+        bucket = getattr(args, 'bucket', None)
+
+        # An export file records the location of everything in it, so naming a
+        # bucket alongside one could only contradict it. Reading a bucket needs
+        # the opposite: the name is how the manifests are found at all.
+        if bool(from_file) == bool(bucket):
+            print("Error: give exactly one of --from-file or --bucket")
             return False
-        if not isinstance(metadata_list, list):
-            metadata_list = [metadata_list]
-        count = backup_controller.import_backups(
-            metadata_list, cluster_id=getattr(args, 'cluster_id', None))
+
+        cluster_id = getattr(args, 'cluster_id', None)
+        try:
+            if bucket:
+                count = backup_controller.import_from_bucket(
+                    _bucket_config(args), cluster_id=cluster_id)
+            else:
+                with open(str(from_file), 'rb') as f:
+                    export = parse_export(f.read(), str(from_file))
+                count = backup_controller.import_backups(
+                    export, cluster_id=cluster_id)
+        except (ManifestError, PreconditionError, ValueError, OSError) as e:
+            print(f"Error: {e}")
+            return False
+
         print(f"Imported {count} backup(s)")
         return True
 
     def backup__policy_add(self, sub_command, args):
-        policy_id, error = backup_controller.add_policy(
+        policy_id, error = backup_policy.add_policy(
             args.cluster_id, args.name,
             max_versions=args.versions or 0,
             max_age=args.age or "",
@@ -1271,7 +1505,7 @@ class CLIWrapperBase:
         return True
 
     def backup__policy_remove(self, sub_command, args):
-        success, error = backup_controller.remove_policy(args.policy_id)
+        success, error = backup_policy.remove_policy(args.policy_id)
         if error:
             print(f"Error: {error}")
             return False
@@ -1280,13 +1514,13 @@ class CLIWrapperBase:
 
     def backup__policy_list(self, sub_command, args):
         cluster_id = getattr(args, 'cluster_id', None)
-        data = backup_controller.list_policies(cluster_id)
+        data = backup_policy.list_policies(cluster_id)
         if data:
             return utils.print_table(data)
         return "No policies found"
 
     def backup__policy_attach(self, sub_command, args):
-        att_id, error = backup_controller.attach_policy(
+        att_id, error = backup_policy.attach_policy(
             args.policy_id, args.target_type, args.target_id)
         if error:
             print(f"Error: {error}")
@@ -1295,37 +1529,12 @@ class CLIWrapperBase:
         return True
 
     def backup__policy_detach(self, sub_command, args):
-        success, error = backup_controller.detach_policy(
+        success, error = backup_policy.detach_policy(
             args.policy_id, args.target_type, args.target_id)
         if error:
             print(f"Error: {error}")
             return False
         print("Policy detached")
-        return True
-
-    def backup__source_list(self, sub_command, args):
-        cluster_id = args.cluster_id
-        if not cluster_id:
-            db = db_controller.DBController()
-            clusters = db.get_clusters()
-            if clusters:
-                cluster_id = clusters[0].get_id()
-        sources = backup_controller.get_backup_sources(cluster_id)
-        return sources
-
-    def backup__source_switch(self, sub_command, args):
-        cluster_id = args.cluster_id
-        if not cluster_id:
-            db = db_controller.DBController()
-            clusters = db.get_clusters()
-            if clusters:
-                cluster_id = clusters[0].get_id()
-        backup_controller.switch_backup_source(cluster_id, args.source_cluster_id)
-        target = args.source_cluster_id
-        if target == cluster_id or target == "local":
-            print("Switched to local backup source")
-        else:
-            print(f"Switched to external backup source: {target}")
         return True
 
     def db_backup__create(self, sub_command, args):
@@ -1444,6 +1653,7 @@ class CLIWrapperBase:
         atomic_4k = getattr(args, 'atomic_4k', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
+        cluster_vip = getattr(args, 'cluster_vip', '')
 
         backup_config = None
         if args.use_backup:
@@ -1471,6 +1681,7 @@ class CLIWrapperBase:
                 Path(args.alerting_config_path) if args.alerting_config_path else None),
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            cluster_vip=cluster_vip,
         )
 
     def query_yes_no(self, question, default="yes"):

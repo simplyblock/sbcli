@@ -10,34 +10,44 @@ import socket
 import string
 import subprocess
 import sys
-import uuid
+import tempfile
 import time
-from datetime import datetime, UTC
-from typing import Any
+import uuid
 from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Annotated, Any
 
-from pydantic import SecretStr
-from docker import DockerClient
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from kubernetes import client, config
-from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
-    V1PodTemplateSpec, V1PodSpec, V1Container, V1EnvVar, V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, \
-    V1LabelSelector, V1ResourceRequirements
-
-import docker
+from kubernetes.client import (
+    ApiException,
+    V1ConfigMapVolumeSource,
+    V1Container,
+    V1Deployment,
+    V1DeploymentSpec,
+    V1EnvVar,
+    V1LabelSelector,
+    V1ObjectMeta,
+    V1PodSpec,
+    V1PodTemplateSpec,
+    V1ResourceRequirements,
+    V1Volume,
+    V1VolumeMount,
+)
 from kubernetes.stream import stream
 from prettytable import PrettyTable
-from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from pydantic import Field, SecretStr
 
-import tempfile
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
-
+import docker
+from docker import DockerClient
 from simplyblock_core import constants
-from simplyblock_core import shell_utils
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
+from ..models.mgmt_node import MgmtNode
 from . import pci as pci_utils
+from . import shell as shell_utils
 from .helpers import parse_thread_siblings_list
 
 CONFIG_KEYS = [
@@ -67,6 +77,14 @@ SCRIPTS_FOLDER = "simplyblock_core/scripts/"
 # Provisioning files for the cluster event log alerts (`cluster event-alerts`).
 EVENT_ALERT_RULES_FILE = "event_alert_rules.yaml"
 EVENT_ALERT_DATASOURCE_FILE = "datasource-events.yml"
+
+
+#: An NVMe Qualified Name, as a type. Declaring a field with this rather than
+#: ``str`` is what makes the format part of the model instead of a check each
+#: caller has to remember; ``NQN_PATTERN`` stays for the paths that validate
+#: imperatively.
+NQN = Annotated[str, Field(pattern=NQN_PATTERN)]
+
 
 def get_env_var(name, default=None, is_required=False):
     if not name:
@@ -199,20 +217,18 @@ def generate_string(length):
 def get_docker_client(cluster_id=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes()
+    nodes = db_controller.get_mgmt_nodes(cluster_id)
     if not nodes:
         raise RuntimeError("No mgmt nodes was found in the cluster!")
 
-    docker_ips = [node.docker_ip_port for node in nodes]
-
-    for ip in docker_ips:
-        try:
-            return docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
-        except Exception as e:
-            print(e)
-            raise e
-
-    raise RuntimeError("No docker client found for this IP")
+    for node in nodes:
+        if node.status == MgmtNode.STATUS_ONLINE:
+            try:
+                return docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto")
+            except Exception as e:
+                logger.error(e)
+                continue
+    raise RuntimeError("No docker client found for this cluster")
 
 
 def get_k8s_node_ip():
@@ -751,8 +767,8 @@ def make_async_handler(target_handler):
     interpreter exit.
     """
     import atexit
-    import queue as _queue
     import logging.handlers as _lh
+    import queue as _queue
     log_queue: _queue.Queue = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
     listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
     listener.start()
@@ -790,7 +806,7 @@ def get_logger(name=""):
     try:
         logg.setLevel(log_level.upper() if log_level else constants.LOG_LEVEL)
     except ValueError as e:
-        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
+        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {e!s}')
         logg.setLevel(constants.LOG_LEVEL)
 
     if not logg.hasHandlers():
@@ -951,50 +967,6 @@ def strfdelta_seconds(remainder: int) -> str:
     return out.strip()
 
 
-def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None, allow_all_errors=False):
-    if res:
-        if not allowed_error_codes:
-            allowed_error_codes = [0]
-
-        res_data = res[0]
-        migration_status = res_data.get("status")
-        error_code = res_data.get("error", -1)
-        progress = res_data.get("progress", -1)
-        if migration_status == "completed":
-            if error_code == 0:
-                task.function_result = "Done"
-                task.status = JobSchedule.STATUS_DONE
-            elif error_code in allowed_error_codes or allow_all_errors:
-                task.function_result = f"mig completed with status: {error_code}"
-                task.status = JobSchedule.STATUS_DONE
-            else:
-                task.function_result = f"mig error: {error_code}, retrying"
-                task.retry += 1
-                task.status = JobSchedule.STATUS_SUSPENDED
-                del task.function_params['migration']
-
-            task.write_to_db()
-            return True
-
-        elif migration_status == "failed":
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = migration_status
-            task.write_to_db()
-            return True
-
-        elif migration_status == "none":
-            task.function_result = "mig retry after restart"
-            task.retry += 1
-            task.status = JobSchedule.STATUS_SUSPENDED
-            del task.function_params['migration']
-            task.write_to_db()
-            return True
-
-        else:
-            task.function_result = f"Status: {migration_status}, progress:{progress}"
-            task.write_to_db()
-    else:
-        logger.error("Failed to get mig status")
 
 
 logger = get_logger(__name__)
@@ -1078,6 +1050,7 @@ def _get_active_port_reservations(cluster_id):
     record itself, so if the reservation read fails we fall back to node-only
     ports rather than break allocation."""
     import time as _time
+
     from simplyblock_core.db_controller import DBController
     from simplyblock_core.models.cluster import PortReservation
     db_controller = DBController()
@@ -1354,8 +1327,8 @@ def generate_dhchap_key(length=32, hash_id=1):
     hash_id: 00=none, 01=SHA-256, 02=SHA-384, 03=SHA-512
     The key bytes are followed by a 4-byte CRC32 checksum (little-endian).
     """
-    import secrets
     import base64
+    import secrets
     import struct
     import zlib
     key_bytes = secrets.token_bytes(length)
@@ -1760,7 +1733,7 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
         # Check for unmatched addresses
         unmatched = user_pci_set - ssd_pci_set
         if unmatched:
-            logger.warn(f"Invalid PCI addresses: {', '.join(unmatched)}")
+            logger.warning(f"Invalid PCI addresses: {', '.join(unmatched)}")
             pci_addresses = user_pci_set & ssd_pci_set
         else:
             pci_addresses = list(user_pci_set)
@@ -1817,6 +1790,89 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
     return nvmes
 
 
+def device_selectors(dev) -> set:
+    """Every spelling one block device may be selected by.
+
+    The persistent /dev/disk links, and only those. They are built from what the
+    device reports about itself and they follow it: on the lab workers the disk
+    the kernel calls sdb is the one the hypervisor calls drive-scsi0 and sda is
+    drive-scsi2, so a host that probes its controllers in another order hands
+    each kernel name to another disk while the links stay put.
+
+    The kernel name (``sdb``) and the kernel path (``/dev/sdb``) are not here.
+    They name a position in one boot's enumeration order, and a selection is not
+    resolved once: ``sn_config_file`` is discarded and written whole on every
+    configure, so nothing carries a resolution forward and the selector is read
+    again at every node restart. A kernel name in it means the identity of a disk
+    in a deployment is whichever disk the kernel enumerated into that position
+    this time, which is the defect persistent names exist to close rather than a
+    convenience to keep beside them.
+
+    Every link the device answers to is a selector, not only the preferred one.
+    The side that records a device and the side that looks it up again run
+    different code on different machines, and a lookup matched against one
+    side's ranking would miss a device present under another of its own names.
+    ``by_id_path`` is included beside ``by_id_paths`` so an inventory taken
+    before the second existed still resolves.
+    """
+    selectors = set(dev.get("by_id_paths") or [])
+    selectors.add(dev.get("by_id_path", ""))
+    selectors.discard("")
+    return selectors
+
+
+def _refuse_impersistent_names(names, devices, flag) -> None:
+    """Refuse a selector that is a kernel name, saying what to use instead.
+
+    The message carries the persistent names the device does answer to, so the
+    correction is a copy rather than a trip to ``ls -l /dev/disk/by-id``, and
+    names ``--blk-serials`` for a device udev published no link for: that device
+    has no persistent name to offer and its serial is the only identity it has.
+    """
+    impersistent = {}
+    for dev in devices:
+        for kernel in (dev.get("name", ""), dev.get("device_path", "")):
+            if kernel and kernel in names:
+                impersistent[kernel] = sorted(device_selectors(dev))
+    if not impersistent:
+        return
+
+    parts = []
+    for kernel, persistent in sorted(impersistent.items()):
+        if persistent:
+            parts.append(f"{kernel} (use {' or '.join(persistent)})")
+        else:
+            parts.append(f"{kernel} (udev published no persistent name for it; "
+                         f"select it with --blk-serials instead)")
+    raise ValueError(
+        f"{flag} takes a persistent /dev/disk name, and these are kernel names: "
+        f"{', '.join(parts)}. A kernel name is a position in this boot's "
+        f"enumeration order, and the selection is resolved again at every node "
+        f"restart, so it names another disk after a reboot that probes the "
+        f"controllers in another order")
+
+
+def _index_by_selector(devices) -> dict:
+    """Devices indexed by every spelling each one answers to."""
+    return {selector: dev for dev in devices for selector in device_selectors(dev)}
+
+
+def _unique_devices(devices) -> list:
+    """The devices given, in order, with a device named twice kept once.
+
+    A selection may name one device by two of its spellings -- its kernel name
+    and one of its links -- and taking it twice would fail the duplicate-serial
+    check below with a message about identity rather than about the selection.
+    """
+    seen, out = set(), []
+    for dev in devices:
+        if id(dev) in seen:
+            continue
+        seen.add(id(dev))
+        out.append(dev)
+    return out
+
+
 def filter_eligible_block_devices(devices, include_names=None, exclude_names=None,
                                   include_serials=None, force_format=False):
     """Eligibility filter for the lblk cluster mode (pure — unit-testable).
@@ -1831,12 +1887,17 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
     add-node); a partition only needs to be idle — its siblings may be in
     use by the OS or other software.
 
-    Selection is one of: ``include_names`` (explicitly requested names must
+    Selection is one of: ``include_names`` (explicitly requested devices must
     exist AND be eligible — a busy requested device is a hard error),
     ``exclude_names`` (all eligible minus these), ``include_serials``
     (matched against the serial/WWN identity). Without a selection, every
     eligible whole disk is taken (partitions are never auto-selected — they
     must be requested explicitly by name or serial).
+
+    The two name channels take a persistent /dev/disk name and refuse a kernel
+    name or kernel path, because the selection is re-resolved at every node
+    restart and a kernel name does not survive one. ``device_selectors`` is
+    where that set is built and says why the kernel spellings are gone.
 
     Returns ``(eligible_devices, rejected)`` where rejected is a list of
     ``(device_dict, reason)``. Raises ValueError on a requested-but-
@@ -1874,14 +1935,21 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
         else:
             eligible.append(dev)
 
-    by_name = {d["name"]: d for d in eligible}
-    rejected_by_name = {d["name"]: r for d, r in rejected}
+    _refuse_impersistent_names(include_names, devices, "--blk-names")
+    _refuse_impersistent_names(exclude_names, devices, "--blk-names-exclude")
+
+    by_selector = _index_by_selector(eligible)
+    rejected_by_selector = {
+        selector: reason
+        for dev, reason in rejected
+        for selector in device_selectors(dev)
+    }
     if include_names:
-        missing = include_names - set(by_name)
+        missing = sorted(include_names - set(by_selector))
         if missing:
-            details = {n: rejected_by_name.get(n, "not present") for n in sorted(missing)}
+            details = {n: rejected_by_selector.get(n, "not present") for n in missing}
             raise ValueError(f"requested block devices are not eligible: {details}")
-        selected = [by_name[n] for n in sorted(include_names)]
+        selected = _unique_devices(by_selector[n] for n in sorted(include_names))
     elif include_serials:
         by_serial = {d["serial"]: d for d in eligible}
         missing_serials = include_serials - set(by_serial)
@@ -1893,7 +1961,8 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
         # Auto-selection takes whole disks only: silently absorbing idle
         # partitions of otherwise-used disks would be a data-loss trap.
         selected = [d for d in eligible
-                    if d["name"] not in exclude_names and d.get("type") == "disk"]
+                    if not (device_selectors(d) & exclude_names)
+                    and d.get("type") == "disk"]
 
     serials = [d["serial"] for d in selected]
     dupes = {s for s in serials if serials.count(s) > 1}
@@ -2023,6 +2092,19 @@ def node_config_device_count(node) -> int:
     """Number of storage devices a node-config entry carries — ssd_pcis for
     nvme mode, lblk_devices for lblk mode."""
     return len(node.get("lblk_devices") or []) or len(node.get("ssd_pcis") or [])
+
+
+def lblk_device_serials(lblk_devices) -> set[str]:
+    """Serials of an lblk device list — the stable identity of an lblk node
+    slot's device set. Device NAMES can move across reboots, serials cannot
+    (detect_lblk_devices synthesises one when the hardware has none), so
+    serials are what identifies a slot to anything that has to find it again:
+    persist_node_config's matcher, add-node's ownership classification.
+
+    Takes the list itself, so it serves both a node-config entry's
+    ``lblk_devices`` and a StorageNode record's.
+    """
+    return {e["serial"] for e in (lblk_devices or []) if e.get("serial")}
 
 
 # Sys-memory sizing intent (see generate_automated_deployment_config):
@@ -3281,14 +3363,20 @@ def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bo
         return False
 
 
-def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storagenodesets"):
-    """Read spec.maxParallelNodeAdds from the node's StorageNodeSet CR.
+def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storageclusters"):
+    """Read spec.storageNodes.maxParallelNodeAdds from the StorageCluster CR.
 
     This is the operator-facing knob for how many storage nodes are added — and
     thus rebooted for the first-time CPU-topology apply — in parallel. We use it
     to seed the storage MCP's initial maxUnavailable so those reboots roll in
     one wave instead of a serialized, one-at-a-time queue (cluster_activate
     later narrows the pool to the cluster's fault tolerance).
+
+    The knob moved twice in the operator's CRD redesign: off the retired
+    StorageNodeSet and onto StorageCluster, and from the top of the spec into the
+    storageNodes block. Both spellings are read, newest first, so a control plane
+    talking to either generation of operator finds it; reading only the old one
+    returned None everywhere and serialized every node reboot of a fresh cluster.
 
     Read directly from the CR rather than via an operator-injected env, so it
     works without any operator/deployment change. Returns None when the CR
@@ -3301,19 +3389,22 @@ def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storage
         load_kube_config_with_fallback()
         api = client.CustomObjectsApi()
         cr = api.get_namespaced_custom_object(
-            group="storage.simplyblock.io",
-            version="v1alpha1",
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
             namespace=cr_namespace,
-            plural=cr_plural or "storagenodesets",
+            plural=cr_plural or "storageclusters",
             name=cr_name,
         )
-        value = (cr.get("spec") or {}).get("maxParallelNodeAdds")
+        spec = cr.get("spec") or {}
+        value = (spec.get("storageNodes") or {}).get("maxParallelNodeAdds")
+        if value is None:
+            value = spec.get("maxParallelNodeAdds")
         if value is None:
             return None
         return max(int(value), 1)
     except ApiException as e:
         if e.status == 404:
-            logger.info(f"StorageNodeSet {cr_name} not found in {cr_namespace} "
+            logger.info(f"StorageCluster {cr_name} not found in {cr_namespace} "
                         f"(non-OpenShift or CR absent); using default parallel-add")
         else:
             logger.warning(f"Failed to read maxParallelNodeAdds from CR "
@@ -3790,11 +3881,11 @@ def patch_prometheus_configmap(username: str, password: str):
         return False
 
 
-def create_docker_service(cluster_docker: DockerClient, service_name: str, service_file: str, service_image: str):
+def create_docker_service(cluster_docker: DockerClient, service_name: str, command: list[str], service_image: str):
     logger.info(f"Creating service: {service_name}")
     cluster_docker.services.create(
         image=service_image,
-        command=service_file,
+        command=list(command),
         name=service_name,
         mounts=["/etc/foundationdb:/etc/foundationdb"],
         env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
@@ -3807,7 +3898,7 @@ def create_docker_service(cluster_docker: DockerClient, service_name: str, servi
 
 
 def create_k8s_service(namespace: str, deployment_name: str,
-                       container_name: str, service_file: str, container_image: str):
+                       container_name: str, command: list[str], container_image: str):
     logger.info(f"Creating deployment: {deployment_name} in namespace {namespace}")
     load_kube_config_with_fallback()
     apps_v1 = client.AppsV1Api()
@@ -3840,7 +3931,7 @@ def create_k8s_service(namespace: str, deployment_name: str,
     container = V1Container(
         name=container_name,
         image=container_image,
-        command=["python", service_file],
+        command=list(command),
         env=env_list,
         volume_mounts=volume_mounts,
         resources=V1ResourceRequirements(

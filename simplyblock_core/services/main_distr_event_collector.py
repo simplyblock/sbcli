@@ -4,12 +4,17 @@ import time
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import constants, db_controller, rpc_client, utils, distr_controller
-from simplyblock_core.controllers import events_controller, device_controller
+from simplyblock_core import (
+    constants,
+    db_controller,
+    distr_controller,
+    rpc_client,
+    utils,
+)
+from simplyblock_core.controllers import device_controller, events_controller
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)
@@ -218,7 +223,10 @@ def process_device_event(event, logger):
 
         device_obj = None
         device_node_obj = None
-        for node in db.get_storage_nodes():
+        # `cluster_device_order` is ordered within one cluster, so the search
+        # belongs in the reporting node's cluster; it carries no index of its
+        # own, which is what keeps this a loop rather than a lookup.
+        for node in db.get_storage_nodes_by_cluster_id(event_node_obj.cluster_id):
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
                     device_obj = dev
@@ -635,9 +643,10 @@ def start_jm_event_collector_on_node(node_id):
     that gives (nodes x sources) collectors in parallel.
 
     Events are only read here, never acted upon -- unlike distrib events, which
-    can force a device unavailable. Every event received is written to the
-    cluster event log, including successful ones, so the log carries the whole
-    compression history rather than only its failures.
+    can force a device unavailable. Only FAILED events reach the cluster event
+    log: compression emits a started and a finished event per cycle per node,
+    and persisting those drowned the log an operator scans for faults. The full
+    history stays in the service log and in the JM's own event list.
     """
     try:
         snode = db.get_storage_node_by_id(node_id)
@@ -689,11 +698,16 @@ def start_jm_event_collector_on_node(node_id):
                         if len(seen_order) > constants.JM_EVENT_DEDUPE_MAX:
                             seen.discard(seen_order.popleft())
 
+                        # Returns None for a successful compression:
+                        # those are service-log only, so the cluster
+                        # event log is not two records per node per
+                        # compression cycle.
                         event = events_controller.log_jm_event(
                             snode.cluster_id, node_id, event_dict)
                         fresh += 1
                         logger.info(
-                            f"Logged JM event {event.get_id()}: "
+                            f"JM event "
+                            f"{event.get_id() if event else '(not persisted)'}: "
                             f"{event_dict.get('event_type')} "
                             f"{event_dict.get('status')} "
                             f"jm_vuid={event_dict.get('jm_vuid')} "

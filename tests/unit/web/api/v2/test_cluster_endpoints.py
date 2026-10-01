@@ -2,8 +2,8 @@
 
 import pytest
 
+from simplyblock_core.models.cluster import Cluster
 from tests.unit.web.api.v2._factories import CLUSTER_ID, EVENT_ID, make_event
-
 
 # max_subsys and spdk_vcpu_count are capacity decisions with real
 # consequences if silently defaulted, so every create body has to state
@@ -32,6 +32,27 @@ class TestListClusters:
         (body,) = client.get('/api/v2/clusters/').json()
 
         assert body['secret'] == 'cluster-secret'
+
+
+# ClusterDTO.status is a hand-listed Literal; every persisted status must serialize.
+ALL_CLUSTER_STATUSES = [
+    getattr(Cluster, name) for name in dir(Cluster)
+    if name.startswith('STATUS_') and isinstance(getattr(Cluster, name), str)
+    and name != 'STATUS_CODE_MAP'
+]
+
+
+class TestClusterStatusSerialization:
+
+    @pytest.mark.parametrize('status', ALL_CLUSTER_STATUSES)
+    def test_every_core_status_serializes(self, client, db, cluster, status):
+        cluster.status = status
+
+        response = client.get('/api/v2/clusters/')
+
+        assert response.status_code == 200
+        (body,) = response.json()
+        assert body['status'] == status
 
 
 class TestCreateCluster:
@@ -80,6 +101,54 @@ class TestCreateCluster:
         defaulted, so omitting either must be rejected outright."""
         body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
         del body[field]
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 422
+        cluster_ops.add_cluster.assert_not_called()
+
+    def test_backup_config_without_a_bucket_is_accepted(self, client, db, cluster, cluster_ops):
+        """The bucket is derived from the id of the cluster this request is
+        asking to create, so no caller can name one: the operator's
+        ``StorageCluster.spec.backup`` has no field for it at all. Requiring it
+        here rejected every backup-enabled create with a 422 before any of
+        Cluster's resolution ran."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {
+                'access_key_id': 'minioadmin',
+                'secret_access_key': 'minioadmin',
+                'local_endpoint': 'http://minio:9000',
+                'local_testing': True,
+            },
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        # Absent rather than derived: what keeps Cluster.get_backup_config's
+        # derivation live instead of frozen into the record.
+        assert 'bucket_name' not in cluster_ops.add_cluster.call_args.kwargs['backup_config']
+
+    def test_a_named_backup_bucket_is_passed_through(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {'bucket_name': 'chosen', 'region': 'eu-central-1'},
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        assert cluster_ops.add_cluster.call_args.kwargs['backup_config']['bucket_name'] == 'chosen'
+
+    def test_an_invalid_backup_config_is_still_rejected(self, client, db, cluster_ops):
+        """Dropping the bucket requirement must not drop the rest of them."""
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {'buckt_name': 'typo'},
+        }
 
         response = client.post('/api/v2/clusters/', json=body)
 

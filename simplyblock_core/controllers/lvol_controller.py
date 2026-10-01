@@ -6,27 +6,84 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import utils, constants
-from simplyblock_core.controllers import ops_gate
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
-    snapshot_events
+from simplyblock_core import constants, utils
+from simplyblock_core.controllers import (
+    events_controller,
+    lvol_events,
+    object_limits,
+    ops_gate,
+    pool_controller,
+    snapshot_controller,
+    snapshot_events,
+    tasks_controller,
+)
+from simplyblock_core.controllers.host_auth import (
+    _get_dhchap_group,
+    _register_dhchap_keys_on_node,
+    _register_pool_dhchap_keys_on_node,
+)
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.kms import KMSException, create_kms_connection, lvol_dek_path, pool_kek_name
-from simplyblock_core.controllers.host_auth import (
-    _get_dhchap_group, _register_dhchap_keys_on_node, _register_pool_dhchap_keys_on_node)
+from simplyblock_core.kms import (
+    KMSException,
+    create_kms_connection,
+    lvol_dek_path,
+    pool_kek_name,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.pool import Pool
-from simplyblock_core.utils import capacity
-from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
+from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-
+from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.utils import capacity
+from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 
 logger = utils.get_logger(__name__)
+
+
+def rollback_create_record(lvol) -> None:
+    """Erase a failed create's record — unless a blob outlived the attempt.
+
+    ``release_lvol_ns_slot`` removes the record (and with it the namespace-slot
+    claim, which the record IS) in one transaction. That is correct only when
+    the attempt left nothing on any node. Once the attempt got as far as
+    creating a blob, the rollback flips the record to in_deletion
+    (``_fail_after_bdev`` / ``_create_bdev_stack``) and the record MUST survive:
+    lvol_monitor's delete state machine owns finishing that teardown, and
+    erasing it here strands the blob in SPDK with nothing left to find it by.
+
+    Only ``add_lvol_ha``'s leader-failure branch performed this check; every
+    other create/clone rollback called ``release_lvol_ns_slot`` straight out,
+    which is how a create whose rollback RPCs failed produced an lvol that
+    exists in SPDK and not in FDB, with no delete event in the cluster log.
+    """
+    db_controller = DBController()
+    try:
+        fresh = db_controller.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return  # already gone
+    if fresh.status == LVol.STATUS_IN_DELETION:
+        logger.warning(
+            "LVol %s rollback left data-plane state behind; keeping the record "
+            "in in_deletion for lvol_monitor to complete", lvol.get_id())
+        return
+    db_controller.release_lvol_ns_slot(fresh)
+
+
+def lvol_bdev_absent_on_node(lvol, snode) -> bool:
+    """Is ``lvol``'s bdev really gone from ``snode``'s lvstore?
+
+    The post-condition the delete protocol never checked. A successful
+    ``delete_lvol(..., sync=True)`` RPC is an acknowledgement, not proof — and
+    several paths reach the record removal without having issued one at all.
+    Raises on any RPC/connection failure rather than returning an ambiguous
+    "unknown" — the caller must treat that the same as "not confirmed absent".
+    """
+    rpc_client = snode.rpc_client(timeout=5, retry=2)
+    return rpc_client.bdev_get(f"{lvol.lvs_name}/{lvol.lvol_bdev}") is None
 
 
 def _create_crypto_lvol(rpc_client, lvol, cluster):
@@ -111,7 +168,7 @@ def ask_for_lvol_vuid():
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
-                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols=None, all_snaps=None):
+                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
     #  Validation
     #  name validation
     db_controller = DBController()
@@ -121,6 +178,9 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #  size validation
     if size < utils.parse_size('100MiB'):
         return False, "Size must be larger than 100M"
+    size_error = object_limits.check_lvol_size(size)
+    if size_error:
+        return False, size_error
 
     #  host validation
     # snode = db_controller.get_storage_node_by_id(host_id_or_name)
@@ -136,12 +196,9 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #     return False, "Storage node has no nvme devices"
 
     #  pool validation
-    pool = None
-    for p in db_controller.get_pools():
-        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
-            pool = p
-            break
-    if not pool:
+    try:
+        pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
+    except KeyError:
         return False, f"Pool not found: {pool_id_or_name}"
 
     if pool.status != pool.STATUS_ACTIVE:
@@ -151,7 +208,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
         return False, f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
 
     if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
@@ -206,9 +263,15 @@ def max_subsystems_for_node(node):
 
 
 def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
-                      exclude_ids=None):
+                      pool_id=None, exclude_ids=None):
     """Pick candidate primary nodes for an lvol: up to three, best first,
     weighted by how little each is already carrying.
+
+    ``pool_id`` is the pool of the lvol being placed; for namespaced creates
+    it decides which existing subsystems count as joinable (a shared
+    subsystem is exclusive to one pool -- see
+    ``get_next_available_subsystem_on_node``). Non-namespaced placement
+    ignores it.
 
     ``exclude_ids`` removes nodes from consideration outright. Creation has
     never needed it -- the ONLINE filter below is enough when the only
@@ -236,7 +299,8 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False,
         if node.status == node.STATUS_ONLINE:
             subsys_count = count_lvol_subsystems(node, all_lvols)
             has_ns_slot = bool(
-                namespaced and get_next_available_subsystem_on_node(node.get_id(), all_lvols))
+                namespaced and get_next_available_subsystem_on_node(
+                    node.get_id(), all_lvols, pool_id=pool_id))
             if subsys_count >= max_subsystems_for_node(node) and not has_ns_slot:
                 # At subsystem capacity, and (for namespaced creates) no
                 # existing subsystem on the node has a free namespace slot.
@@ -412,8 +476,9 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
     otherwise both grab the same last free namespace slot). Whatever this
     function assigns to ``lvol.nqn``/``lvol.namespace`` is overwritten there.
 
-    A namespaced lvol joins an existing subsystem on the host node when one
-    has a free namespace slot; otherwise (and for non-namespaced lvols) a new
+    A namespaced lvol joins an existing subsystem OF ITS POOL on the host node
+    when one has a free namespace slot (``lvol.pool_uuid`` must already be
+    set); otherwise (and for non-namespaced lvols) a new
     subsystem is claimed. The node's ``max_lvol`` subsystem cap is enforced
     only when a new subsystem would actually be created — joining an existing
     one consumes no subsystem slot.
@@ -422,7 +487,8 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
     """
     lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
     if namespaced:
-        result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols)
+        result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols,
+                                                      pool_id=lvol.pool_uuid)
         if result:
             lvol.nqn = result.nqn
             lvol.namespace = result.uuid
@@ -481,7 +547,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
                 allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None,
-                replication_policy=None, internal=False):
+                replication_policy=None, consistency_group=None, internal=False):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     if max_namespace_per_subsys is None:
@@ -500,8 +566,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # group's node BEFORE placement runs (requirement: pin to host before
         # creation). An explicit conflicting --host is an error, not a
         # preference fight.
-        from simplyblock_core.controllers import replication_policy_controller as _rpc
+        # Local import: consistency_group_controller from-imports
+        # snapshot_controller internals, and snapshot_controller imports this
+        # module — a top-level import here breaks any process that loads
+        # snapshot_controller first (every tasks-runner service; see
+        # tests/unit/test_controller_import_order.py).
         from simplyblock_core.controllers import consistency_group_controller as _cgc
+        from simplyblock_core.controllers import replication_policy_controller as _rpc
         try:
             _policy = _rpc._resolve_policy(replication_policy)
         except KeyError:
@@ -516,6 +587,38 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                         f"consistency group pinned to that node's LVS")
                 host_id_or_name = pinned
 
+    cg_group = None
+    if consistency_group:
+        # Standalone consistency group (design §4.1): ensure the group by name,
+        # then pin this volume onto the group's node/LVS BEFORE placement runs,
+        # so every member shares one store. The first labeled volume pins the
+        # group; later ones are forced onto the pin. A conflicting explicit
+        # --host is an error, not a preference fight.
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cg_pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
+        except KeyError:
+            return False, f"Pool not found: {pool_id_or_name}"
+        try:
+            cg_group = _cgc.ensure_group(_cg_pool.cluster_id, consistency_group)
+        except _cgc.ConsistencyGroupError as e:
+            return False, str(e)
+        # Reject before creating the lvol so a full group does not leave an
+        # orphan volume behind (the authoritative check is add_member_to_group).
+        _open_members = sum(1 for m in (cg_group.members or {}).values()
+                            if m.get("removed_seq", 0) == 0)
+        if _open_members >= constants.MAX_CONSISTENCY_GROUP_MEMBERS:
+            return False, (
+                f"consistency group {consistency_group} already has the maximum "
+                f"{constants.MAX_CONSISTENCY_GROUP_MEMBERS} members")
+        pinned = _cgc.pinned_node_for_group(cg_group)
+        if pinned:
+            if host_id_or_name and host_id_or_name != pinned:
+                return False, (
+                    f"Volume must be created on node {pinned} — consistency "
+                    f"group {consistency_group} is pinned to that node's LVS")
+            host_id_or_name = pinned
+
     host_node = None
     if host_id_or_name:
         try:
@@ -529,15 +632,23 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         if host_node.lvol_sync_del():
             logger.info(f"LVol sync delete task on node: {host_node.get_id()}, proceeding anyway")
 
-    pool = None
-    for p in db_controller.get_pools():
-        if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
-            pool = p
-            break
-    if not pool:
+    try:
+        pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
+    except KeyError:
         return False, f"Pool not found: {pool_id_or_name}"
 
     ops_gate.assert_object_ops_allowed("volume create", cluster_id=pool.cluster_id)
+
+    # Hard product limit on the provisioned size. Deliberately NOT applied to
+    # max_size: that is the thin-provisioning growth ceiling and the CLI/CSI
+    # pass a large default (1000T) when the user gives none -- capping it
+    # rejected every `sbctl volume add` (AWS soak 2026-09-11). Growth is
+    # bounded where it happens: resize_lvol enforces MAX_LVOL_SIZE on new_size.
+    size_error = object_limits.check_lvol_size(size)
+    if size_error:
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, pool, size_error, limit_key="lvol_size")
+        return False, size_error
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
 
@@ -578,13 +689,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # TTL-cached scans: these feed advisory capacity math and random-vuid
     # dedup only — name uniqueness goes through the O(1) per-pool name index
     # inside validate_add_lvol_func, so a few seconds of staleness here cannot
-    # admit a duplicate name. Uncached, these two full-DB reads cost seconds
-    # per create at a few thousand objects and dominate mass-create runs.
-    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
+    # admit a duplicate name (the pool's capacity is likewise read fresh there).
+    # Uncached, these two full-DB reads cost seconds per create at a few
+    # thousand objects and dominate mass-create runs.
+    from simplyblock_core.utils.ttl_cache import (
+        cached_mini_lvols,
+        cached_mini_snapshots,
+    )
     all_lvols = cached_mini_lvols(db_controller)
     all_snaps = cached_mini_snapshots(db_controller)
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
-                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
+                                           max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
 
     if error:
         logger.error(error)
@@ -683,22 +798,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
-    # ns_id semantics in the create flow: 0 = "not assigned yet". The model
-    # default is 1 (a legitimate nsid), so it must be reset here — the
-    # primary's namespace add assigns the real value and every replica add
-    # is REQUIRED to reuse it (see add_lvol_on_node). Never let a replica
-    # add run with an auto-assigned nsid: namespace IDs must be identical
-    # on every path of a shared subsystem, or the client kernel rejects
-    # the namespaces ("duplicate IDs in subsystem" / "IDs don't match for
-    # shared namespace", mass-create incident 2026-07-06).
-    lvol.ns_id = 0
     lvol.lvol_name = name
     lvol.pvc_name = pvc_name or ""
     lvol.size = int(size)
     lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_IN_CREATION
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
+    lvol.place_in_pool(pool)
     lvol.create_dt = str(datetime.now())
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
@@ -706,8 +811,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.guid = utils.generate_hex_string(16)
     lvol.vuid = vuid
     lvol.lvol_bdev = f"LVOL_{vuid}"
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
     lvol.crypto_bdev = ''
     lvol.comp_bdev = ''
 
@@ -719,7 +822,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.fabric = fabric
 
     if not host_node:
-        nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced))
+        nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced),
+                                  pool_id=pool.get_id())
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
@@ -727,6 +831,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     limit_error = check_lvstore_object_limit(host_node, all_lvols, all_snaps)
     if limit_error:
         logger.error(limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, pool, limit_error,
+            limit_key=f"lvstore_objects:{host_node.get_id()}")
         return False, limit_error
 
     # Create a new subsystem by default unless namespaced is set and an
@@ -838,10 +945,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             return host_entries  # (False, error_message)
         standalone_allowed_hosts = host_entries
 
-    # Set pool_uuid before write_to_db and add_lvol_on_node so that
-    # add_lvol_on_node can look up the pool for DHCHAP key registration.
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
     logger.info("[DHCHAP-DEBUG] create_lvol: pool_uuid=%s, pool.dhchap=%s, "
                 "allowed_hosts=%s, pool.dhchap_key=%s",
                 lvol.pool_uuid, pool.dhchap,
@@ -899,7 +1002,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     node_id=host_node.get_id()):
                 lvol_bdev, error = add_lvol_on_node(lvol, host_node)
             if error:
-                db_controller.release_lvol_ns_slot(lvol)
+                # Guarded: add_lvol_on_node can fail AFTER _create_bdev_stack
+                # produced the blob. The HA branch below has always checked for
+                # that; this one erased the record unconditionally, orphaning
+                # the bdev in SPDK whenever the rollback could not remove it.
+                rollback_create_record(lvol)
                 return False, error
 
             lvol.nodes = [host_node.get_id()]
@@ -908,7 +1015,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         else:
             msg = f"Host node in not online: {host_node.get_id()}"
             logger.error(msg)
-            db_controller.release_lvol_ns_slot(lvol)
+            rollback_create_record(lvol)
             return False, msg
 
     if ha_type == "ha":
@@ -922,8 +1029,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # snapshot_controller, which already locks the parent chain).
         with snapshot_controller.object_mutation_lock(cl.get_id(), lvol.uuid):
             from simplyblock_core.storage_node_ops import (
-                find_leader_with_failover, check_non_leader_for_operation,
+                check_non_leader_for_operation,
                 execute_on_leader_with_failover,
+                find_leader_with_failover,
             )
 
             # Build nodes list
@@ -944,7 +1052,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             if primary_node is None:
                 msg = "No leader available for lvol create"
                 logger.error(msg)
-                db_controller.release_lvol_ns_slot(lvol)
+                rollback_create_record(lvol)
                 return False, msg
 
             precheck_started = time.time()
@@ -961,7 +1069,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 if action == "reject":
                     msg = f"Cannot create lvol: non-leader {nl.get_id()[:8]} unreachable but fabric healthy"
                     logger.error(msg)
-                    db_controller.release_lvol_ns_slot(lvol)
+                    rollback_create_record(lvol)
                     return False, msg
                 elif action == "proceed":
                     secondary_nodes.append(nl)
@@ -1002,18 +1110,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 # record: the lvol monitor's delete state machine owns completing
                 # that delete (poll → finish → sync replicas). Erasing it here
                 # orphaned the async delete with no sync follow-up — 27 open
-                # delete windows in run 20260721-213609.
-                try:
-                    fresh = db_controller.get_lvol_by_id(lvol.get_id())
-                except KeyError:
-                    fresh = None
-                if fresh is not None and fresh.status == LVol.STATUS_IN_DELETION:
-                    logger.warning(
-                        "LVol %s rollback left an in-flight async delete; keeping "
-                        "the record in in_deletion for the monitor to complete",
-                        lvol.get_id())
-                else:
-                    db_controller.release_lvol_ns_slot(lvol)
+                # delete windows in run 20260721-213609. That check now lives in
+                # rollback_create_record, which every create/clone rollback uses.
+                rollback_create_record(lvol)
                 return False, str(result)
 
             lvol_bdev = result
@@ -1105,6 +1204,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             logger.error("Volume %s created but replication policy %s could not be "
                          "attached: %s", lvol.get_id(), replication_policy, e)
             return lvol.uuid, f"Volume created but replication policy could not be attached: {e}"
+
+    if cg_group is not None:
+        # Atomic-join (design §4.1, P0-3): the volume joined its group in the
+        # same operation that created it. Placement was already pinned above, so
+        # this only opens the member's epoch.
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cgc.add_member_to_group(cg_group, lvol)
+            lvol.group_id = cg_group.get_id()
+            lvol.write_to_db(db_controller.kv_store)
+        except _cgc.ConsistencyGroupError as e:
+            logger.error("Volume %s created but could not join consistency group "
+                         "%s: %s", lvol.get_id(), consistency_group, e)
+            return lvol.uuid, f"Volume created but could not join consistency group: {e}"
 
     return lvol.uuid, None
 
@@ -1262,6 +1375,49 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
         return False
 
 
+def _fail_after_ns(lvol, rpc_client, nsid, msg, is_primary=True):
+    """Rollback for a failure that happens AFTER the namespace was attached.
+
+    _fail_after_bdev alone removes the bdev stack, which used to be the whole
+    rollback because every failure it covered happened before the namespace
+    existed -- the listener was published first. Now that the namespace goes on
+    before the listener, leaving it behind would point a live namespace at a
+    bdev the rollback is about to delete, which is the resurrected-namespace
+    state the delete flow already guards against (reads on it answered INTERNAL
+    DEVICE ERROR, incident 2026-07-14).
+    """
+    if nsid:
+        # remove_ns is asynchronous inside SPDK: it can return success and
+        # defer the actual removal, which is why the delete path confirms with
+        # _confirm_namespace_removed rather than trusting the return. Deleting
+        # the bdev while the subsystem still references its namespace is the
+        # stale-namespace state this rollback exists to avoid, so an
+        # unconfirmed removal must NOT fall through to the bdev delete.
+        try:
+            removed = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, nsid))
+            confirmed = False
+            if removed:
+                confirmed, _ = _confirm_namespace_removed(rpc_client, lvol.nqn, nsid)
+        except Exception:
+            logger.exception("rollback of namespace nsid=%s on %s failed for %s",
+                             nsid, lvol.nqn, lvol.get_id())
+            removed = confirmed = False
+        if not confirmed:
+            logger.error(
+                "Namespace nsid=%s still on %s after rollback (removed=%s); leaving "
+                "the bdev in place -- deleting it under a live namespace is the "
+                "state the rollback is meant to prevent. Original failure: %s",
+                nsid, lvol.nqn, removed, msg)
+            lvol.status = LVol.STATUS_IN_DELETION
+            try:
+                lvol.write_to_db(DBController().kv_store)
+            except Exception:
+                logger.exception("failed to mark %s in_deletion", lvol.get_id())
+            return False, (f"{msg}; rollback incomplete: namespace nsid={nsid} "
+                           f"still on {lvol.nqn}")
+    return _fail_after_bdev(lvol, rpc_client, msg, is_primary=is_primary)
+
+
 def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
     already produced a bdev/blob. Without this, a post-bdev-stack failure (a
@@ -1281,7 +1437,25 @@ def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     20260826_221806. Replicas therefore roll back with a SYNC delete, and the
     namespace is dropped first so nothing of this attempt survives in the
     subsystem.
+
+    The deletion intent is persisted FIRST, before any teardown RPC. It used to
+    be written after ``_remove_bdev_stack`` and inside the same ``try``, so a
+    rollback whose RPCs raised never reached the status write -- and the
+    caller's ``release_lvol_ns_slot`` then erased a record whose blob was still
+    on the node, with no delete event ever logged. Persisting the intent up
+    front makes that unrepresentable: from here on the record is only ever
+    removed by the monitor's delete state machine, which has to confirm the
+    teardown first.
     """
+    db_controller = DBController()
+    try:
+        lvol.status = LVol.STATUS_IN_DELETION
+        lvol.write_to_db(db_controller.kv_store)
+    except Exception:
+        logger.exception(
+            "rollback: could not persist in_deletion for %s -- its bdev may "
+            "survive this failed create", lvol.get_id())
+
     try:
         try:
             subsystem = rpc_client.subsystem_get(lvol.nqn)
@@ -1294,9 +1468,10 @@ def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
         except Exception:                       # noqa: BLE001 - best effort
             logger.exception("rollback: could not clear the namespace for %s",
                              lvol.get_id())
-        _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, sync=not is_primary)
-        lvol.status = LVol.STATUS_IN_DELETION
-        lvol.write_to_db(DBController().kv_store)
+        if not _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, sync=not is_primary):
+            logger.error(
+                "rollback of bdev stack incomplete for %s; the record stays "
+                "in_deletion for lvol_monitor to finish", lvol.get_id())
     except Exception:
         logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
     return False, msg
@@ -1359,7 +1534,7 @@ def _lvol_secondary_index(lvol, node):
 
 
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None, ns_uuid=None,
-                     primary_nsid=None):
+                     primary_nsid=None, defer_listeners=False):
     rpc_client = snode.rpc_client()
 
     # Refuse to attach a new namespace to a shared subsystem while any
@@ -1455,39 +1630,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                     else:
                         logger.warning("[DHCHAP-DEBUG] subsystem_add_host PLAIN — no DHCHAP keys at all")
                         rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
-
-        if is_primary or lvol.node_id == snode.get_id():
-            ana_state = "optimized"
-        else:
-            ana_state = "non_optimized"
-
-        # add listeners
-        # Use the per-lvstore port for the lvol's lvstore
-        listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
-        logger.info("adding listeners")
-        for iface in snode.data_nics:
-            if iface.ip4_address and lvol.fabric==iface.trtype.lower():
-                logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-                ret, err = rpc_client.nvmf_subsystem_add_listener(
-                    lvol.nqn, iface.trtype, iface.ip4_address, listener_port, ana_state)
-                if not ret:
-                    if err and "code" in err and err["code"] == -32602:
-                        logger.warning("listener already exists")
-                    else:
-                        return _fail_after_bdev(
-                            lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}", is_primary=is_primary)
-            elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-                logger.info("adding listener for %s on IP %s, fabric TCP port %s" % (lvol.nqn, iface.ip4_address, listener_port))
-                ret, err = rpc_client.nvmf_subsystem_add_listener(
-                        lvol.nqn, "TCP", iface.ip4_address, listener_port, ana_state)
-                if not ret:
-                    if err and "code" in err and err["code"] == -32602:
-                        logger.warning("listener already exists")
-                    else:
-                        return _fail_after_bdev(
-                            lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}", is_primary=is_primary)
 
     logger.info("Add BDev to subsystem")
     # Cluster-consistent namespace IDs: the PRIMARY add lets the target
@@ -1603,7 +1745,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                     logger.error(str(e))
                     return _fail_after_bdev(lvol, rpc_client, str(e),
                                             is_primary=is_primary)
-                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
+                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index,
+                                        defer_listeners=defer_listeners)
 
         # A REPLICA add cannot re-claim a slot (its nsid is dictated by the
         # primary), so -32602 here ends the whole create/fail-over. Say WHY.
@@ -1613,6 +1756,45 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return _fail_after_bdev(
             lvol, rpc_client, "Failed to add bdev to subsystem" + detail,
             is_primary=is_primary)
+
+    # The namespace is attached: only now may the subsystem be reachable.
+    #
+    # This used to run inside the resolve_subsys block above, so the listener
+    # went up first and the subsystem answered on the network while this lvol's
+    # namespace did not exist yet. A client reading it in that window gets
+    # "Invalid Namespace or Format" with DNR set, and DNR means the kernel does
+    # not try another path -- it fails the I/O to the application. See
+    # tests/unit/test_listener_after_namespace.py for the incident.
+    #
+    # defer_listeners is for the caller that registers a whole node's lvols at
+    # once: on a shared subsystem the members are registered concurrently, so
+    # the first one to get here would publish a listener for a subsystem whose
+    # other members are still arriving. That caller publishes once the batch is
+    # complete instead.
+    attached_nsid = int(ret) if is_primary else requested_nsid
+    # Only the call that resolved/created the subsystem publishes its listener.
+    # An lvol JOINING an existing namespaced subsystem must not: the listener is
+    # already there from whoever created it, and re-adding it is a wasted RPC
+    # that the attach path explicitly does not pay (see
+    # tests/integration/test_clone_namespace_race.py). The gap a join leaves --
+    # this member's namespace landing after a listener someone else published --
+    # is the cross-member case, and it is closed by the batch barrier in
+    # _register_lvols_on_node rather than here.
+    if resolve_subsys and not defer_listeners:
+        # No re-read of the namespace before publishing here, deliberately.
+        # The batch path polls (_rpc_wait_subsystem_has_ns) because it reads
+        # back state other threads wrote during a recovery; this call just
+        # issued the add itself and holds the nsid the target returned. And the
+        # probe's known failure is the FALSE NEGATIVE -- soak 2026-08-11 read a
+        # present namespace as absent and left every lvol with a namespace and
+        # zero listeners, permanently (see rpc_client.namespace_matches). There
+        # that costs a listener the monitor can repair; here, with the rollback
+        # below, it would delete the namespace and the blob under a create that
+        # actually succeeded.
+        ok, err = publish_lvol_listeners(lvol, snode, rpc_client, is_primary=is_primary)
+        if not ok:
+            return _fail_after_ns(lvol, rpc_client, attached_nsid, err,
+                                  is_primary=is_primary)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
@@ -1642,6 +1824,56 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         return lvol_bdev, None
     else:
         return False, "Failed to get lvol bdev"
+
+def publish_lvol_listeners(lvol, snode, rpc_client=None, is_primary=True):
+    """Publish ``lvol``'s subsystem listeners on ``snode``.
+
+    Separated from add_lvol_on_node so it can be called once a whole batch of
+    namespaces is attached: see the defer_listeners note there. Returns
+    ``(True, None)`` or ``(False, reason)``; "listener already exists" is a
+    success, since that is what a re-registration looks like.
+    """
+    rpc_client = rpc_client or snode.rpc_client()
+    if is_primary or lvol.node_id == snode.get_id():
+        ana_state = "optimized"
+    else:
+        ana_state = "non_optimized"
+
+    # Use the per-lvstore port for the lvol's lvstore
+    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+    logger.info("adding listeners")
+    added: list[tuple[str, str]] = []
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            trtype = iface.trtype
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            trtype = "TCP"
+        else:
+            continue
+        logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, listener_port))
+        ret, err = rpc_client.nvmf_subsystem_add_listener(
+            lvol.nqn, trtype, iface.ip4_address, listener_port, ana_state)
+        if not ret:
+            if err and "code" in err and err["code"] == -32602:
+                logger.warning("listener already exists")
+            else:
+                # A node with several matching NICs can get one listener up and
+                # fail on the next. The caller rolls the namespace and the bdev
+                # back, so anything published here would be left pointing at a
+                # deleted bdev -- take them down again first.
+                for done_trtype, done_ip in added:
+                    try:
+                        rpc_client.listeners_del(
+                            lvol.nqn, done_trtype, done_ip, listener_port)
+                    except Exception:
+                        logger.exception(
+                            "failed to remove listener %s %s:%s from %s during rollback",
+                            done_trtype, done_ip, listener_port, lvol.nqn)
+                return False, f"Failed to create listener for {lvol.get_id()}"
+        else:
+            added.append((trtype, iface.ip4_address))
+    return True, None
+
 
 def is_node_leader(snode, lvs_name):
     rpc_client = snode.rpc_client()
@@ -1724,11 +1956,11 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
     # Recreate must present the SAME nsid as every other path of the shared
-    # subsystem — pass the persisted primary-assigned value. Legacy records
-    # created before ns_id persistence carry the model default; for those
-    # (and dedicated one-namespace subsystems) the stored value is the
-    # correct nsid as well. Only a record with ns_id unset falls back to
-    # auto-assignment.
+    # subsystem — pass the persisted primary-assigned value. A record with
+    # ns_id unset falls back to auto-assignment: that covers legacy records
+    # from before ns_id persistence, which are dedicated one-namespace
+    # subsystems where auto-assignment on the freshly recreated (empty)
+    # subsystem lands on the same nsid the record always had.
     ret = rpc_client.nvmf_subsystem_add_ns(
         lvol.nqn, lvol.top_bdev, lvol.get_ns_uuid(), lvol.guid,
         nsid=lvol.ns_id if lvol.ns_id else None)
@@ -1794,6 +2026,16 @@ def recreate_lvol(lvol_id):
 
 
 def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
+    """Remove every bdev in *bdev_stack*. True only when ALL of them are gone.
+
+    This used to ``return True`` unconditionally: a failed removal was logged
+    and then the entry was stamped ``status='deleted'`` anyway, so
+    ``delete_lvol_from_node`` reported success and the monitor went on to erase
+    the FDB record while the bdev was still registered in SPDK. A bdev that was
+    not confirmed removed now leaves its ``status`` untouched (so a retry
+    re-attempts it) and drags the result to False.
+    """
+    all_removed = True
     for bdev in bdev_stack:
         # if 'status' in bdev and bdev['status'] == 'deleted':
         #     continue
@@ -1804,7 +2046,12 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
         if type == "bdev_distr":
             ret = rpc_client.bdev_distrib_delete(name)
         elif type == "bmap_init":
-            pass
+            # Nothing to remove — it is a bookkeeping entry, not a bdev. It
+            # fell through to the failure log below and reported "Failed to
+            # delete BDev" on every single delete; now that the result is
+            # honest that noise would fail the whole teardown.
+            bdev['status'] = 'deleted'
+            continue
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "crypto" and not sync:
@@ -1814,43 +2061,73 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
 
         elif type == "bdev_lvstore":
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
-        elif type == "bdev_lvol":
-            name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
-            if not rpc_client.get_bdevs(name):
-                # Already gone (e.g. the monitor's finish-phase re-issues the
-                # leader delete after the async pass completed). Re-deleting
-                # walks the snapshot/clone metadata a second time and errors
-                # on every entry the first pass cleaned ("Clone entry not
-                # found", 1382x in run mass_create_delete_docker-20260716) —
-                # skip instead.
+        elif type in ("bdev_lvol", "bdev_lvol_clone"):
+            if type == "bdev_lvol":
+                name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
+            # Already gone (e.g. the monitor's finish-phase re-issues the
+            # leader delete after the async pass completed)? Re-deleting walks
+            # the snapshot/clone metadata a second time and errors on every
+            # entry the first pass cleaned ("Clone entry not found", 1382x in
+            # run mass_create_delete_docker-20260716) — skip instead.
+            #
+            # The probe used to be `if not rpc_client.get_bdevs(name)`, which
+            # reads a failed RPC as "already deleted": one non-200 from the
+            # SPDK proxy during a mass delete skipped the delete entirely,
+            # stamped the entry deleted, and the record was removed with the
+            # blob still on disk — leaving nothing in the log but an INFO
+            # line. A failed probe must not be read as "absent". It is only an
+            # optimisation, so when the probe itself fails the delete is
+            # attempted anyway and ITS result decides.
+            try:
+                present = rpc_client.bdev_get(name) is not None
+            except RPCException as e:
+                logger.warning(
+                    f"Could not determine whether BDev {name} still exists "
+                    f"({e}); attempting the delete and judging by its result")
+                present = True
+            if not present:
                 logger.info(f"BDev {name} already deleted, skipping")
                 bdev['status'] = 'deleted'
                 continue
-            ret, _ = rpc_client.delete_lvol(name, sync=sync)
-        elif type == "bdev_lvol_clone":
-            if not rpc_client.get_bdevs(name):
-                logger.info(f"BDev {name} already deleted, skipping")
+            ret, err = rpc_client.delete_lvol(name, sync=sync)
+            if not ret and isinstance(err, dict) and err.get("code") == -19:
+                # "No such device" from the delete itself is confirmation that
+                # the bdev is gone — the one answer that closes the question.
+                logger.info(f"BDev {name} reported absent by the delete")
                 bdev['status'] = 'deleted'
                 continue
-            ret, _ = rpc_client.delete_lvol(name,  sync=sync)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
 
         if not ret:
             logger.error(f"Failed to delete BDev {name}")
+            all_removed = False
+            continue
 
         bdev['status'] = 'deleted'
-    return True
+    return all_removed
 
 
-def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=False):
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=False) -> None:
+    """Tear ``lvol_id`` down on ``node_id``.
+
+    Returns normally once the teardown is confirmed complete on this node
+    (subsystem/namespace and every bdev gone), or when nothing was owed here
+    in the first place. Raises ``PreconditionError`` when the teardown could
+    not be attempted yet — a durable task owns it, or the node is
+    disconnected. That is expected, not a failure, but the caller must not
+    treat it as done. Raises ``RuntimeError`` when it was attempted and
+    failed — something of the object may still be on the node.
+    """
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
-        return True
+        # The record (or the node) is already gone: whatever this node held
+        # went with it, so nothing is owed.
+        return
 
     # Per design: gate sync deletes on non-leader nodes.
     from simplyblock_core.storage_node_ops import check_non_leader_for_operation
@@ -1860,14 +2137,16 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=F
             logger.info(f"Skipping sync delete of {lvol_id} on {node_id[:8]}: node disconnected")
             lvol.deletion_status = node_id
             lvol.write_to_db(db_controller.kv_store)
-            return True
+            raise PreconditionError(
+                f"node {node_id[:8]} is disconnected; teardown of {lvol_id} deferred")
         elif action in ("queue", "retry"):
             # Durable deferral (DB task) — the in-memory drain queue is
             # per-process and lossy (incident 2026-07-10).
             tasks_controller.add_lvol_sync_del_task(
                 snode.cluster_id, node_id,
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.node_id)
-            return True
+            raise PreconditionError(
+                f"teardown of {lvol_id} on {node_id[:8]} handed to a durable task")
     # action == "proceed" — execute now
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
@@ -1885,20 +2164,19 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=F
     # online-expand incident (CI 27398880537) — abort so the delete is
     # retried instead of leaving surviving namespaces without a device.
     if not _remove_lvol_subsys_from_node(lvol, rpc_client) and not force:
-        logger.error(
+        raise RuntimeError(
             f"Namespace/subsystem removal not confirmed for {lvol.get_id()} "
             f"on {node_id[:8]}; aborting bdev delete")
-        return False
 
     # 2- remove bdevs
     logger.info("Removing bdev stack")
-    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, sync)
-    if not ret:
-        return False
+    if not _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, sync):
+        raise RuntimeError(
+            f"Bdev stack of {lvol.get_id()} not fully removed on "
+            f"{node_id[:8]}; the teardown is NOT complete")
 
     lvol.deletion_status = node_id
     lvol.write_to_db(db_controller.kv_store)
-    return True
 
 
 # nvmf_subsystem_remove_ns is asynchronous inside SPDK: the RPC response can
@@ -2093,11 +2371,18 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
     }
 
     if lvol.ha_type == 'single':
-        with snapshot_controller.lvstore_op_lock(
-                snode.cluster_id, lvol.lvs_name, node_id=lvol.node_id, enabled=_inner, **_inner_kw):
-            ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
-        if not ret and not force_delete:
-            raise RuntimeError("Failed to delete lvol from node")
+        try:
+            with snapshot_controller.lvstore_op_lock(
+                    snode.cluster_id, lvol.lvs_name, node_id=lvol.node_id, enabled=_inner, **_inner_kw):
+                delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
+        except PreconditionError:
+            # A durable task (or the monitor) owns the teardown -- the record
+            # is already in_deletion, so this is not a failure to report to
+            # the API caller.
+            pass
+        except RuntimeError:
+            if not force_delete:
+                raise
 
     elif lvol.ha_type == "ha":
         from simplyblock_core.storage_node_ops import (
@@ -2174,11 +2459,17 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
         def _delete_on_leader(leader):
             with snapshot_controller.lvstore_op_lock(
                     snode.cluster_id, lvol.lvs_name, node_id=leader.get_id(), enabled=_inner, **_inner_kw):
-                ret = delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
-                if ret:
-                    async_completed["done"] = _wait_async_delete(
-                        leader.rpc_client(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-            return ret if ret else None
+                try:
+                    delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
+                except PreconditionError:
+                    # Not a leader failure -- a durable task (or the monitor)
+                    # owns the teardown, so this must not trigger a failover
+                    # onto another node (execute_on_leader_with_failover reads
+                    # a raised exception as exactly that).
+                    return True
+                async_completed["done"] = _wait_async_delete(
+                    leader.rpc_client(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+            return True
 
         success, actual_leader, result = execute_on_leader_with_failover(
             all_nodes, lvol.lvs_name, _delete_on_leader)
@@ -2293,9 +2584,70 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
         if not force_delete:
             return
 
+    # Consistency-group detach on delete (design §8.2): close the member's
+    # epoch so future generations exclude it, but PRESERVE its snapshots in
+    # prior generations. delete_lvol only removes a snapshot the volume was
+    # cloned FROM, never snapshots taken OF it, so the group's generations stay
+    # restorable; this just closes the epoch.
+    if lvol.group_id:
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cg = db_controller.get_consistency_group_by_id(lvol.group_id)
+            _cgc.remove_member_from_group(_cg, lvol.get_id())
+        except KeyError:
+            logger.debug(
+                "Skipping consistency-group detach for lvol %s: group %s not found",
+                lvol.get_id(),
+                lvol.group_id,
+            )
+
     logger.debug(lvol)
     if snode is None:
         logger.error(f"lvol node id not found: {lvol.node_id}")
+
+        # The PRIMARY's node record is gone — but for an HA volume the blob
+        # lives on every member of the LVS, and the peers' records usually
+        # still exist. This branch used to erase the record here without a
+        # single RPC and without an event, so the bdev survived on each
+        # surviving peer with nothing left in FDB or the cluster log to find it
+        # by. Tear it down wherever we still can before letting the record go.
+        unconfirmed = []
+        for peer_id in lvol.nodes:
+            if peer_id == lvol.node_id:
+                continue
+            try:
+                peer = db_controller.get_storage_node_by_id(peer_id)
+            except KeyError:
+                continue  # gone with its lvstore; owes nothing
+            if peer.status != StorageNode.STATUS_ONLINE:
+                unconfirmed.append(peer_id)
+                continue
+            try:
+                delete_lvol_from_node(lvol.get_id(), peer_id, sync=True, force=True)
+            except Exception:
+                logger.exception(
+                    f"force delete: teardown of {lvol.get_id()} on "
+                    f"{peer_id[:8]} raised")
+                unconfirmed.append(peer_id)
+
+        if unconfirmed:
+            # force_delete is an explicit operator override, so the record
+            # still goes — but never silently: this is the one place the
+            # control plane knowingly leaves data-plane state behind, and the
+            # orphan sweep has to be able to correlate it afterwards.
+            logger.error(
+                f"force delete of {lvol.get_id()} ({lvol.lvs_name}/"
+                f"{lvol.lvol_bdev}) could not confirm teardown on "
+                f"{[n[:8] for n in unconfirmed]}; removing the record anyway — "
+                f"the bdev may survive in SPDK with no record referencing it")
+
+        # Emit the delete event before the record goes. Without it this path
+        # produced no cluster-log entry at all, which is why volumes removed
+        # through it looked like they had simply never been deleted.
+        try:
+            lvol_events.lvol_delete(lvol)
+        except Exception:
+            logger.exception(f"failed to log delete event for {lvol.get_id()}")
 
         db_controller.release_lvol_ns_slot(lvol)
 
@@ -2569,14 +2921,13 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
             size_used = records[0].size_used
         if lvol.ndcs == 0 and lvol.npcs == 0:
             cid = cluster_id
-            if not cid and lvol.node_id:
+            if not cid:
                 try:
-                    cid = db_controller.get_storage_node_by_id(lvol.node_id).cluster_id
+                    cid = db_controller.get_cluster_id_by_lvol(lvol)
                 except KeyError:
                     logger.warning(
-                        "Storage node %s not found for lvol %s; "
-                        "falling back to mode 0x0",
-                        lvol.node_id, lvol.get_id(),
+                        "Pool %s not found for lvol %s; falling back to mode 0x0",
+                        lvol.pool_uuid, lvol.get_id(),
                     )
             cl = db_controller.get_cluster_by_id(cid) if cid else None
             mode = f"{cl.distr_ndcs}x{cl.distr_npcs}" if cl else "0x0"
@@ -2607,17 +2958,38 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
     return data
 
 
+def _task_shipped(task):
+    """True when a snapshot-replication task ended by shipping its snapshot.
+
+    The success path stores the new remote snapshot's uuid as the result
+    (snap-instance replication sets no counterpart id, so the result is its
+    only trace); a snapshot already on the other side ends "is already
+    replicated". Every other DONE result is a give-up.
+    """
+    if task.status != JobSchedule.STATUS_DONE or task.canceled:
+        return False
+    result = str(task.function_result or "")
+    if " is already replicated " in result:
+        return True
+    try:
+        uuid.UUID(result)
+    except ValueError:
+        return False
+    return True
+
+
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
-    lvol = None
-    for lv in db_controller.get_lvols():  # pass
-        if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
-            lvol = lv
-            break
-
-    if not lvol:
-        logger.error(f"LVol id or name not found: {lvol_id_or_name}")
-        return None
+    # Id first, then name — the order the scan this replaces used. Not
+    # dispatched on UUID shape: callers pass ids that are not UUID-shaped.
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id_or_name)
+    except KeyError:
+        try:
+            lvol = db_controller.get_lvol_by_name(lvol_id_or_name)
+        except KeyError:
+            logger.error(f"LVol id or name not found: {lvol_id_or_name}")
+            return None
 
     tasks = []
     snaps = []
@@ -2682,10 +3054,16 @@ def get_replication_info(lvol_id_or_name):
         # in source_replicated_snap_uuid and never sets the target one, so a
         # target-only test reported every failing-back volume as 0 replicated
         # and left lag_seconds None for ever — no gate on lag could ever pass.
+        #
+        # A DONE task alone is NOT a replicated snapshot: tasks that gave up
+        # (max retry, cancelled, snapshot gone) are DONE too. Counting them
+        # reported a fresh lag and a recent last replication for a volume of
+        # which nothing had reached the target for an hour, and Ramen took it
+        # as protected (2026-09-29, vm-a: 12 tasks at max retry, lag "0m").
         def _is_replicated(task, snap):
-            return (task.status == JobSchedule.STATUS_DONE
-                    or bool(snap.target_replicated_snap_uuid)
-                    or bool(snap.source_replicated_snap_uuid))
+            return (bool(snap.target_replicated_snap_uuid)
+                    or bool(snap.source_replicated_snap_uuid)
+                    or _task_shipped(task))
 
         replicated = [s for (t, s) in items if _is_replicated(t, s)]
         outstanding = [s for (t, s) in items if not _is_replicated(t, s)]
@@ -2739,9 +3117,14 @@ def get_replication_info(lvol_id_or_name):
         # while every status view looked normal.
         failing = [t for t in tasks
                    if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
-        gave_up = [t for t in tasks
+        # A task that gave up still matters while nothing newer reached the
+        # target; once a later snapshot has, the volume is protected again and
+        # the old give-up is history, not a current error.
+        newest_replicated = max((s.created_at for s in replicated), default=None)
+        gave_up = [t for (t, s) in items
                    if t.status == JobSchedule.STATUS_DONE
-                   and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
+                   and str(t.function_result or "").startswith(("max retry", "task cancelled"))
+                   and (newest_replicated is None or s.created_at > newest_replicated)]
         out["failing_count"] = len(failing)
         out["max_retry_reached"] = len(gave_up)
         if failing:
@@ -3063,6 +3446,16 @@ def resize_lvol(id, new_size, lock=True) -> None:
     lvol = db_controller.get_lvol_by_id(id)
     ops_gate.assert_object_ops_allowed("volume resize", pool_uuid=lvol.pool_uuid)
 
+    size_error = object_limits.check_lvol_size(new_size, what="New size")
+    if size_error:
+        try:
+            _snode = db_controller.get_storage_node_by_id(lvol.node_id)
+            events_controller.log_object_limit_reached(
+                _snode.cluster_id, lvol, size_error, limit_key="lvol_size")
+        except Exception as _e:
+            logger.warning("Could not log resize limit event: %s", _e)
+        raise PreconditionError(size_error)
+
     # Block during restart Phase 5
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -3320,12 +3713,19 @@ def move(lvol_id, node_id, force=False):
 
     if migrate(lvol_id, node_id):
         if src_node.status == StorageNode.STATUS_ONLINE:
-            # delete lvol
-            if lvol.ha_type == 'single':
-                delete_lvol_from_node(lvol_id, lvol.node_id, clear_data=False)
-            elif lvol.ha_type == "ha":
-                for nodes_id in lvol.nodes:
-                    delete_lvol_from_node(lvol_id, nodes_id, clear_data=False)
+            # delete lvol. Best-effort cleanup of the source: the migrate
+            # already succeeded, so a deferred/failed teardown here must not
+            # fail the move -- the monitor's delete state machine owns
+            # finishing it.
+            try:
+                if lvol.ha_type == 'single':
+                    delete_lvol_from_node(lvol_id, lvol.node_id, clear_data=False)
+                elif lvol.ha_type == "ha":
+                    for nodes_id in lvol.nodes:
+                        delete_lvol_from_node(lvol_id, nodes_id, clear_data=False)
+            except Exception:
+                logger.exception(
+                    f"move: cleanup of {lvol_id} on the source node raised")
 
             # remove from storage node
             # src_node.lvols.remove(lvol_id)
@@ -3505,12 +3905,25 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                 "LVol %s must replicate to %s to keep subsystem %s whole, "
                 "though that node is the origin of its snapshot",
                 lvol.get_id(), sibling_node_id, lvol.nqn)
+        chain_node_id = "" if sibling_node_id else _chain_counterpart_node(
+            db_controller, lvol, replication_cluster_id)
         if sibling_node_id:
             logger.info(
                 "Replicating on node %s: it is where subsystem %s already "
                 "replicates (co-locating the group's snapshots on one LVS)",
                 sibling_node_id, lvol.nqn)
             lvol.replication_node_id = sibling_node_id
+            lvol.write_to_db()
+        elif chain_node_id:
+            # The destination already holds this volume's chain (it came from
+            # there: a relocate or fail-over back). Replicating anywhere else
+            # re-ships the whole chain, and the copies collide with the
+            # originals' names on that cluster (2026-09-29). This node lets
+            # the backlog link the existing snapshots and ship only the delta,
+            # like replication_failback does.
+            logger.info("Replicating on node %s: it holds the chain of %s on the "
+                        "destination, so only the delta is shipped", chain_node_id, lvol.get_id())
+            lvol.replication_node_id = chain_node_id
             lvol.write_to_db()
         else:
             random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
@@ -3526,11 +3939,21 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     logger.info("Setting LVol do_replicate: True")
 
     all_snaps = db_controller.get_snapshots()
+    # A copy counts when it is on the replication node's lvstore (any member
+    # of it), not only when its volume was created on that very node: the
+    # chain is shared by the lvstore, and an HA peer may have created it.
+    try:
+        _repl_lvs = db_controller.get_storage_node_by_id(lvol.replication_node_id).lvstore
+    except KeyError:
+        _repl_lvs = ""
     for snap in replication_backlog(db_controller, lvol, all_snaps):
         if not snap.target_replicated_snap_uuid:
             matched = False
             for sn in all_snaps:
-                if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
+                if (sn.data_uuid == snap.data_uuid and sn.get_id() != snap.get_id()
+                        and (sn.lvol.node_id == lvol.replication_node_id
+                             or (_repl_lvs and sn.lvol.lvs_name == _repl_lvs
+                                 and sn.cluster_id != snap.cluster_id))):
                     snap = db_controller.get_snapshot_by_id(snap.get_id())
                     snap.target_replicated_snap_uuid = sn.get_id()
                     snap.write_to_db()
@@ -3557,6 +3980,35 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                 if task:
                     snapshot_events.replication_task_created(snap)
     return True
+
+
+def _chain_counterpart_node(db_controller, lvol, replication_cluster_id):
+    """The online node of *replication_cluster_id* holding the newest copy of
+    a snapshot of *lvol*'s chain (matched by data_uuid), or "".
+
+    The copy's lvstore decides: its current leader among the lvstore's online
+    members, else the node the copy's volume was created on.
+    """
+    try:
+        all_snaps = db_controller.get_snapshots()
+        backlog = replication_backlog(db_controller, lvol, all_snaps)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Chain lookup for %s failed: %s", lvol.get_id(), e)
+        return ""
+    wanted = {s.data_uuid for s in backlog if s.data_uuid}
+    if not wanted:
+        return ""
+    copies = [s for s in all_snaps
+              if s.cluster_id == replication_cluster_id and s.data_uuid in wanted
+              and s.status != SnapShot.STATUS_IN_DELETION and s.lvol]
+    for snap_copy in sorted(copies, key=lambda s: s.created_at, reverse=True):
+        try:
+            node = db_controller.get_storage_node_by_id(snap_copy.lvol.node_id)
+        except KeyError:
+            continue
+        if node.status == StorageNode.STATUS_ONLINE:
+            return node.get_id()
+    return ""
 
 
 def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
@@ -3612,13 +4064,11 @@ def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
 
 def list_by_node(node_id=None):
     db_controller = DBController()
-    lvols = db_controller.get_lvols()
+    lvols = (db_controller.get_lvols_by_node_id(node_id) if node_id
+             else db_controller.get_lvols())
     lvols = sorted(lvols, key=lambda x: x.create_dt)
     data = []
     for lvol in lvols:
-        if node_id:
-            if lvol.node_id != node_id:
-                continue
         logger.debug(lvol)
         cloned_from_snap = ""
         if lvol.cloned_from_snap:
@@ -3670,7 +4120,8 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     # Resolve the namespace slot early so we can (a) skip the subsystem limit
     # check when the clone fits into an existing subsystem, and (b) reuse the
     # result below instead of calling get_next_available_subsystem_on_node twice.
-    _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols)
+    _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols,
+                                                             pool_id=lvol.pool_uuid)
 
     if not _available_subsys:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -3740,7 +4191,15 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
 
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
-            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            # A task whose snapshot is gone replicates nothing and belongs to
+            # no volume any more; it must not fail the stop, which a fail-over
+            # (replicate_lvol_on_target_cluster) runs first.
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                logger.warning("replication task %s names snapshot %s, which no longer exists; skipped",
+                               task.uuid, task.function_params.get("snapshot_id"))
+                continue
             if snap.lvol.uuid == lvol.uuid:
                 tasks_controller.cancel_task(task.uuid)
 
@@ -3892,7 +4351,9 @@ def _subsystem_home_node(db_controller, nqn, cluster_id):
     all of its volumes have to live on one primary and its HA peers. Whichever
     node got there first owns the subsystem for that cluster.
     """
-    for lv in db_controller.get_lvols():
+    # `nqn` carries no index of its own; the cluster scope is what keeps this
+    # off a deployment-wide volume scan.
+    for lv in db_controller.get_lvols(cluster_id):
         if lv.nqn != nqn or lv.status == LVol.STATUS_IN_DELETION:
             continue
         if getattr(lv, "deleted", False) or not lv.node_id:
@@ -3989,7 +4450,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # the other cluster, where it names nothing and would block fail-back.
     new_lvol.replication_policy_id = ""
     new_lvol.cloned_from_snap = snapshot.get_id()
-    new_lvol.pool_uuid = pool_uuid
+    new_lvol.place_in_pool(db_controller.get_pool_by_id(pool_uuid))
     new_lvol.lvs_name = target_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.snapshot_name = snapshot.snap_bdev
@@ -4103,6 +4564,17 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         random.randint(6001, 6500),  # tertiary
     ]
 
+    # The target clone shares the source NQN.  During preconnect the host has
+    # live paths to the source (cntlids 1, 1000, 2000) AND tries to add paths
+    # to the inaccessible target simultaneously.  If target uses the same
+    # min_cntlid the kernel rejects it as a duplicate cntlid.  Use windows
+    # above 4000 so source (1/1000/2000) and target never collide.
+    _tgt_cntlids = [
+        random.randint(4001, 4500),  # primary
+        random.randint(5001, 5500),  # secondary
+        random.randint(6001, 6500),  # tertiary
+    ]
+
     # For migration/failover, preserve the source nsid so the kernel can
     # match target paths to source paths under the same NQN. new_lvol is a
     # deepcopy of the source lvol, so new_lvol.ns_id is already the source
@@ -4116,7 +4588,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
                                          primary_nsid=new_lvol.ns_id)
     if error:
         logger.error(error)
-        db_controller.release_lvol_ns_slot(new_lvol)
+        rollback_create_record(new_lvol)
         return None, error
 
     new_lvol.lvol_uuid = lvol_bdev['uuid']
@@ -4164,15 +4636,13 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
             # rollback reported success while deleting nothing at all.
             for node in placed_nodes:
                 try:
-                    if not delete_lvol_from_node(
-                            new_lvol.get_id(), node.get_id(),
-                            sync=node.get_id() != target_node.get_id()):
-                        logger.error("rollback: could not remove %s from %s",
-                                     new_lvol.get_id(), node.get_id()[:8])
+                    delete_lvol_from_node(
+                        new_lvol.get_id(), node.get_id(),
+                        sync=node.get_id() != target_node.get_id())
                 except Exception:
                     logger.exception("rollback: removing %s from %s raised",
                                      new_lvol.get_id(), node.get_id()[:8])
-            db_controller.release_lvol_ns_slot(new_lvol)
+            rollback_create_record(new_lvol)
             return None, error
         placed_nodes.append(peer_node)
 
@@ -4999,9 +5469,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     new_lvol.lvs_name = source_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     if pool_uuid:
-        new_pool = db_controller.get_pool_by_id(pool_uuid)
-        new_lvol.pool_uuid = new_pool.get_id()
-        new_lvol.pool_name = new_pool.pool_name
+        new_lvol.place_in_pool(db_controller.get_pool_by_id(pool_uuid))
     if new_source_cluster:
         new_lvol.nqn = new_source_cluster.nqn + ":lvol:" + new_lvol.uuid
     new_lvol.bdev_stack = [
@@ -5025,7 +5493,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
         logger.error(error)
-        db_controller.release_lvol_ns_slot(new_lvol)
+        rollback_create_record(new_lvol)
         return False, error
 
     new_lvol.lvol_uuid = lvol_bdev['uuid']
@@ -5037,19 +5505,15 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         if error:
             logger.error(error)
             # IDs, not objects: delete_lvol_from_node(lvol_id, node_id) hits
-            # `except KeyError: return True` when handed the records, so this
+            # `except KeyError: return` when handed the records, so this
             # rollback reported success while deleting nothing -- leaving the
             # primary's namespace behind to collide with the next attempt.
             try:
-                ret = delete_lvol_from_node(new_lvol.get_id(), source_node.get_id())
+                delete_lvol_from_node(new_lvol.get_id(), source_node.get_id())
             except Exception:
-                logger.exception("rollback: removing %s from %s raised",
+                logger.exception("rollback: could not remove %s from %s",
                                  new_lvol.get_id(), source_node.get_id()[:8])
-                ret = False
-            if not ret:
-                logger.error("rollback: could not remove %s from %s",
-                             new_lvol.get_id(), source_node.get_id()[:8])
-            db_controller.release_lvol_ns_slot(new_lvol)
+            rollback_create_record(new_lvol)
             return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
@@ -5265,8 +5729,26 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None)-> LVol | None:
-    """``exclude_nqns`` skips subsystems the caller knows are unusable even
+def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None,
+                                         *, pool_id) -> LVol | None:
+    """Pick the shared subsystem on ``node_id`` that a new namespaced lvol of
+    pool ``pool_id`` should join, or ``None`` when it has to open a new one.
+
+    Subsystem/pool alignment: a shared subsystem belongs to exactly ONE pool
+    -- the pool of the lvols already in it. Only a subsystem whose every
+    non-deleted member (in_creation included: that record is a committed
+    slot claim) belongs to ``pool_id`` is joinable, so a pool's lvols never
+    share an NQN with another pool's. A legacy subsystem that already mixes
+    pools (created before alignment was enforced) is frozen: it is never
+    offered for a join, by any pool.
+
+    Fill order: the MOST-occupied joinable subsystem of the pool is offered
+    first, so the pool fills one subsystem completely before the next one is
+    opened -- a new subsystem is created only when none of the pool's
+    subsystems on the node has a free namespace slot (``None`` returned).
+    Ties break on NQN so a conflict retry of the claim is deterministic.
+
+    ``exclude_nqns`` skips subsystems the caller knows are unusable even
     though the DB count says they have room (SPDK rejected the add with
     -32602 — SPDK is the authority on its own namespace table)."""
     # `is None`, NOT falsy: an empty list from an in-transaction snapshot read
@@ -5275,17 +5757,20 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
     if all_lvols is None:
         all_lvols = DBController().get_mini_lvols()
 
-    # Count active namespaces per NQN in a single pass instead of issuing a
-    # separate DB read for every subsystem root (was O(N²)).
+    # One pass: active namespaces per NQN and the set of pools present in
+    # each subsystem (was O(N^2) with a DB read per subsystem root).
     ns_counts: dict[str, int] = {}
+    nqn_pools: dict[str, set] = {}
 
     for lv in all_lvols:
         if lv.node_id != node_id:
             continue
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
             ns_counts[lv.nqn] = ns_counts.get(lv.nqn, 0) + 1
+            nqn_pools.setdefault(lv.nqn, set()).add(lv.pool_uuid)
 
-    ret = []
+    best: LVol | None = None
+    best_key = None
     for lvol in all_lvols:
         if lvol.node_id != node_id:
             continue
@@ -5293,18 +5778,22 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
             continue
         if exclude_nqns and lvol.nqn in exclude_nqns:
             continue
+        # Pool exclusivity: every member must be from the joining lvol's pool.
+        if nqn_pools.get(lvol.nqn) != {pool_id}:
+            continue
         # The subsystem's recorded max is bounded by the hard per-subsystem
         # cap: legacy subsystems created with a larger max stop accepting
         # joins at the cap.
         subsys_max = min(lvol.max_namespace_per_subsys,
                          constants.MAX_NAMESPACES_PER_SUBSYSTEM)
-        if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < subsys_max:
-            if lvol not in ret:
-                ret.append(lvol)
+        used = ns_counts.get(lvol.nqn, 0)
+        if used >= subsys_max:
+            continue
+        key = (-used, lvol.nqn)
+        if best_key is None or key < best_key:
+            best, best_key = lvol, key
 
-    if ret:
-        return ret[random.randint(0, len(ret) - 1)]
-    return None
+    return best
 
 
 # --- Functions carried over from main (reconcile-1276): SSE watch + HA role helper ---

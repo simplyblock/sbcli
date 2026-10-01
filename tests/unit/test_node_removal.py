@@ -20,12 +20,11 @@ import unittest
 from unittest.mock import DEFAULT, MagicMock, call, patch
 
 from simplyblock_core import storage_node_ops
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteJMDevice
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice, RemoteJMDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCConnectionError, RPCException, RPCRemoteError
 from tests._mocks import unique_ip
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -132,6 +131,9 @@ class FakeDB:
 
     def get_snapshots(self):
         return self.snaps
+
+    def get_snapshots_by_node_id(self, node_id):
+        return [s for s in self.snaps if s.lvol and s.lvol.node_id == node_id]
 
     def get_storage_device_by_id(self, did):
         return self.devices[did]
@@ -3157,29 +3159,37 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
 
     def _run_gate(self, cluster_status):
         """Drive the runner's cluster-status gate; True == it proceeded."""
-        from simplyblock_core.services import tasks_runner_failed_migration as runner
         from simplyblock_core.models.job_schedule import JobSchedule
+        from simplyblock_core.services import migration_task_common as mig
+        from simplyblock_core.services import tasks_runner_failed_migration as runner
+        from simplyblock_core.services.task_runner_base import TaskRetry
 
         task = MagicMock(spec=JobSchedule)
         task.node_id, task.cluster_id, task.retry = "n1", "cl-1", 0
         task.status = JobSchedule.STATUS_RUNNING
+        task.function_params = {}
 
-        cluster = MagicMock(spec=Cluster)
+        # A real Cluster, not a mock: the gate goes through Cluster's own
+        # status predicates, which a spec'd mock would answer truthily for
+        # every status and so pass the gate it is meant to test.
+        cluster = Cluster()
         cluster.status = cluster_status
         db = MagicMock()
         db.get_cluster_by_id.return_value = cluster
         db.get_storage_node_by_id.return_value = _node("n1", n_devices=1, with_jm=False)
 
-        with patch.object(runner, "db", db):
+        with patch.object(runner, "db", db), patch.object(mig, "db", db):
             try:
                 runner.task_runner(task)
+            except TaskRetry as e:
+                # The gate refuses by raising; the driver, not the handler, is
+                # what turns that into STATUS_SUSPENDED. Any other TaskRetry
+                # comes from the real device/RPC work past the gate, which this
+                # test deliberately does not mock.
+                return "cluster is not active" not in str(e)
             except Exception:
-                # Admitted by the gate, then reached real device/DB work this
-                # test deliberately does not mock. The gate's decision is
-                # already recorded on task.status by that point, and it is the
-                # only thing under test here.
                 pass
-        return task.status != JobSchedule.STATUS_SUSPENDED
+        return True
 
     def test_failed_migration_runner_admits_in_shrink(self):
         self.assertTrue(

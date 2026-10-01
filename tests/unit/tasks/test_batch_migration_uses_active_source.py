@@ -13,9 +13,8 @@ Pure logic tests: the DB and RPC clients are mocked.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-
 import simplyblock_core.services.tasks_runner_batch_migration as runner
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 
 
 def _node(node_id, lvstore, secondary="", tertiary=""):

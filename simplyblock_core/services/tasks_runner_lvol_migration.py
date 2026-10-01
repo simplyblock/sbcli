@@ -85,24 +85,48 @@ import datetime
 import logging
 import random
 import time
-from tenacity import RetryError, Retrying, before_sleep_log, retry_if_result, stop_after_attempt, wait_fixed
 
-from simplyblock_core import db_controller as db_mod, utils, constants
-from simplyblock_core.utils import convert_size
+from tenacity import (
+    RetryError,
+    Retrying,
+    before_sleep_log,
+    retry_if_result,
+    stop_after_attempt,
+    wait_fixed,
+)
+
+from simplyblock_core import constants, utils
+from simplyblock_core import db_controller as db_mod
 from simplyblock_core.controllers import (
-    migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
+    migration_controller,
+    migration_events,
+    snapshot_controller,
+    tasks_controller,
+    tasks_events,
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
-from simplyblock_core.exceptions import ChainLockTimeout, MigrationConflictError, PreconditionError
+from simplyblock_core.controllers.migration_bdev_ops import (
+    delete_bdev_blocking as _delete_bdev_blocking,
+)
+from simplyblock_core.exceptions import (
+    ChainLockTimeout,
+    MigrationConflictError,
+    PreconditionError,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException, RPCClient
+from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import (
+    RPCClient,
+    RPCErrorCode,
+    RPCException,
+    RPCRemoteError,
+)
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
-from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
+from simplyblock_core.utils import convert_size
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -3344,7 +3368,7 @@ def task_runner(task):
 
     # Expansion-first ordering: defer while a cluster expansion is open —
     # even between the expand task's retries, when the cluster status is
-    # momentarily ACTIVE (see tasks_controller.defer_task_for_expansion).
+    # momentarily ACTIVE (see migration_task_common.require_active_cluster).
     if tasks_controller.get_active_cluster_expand_task(task.cluster_id):
         return _suspend_task(
             task, migration, "cluster expansion in progress, deferring",
@@ -4360,12 +4384,6 @@ def main():
     logger.info("Starting LVol Migration task runner...")
 
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         if not clusters:
             logger.error("No clusters found!")

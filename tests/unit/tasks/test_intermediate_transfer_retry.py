@@ -138,6 +138,7 @@ def test_the_size_log_queries_on_its_default_path():
 
 def test_the_batch_final_step_waits_longer_than_spdk_does():
     import inspect
+
     from simplyblock_core.services import tasks_runner_batch_migration as batch
     src = inspect.getsource(batch)
     assert "final_step_rpc = src_node.rpc_client(timeout=20" in src

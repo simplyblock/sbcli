@@ -83,21 +83,25 @@ class TestDeviceMigrationGate(unittest.TestCase):
         self.assertTrue(self._run([]))
 
 
-class TestRemovalRetryCeiling(unittest.TestCase):
-    """The exit, once the wait is real."""
+class TestRemovalWaitCeiling(unittest.TestCase):
+    """The exit, once the wait is real.
 
-    def _task(self, retry, max_retry):
+    On the shared task driver an unfinished pass is progress, not a failed
+    attempt (TaskProgress, no retry spent), so the ceiling is the time a
+    removal has kept coming back unfinished, not a retry count."""
+
+    def _task(self, params=None):
         task = JobSchedule()
         task.uuid = "t1"
         task.cluster_id = "c1"
         task.node_id = "n1"
         task.function_name = JobSchedule.FN_NODE_REMOVAL
         task.status = JobSchedule.STATUS_RUNNING
-        task.retry = retry
-        task.max_retry = max_retry
-        task.function_params = {}
+        task.retry = 0
+        task.max_retry = constants.NODE_REMOVAL_MAX_RETRY
+        task.function_params = dict(params or {})
         task.canceled = False
-        return task
+        return task.frozen_view()
 
     def _process(self, task, orchestrate_result=False):
         cluster = MagicMock()
@@ -105,48 +109,122 @@ class TestRemovalRetryCeiling(unittest.TestCase):
         db = MagicMock()
         db.get_cluster_by_id.return_value = cluster
         set_status = MagicMock()
+        checkpoints = []
+        results = []
+        raised = None
         with patch.object(runner, "db", db), \
              patch.object(runner.storage_node_ops, "node_removal_orchestrate",
                           return_value=orchestrate_result), \
-             patch.object(runner.storage_node_ops, "set_node_status", set_status):
-            handled = runner.process_task(task)
-        return handled, set_status
+             patch.object(runner.storage_node_ops, "set_node_status", set_status), \
+             patch.object(runner, "checkpoint",
+                          side_effect=lambda t, **p: checkpoints.append(p) or t), \
+             patch.object(runner, "set_result",
+                          side_effect=lambda t, m: results.append(m) or t):
+            try:
+                runner.process_task(task)
+            except Exception as e:  # noqa: BLE001 - the signal is the outcome
+                raised = e
+        return raised, set_status, checkpoints, results
 
-    def test_keeps_retrying_below_the_ceiling(self):
-        task = self._task(retry=3, max_retry=100)
-        handled, set_status = self._process(task)
-        self.assertFalse(handled)
-        self.assertEqual(task.status, JobSchedule.STATUS_SUSPENDED)
-        self.assertEqual(task.retry, 4)
+    def test_an_unfinished_pass_is_progress_and_starts_the_clock(self):
+        raised, set_status, checkpoints, _ = self._process(self._task())
+        self.assertIsInstance(raised, runner.TaskProgress)
+        self.assertIn(runner.INCOMPLETE_SINCE_KEY, checkpoints[-1])
+        set_status.assert_not_called()
+
+    def test_keeps_waiting_below_the_ceiling(self):
+        since = runner.time.time() - constants.NODE_REMOVAL_MAX_WAIT_SEC / 2
+        raised, set_status, _, _ = self._process(
+            self._task({runner.INCOMPLETE_SINCE_KEY: since}))
+        self.assertIsInstance(raised, runner.TaskProgress)
         set_status.assert_not_called()
 
     def test_gives_up_at_the_ceiling_and_marks_removed_failed(self):
-        task = self._task(retry=99, max_retry=100)
-        handled, set_status = self._process(task)
-        self.assertTrue(handled, "the task must end, not stay suspended")
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
+        since = runner.time.time() - constants.NODE_REMOVAL_MAX_WAIT_SEC - 1
+        raised, set_status, _, _ = self._process(
+            self._task({runner.INCOMPLETE_SINCE_KEY: since}))
+        self.assertIsInstance(raised, runner.TaskAbort, "the task must end, not keep waiting")
+        self.assertIn("gave up", str(raised))
         set_status.assert_called_once()
         self.assertEqual(set_status.call_args.args[0], "n1")
-        self.assertEqual(set_status.call_args.args[1],
-                         StorageNode.STATUS_REMOVED_FAILED)
-        self.assertIn("gave up", task.function_result)
-
-    def test_an_uncapped_task_still_retries(self):
-        """max_retry=-1 predates the ceiling; such a task must not be
-        mistaken for one that has exhausted its budget."""
-        task = self._task(retry=500, max_retry=-1)
-        handled, set_status = self._process(task)
-        self.assertFalse(handled)
-        self.assertEqual(task.status, JobSchedule.STATUS_SUSPENDED)
-        set_status.assert_not_called()
+        self.assertEqual(set_status.call_args.args[1], StorageNode.STATUS_REMOVED_FAILED)
 
     def test_success_never_trips_the_ceiling(self):
-        task = self._task(retry=99, max_retry=100)
-        handled, set_status = self._process(task, orchestrate_result=True)
-        self.assertTrue(handled)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
-        self.assertEqual(task.function_result, "Node removed")
+        since = runner.time.time() - constants.NODE_REMOVAL_MAX_WAIT_SEC - 1
+        raised, set_status, _, results = self._process(
+            self._task({runner.INCOMPLETE_SINCE_KEY: since}), orchestrate_result=True)
+        self.assertIsNone(raised)
+        self.assertEqual(results, ["Node removed"])
         set_status.assert_not_called()
+
+    def test_a_step_that_gives_up_ends_the_task_as_removed_failed(self):
+        task = self._task()
+        cluster = MagicMock()
+        cluster.status = "active"
+        db = MagicMock()
+        db.get_cluster_by_id.return_value = cluster
+        with patch.object(runner, "db", db), \
+             patch.object(runner.storage_node_ops, "node_removal_orchestrate",
+                          side_effect=storage_node_ops.RemovalGaveUp("no target")), \
+             patch.object(runner.storage_node_ops, "set_node_status") as set_status, \
+             patch.object(runner, "checkpoint", side_effect=lambda t, **p: t):
+            with self.assertRaises(runner.TaskAbort) as ctx:
+                runner.process_task(task)
+        self.assertIn("no target", str(ctx.exception))
+        self.assertEqual(set_status.call_args.args[1], StorageNode.STATUS_REMOVED_FAILED)
+
+    def test_the_cursor_goes_through_checkpoint_not_the_frozen_task(self):
+        task = self._task()
+        cluster = MagicMock()
+        cluster.status = "active"
+        db = MagicMock()
+        db.get_cluster_by_id.return_value = cluster
+        checkpoints = []
+
+        def orchestrate(node_id, force_remove=False, cursor=None):
+            cursor.enter("drain_lvols", "drain")
+            cursor.enter("drain_lvols", "drain again")
+            return True
+
+        with patch.object(runner, "db", db), \
+             patch.object(runner.storage_node_ops, "node_removal_orchestrate", side_effect=orchestrate), \
+             patch.object(runner, "checkpoint", side_effect=lambda t, **p: checkpoints.append(p) or t), \
+             patch.object(runner, "set_result"):
+            runner.process_task(task)
+        steps = [c["step"] for c in checkpoints if "step" in c]
+        self.assertEqual(steps, ["drain_lvols"], "an unchanged position is not re-written")
+
+
+class TestOnFinish(unittest.TestCase):
+    """A task that ended without removing its node -- retry ceiling, cancel --
+    must not strand the node mid-removal."""
+
+    def _finish(self, node_status):
+        node = MagicMock()
+        node.status = node_status
+        db = MagicMock()
+        db.get_storage_node_by_id.return_value = node
+        task = MagicMock()
+        task.node_id = "n1"
+        with patch.object(runner, "db", db), \
+             patch.object(runner.storage_node_ops, "set_node_status") as set_status:
+            runner._on_finish(task)
+        return set_status
+
+    def test_a_node_still_mid_removal_is_marked_removed_failed(self):
+        for status in StorageNode.REMOVAL_IN_PROGRESS_STATUSES:
+            with self.subTest(status=status):
+                set_status = self._finish(status)
+                set_status.assert_called_once_with(
+                    "n1", StorageNode.STATUS_REMOVED_FAILED, caused_by="remove")
+
+    def test_a_finished_removal_is_left_alone(self):
+        for status in (StorageNode.STATUS_REMOVED, StorageNode.STATUS_REMOVED_FAILED):
+            with self.subTest(status=status):
+                self._finish(status).assert_not_called()
+
+    def test_it_is_wired(self):
+        self.assertIs(runner.SPEC.on_finish, runner._on_finish)
 
 
 class TestRemovalTaskIsBounded(unittest.TestCase):
@@ -212,24 +290,20 @@ class TestInActivationStampIsForwardOnly(unittest.TestCase):
         db.get_cluster_by_id.return_value = cluster
         db.get_storage_node_by_id.return_value = node
         with patch.object(runner, "db", db), \
-             patch.object(runner.storage_node_ops, "set_node_status") as stamp:
-            handled = runner.process_task(task)
-        return handled, task, stamp
+             patch.object(runner.storage_node_ops, "set_node_status") as stamp, \
+             self.assertRaises(runner.TaskDefer):
+            runner.process_task(task.frozen_view())
+        return stamp
 
     def test_a_node_not_yet_departing_is_marked_pending(self):
-        handled, task, stamp = self._park(StorageNode.STATUS_ONLINE)
-        self.assertFalse(handled)
-        self.assertEqual(task.status, JobSchedule.STATUS_SUSPENDED)
+        stamp = self._park(StorageNode.STATUS_ONLINE)
         stamp.assert_called_once_with("n1", StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
 
     def test_a_node_already_on_its_way_out_keeps_its_place(self):
         for status in (StorageNode.STATUS_MIGRATING_DEVICES, StorageNode.STATUS_MIGRATING_LVOLS,
                        StorageNode.STATUS_IN_REMOVAL, StorageNode.STATUS_REMOVED):
             with self.subTest(status=status):
-                handled, task, stamp = self._park(status)
-                self.assertFalse(handled)
-                self.assertEqual(task.status, JobSchedule.STATUS_SUSPENDED)
-                stamp.assert_not_called()
+                self._park(status).assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

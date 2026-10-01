@@ -9,12 +9,11 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+import simplyblock_core.services.tasks_runner_batch_migration as runner
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-
-import simplyblock_core.services.tasks_runner_batch_migration as runner
 
 
 def _task(status=JobSchedule.STATUS_RUNNING):

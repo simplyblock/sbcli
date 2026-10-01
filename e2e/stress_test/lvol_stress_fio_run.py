@@ -1,10 +1,11 @@
-from utils.common_utils import sleep_n_sec
-from datetime import datetime
-from stress_test.lvol_ha_stress_fio import TestLvolHACluster
-from exceptions.custom_exception import LvolNotConnectException
-import threading
-import string
 import random
+import string
+import threading
+from datetime import datetime
+
+from exceptions.custom_exception import LvolNotConnectException
+from stress_test.lvol_ha_stress_fio import TestLvolHACluster
+from utils.common_utils import sleep_n_sec
 
 
 def random_char(len):
@@ -399,7 +400,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
                 sleep_n_sec(300)  # Sleep for 60 seconds before the next validation
             except Exception as e:
-                self.logger.error(f"Error in continuous I/O stats validation: {str(e)}")
+                self.logger.error(f"Error in continuous I/O stats validation: {e!s}")
                 break  # Exit the thread on failure
 
 

@@ -216,17 +216,18 @@ class TestGiveUpIsTerminal(unittest.TestCase):
         db = MagicMock()
         db.get_cluster_by_id.return_value = cluster
 
+        # TaskAbort is the shared driver's "finish the task, do not retry".
         with patch.object(runner, "db", db), \
              patch.object(runner.storage_node_ops, "node_removal_orchestrate",
                           side_effect=storage_node_ops.RemovalGaveUp("no target left")), \
-             patch.object(runner.storage_node_ops, "set_node_status") as set_status:
-            handled = runner.process_task(task)
+             patch.object(runner, "checkpoint", side_effect=lambda t, **p: t), \
+             patch.object(runner.storage_node_ops, "set_node_status") as set_status, \
+             self.assertRaises(runner.TaskAbort, msg="the task ends rather than retrying for ever") as ctx:
+            runner.process_task(task.frozen_view())
 
-        self.assertTrue(handled, "the task ends rather than retrying for ever")
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
         self.assertEqual(set_status.call_args.args[1],
                          StorageNode.STATUS_REMOVED_FAILED)
-        self.assertIn("no target left", task.function_result)
+        self.assertIn("no target left", str(ctx.exception))
 
 
 if __name__ == "__main__":

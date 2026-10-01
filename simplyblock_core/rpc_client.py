@@ -15,10 +15,10 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError, HTTPError, ReadTimeout
 from urllib3 import Retry
 
-from simplyblock_core import utils, constants
+from simplyblock_core import constants, utils
 from simplyblock_core.settings import Settings
 from simplyblock_core.utils.helpers import single_or_none
-from simplyblock_core.utils.secrets import unwrap_secrets_for_send
+from simplyblock_core.utils.secrets import redact_rpc_params, unwrap_secrets_for_send
 
 logger = utils.get_logger()
 
@@ -342,7 +342,8 @@ class RPCClient:
         # window, where a single attach has to land within hundreds of ms).
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
+            logger.debug("From: %s, Requesting method: %s, params: %s",
+                         self.host, method, redact_rpc_params(params))
             # Tell the SPDK proxy how long we are willing to wait, so it bounds
             # its own SPDK round-trip (and the semaphore slot it holds) to this
             # instead of the proxy-global timeout. Prevents an abandoned/stuck
@@ -385,7 +386,7 @@ class RPCClient:
         return None, None
 
     def _request3(self, method: str, **kwargs):
-        logger.debug("Requesting method: %s, params: %s", method, kwargs)
+        logger.debug("Requesting method: %s, params: %s", method, redact_rpc_params(kwargs))
         wire_payload = unwrap_secrets_for_send({
             'id': 1,
             'method': method,
@@ -677,8 +678,15 @@ class RPCClient:
 
         if eui64:
             params['namespace']['eui64'] = eui64
-            params['namespace']['ptpl_file'] = "/mnt/ns_resv"+eui64+".json"
 
+        # ptpl_file is what makes a namespace advertise RESCAP bit 0, i.e.
+        # Persist Through Power Loss reservations. It used to be set only
+        # alongside eui64, which no caller passes, so it never reached the
+        # wire. Punctuation is stripped so one namespace cannot end up with two
+        # reservation files across a restart.
+        ptpl_id = eui64 or nguid or uuid
+        if ptpl_id:
+            params['namespace']['ptpl_file'] = f"/mnt/ns_resv{str(ptpl_id).replace('-', '')}.json"
 
         ret, err = self._request2("nvmf_subsystem_add_ns", params)
         if err and idempotent:
@@ -826,6 +834,20 @@ class RPCClient:
                 "(cold paths only)")
         return self._request("bdev_get_bdevs", None)
 
+    def bdev_get(self, name) -> dict | None:
+        """Single bdev lookup by exact name, mirroring ``subsystem_get``.
+        ``None`` means the bdev does not exist (SPDK answers ENODEV, or the
+        filtered lookup comes back empty). Raises ``RPCConnectionError`` /
+        ``RPCHTTPError`` / ``RPCProtocolError`` for a transport-level failure,
+        or ``RPCRemoteError`` for any other RPC error — callers must not read
+        an unknown answer as "absent"."""
+        try:
+            return single_or_none(self._request3("bdev_get_bdevs", name=name))
+        except RPCRemoteError as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
+
     def resize_lvol(self, lvol_bdev, blockcnt):
         params = {
             "lvol_bdev": lvol_bdev,
@@ -875,8 +897,7 @@ class RPCClient:
         }
         return self._request("bdev_crypto_create", params)
 
-    def lvol_crypto_key_create(self, name, key, key2):
-        # todo: mask the keys so that they don't show up in logs
+    def lvol_crypto_key_create(self, name, key: SecretStr, key2: SecretStr):
         params = {
             "cipher": "AES_XTS",
             "key": key,
@@ -2230,7 +2251,7 @@ class RPCClient:
         #     params["allow_partial"] = True
         return self._request("bdev_lvol_transfer", params)
 
-    def bdev_lvol_transfer_stat(self, name):
+    def bdev_lvol_transfer_stat(self, name: str):
         """
         Return transfer status for *name* (source composite bdev).
 
@@ -2330,45 +2351,83 @@ class RPCClient:
 
     # ---- S3 Backup RPCs ----
 
-    def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
-                       snapshot_backups=True, local_testing=False, local_endpoint="",
-                       access_key_id="", secret_access_key="",
-                       bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
-        """Create the S3 bdev device.
-        Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
+    def bdev_s3_create(self, name: str, bucket_name: str,
+                       secondary_target: int, with_compression: bool,
+                       snapshot_backups: bool, verify_tls: bool = True,
+                       use_path_style: bool = False,
+                       region: str | None = None,
+                       endpoint: str | None = None,
+                       access_key_id: SecretStr | None = None,
+                       secret_access_key: SecretStr | None = None,
+                       bdb_lcpu_mask: int | None = None,
+                       s3_lcpu_mask: int | None = None,
+                       s3_thread_pool_size: int | None = None,
+                       s3_request_timeout_ms: int | None = None,
+                       s3_request_hard_abort_ms: int | None = None,
+                       s3_request_max_attempts: int | None = None,
+                       s3_retry_burst: int | None = None,
+                       s3_retry_refill_ms: int | None = None,
+    ):
+        """Create an S3 bdev for one bucket.
+
+        A device serves exactly one bucket with one set of credentials, so
+        reading a second bucket means creating a second device. Attach it to an
+        lvstore with bdev_lvol_s3_bdev.
+
+        What the device cannot function without has no default. What the data
+        plane has its own default for is Optional and omitted from the payload
+        when absent. Nothing here uses ``0`` or ``""`` to mean "unset": the data
+        plane already reads zero that way for the masks and the pool size
+        (bdev_s3_impl.cpp:1204, 1222, 1239), so an explicit 0 would behave as
+        absent while reading as a deliberate choice.
+
         Args:
-            name: Bdev name
-            secondary_target: 0=S3, 1=FileSystem
-            with_compression: Enable ISA-L compression
-            snapshot_backups: Snapshot backup mode
-            local_testing: Use local endpoint (e.g. MinIO)
-            local_endpoint: Local endpoint URL
-            access_key_id: AWS access key (optional if using IAM roles)
-            secret_access_key: AWS secret key (optional if using IAM roles)
-            bdb_lcpu_mask: CPU mask for the SPDK thread of this bdev (uint64)
-            s3_lcpu_mask: CPU mask for the internal AWS S3 thread pool (uint64)
-            s3_thread_pool_size: AWS S3 thread pool size (default 32 on data plane)
+            bucket_name: the bucket this device reads and writes. A device
+                without one cannot service any I/O.
+            region: the bucket's region. Absent means the SDK resolves it, the
+                same way it resolves credentials -- the data plane leaves its
+                config untouched when this is not given.
+            secondary_target: 0=S3, 1=FileSystem. The caller holds a
+                SecondaryTarget enum and converts at this boundary.
+            with_compression: enable ISA-L compression.
+            snapshot_backups: selects the backup object layout
+                ({s3_id}/{mid}/{extent}) rather than the tiering one.
+            verify_tls: verify the endpoint's certificate.
+            use_path_style: path-style addressing, needed by MinIO and most
+                S3-compatible stores.
+            endpoint: an S3-compatible endpoint, e.g. "http://minio:9000".
+                Absent means the SDK resolves AWS's endpoint from the region.
+            access_key_id / secret_access_key: absent means the node's instance
+                role, via the SDK's default credential provider chain. Callers
+                derive them from an S3Credentials pair, so they arrive together
+                or not at all.
+            bdb_lcpu_mask: CPU mask for this bdev's SPDK thread. Absent lets the
+                data plane derive one from the app core mask.
+            s3_lcpu_mask: CPU mask for the AWS SDK thread pool. Absent leaves the
+                data plane's own choice, which pins onto SPDK reactor cores --
+                so callers that care should compute one.
+            s3_thread_pool_size: AWS SDK thread pool size. Absent means the data
+                plane's default of 32.
         """
-        params = {
+        params: dict[str, Any] = {
             "name": name,
+            "bucket_name": bucket_name,
             "secondary_target": secondary_target,
             "with_compression": with_compression,
             "snapshot_backups": snapshot_backups,
+            "verify_tls": verify_tls,
+            "use_path_style": use_path_style,
         }
-        if local_testing:
-            params["local_testing"] = True
-        if local_endpoint:
-            params["local_endpoint"] = local_endpoint
-        if access_key_id:
-            params["access_key_id"] = access_key_id
-        if secret_access_key:
-            params["secret_access_key"] = secret_access_key
-        if bdb_lcpu_mask:
-            params["bdb_lcpu_mask"] = bdb_lcpu_mask
-        if s3_lcpu_mask:
-            params["s3_lcpu_mask"] = s3_lcpu_mask
-        if s3_thread_pool_size:
-            params["s3_thread_pool_size"] = s3_thread_pool_size
+        optional: dict[str, Any] = {
+            "region": region,
+            "endpoint": endpoint,
+            "access_key_id": access_key_id,
+            "secret_access_key": secret_access_key,
+            "bdb_lcpu_mask": bdb_lcpu_mask,
+            "s3_lcpu_mask": s3_lcpu_mask,
+            "s3_thread_pool_size": s3_thread_pool_size,
+        }
+        params.update({k: v for k, v in optional.items() if v is not None})
         return self._request3("bdev_s3_create", **params)
 
     def bdev_lvol_create_poller_group(self, cpu_mask):
@@ -2379,7 +2438,7 @@ class RPCClient:
         """
         return self._request3("bdev_lvol_create_poller_group", cpu_mask=cpu_mask)
 
-    def bdev_lvol_s3_bdev(self, lvs_name, bdev_name):
+    def bdev_lvol_s3_bdev(self, lvs_name: str, bdev_name: str):
         """Attach an S3 bdev to the given lvstore.
         The S3 bdev must already exist (created via bdev_s3_create).
         Called once per lvstore at setup time (cluster activate, node restart)."""
@@ -2388,72 +2447,117 @@ class RPCClient:
             "s3_bdev": bdev_name,
         })
 
-    def bdev_s3_add_bucket_name(self, name, bucket_name, allow_existing: bool = False):
-        """Register a bucket name with the S3 bdev.
-        Must be called after bdev_s3_create and before any backup/recovery operations.
-        Args:
-            name: S3 bdev name (e.g. 's3_LVS_1234')
-            bucket_name: S3/MinIO bucket name to use for data storage
-        Returns (result, error) tuple.
-        """
-        try:
-            return self._request3(
-                "bdev_s3_add_bucket_name",
-                name=name,
-                bucket_name=bucket_name,
-            )
-        except RPCRemoteError as e:
-            if allow_existing and e.code == -17:
-                logger.debug("Bucket %s already registered with %s", name, bucket_name)
-                return None
-            raise
-
-    def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
+    def bdev_lvol_s3_backup(self, s3_id: int, snapshot_names: list[str],
+                            s3_bdev: str, cluster_batch: int = 1):
         """Start an async backup of snapshots to S3.
         Args:
-            s3_id: unique backup identifier (uint32)
-            snapshot_names: list of snapshot composite bdev names
+            s3_id: unique backup identifier (uint32, < 2**30)
+            snapshot_names: snapshot composite bdev names, NEWEST first -- the
+                data plane unions their cluster maps first-writer-wins, so the
+                newest snapshot's allocation must be seen first.
+            s3_bdev: which S3 device to write through. Required: an lvstore may
+                carry several, and "the first" is ambiguous.
             cluster_batch: batch size in clusters (default 1)
         Returns RPC result (truthy on success). Poll with bdev_lvol_transfer_stat.
+
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another backup/recovery/merge transfer in flight -- the caller
+                should retry once that transfer completes, not treat this as a
+                failure. Concurrent transfers against the same device corrupt
+                the shared channel state.
         """
         params = {
             "s3_id": s3_id,
             "snapshot_names": snapshot_names,
+            "s3_bdev": s3_bdev,
             "cluster_batch": cluster_batch,
         }
-        return self._request("bdev_lvol_s3_backup", params)
+        return self._request3("bdev_lvol_s3_backup", **params)
 
-    # Backup/recovery/merge polling: use bdev_lvol_transfer_stat(lvol_name)
-    # which reads lvol->transfer_status on the data plane. Works for backup
-    # (pass snapshot bdev name) and recovery (pass target lvol name).
-    # Merge has lvol=NULL on data plane so transfer_stat cannot poll it.
+    # Backup/recovery polling: use bdev_lvol_transfer_stat(lvol_name) which
+    # reads lvol->transfer_status on the data plane. Works for backup (pass
+    # snapshot bdev name) and recovery (pass target lvol name). Merge has
+    # lvol=NULL on data plane, so it's polled separately via
+    # bdev_lvol_s3_merge_stat(s3_id, old_s3_id) below.
 
-    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None):
+    def bdev_lvol_s3_merge(self, s3_id: int, old_s3_id: int, cluster_batch: int,
+                           s3_bdev: str, lvs_name: str | None = None,
+                           allow_exist: bool = True):
         """Merge two backups: keep s3_id and merge old_s3_id into it.
-        This shortens the backup chain."""
-        params = {
+
+        This shortens the backup chain. Both backups must live in the bucket
+        served by s3_bdev -- a merge reads one and writes the other.
+
+        allow_exist: if True (default), an EEXIST response -- a matching
+        merge already queued/running on the data plane, e.g. from a prior
+        call whose RPC connection dropped before the response arrived -- is
+        treated the same as a fresh success (returns True) rather than
+        raised. A caller that needs to distinguish "started this call" from
+        "already running" can pass allow_exist=False.
+
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another transfer in flight -- retry rather than fail; see
+                bdev_lvol_s3_backup.
+        """
+        params: dict[str, Any] = {
             "s3_id": s3_id,
             "old_s3_id": old_s3_id,
             "cluster_batch": cluster_batch,
+            "s3_bdev": s3_bdev,
         }
         if lvs_name:
             params["lvs_name"] = lvs_name
-        return self._request("bdev_lvol_s3_merge", params)
+        try:
+            return self._request3("bdev_lvol_s3_merge", **params)
+        except RPCRemoteError as e:
+            if allow_exist and e.code == -17:
+                logger.debug("Merge %s -> %s already in progress", old_s3_id, s3_id)
+                return True
+            raise
 
-    def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch):
+    def bdev_lvol_s3_merge_stat(self, s3_id, old_s3_id):
+        """Return merge status for the (s3_id, old_s3_id) pair.
+
+        Result dict keys:
+          ``transfer_state``: "No process" | "In progress" | "Failed" | "Done"
+        """
+        return self._request("bdev_lvol_s3_merge_stat", {"s3_id": s3_id, "old_s3_id": old_s3_id})
+
+    def bdev_lvol_s3_recovery(self, lvol_name: str, s3_ids: list[int],
+                              cluster_batch: int, s3_bdev: str):
         """Restore a chain of S3 backups into a new lvol.
         Args:
             lvol_name: target lvol name to restore into
-            s3_ids: list of S3 backup IDs (uint32) forming the chain (oldest first)
+            s3_ids: list of S3 backup IDs (uint32) forming the chain, NEWEST
+                first: the data plane claims each cluster for the first id that
+                offers it (prepare_s3_clusters is first-writer-wins), so the
+                newest backup's data must win.
             cluster_batch: batch size in clusters
-        """
-        return self._request("bdev_lvol_s3_recovery", {
-            "lvol_name": lvol_name,
-            "cluster_batch": cluster_batch,
-            "s3_ids": s3_ids,
-        })
+            s3_bdev: which S3 device to read from. Required: a restore from a
+                foreign bucket attaches a second device, so "the first" is
+                ambiguous exactly when it matters.
 
-    def bdev_lvol_s3_delete(self, s3_ids):
+        Raises:
+            RPCRemoteError: with code -errno.EBUSY if s3_bdev already has
+                another transfer in flight -- retry rather than fail; see
+                bdev_lvol_s3_backup.
+        """
+        return self._request3("bdev_lvol_s3_recovery",
+                              lvol_name=lvol_name,
+                              cluster_batch=cluster_batch,
+                              s3_ids=s3_ids,
+                              s3_bdev=s3_bdev)
+
+    def bdev_s3_delete(self, name: str):
+        """Delete an S3 bdev.
+
+        Used to release the device a restore attached for a foreign bucket.
+        """
+        return self._request3("bdev_s3_delete", name=name)
+
+    def bdev_lvol_s3_delete(self, s3_ids: list[int]):
         """Delete all S3 backups for the given IDs (list of uint32)."""
         # RPC still missing on data plane — use dummy
         return self._request("bdev_lvol_s3_delete", {

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from simplyblock_core import watches
+from simplyblock_core.models import watches
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation
 from simplyblock_core.models.events import EventObj
@@ -15,7 +15,6 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import LVolStatObject, StatsObject
 from simplyblock_core.models.storage_node import StorageNode
-
 
 WATCHED_CLASSES = [Cluster, StorageNode, Pool, LVol, SnapShot, JobSchedule, EventObj]
 UNWATCHED_CLASSES = [

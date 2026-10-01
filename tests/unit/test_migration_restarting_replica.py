@@ -16,10 +16,10 @@ import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
+import simplyblock_core.services.tasks_runner_lvol_migration as runner
 from simplyblock_core.controllers import migration_controller as mc
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.storage_node import StorageNode
-import simplyblock_core.services.tasks_runner_lvol_migration as runner
 
 
 def _node(node_id, status, secondary="", tertiary=""):

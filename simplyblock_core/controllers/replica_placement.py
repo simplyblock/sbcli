@@ -56,8 +56,8 @@ not -- instead of a warning buried in a log.
 """
 
 import logging
-from typing import NamedTuple
 from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 logger = logging.getLogger()
 

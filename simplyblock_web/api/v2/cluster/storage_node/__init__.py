@@ -7,17 +7,16 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import node_drain_steps, tasks_controller
-from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 from simplyblock_core import storage_node_ops
+from simplyblock_core.controllers import node_drain_steps, tasks_controller
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 
 from ... import util as util
 from ..._dependencies import Cluster, StorageNode
+from ..._dtos import StorageNodeDTO, TaskDTO
 from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .device import api as device_api
-from ..._dtos import StorageNodeDTO, TaskDTO
-
 
 api = APIRouter()
 db = DBController()
@@ -220,8 +219,14 @@ def nic_iostats(cluster: Cluster, storage_node: StorageNode, nic_id: str):
     ]
 
 
-@instance_api.post('/suspend', name='clusters:storage-nodes:suspend', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/suspend', name='clusters:storage-nodes:suspend', status_code=204, responses={204: {"content": None}, 409: {"description": "The node is not online"}})
 def suspend(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
+    # Idempotent: a retry finds the node already suspended.
+    if storage_node.status == StorageNode.STATUS_SUSPENDED:
+        return Response(status_code=204)
+    if storage_node.status != StorageNode.STATUS_ONLINE:
+        raise HTTPException(409, f'Storage node is {storage_node.status}, not online')
+
     ret = storage_node_ops.suspend_storage_node(storage_node.get_id(), force)
     if isinstance(ret, tuple):
         ok, reason = ret
@@ -233,8 +238,13 @@ def suspend(cluster: Cluster, storage_node: StorageNode, force: bool = False) ->
     return Response(status_code=204)
 
 
-@instance_api.post('/resume', name='clusters:storage-nodes:resume', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/resume', name='clusters:storage-nodes:resume', status_code=204, responses={204: {"content": None}, 409: {"description": "The node is not suspended"}})
 def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
+    if storage_node.status == StorageNode.STATUS_ONLINE:
+        return Response(status_code=204)
+    if storage_node.status != StorageNode.STATUS_SUSPENDED:
+        raise HTTPException(409, f'Storage node is {storage_node.status}, not suspended')
+
     if not storage_node_ops.resume_storage_node(storage_node.get_id()):
         raise ValueError('Failed to resume storage node')
 
@@ -244,8 +254,8 @@ def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
 @instance_api.post('/shutdown', name='clusters:storage-nodes:shutdown', status_code=202, responses={202: {"content": None}, 409: {"description": "Shutdown preconditions not met; retry later or use force"}})
 def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
     if not force:
-        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
         from simplyblock_core.db_controller import DBController
+        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
         allowed, reason = _check_ftt_allows_node_removal(storage_node.get_id(), DBController())
         if not allowed:
             raise ValueError(reason)

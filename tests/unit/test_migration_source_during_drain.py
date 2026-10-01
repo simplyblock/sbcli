@@ -126,8 +126,9 @@ class ResolvedOnceAtCreateTests(unittest.TestCase):
     def test_the_runner_addresses_the_pinned_source(self):
         """The failure this caused on the cluster: RPCs went to the stopped
         primary and came back as a bare `connection error` in cleanup_target."""
-        from simplyblock_core.services import tasks_runner_lvol_migration as runner
         import inspect
+
+        from simplyblock_core.services import tasks_runner_lvol_migration as runner
         body = inspect.getsource(runner.task_runner)
         self.assertIn("migration.active_source_node_id or migration.source_node_id", body)
         self.assertNotIn("resolve_source_node(", body)

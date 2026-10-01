@@ -32,7 +32,6 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import NodeTransitionInProgress
 from simplyblock_core.models.nvme_device import NVMeDevice
 
-
 logger = logging.getLogger()
 
 # How long a pass that reports "still migrating" waits before being re-driven.
@@ -363,10 +362,10 @@ def _reset_for_test() -> None:
 
 
 __all__ = [
-    'start_device_decommission',
-    'mark_migrating_lvols',
     'device_decommission_progress',
+    'mark_migrating_lvols',
     'prepare_node_for_removal',
     'prepare_progress',
+    'start_device_decommission',
     'verify_node_drained',
 ]

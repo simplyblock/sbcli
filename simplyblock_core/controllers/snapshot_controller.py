@@ -17,22 +17,27 @@ from tenacity import (
     wait_fixed,
 )
 
-from simplyblock_core.controllers import ops_gate
-from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
-    migration_controller
-
 from simplyblock_core import constants, utils
+from simplyblock_core.controllers import (
+    events_controller,
+    lvol_controller,
+    migration_controller,
+    object_limits,
+    ops_gate,
+    pool_controller,
+    snapshot_events,
+    tasks_controller,
+)
+from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import ChainLockTimeout, PreconditionError
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
-from simplyblock_core.db_controller import DBController, SubsystemCapacityError
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-
 
 logger = lg.getLogger()
 
@@ -226,7 +231,11 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
     even under a snapshot/clone-only workload."""
     from simplyblock_core.controllers import lvol_controller
     from simplyblock_core.utils.ttl_cache import (
-        leader_cache, LEADER_TTL_SEC, no_leader_cache, NO_LEADER_TTL_SEC)
+        LEADER_TTL_SEC,
+        NO_LEADER_TTL_SEC,
+        leader_cache,
+        no_leader_cache,
+    )
 
     key = (cluster_id, lvs_name)
     if no_leader_cache.get(key, NO_LEADER_TTL_SEC):
@@ -560,7 +569,7 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
             cluster_id, node.get_id(), bdev_name, primary_node.get_id())
 
 
-def check_snapshot_capacity(pool, cluster, lvol, all_lvols=None, all_snaps=None):
+def check_snapshot_capacity(pool, cluster, lvol, all_snaps=None):
     """Admission control for taking a snapshot, at pool AND cluster level.
 
     A new snapshot immediately owns the source volume's utilized bytes (the
@@ -594,13 +603,7 @@ def check_snapshot_capacity(pool, cluster, lvol, all_lvols=None, all_snaps=None)
                 f"LVol size: {utils.humanbytes(size)} must be below this limit")
 
     if pool.pool_max_size > 0:
-        # Only load the full lvol/snapshot sets when a pool size limit is set
-        # (the capacity sum). Unlimited pools — the common case — skip both scans.
-        if not all_lvols:
-            all_lvols = db_controller.get_mini_lvols()
-        if not all_snaps:
-            all_snaps = db_controller.get_mini_snapshots()
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             return (f"Cannot take snapshot: pool capacity would reach "
                     f"{utils.humanbytes(total + size)} of "
@@ -708,13 +711,32 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     # Hard per-lvstore object cap (lvols + clones + snapshots).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
-    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
+    from simplyblock_core.utils.ttl_cache import (
+        cached_mini_lvols,
+        cached_mini_snapshots,
+    )
     limit_error = _lvol_ctrl.check_lvstore_object_limit(
         snode, cached_mini_lvols(db_controller),
         cached_mini_snapshots(db_controller))
     if limit_error:
         logger.error(limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, lvol, limit_error,
+            limit_key=f"lvstore_objects:{snode.get_id()}")
         return False, limit_error
+
+    # Hard per-volume snapshot cap (active = not deleted). Internal snapshots
+    # (replication / migration) are exempt so a volume at the cap can still be
+    # replicated and migrated; they are transient and cleaned up by their owner.
+    if snap_type == SnapShot.TYPE_USER:
+        snap_limit_error = object_limits.check_snapshot_limit(
+            lvol_id, cached_mini_snapshots(db_controller))
+        if snap_limit_error:
+            logger.error(snap_limit_error)
+            events_controller.log_object_limit_reached(
+                pool.cluster_id, lvol, snap_limit_error,
+                limit_key=f"snapshots:{lvol_id}")
+            return False, snap_limit_error
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
@@ -726,8 +748,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     # the source volume's UTILIZED size (see check_snapshot_capacity). This
     # replaces the former extra pool check at the source's full provisioned
     # size, which rejected snapshots the capacity model actually allows.
-    cap_error = check_snapshot_capacity(pool, cluster, lvol,
-                                        all_lvols=all_lvols, all_snaps=all_snaps)
+    cap_error = check_snapshot_capacity(pool, cluster, lvol, all_snaps=all_snaps)
     if cap_error:
         logger.error(cap_error)
         return False, cap_error
@@ -851,7 +872,10 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             # _rollback_snapshot_bdev) — no per-peer bookkeeping needed.
             for sec in secondary_nodes:
                 # Per design: gate snapshot registration around restart port block.
-                from simplyblock_core.storage_node_ops import wait_or_delay_for_restart_gate, queue_for_restart_drain
+                from simplyblock_core.storage_node_ops import (
+                    queue_for_restart_drain,
+                    wait_or_delay_for_restart_gate,
+                )
                 gate = wait_or_delay_for_restart_gate(sec.get_id(), lvol.lvs_name)
                 if gate == "delay":
                     queue_for_restart_drain(
@@ -918,16 +942,14 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     # Link into this lvol's snapshot chain using the by-lvol index (a single
     # reverse read for the current tail) instead of scanning every cluster
-    # snapshot. Find the predecessor BEFORE registering the new snap below.
+    # snapshot. The new snap is already in that index (its write maintained
+    # it), hence the exclusion.
     prev = db_controller.get_lvol_latest_snapshot(lvol_id, exclude_uuid=snap.get_id())
     if prev is not None and not prev.next_snap_uuid:
         prev.next_snap_uuid = snap.get_id()
         snap.prev_snap_uuid = prev.get_id()
         prev.write_to_db()
         snap.write_to_db()
-
-    # Register the new snapshot in the name + by-lvol indexes (O(1)).
-    db_controller.index_snapshot(snap)
 
     snapshot_events.snapshot_create(snap)
     if lvol.do_replicate:
@@ -956,7 +978,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 pass
 
     if backup:
-        from simplyblock_core.controllers import backup_controller
+        from simplyblock_core.controllers.backup import controller as backup_controller
         backup_id, backup_err = backup_controller.backup_snapshot(snap.uuid)
         if backup_err:
             logger.warning(f"Snapshot created but backup failed: {backup_err}")
@@ -964,13 +986,13 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     return snap.uuid, False
 
 
-def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False):
-    all_snaps = db_controller.get_snapshots()
+def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False,
+                   consistency_group=None):
     if lvol_id:
         try:
             lvol = (db_controller.get_lvol_by_id(lvol_id) if utils.UUID_PATTERN.match(lvol_id) is not None
                     else db_controller.get_lvol_by_name(lvol_id))
-            snaps = [sn for sn in all_snaps if sn.lvol.get_id() == lvol.get_id()]
+            snaps = db_controller.get_snapshots_by_lvol_id(lvol.get_id())
         except KeyError:
             logger.error("Can not find lvol with provided lvol_id_or_name: %s", lvol_id)
             return False
@@ -986,17 +1008,25 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             node = (db_controller.get_storage_node_by_id(node_id)
                     if utils.UUID_PATTERN.match(node_id) is not None
                     else db_controller.get_storage_nodes_by_hostname(node_id)[0])
-            snaps = [sn for sn in all_snaps if sn.lvol.node_id == node.get_id()]
+            snaps = db_controller.get_snapshots_by_node_id(node.get_id())
         except KeyError:
             logger.error("Can not find node with provided value: %s", node_id)
             return False
 
-    elif cluster_id:
-        snaps = [sn for sn in all_snaps if sn.cluster_id == cluster_id]
     else:
-        snaps = all_snaps
+        snaps = db_controller.get_snapshots(cluster_id)
+
+    if consistency_group:
+        # Filter to one group's snapshots without client-side name matching
+        # (design §6.2). Accept either the full "cluster/uuid" id or the uuid.
+        want = consistency_group.split('/')[-1]
+        snaps = [sn for sn in snaps if sn.group_id and sn.group_id.split('/')[-1] == want]
 
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
+
+    # A group column is shown only when the listing actually contains a group
+    # snapshot; the machine-readable group_id / group_seq are always present.
+    any_group = any(sn.group_id for sn in snaps)
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
     migrating_lvols = []
@@ -1027,7 +1057,12 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
             "Status": snap.status,
+            "group_id": snap.group_id,
+            "group_seq": snap.group_seq,
         }
+        if any_group:
+            d["Group"] = snap.group_id.split('/')[-1][:8] if snap.group_id else ""
+            d["Gen"] = snap.group_seq or ""
         if with_details:
             instances = []
             if snap.instances:
@@ -1138,7 +1173,6 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
     except KeyError:
         logger.exception(f"Storage node not found {snap.lvol.node_id}")
         if force_delete:
-            db_controller.unindex_snapshot(snap)
             snap.remove(db_controller.kv_store)
             return True
         return False
@@ -1308,7 +1342,7 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
 
 def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False,
-          lock=True, namespaced=True, all_snaps=None, all_lvols=None):
+          lock=True, namespaced=True, all_snaps=None, all_lvols=None, consistency_group=None):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError:
@@ -1385,13 +1419,37 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     # Hard per-lvstore object cap (lvols + clones + snapshots).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
-    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
+    from simplyblock_core.utils.ttl_cache import (
+        cached_mini_lvols,
+        cached_mini_snapshots,
+    )
     limit_error = _lvol_ctrl.check_lvstore_object_limit(
         snode, cached_mini_lvols(db_controller),
         cached_mini_snapshots(db_controller))
     if limit_error:
         logger.error(limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, snap, limit_error,
+            limit_key=f"lvstore_objects:{snode.get_id()}")
         return False, limit_error
+
+    # Hard per-snapshot clone cap (active = not deleted) and the volume size cap
+    # on a clone-with-resize.
+    clone_limit_error = object_limits.check_clone_limit(
+        snapshot_id, cached_mini_lvols(db_controller))
+    if clone_limit_error:
+        logger.error(clone_limit_error)
+        events_controller.log_object_limit_reached(
+            pool.cluster_id, snap, clone_limit_error,
+            limit_key=f"clones:{snapshot_id}")
+        return False, clone_limit_error
+    if new_size:
+        size_error = object_limits.check_lvol_size(new_size, what="Clone size")
+        if size_error:
+            logger.error(size_error)
+            events_controller.log_object_limit_reached(
+                pool.cluster_id, snap, size_error, limit_key="lvol_size")
+            return False, size_error
 
     # Clone-name uniqueness / reuse via the per-pool lvol name index (O(1) point
     # read) instead of scanning every lvol in the DB.
@@ -1408,11 +1466,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
-    # all_snaps only feeds the pool-capacity sum below (get_random_vuid no
-    # longer dedupes); minis suffice and the load is skipped entirely for
-    # unlimited pools instead of full-scanning every snapshot per clone.
-    if not all_snaps and pool.pool_max_size > 0:
-        all_snaps = db_controller.get_mini_snapshots()
     if not all_lvols:
         all_lvols = db_controller.get_mini_lvols()
     size = snap.size
@@ -1422,7 +1475,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, msg
 
     if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
+        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
@@ -1456,7 +1509,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     # ADVISORY early capacity check only — the authoritative namespace-slot
     # pick happens transactionally in claim_lvol_ns_slot at record-write time
     # (two concurrent clones/creates otherwise race for the same last slot).
-    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
+    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(
+        snode.get_id(), all_lvols=all_lvols, pool_id=pool.get_id()) if namespaced else None
 
     if not _available_subsys:
         subsys_count = lvol_controller.count_lvol_subsystems(snode, all_lvols)
@@ -1480,8 +1534,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.node_id = snode.get_id()
     lvol.nodes = snap.lvol.nodes
     lvol.cloned_from_snap = snapshot_id
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
+    lvol.place_in_pool(pool)
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.guid = utils.generate_hex_string(16)
@@ -1578,13 +1631,22 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
         if error:
+            # The record was persisted by claim_lvol_ns_slot above. Leaving it
+            # on a failed clone strands an in_creation zombie holding a
+            # namespace slot and pool capacity until the monitor's stale sweep
+            # notices; the guarded rollback releases it, or keeps it when the
+            # attempt left a blob behind.
+            lvol_controller.rollback_create_record(lvol)
             return False, error
         lvol.nodes = [snode.get_id()]
         lvol.lvol_uuid = lvol_bdev['uuid']
         lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
     if lvol.ha_type == "ha":
-        from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
+        from simplyblock_core.storage_node_ops import (
+            check_non_leader_for_operation,
+            queue_for_restart_drain,
+        )
 
         host_node = snode
         # skip empty role ids — non-HA topologies
@@ -1608,7 +1670,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = (f"No leader available for LVS {lvol.lvs_name} — "
                    f"rejecting clone until leadership is re-established")
             logger.error(msg)
-            db_controller.release_lvol_ns_slot(lvol)
+            lvol_controller.rollback_create_record(lvol)
             return False, msg
 
         # Assign each non-leader a stable index so its subsystem is created
@@ -1634,7 +1696,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             if action == "reject":
                 msg = f"Cannot clone: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
                 logger.error(msg)
-                db_controller.release_lvol_ns_slot(lvol)
+                lvol_controller.rollback_create_record(lvol)
                 return False, msg
             elif action == "proceed":
                 secondary_nodes.append(candidate)
@@ -1662,8 +1724,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
                     if error:
                         logger.error(error)
-                        if lvol.status != LVol.STATUS_IN_DELETION:
-                            db_controller.release_lvol_ns_slot(lvol)
+                        lvol_controller.rollback_create_record(lvol)
                         return False, error
                     lvol.lvol_uuid = lvol_bdev['uuid']
                     lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
@@ -1676,12 +1737,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                             secondary_index=secondary_index_map[sec.get_id()])
                     if error:
                         logger.error(error)
-                        if lvol.status != LVol.STATUS_IN_DELETION:
-                            db_controller.release_lvol_ns_slot(lvol)
+                        lvol_controller.rollback_create_record(lvol)
                         return False, error
         except PreconditionError as e:
-            if lvol.status != LVol.STATUS_IN_DELETION:
-                db_controller.release_lvol_ns_slot(lvol)
+            lvol_controller.rollback_create_record(lvol)
             return False, str(e)
 
     lvol.status = LVol.STATUS_ONLINE
@@ -1695,6 +1754,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             db_controller.atomic_update(ref_snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
     else:
         db_controller.atomic_update(snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
+
+    if consistency_group:
+        # Group-forming restore (design §7.2): the clone joins the named group,
+        # birthing it when this is the first clone. Placement is already fixed
+        # by the snapshot's store, so the join only pins or verifies the pin.
+        # Imported here: consistency_group_controller from-imports this module
+        # at top level (see tests/unit/test_controller_import_order.py).
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _cgc.join_new_volume(pool.cluster_id, lvol, consistency_group)
+        except _cgc.ConsistencyGroupError as e:
+            logger.error("Clone %s created but could not join consistency group "
+                         "%s: %s", lvol.get_id(), consistency_group, e)
+            return lvol.uuid, f"Clone created but could not join consistency group: {e}"
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)

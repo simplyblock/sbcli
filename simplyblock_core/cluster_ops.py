@@ -9,38 +9,62 @@ import socket
 import subprocess
 import threading
 import time
-import uuid
 import typing as t
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
-import docker
-from kubernetes import client as k8s_client
 import requests
 import yaml
-
 from docker.errors import DockerException
+from kubernetes import client as k8s_client
 from pydantic import SecretStr
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, release_upgrades, storage_node_ops
-from simplyblock_core.utils import port_block
-from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+import docker
+from simplyblock_core import (
+    constants,
+    index_ops,
+    jm_raid,
+    mgmt_node_ops,
+    release_upgrades,
+    scripts,
+    storage_node_ops,
+    utils,
+)
+from simplyblock_core.controllers import (
+    cluster_events,
+    device_controller,
+    qos_controller,
+    tasks_controller,
+    tcp_ports_events,
+)
+from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.db_controller import DBController
-from simplyblock_core import jm_raid
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
+from simplyblock_core.models import indices
+from simplyblock_core.models.backup_config import UnresolvedBackupConfig
+from simplyblock_core.models.cluster import (
+    Cluster,
+    DeployConfig,
+    HashicorpVaultSettings,
+)
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, NodeStatObject, DeviceStatObject
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.stats import (
+    ClusterStatObject,
+    DeviceStatObject,
+    LVolStatObject,
+    NodeStatObject,
+)
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.release_upgrades import jc_compression_upgrade
-from simplyblock_core.utils import pull_docker_image_with_retry
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils import port_block, pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
@@ -327,6 +351,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    alert_config: dict[str, t.Any] | None = None,
                    inline_checksum=False,
                    atomic_4k=False,
+                   cluster_vip=None,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -343,6 +368,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
+
+    if backup_config:
+        # Reject a configuration the cluster could not act on before installing
+        # anything, rather than at the set_backup_config below. Everything but
+        # the bucket is checked here: that one is derived from a cluster id that
+        # does not exist yet, so an absent one is not a caller's mistake.
+        UnresolvedBackupConfig.model_validate(backup_config)
 
     if name and db_controller.kv_store is not None:
         existing_clusters = db_controller.get_clusters()
@@ -486,13 +518,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.container_image_prefix = container_image_prefix or ""
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
-
+    cluster.cluster_vip = cluster_vip or ""
     if nvmeof_tls_config:
         cluster.tls = True
         cluster.tls_config = nvmeof_tls_config
 
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
     if not disable_monitoring:
         utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
@@ -539,6 +571,14 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(cluster)
+
+    # Every declared index is complete from the first write on a cluster that
+    # starts empty, so flip them to `ready` now rather than leaving every read
+    # on the scan fallback until someone runs the backfill by hand. The walk is
+    # over empty tables here; on a deployment that already holds clusters it
+    # indexes what is there, which is equally correct.
+    for line in index_ops.build_indices(log=logger.info):
+        logger.info(line)
 
     mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
 
@@ -774,7 +814,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.snode_api_port = snode_api_port
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
@@ -1243,7 +1283,9 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         # layout) is deliberately NOT blocked: refusing to reactivate a
         # drifted cluster would turn a policy violation into an outage.
         if is_fresh_activation:
-            from simplyblock_core.controllers.cluster_expansion import planner as fd_planner
+            from simplyblock_core.controllers.cluster_expansion import (
+                planner as fd_planner,
+            )
 
             def _fd_fail(msg: str) -> None:
                 set_cluster_status(cl_id, ols_status)
@@ -1455,7 +1497,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             # Create S3 bdev for backup support (only if backup is configured)
             if cluster.backup_config:
                 snode = db_controller.get_storage_node_by_id(node_id)
-                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+                backup_device.create_s3_bdev(snode, cluster.get_backup_config())
 
         else:
             _set_lvstore_status(node_id, "failed")
@@ -2390,7 +2432,7 @@ def list_all_info(cluster_id) -> str:
     lvols = db_controller.get_lvols(cluster_id)
     lv_online = [p for p in lvols if p.status == LVol.STATUS_ONLINE]
 
-    snaps = [sn for sn in db_controller.get_snapshots() if sn.cluster_id == cluster_id]
+    snaps = db_controller.get_snapshots(cluster_id)
 
     devs = []
     devs_online = []
@@ -3066,28 +3108,28 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_SnapshotMonitor",
-                service_file="python3 simplyblock_core/services/snapshot_monitor.py",
+                command=["python3", "simplyblock_core/services/snapshot_monitor.py"],
                 service_image=service_image)
 
         if "app_TasksRunnerLVolSyncDelete" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerLVolSyncDelete",
-                service_file="python3 simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
                 service_image=service_image)
 
         if "app_TasksRunnerJCCompResume" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerJCCompResume",
-                service_file="python3 simplyblock_core/services/tasks_runner_jc_comp.py",
+                command=["simplyblock-task-runner", "tasks-runner-jc-comp"],
                 service_image=service_image)
 
         if "app_BackupService" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_BackupService",
-                service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
+                command=["simplyblock-task-runner", "tasks-runner-fdb-backup"],
                 service_image=service_image)
 
         if not cluster.disable_monitoring:
@@ -3147,7 +3189,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 namespace=namespace,
                 deployment_name="simplyblock-tasks-runner-sync-lvol-del",
                 container_name="tasks-runner-sync-lvol-del",
-                service_file="simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
                 container_image=service_image)
 
         if "simplyblock-snapshot-monitor" not in deployment_names:
@@ -3155,7 +3197,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 namespace=namespace,
                 deployment_name="simplyblock-snapshot-monitor",
                 container_name="snapshot-monitor",
-                service_file="simplyblock_core/services/snapshot_monitor.py",
+                command=["python", "simplyblock_core/services/snapshot_monitor.py"],
                 container_image=service_image)
 
         # Update DaemonSets
@@ -3265,6 +3307,113 @@ def upgrade_complete(cluster_id) -> bool:
         logger.info("Armed write-protection v2 migration for cluster %s "
                     "post-upgrade", cluster_id)
     return True
+
+
+def build_indices() -> bool:
+    """Backfill every declared secondary index that is not ``ready`` yet.
+
+    Idempotent and safe on a live cluster: live writes have maintained each
+    index since its declaration shipped, so the backfill only has to cover the
+    records that predate it, and it derives each one's entries inside the
+    transaction that writes them — a record rewritten underneath is re-derived,
+    never indexed under the value it used to carry. Re-running it after
+    completion is a no-op.
+
+    False when an index could not be completed — a ``Unique`` declaration whose
+    values are already duplicated in the data, or a record that stayed under
+    rewrite for the whole retry budget. Reads keep their scan fallback, so this
+    is a job for the operator, not an outage.
+
+    Deployment-wide: the index keyspace is shared by every cluster on the
+    management node, so this takes no cluster id.
+    """
+    for line in index_ops.build_indices(log=logger.info):
+        logger.info(line)
+    unready = index_ops.unready_indices()
+    for name in unready:
+        logger.error("Index %s was not completed; reads still fall back to a "
+                     "full scan. Run `sbctl cluster check-indices` for the "
+                     "records behind it.", name)
+    return not unready
+
+
+def list_index_states(index=None) -> builtins.list[dict]:
+    """The state record of every declared index, or of the one named.
+
+    The only way to see where an index stands without reading ``index_meta/``
+    out of FoundationDB by hand: ``build-indices`` reports an outcome and
+    ``check-indices`` reports drift, neither reports state.
+    """
+    if index is None:
+        return index_ops.index_states()
+    model_cls, idx = index_ops.resolve_index(index)
+    return index_ops.index_states(model_cls, idx)
+
+
+def switch_index(index, state) -> bool:
+    """Take one index out of service, or put it back.
+
+    ``building`` empties the index on the way back in — see
+    :func:`index_ops.enable_index` — and hands it to the next
+    ``build-indices``.
+
+    Blocks for ``ttl_cache.INDEX_STATE_CONVERGENCE_SEC`` while the new state
+    reaches the other processes, so the command returns only once the switch is
+    actually in effect across the deployment.
+    """
+    if not index:
+        raise ValueError('--set needs an index to act on, e.g. LVol.node_id')
+    if state == indices.STATE_READY:
+        raise ValueError('an index reaches `ready` only by completing '
+                         '`sbctl cluster build-indices`')
+    if state not in indices.STATES:
+        raise ValueError(f'unknown index state {state!r}')
+
+    model_cls, idx = index_ops.resolve_index(index)
+    if state == indices.STATE_DISABLED:
+        index_ops.disable_index(model_cls, idx)
+        logger.warning("Index %s is out of service everywhere; reads of it fall "
+                       "back to a full scan of %s", index, model_cls.__name__)
+    else:
+        index_ops.enable_index(model_cls, idx)
+        logger.info("Index %s is back in service at `building`. Run "
+                    "`sbctl cluster build-indices` to fill and flip it.", index)
+    return True
+
+
+def check_indices(repair=False) -> bool:
+    """Verify every secondary index in both directions and report the drift.
+
+    False while anything is left for the operator to do — which is every finding
+    of a read-only run, and the duplicated values a ``--repair`` run cannot
+    settle by picking a winner. A repair that found its finding already gone is
+    not one of them: the walks are not isolated from live traffic, so on a busy
+    cluster that is the expected outcome rather than a problem.
+
+    Deployment-wide, like :func:`build_indices`.
+    """
+    findings = index_ops.check_indices(repair=repair, log=logger.info)
+    for entry in findings['missing']:
+        logger.error("Missing index entry %s -> %s", *entry)
+    for entry in findings['stale']:
+        logger.error("Index entry %s points at %s, expected %s", *entry)
+    for key in findings['orphaned']:
+        logger.error("Orphaned index entry %s", key)
+    for entry in findings['duplicate']:
+        logger.error("Unique index key %s is derived by both %s and %s", *entry)
+    total = sum(len(findings[kind])
+                for kind in ('missing', 'stale', 'orphaned', 'duplicate'))
+    logger.info("Index check: %d problem(s), %d repaired, %d no longer present, "
+                "%d unresolved", total, findings['repaired'], findings['vanished'],
+                findings['unresolved'])
+    if findings['unresolved'] and not repair:
+        logger.error("Re-run with --repair to write back the entries that can be "
+                     "derived from the records.")
+    elif findings['unresolved']:
+        logger.error("%d problem(s) need an operator: a value two live records "
+                     "both carry cannot be repaired by picking one of them.",
+                     findings['unresolved'])
+    return findings['unresolved'] == 0
 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
@@ -3495,9 +3644,10 @@ def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> 
     logger.info("Updating Cluster replication target")
     new_pool = None
     if target_pool:
-        # --target-pool is documented as "ID or name".
+        # --target-pool is documented as "ID or name", and a name is only
+        # unique within its cluster -- which is the target cluster here.
         try:
-            pool = db_controller.get_pool_by_id_or_name(target_pool)
+            pool = db_controller.get_pool_by_id_or_name(target_pool, target_cl_id)
         except KeyError:
             raise ValueError(f"Pool not found: {target_pool}")
         if pool.status != Pool.STATUS_ACTIVE:

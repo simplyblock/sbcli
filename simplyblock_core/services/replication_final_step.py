@@ -12,8 +12,7 @@ they never share nodes, so the source/target path sets never overlap — the ANA
 choreography is the simple "no-overlap" case (target primary → optimized, other
 target paths → non_optimized, all source paths → inaccessible).
 """
-from simplyblock_core import xfer_timing
-from simplyblock_core import db_controller, utils
+from simplyblock_core import db_controller, utils, xfer_timing
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)

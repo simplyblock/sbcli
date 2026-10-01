@@ -24,7 +24,6 @@ from simplyblock_core import constants
 from simplyblock_core.models.cluster import ClusterAddNodeLock, PortReservation
 from simplyblock_core.models.storage_node import StorageNode
 
-
 # ---------------------------------------------------------------------------
 # In-memory FDB transaction fake
 # ---------------------------------------------------------------------------
@@ -294,8 +293,9 @@ class TestBlockingAcquireHelper(unittest.TestCase):
         self.assertEqual(db.acquire_cluster_add_lock.call_count, 3)
 
     def test_heartbeat_stops_when_lock_lost(self):
-        from simplyblock_core.storage_node_ops import _cluster_add_lock_heartbeat
         import threading
+
+        from simplyblock_core.storage_node_ops import _cluster_add_lock_heartbeat
         db = MagicMock()
         db.refresh_cluster_add_lock.return_value = False  # lost the lock
         stop = threading.Event()

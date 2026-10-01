@@ -39,3 +39,14 @@ class SkippedTestsException(Exception):
 class CoreFileFoundException(Exception):
     def __init__(self, message) -> None:
         super().__init__(message)
+
+class NodeUnreachableTimeout(Exception):
+    """A node has been SSH-unreachable long enough that the run is pointless.
+
+    Raised by SshUtils once a node has been failing SSH continuously past
+    SSH_NODE_DOWN_SEC (default 2h) and a final liveness probe also fails.
+    Deliberate outages reset the clock, so this only fires on a node that
+    never came back.
+    """
+    def __init__(self, message) -> None:
+        super().__init__(message)

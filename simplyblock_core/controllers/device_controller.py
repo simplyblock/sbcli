@@ -1,16 +1,17 @@
 import json
+import logging
 import threading
 import time
-import logging
 import uuid
 
-from simplyblock_core import constants, distr_controller, utils, storage_node_ops
+from simplyblock_core import constants, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.utils.helpers import single_or_none
 
 # Debounce window for the per-device flap counter: two countable
 # online→not-online transitions within this many seconds are treated as
@@ -56,20 +57,19 @@ async def watch_device(cluster_id, node_id, device_id):
 
 
 def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNode:
-    try:
-        return next(
-            node
-            for node in db_controller.get_storage_nodes()
-            if node.jm_device.get_id() == id
-        )
-    except StopIteration:
+    """The node whose *journal* device this is.
+
+    Every caller goes on to act on ``snode.jm_device``, so resolving an NVMe id
+    here would silently operate on a different device — `sn remove-jm-device`
+    with a mistyped id would tear down the node's journal. Hence the kind is
+    part of the lookup, not a filter callers are trusted to remember.
+    """
+    node = single_or_none(db_controller.query(
+        StorageNode, 'device_id', id, StorageNode.DEVICE_KIND_JM))
+    if (node is None) or (node.jm_device is None):
         raise KeyError(f'No storage node with JM device {id}')
+    return node
 
-
-# Maximum number of `online → not-online` transitions caused by a local IO
-# error report from the device's home node before the device is force-failed.
-# Counter is per-device and resets only on explicit device restart.
-DEVICE_FLAP_LIMIT = 2
 
 # Allowed values for the `cause` argument of device_set_state.
 #
@@ -262,68 +262,8 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
             )
             return False
 
-    # Per-device flap counter. Increment ONLY when the device's home node
-    # spontaneously reported an unsolicited failure event against its own
-    # device — IO error or REMOVE/error_open. Anything else (remote-node
-    # observations, node cascades, operator-driven CLI commands, restarts)
-    # uses a different `cause` and is not counted. Belt-and-braces: also
-    # require the home node to currently be online; if the parent node is
-    # already in some non-online state then we are in a node-cascade window
-    # by definition and any device transition is collateral.
-    force_fail = False
-    countable = (
-        device.status == NVMeDevice.STATUS_ONLINE
-        and state not in (
-            NVMeDevice.STATUS_ONLINE,
-            NVMeDevice.STATUS_FAILED,
-            NVMeDevice.STATUS_FAILED_AND_MIGRATED,
-        )
-        and cause == CAUSE_LOCAL_FAILURE
-        and snode.status == StorageNode.STATUS_ONLINE
-    )
-    if countable:
-        # Debounce: error storms fire many error events in quick succession
-        # against a single underlying device problem. We only advance the
-        # counter for transitions that are at least DEVICE_FLAP_DEBOUNCE_SEC
-        # apart, so a single hung-device incident (potentially hundreds of
-        # error_write events) only burns one slot of the budget.
-        now = time.time()
-        if device.last_flap_tsc and (now - device.last_flap_tsc) < DEVICE_FLAP_DEBOUNCE_SEC:
-            logger.info(
-                f"Device {device_id} flap dedup: "
-                f"only {now - device.last_flap_tsc:.1f}s since last flap "
-                f"(< {DEVICE_FLAP_DEBOUNCE_SEC}s window); not counting"
-            )
-        else:
-            next_count = device.flap_count + 1
-            device.last_flap_tsc = now
-            if next_count > DEVICE_FLAP_LIMIT:
-                logger.warning(
-                    f"Device {device_id} exceeded flap limit "
-                    f"({next_count} > {DEVICE_FLAP_LIMIT}); forcing to failed "
-                    f"instead of {state}. Use device-restart to recover."
-                )
-                state = NVMeDevice.STATUS_FAILED
-                force_fail = True
-            else:
-                device.flap_count = next_count
-                logger.info(
-                    f"Device {device_id} flap_count={device.flap_count}/"
-                    f"{DEVICE_FLAP_LIMIT} (online→{state})"
-                )
-
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
-        if cause == CAUSE_DEVICE_RESTART:
-            # Explicit operator-initiated restart is the only path that
-            # forgives prior flapping. Both the counter and the debounce
-            # timestamp are wiped — the device gets a fresh budget.
-            if device.flap_count != 0:
-                logger.info(
-                    f"Device {device_id} flap_count reset on device-restart"
-                )
-            device.flap_count = 0
-            device.last_flap_tsc = 0.0
 
     if state == NVMeDevice.STATUS_REMOVED:
         device.deleted = True
@@ -365,8 +305,6 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
         new_fields = {
             "status": device.status,
             "previous_status": device.previous_status,
-            "flap_count": device.flap_count,
-            "last_flap_tsc": device.last_flap_tsc,
             "retries_exhausted": device.retries_exhausted,
             "repair_attempts": device.repair_attempts,
             "last_repair_tsc": device.last_repair_tsc,
@@ -386,21 +324,6 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
         connect_peers_to_node_devices(snode)
 
     distr_controller.send_dev_status_event(device, device.status)
-
-    if force_fail:
-        # Mirror the post-failed bookkeeping that device_set_failed() does:
-        # remove this device's storage_id from peer cluster maps and queue a
-        # failure-migration task. Wrapped in try/except so a partial cluster
-        # outage doesn't keep the device stuck mid-failure.
-        try:
-            for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-                if node.status == StorageNode.STATUS_ONLINE:
-                    node.rpc_client().distr_replace_id_in_map_prob(
-                        device.cluster_device_order, -1)
-            tasks_controller.add_device_failed_mig_task(device_id)
-        except Exception:
-            logger.exception(
-                f"Post-failed bookkeeping for {device_id} hit an error")
 
     return True
 
@@ -1653,21 +1576,16 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
 
 def new_device_from_failed(device_id):
     db_controller = DBController()
-    device = None
-    device_node = None
-    for node in db_controller.get_storage_nodes():
-        for dev in node.nvme_devices:
-            if dev.get_id() == device_id:
-                device = dev
-                device_node = node
-                break
-
-    if not device:
-        logger.info(f"Device not found: {device_id}")
+    try:
+        device_node = db_controller.get_storage_node_by_device_id(device_id)
+    except KeyError:
+        logger.info("node not found")
         return False
 
-    if not device_node:
-        logger.info("node not found")
+    device = next(
+        (dev for dev in device_node.nvme_devices if dev.get_id() == device_id), None)
+    if not device:
+        logger.info(f"Device not found: {device_id}")
         return False
 
     if device.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED:

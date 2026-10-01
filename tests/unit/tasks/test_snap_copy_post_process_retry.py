@@ -14,9 +14,8 @@ the unit tier rather than integration/migration (which provisions a real FDB).
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.models.lvol_migration import LVolMigration
-
 import simplyblock_core.services.tasks_runner_lvol_migration as runner
+from simplyblock_core.models.lvol_migration import LVolMigration
 
 
 def _migration(transfers):

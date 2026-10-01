@@ -3,7 +3,6 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.storage_node_ops import _connect_to_remote_devs
 
-
 CLUSTER_ID = "10293de0-b91c-4618-b17a-5c3e688686f4"
 
 

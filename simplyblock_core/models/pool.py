@@ -4,11 +4,20 @@ from typing import ClassVar
 from pydantic import SecretStr
 
 from simplyblock_core.models.base_model import BaseModel, default_factory
+from simplyblock_core.models.indices import Index, Unique
 
 
 class Pool(BaseModel):
 
     _WATCHED = True
+
+    _INDEXES: ClassVar[tuple] = (
+        Index('cluster_id'),
+        # As for LVol.lvol_name: the constraint is per cluster, but a lookup
+        # that knows only the name still has to be answerable.
+        Index('pool_name'),
+        Unique(('cluster_id', 'pool_name')),
+    )
 
     STATUS_ACTIVE = "active"
     STATUS_INACTIVE = "inactive"

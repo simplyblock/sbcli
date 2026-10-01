@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
 from typing import Literal, cast
 from uuid import UUID
@@ -7,26 +7,46 @@ from fastapi import Request
 from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
+from simplyblock_core.controllers.backup.manifest import BackupExport, BackupManifest
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.utils import hexa_to_cpu_list
+from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.backup_config import (
+    BackupConfig,
+    BackupLocation,
+    UnresolvedBackupConfig,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.utils.nvme import NvmeConnectEntry
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.replication import (
-    ConsistencyGroup, ReplicationPolicy, ReplicationTarget)
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.models.stats import StatsObject
-from simplyblock_core.models.lvol_migration import LVolMigration
-from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils import hexa_to_cpu_list
+from simplyblock_core.utils.nvme import NvmeConnectEntry
 
 from . import util
+
+AlertSeverity = Literal[
+    "critical",
+    "warning",
+]
+
+
+AlertStatus = Literal[
+    "firing",
+    "resolved",
+]
 
 
 ClusterStatus = Literal[
@@ -38,6 +58,7 @@ ClusterStatus = Literal[
     "unready",
     "in_activation",
     "in_expansion",
+    "in_shrink",
 ]
 
 StoragePoolStatus = Literal["active", "inactive"]
@@ -307,7 +328,7 @@ class StoragePoolDTO(BaseModel):
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO | None
     dhchap: bool = False
-    allowed_hosts: list[str] = []
+    allowed_hosts: list[util.NQN] = []
 
     @staticmethod
     def from_model(model: Pool, stat_obj: StatsObject | None = None):
@@ -338,6 +359,8 @@ class SnapshotDTO(BaseModel):
     migrating: bool
     lvol: util.UrlPath | None
     created_at: datetime
+    group_id: str
+    group_seq: int
 
 
     @staticmethod
@@ -360,6 +383,8 @@ class SnapshotDTO(BaseModel):
             used_size=model.used_size,
             migrating=is_migrating,
             created_at=datetime.fromtimestamp(model.created_at, tz=UTC),
+            group_id=model.group_id,
+            group_seq=model.group_seq,
             lvol=str(
                 request.url_for(
                     #"clusters:pools:volumes:detail",
@@ -506,11 +531,13 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: list[str]
+    allowed_hosts: list[util.NQN]
     policy: str
     capacity: CapacityStatDTO
     rep_info: dict | None = None
     from_source: bool = True
+    group_id: str = ""
+    group_seq: int = 0
 
     @staticmethod
     def from_model(
@@ -523,6 +550,18 @@ class VolumeDTO(BaseModel):
         active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
         _db = DBController()
         eff_policy = _db.get_policy_for_lvol(model)
+        # Surface consistency-group membership (design §10): the migration
+        # webhook (§9.5) reads group_id to decide whether a volume is a member.
+        # group_id is the denormalized field on the volume; group_seq is the
+        # group's latest generation, resolved only for an actual member.
+        _grp_seq = 0
+        if model.group_id:
+            try:
+                _grp_seq = _db.get_consistency_group_by_id(model.group_id).last_group_seq
+            except KeyError:
+                # Missing/deleted consistency-group record is tolerated here;
+                # keep default group_seq=0 for non-resolvable membership.
+                _grp_seq = 0
         return VolumeDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(cluster_id),
@@ -581,42 +620,84 @@ class VolumeDTO(BaseModel):
             ),
             rep_info=rep_info,
             from_source=model.from_source,
+            group_id=model.group_id,
+            group_seq=_grp_seq,
         )
+
+
+#: A resolved backup configuration as the API exchanges it, in both directions:
+#: the response body of the backup-config GET, and the request body of discover.
+#: Both name a bucket -- one reads back what a cluster resolved, and the other
+#: points at somebody else's bucket, which only the caller can name.
+#:
+#: An alias rather than a hand-copied duplicate, because the two shapes are
+#: identical today and a copy would only drift. It is still a name of its own, so
+#: the wire format can diverge from ``BackupConfig`` later by turning this into a
+#: real class, without touching a single route signature.
+BackupConfigDTO = BackupConfig
+
+#: The same configuration as the cluster-create request body takes it, where the
+#: bucket is the one field a caller cannot supply: it is derived from the id of
+#: the cluster the request is asking to create. ``Cluster.set_backup_config``
+#: resolves it, so this shape reaches nothing beyond that call.
+UnresolvedBackupConfigDTO = UnresolvedBackupConfig
+
+#: Where a set of backups lives, without the credentials to reach it. Carried
+#: inside an export rather than named beside one: the manifests describe objects
+#: and not where they are, so the document that collects them says instead.
+BackupLocationDTO = BackupLocation
+
+#: A backup's manifest as the API exchanges it: the response body of
+#: export/discover and the entries of an inline import.
+#:
+#: An alias for the same reason ``BackupConfigDTO`` is one -- except that here the
+#: shapes have a reason to stay locked together, since the wire form of a manifest
+#: is also its form in the bucket. Naming it separately still lets the API grow a
+#: field the stored document does not have.
+BackupManifestDTO = BackupManifest
+
+#: Backups as export and inline import exchange them: manifests grouped by the
+#: bucket they live in. Grouped because one cluster can hold backups in several
+#: -- its own and any it imported -- so a single location cannot describe them.
+BackupExportDTO = BackupExport
 
 
 class BackupDTO(BaseModel):
     id: UUID
     s3_id: int
-    lvol_id: str
+    lvol_id: UUID
     lvol_name: str
-    snapshot_id: str
+    snapshot_id: UUID
     snapshot_name: str
-    node_id: str
+    node_id: UUID
     status: str
-    prev_backup_id: str
+
+    #: Absent for a full backup, which is the root of its chain. The record
+    #: spells that "", as it does every unset id; the wire says null, the way
+    #: ``DeviceDTO`` and ``LVolDTO`` already do for theirs.
+    prev_backup_id: UUID | None = None
+
     size: int
-    allowed_hosts: list[dict]
     created_at: int
     completed_at: int
-    source_cluster_id: str
+    encrypted: bool
 
     @staticmethod
     def from_model(model: Backup):
         return BackupDTO(
             id=UUID(model.uuid),
             s3_id=model.s3_id,
-            lvol_id=model.lvol_id,
+            lvol_id=UUID(model.lvol_id),
             lvol_name=model.lvol_name,
-            snapshot_id=model.snapshot_id,
+            snapshot_id=UUID(model.snapshot_id),
             snapshot_name=model.snapshot_name,
-            node_id=model.node_id,
+            node_id=UUID(model.node_id),
             status=model.status,
-            prev_backup_id=model.prev_backup_id,
+            prev_backup_id=UUID(model.prev_backup_id) if model.prev_backup_id else None,
             size=model.size,
-            allowed_hosts=model.allowed_hosts or [],
             created_at=model.created_at,
             completed_at=model.completed_at,
-            source_cluster_id=model.source_cluster_id or "",
+            encrypted=model.encrypted,
         )
 
 
@@ -701,6 +782,62 @@ class ReplicationPolicyDTO(BaseModel):
             group_lvs_name=group.lvs_name if group is not None else "",
             group_last_seq=group.last_group_seq if group is not None else 0,
         )
+
+
+class ConsistencyGroupDTO(BaseModel):
+    """A standalone consistency group summary (design §10)."""
+    id: UUID
+    cluster_id: UUID
+    name: str
+    node_id: util.OptionalUUID = None
+    lvs_name: str = ""
+    member_count: int
+    last_group_seq: int
+
+    @staticmethod
+    def from_model(model: ConsistencyGroup):
+        current = sum(1 for m in (model.members or {}).values()
+                      if m.get("removed_seq", 0) == 0)
+        return ConsistencyGroupDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_id),
+            name=model.group_name,
+            node_id=UUID(model.node_id) if model.node_id else None,
+            lvs_name=model.lvs_name,
+            member_count=current,
+            last_group_seq=model.last_group_seq,
+        )
+
+
+class ConsistencyGroupMemberDTO(BaseModel):
+    """One current member of a consistency group (design §10 /members)."""
+    lvol_id: str
+    joined_seq: int
+    removed_seq: int
+    node_id: str
+    lvs_name: str
+    online: bool
+
+
+class ConsistencyGroupMemberJoinDTO(BaseModel):
+    """Request body for the late join of an existing volume (design §4.5)."""
+    lvol_id: str
+
+
+class ConsistencyGroupGenerationMemberDTO(BaseModel):
+    lvol_id: str
+    snapshot_id: str
+    ready: bool
+
+
+class ConsistencyGroupGenerationDTO(BaseModel):
+    """One generation of a consistency group (design §6.3)."""
+    group_seq: int
+    created_at: int
+    expected: int
+    present: int
+    complete: bool
+    members: list[ConsistencyGroupGenerationMemberDTO]
 
 
 class ReplicationRelationshipDTO(BaseModel):
@@ -852,3 +989,46 @@ class DeviceHealthInfoDTO(BaseModel):
             critical_composite_temperature_time_minutes=health_info["critical_composite_temperature_time_minutes"],
         )
 
+
+class AlertDTO(BaseModel):
+    """One condition that currently needs an operator.
+
+    Deliberately NOT an EventObj. An event is a journal entry -- it happened,
+    it is kept forever, and nothing ever retracts it. An alert is a claim
+    about the present that goes away by itself when it stops being true, so
+    it carries the object it is about and the time the condition started
+    rather than the time something was logged. ``id`` is derived from the
+    kind and the object, so it is stable across polls and a consumer can
+    dedupe on it without keeping state.
+    """
+    id: str
+    kind: str
+    severity: AlertSeverity
+    status: AlertStatus
+    message: str
+    cluster_id: UUID
+    node_id: UUID | None
+    device_id: UUID | None
+    since: str | None
+    first_seen: str | None
+    resolved_at: str | None
+    details: dict
+
+    @staticmethod
+    def from_alert(alert: dict):
+        # Not from_model: alerts are computed, not stored, so there is no core
+        # model to convert -- alerts_controller yields these dicts directly.
+        return AlertDTO(
+            id=alert['id'],
+            kind=alert['kind'],
+            severity=cast(AlertSeverity, alert['severity']),
+            status=cast(AlertStatus, alert.get('status', 'firing')),
+            message=alert['message'],
+            cluster_id=UUID(alert['cluster_id']),
+            node_id=UUID(alert['node_id']) if alert.get('node_id') else None,
+            device_id=UUID(alert['device_id']) if alert.get('device_id') else None,
+            since=alert.get('since') or None,
+            first_seen=alert.get('first_seen') or None,
+            resolved_at=alert.get('resolved_at') or None,
+            details=alert.get('details') or {},
+        )

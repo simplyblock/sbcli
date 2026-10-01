@@ -4,59 +4,93 @@ import datetime
 import json
 import logging
 import math
+import os
 import platform
 import socket
 import subprocess
-
-import psutil
+import threading
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-import threading
-
-import time
-import uuid
-
-import docker
+import psutil
 from docker.types import LogConfig
 from kubernetes.client import ApiException
 from pydantic import SecretStr
-from tenacity import RetryError, Retrying, before_sleep_log, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import (
+    RetryError,
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_fixed,
+)
 
-from simplyblock_core import constants, scripts, distr_controller, cluster_ops
-from simplyblock_core import utils
-from simplyblock_core import jm_raid
-from simplyblock_core.utils import port_block
-from simplyblock_core.utils import rpc_budget
-from simplyblock_core.utils import hublvol_reconnect
-from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
-from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller, \
-    migration_controller
-from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+import docker
+from simplyblock_core import (
+    cluster_ops,
+    constants,
+    distr_controller,
+    jm_raid,
+    scripts,
+    utils,
+)
 from simplyblock_core import db_controller as db_module
+from simplyblock_core import rpc_client as rpc_client_module
+from simplyblock_core.constants import (
+    LINUX_DRV_MASS_STORAGE_ID,
+    LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID,
+)
+from simplyblock_core.controllers import (
+    device_controller,
+    device_events,
+    health_controller,
+    lvol_controller,
+    migration_controller,
+    qos_controller,
+    snapshot_controller,
+    storage_events,
+    tasks_controller,
+    tcp_ports_events,
+)
+from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.lvol_migration import LVolMigration
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.nvme_device import (
+    JMDevice,
+    NVMeDevice,
+    RemoteDevice,
+    RemoteJMDevice,
+)
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.release_upgrades import jc_compression_upgrade
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.rpc_client import (
-    JC_REMOVE_JM_NOT_USED, JC_REMOVE_JM_STILL_IN_USE, RPC_UNSUPPORTED, RPCErrorCode,
-    RPCException, RPCRemoteError, namespace_matches, evict_cached_session)
-from simplyblock_core import rpc_client as rpc_client_module
+    JC_REMOVE_JM_NOT_USED,
+    JC_REMOVE_JM_STILL_IN_USE,
+    RPC_UNSUPPORTED,
+    RPCErrorCode,
+    RPCException,
+    RPCRemoteError,
+    evict_cached_session,
+    namespace_matches,
+)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
-from simplyblock_core.utils import dial_backoff
+from simplyblock_core.utils import (
+    addNvmeDevices,
+    dial_backoff,
+    hublvol_reconnect,
+    port_block,
+    pull_docker_image_with_retry,
+    rpc_budget,
+)
 from simplyblock_web import node_utils
-from simplyblock_core.utils import addNvmeDevices
-from simplyblock_core.utils import pull_docker_image_with_retry
-import os
-
 
 logger = utils.get_logger(__name__)
 
@@ -3124,6 +3158,7 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
             ok, err = snode_api.persist_node_config(
                 max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
                 ssd_list=entry.get("ssd_pcis"),
+                lblk_serials=utils.lblk_device_serials(entry.get("lblk_devices")),
                 cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
                 l_cores=entry["l-cores"], distribution=entry["distribution"],
                 core_to_index={str(k): v for k, v in entry["core_to_index"].items()},
@@ -3181,6 +3216,7 @@ def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
     ok, err = snode_api.persist_node_config(
         max_lvol=None, huge_page_memory=huge_page_memory, numa_node=node_config.get("socket"),
         ssd_list=node_config.get("ssd_pcis"),
+        lblk_serials=utils.lblk_device_serials(node_config.get("lblk_devices")),
         small_pool_count=small_pool_count, large_pool_count=large_pool_count)
     if not ok:
         logger.error("Failed to persist the recalculated huge-page sizing: %s", err)
@@ -3557,7 +3593,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         # check for memory
-        if "memory_details" in node_info and node_info['memory_details']:
+        if node_info.get('memory_details'):
             memory_details = node_info['memory_details']
             logger.info("Node Memory info")
             logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -3702,7 +3738,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # permanently block its own retry (2026-07-17, node f6308adb).
         if expansion:
             from simplyblock_core.controllers.cluster_expansion.preconditions import (
-                check_expansion_preconditions, check_fd_admission_for_add)
+                check_expansion_preconditions,
+                check_fd_admission_for_add,
+            )
             ok, reason = check_expansion_preconditions(cluster, db_controller)
             if not ok:
                 logger.error(f"Cannot start expansion node-add: {reason}")
@@ -3719,21 +3757,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         fdb_connection = cluster.db_connection
 
-        if cluster.mode == "docker":
-            logger.info("Joining docker swarm...")
-            cluster_docker = utils.get_docker_client(cluster_id)
-            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-            results, err = snode_api.join_swarm(
-                cluster_ip=cluster_ip,
-                join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
-                db_connection=cluster.db_connection,
-                cluster_id=cluster_id)
-
-            if not results:
-                logger.error(f"Failed to Join docker swarm: {err}")
-                return False
+        if cluster.cluster_vip:
+            cluster_ip = cluster.cluster_vip
         else:
-            cluster_ip = utils.get_k8s_node_ip()
+            if cluster.mode == "docker":
+                cluster_docker = utils.get_docker_client(cluster_id)
+                cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+            else:
+                cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_info = utils.get_mgmt_ip(node_info, iface_name)
@@ -3884,9 +3915,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not spdk_proxy_image:
             spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
         # Initial storage-MCP maxUnavailable for the first-time CPU-topology
-        # reboots = the configured parallel-add count (StorageNodeSet
-        # spec.maxParallelNodeAdds), read straight from the CR. cluster_activate
-        # later narrows the pool to the cluster's fault tolerance.
+        # reboots = the configured parallel-add count (StorageCluster
+        # spec.storageNodes.maxParallelNodeAdds), read straight from the CR.
+        # cluster_activate later narrows the pool to the cluster's fault
+        # tolerance.
         mcp_max_unavailable = utils.get_max_parallel_node_adds_from_cr(
             cr_name, cr_namespace, cr_plural)
         try:
@@ -4652,7 +4684,8 @@ def check_removal_admission(snode, db_controller, force_remove=False, check_snap
     # stay within the +/-1 balance rule and keep >=2 hosts per domain.
     # Enforced only once the cluster has an HA layout to protect.
     from simplyblock_core.controllers.cluster_expansion.preconditions import (
-        check_fd_admission_for_remove)
+        check_fd_admission_for_remove,
+    )
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
     if not ok:
@@ -5148,7 +5181,8 @@ def _recheck_removal_conditions(snode, db_controller):
         return False, reason
 
     from simplyblock_core.controllers.cluster_expansion.preconditions import (
-        check_fd_admission_for_remove)
+        check_fd_admission_for_remove,
+    )
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
     if not ok:
@@ -5407,8 +5441,14 @@ class RemovalCursor:
     task and therefore a fresh cursor, with no stale position to clear.
     """
 
-    def __init__(self, task=None):
+    def __init__(self, task=None, persist=None):
+        """``persist``, when given, is called with the cursor's fields as
+        keyword arguments whenever they change, and owns writing them. The task
+        runner passes one: the driver hands its handler a frozen task, so the
+        position goes through the driver's checkpoint rather than onto the task
+        object. Without it the fields are set on ``task`` directly."""
         self._task = task
+        self._persist_cb = persist
         params = (task.function_params if task is not None else None) or {}
         self.step = params.get("step")
         # Keyed BY step, not a single bag cleared on transition. The
@@ -5478,12 +5518,15 @@ class RemovalCursor:
             self._persist()
 
     def _persist(self):
+        fields = {"step": self.step, "step_data": self._all_data,
+                  "step_entered_at": self._entered}
+        if self._persist_cb is not None:
+            self._persist_cb(**fields)
+            return
         if self._task is None:
             return
-        params = self._task.function_params or {}
-        params["step"] = self.step
-        params["step_data"] = self._all_data
-        params["step_entered_at"] = self._entered
+        params = dict(self._task.function_params or {})
+        params.update(fields)
         self._task.function_params = params
 
     def save(self):
@@ -7431,7 +7474,7 @@ def restart_storage_node(
         # only logs this one line, leaving the actual raise point (e.g. a
         # remote-JM/device connect timing out when a same-failure-domain peer
         # is also down) undiagnosable from the logs.
-        logger.error("restart_storage_node raised unexpectedly", exc_info=True)
+        logger.exception("restart_storage_node raised unexpectedly")
     finally:
         _hb_stop.set()
         # Trust the DB. If the impl raised after the ONLINE write was
@@ -7870,7 +7913,7 @@ def _restart_storage_node_impl(
     minimum_hp_memory = max(minimum_hp_memory, max_prov)
 
     # check for memory
-    if "memory_details" in node_info and node_info['memory_details']:
+    if node_info.get('memory_details'):
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -7903,12 +7946,14 @@ def _restart_storage_node_impl(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
-    if cluster.mode == "docker":
-        cluster_docker = utils.get_docker_client(snode.cluster_id)
-        cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-
+    if cluster.cluster_vip:
+        cluster_ip = cluster.cluster_vip
     else:
-        cluster_ip = utils.get_k8s_node_ip()
+        if cluster.mode == "docker":
+            cluster_docker = utils.get_docker_client(snode.cluster_id)
+            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+        else:
+            cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -7942,7 +7987,20 @@ def _restart_storage_node_impl(
 
         fdb_connection = cluster.db_connection
         if lvol_changed:
-            snode_api.persist_node_config(snode.max_lvol, minimum_hp_memory, snode.socket, snode.ssd_pcie)
+            # Keyword args: the positional order here silently paired
+            # huge_page_memory/numa_node/ssd_list correctly only by luck, and
+            # an unchecked result meant an lblk node (whose ssd_pcie is always
+            # empty) restarted against a stale config with no sign of it.
+            ok, err = snode_api.persist_node_config(
+                max_lvol=snode.max_lvol, huge_page_memory=minimum_hp_memory,
+                numa_node=snode.socket, ssd_list=snode.ssd_pcie,
+                lblk_serials=utils.lblk_device_serials(snode.lblk_devices))
+            if not ok:
+                logger.error(
+                    "Failed to persist max_lvol=%s for node %s: %s -- refusing "
+                    "to restart SPDK against a config that does not match it",
+                    snode.max_lvol, snode.get_id(), err)
+                return False
         snode_api.set_hugepages()
         # A restart must actually bounce SPDK: see ensure_spdk_stopped.
         # snode.api_endpoint is already rewritten to node_address above when
@@ -8461,10 +8519,10 @@ def _restart_storage_node_impl(
 
         # Create S3 bdev for backup support (only if backup is configured)
         if cluster.backup_config:
-            from simplyblock_core.controllers import backup_controller
+            from simplyblock_core.controllers.backup import device as backup_device
             logger.info("Creating S3 bdev on restarted node")
             try:
-                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+                backup_device.create_s3_bdev(snode, cluster.get_backup_config())
             except Exception as e:
                 logger.exception(str(e))
                 return False
@@ -9283,16 +9341,10 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
             reason="node deliberately shut down")
 
     # Step 2: cancel migration tasks while controllers are still up.
-    pending_tasks = db_controller.get_job_tasks(snode.cluster_id)
-    for task in pending_tasks:
-        if task.node_id != node_id or task.status == JobSchedule.STATUS_DONE:
-            continue
-        if task.function_name in [
-            JobSchedule.FN_DEV_MIG,
-            JobSchedule.FN_NEW_DEV_MIG,
-        ]:
-            task.canceled = True
-            task.write_to_db(db_controller.kv_store)
+    tasks_controller.cancel_node_tasks(snode.cluster_id, node_id, [
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+    ])
 
     if not force:
         # Step 3 (Loop 1): broadcast device-unavailable events. The
@@ -9342,26 +9394,34 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
                 "Loop 2: peer-side detach pass raised %s (continuing to kill)",
                 e)
 
-        if snode.hublvol:
-            # Disconnect hublvol from secondary
-            if snode.secondary_node_id:
-                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                if sec_node.status == StorageNode.STATUS_ONLINE:
-                    logger.info("Disconnecting hublvol from %s", sec_node.get_id())
-                    try:
-                        sec_node.rpc_client().bdev_nvme_detach_controller(snode.hublvol.bdev_name)
-                    except Exception as e:
-                        logger.warning("Disconnecting hublvol failed: %s", e)
-
-            # Disconnect hublvol from tertiary
-            if snode.tertiary_node_id:
-                ter_node = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
-                if ter_node.status == StorageNode.STATUS_ONLINE:
-                    logger.info("Disconnecting hublvol from %s", ter_node.get_id())
-                    try:
-                        ter_node.rpc_client().bdev_nvme_detach_controller(snode.hublvol.bdev_name)
-                    except Exception as e:
-                        logger.warning("Disconnecting hublvol failed: %s", e)
+        # NO hublvol detach on the peers here. This used to call
+        # bdev_nvme_detach_controller(snode.hublvol.bdev_name) on the
+        # secondary and the tertiary, the reasoning being that a clean
+        # disconnect beats letting the peers discover the TCP drop.
+        #
+        # It does the opposite. The hublvol controller is MULTIPATH: a
+        # follower holds one controller named "<LVS>/hublvol" carrying a
+        # path to the primary AND a path to the acting leader (the
+        # tertiary's two paths are tertiary->primary and
+        # tertiary->secondary). bdev_nvme_detach_controller addressed by
+        # NAME ALONE removes EVERY path on that controller -- the same
+        # property prune_duplicate_paths relies on and guards against. So
+        # detaching "the connection to the dying node" actually destroys
+        # the follower's hublvol at the lvstore level, including its path
+        # to the peer that is still alive and about to lead.
+        #
+        # k8s rapid-failover 2026-09-11 13:46:09: worker-3 (primary,
+        # LVS_16) began a graceful shutdown and told its tertiary
+        # worker-5 to detach LVS_16/hublvol. worker-5 lost both paths, so
+        # it took leadership first, the secondary took it afterwards, and
+        # the resulting leader flap fenced worker-5's 4442 for 74s.
+        #
+        # There is nothing to clean up here in any case: the peers'
+        # reconnect pollers are exactly how a follower rides out a primary
+        # restart, and a follower that genuinely stops being a replica is
+        # torn down explicitly by teardown_non_leader_lvstore /
+        # _delete_replica_on_peer, which detach the controller when the
+        # whole replica really is going away.
 
 
     # Step 5: hard-kill SPDK. Same code path as the existing --force
@@ -10559,7 +10619,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     the pass per request stormed every LVS member with several
     bdev_lvol_get_lvstores per second for hours (run 20260712-231123).
     """
-    from simplyblock_core.utils.ttl_cache import no_leader_cache, NO_LEADER_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import NO_LEADER_TTL_SEC, no_leader_cache
 
     cluster_id = all_nodes[0].cluster_id if all_nodes else ""
     cache_key = (cluster_id, lvs_name)
@@ -10602,7 +10662,7 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
         (leader_node, non_leader_nodes) or (None, []) if no confirmable leader.
     """
     from simplyblock_core.controllers.lvol_controller import is_node_leader
-    from simplyblock_core.utils.ttl_cache import leader_cache, LEADER_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import LEADER_TTL_SEC, leader_cache
 
     leader = None
     leader_confirmed = False
@@ -11008,7 +11068,9 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
          isn't — the quorum reads NVMe controller state on surviving
          peers (see storage_node_monitor::_count_data_plane_votes).
     """
-    from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
+    from simplyblock_core.services.storage_node_monitor import (
+        is_node_data_plane_disconnected_quorum,
+    )
 
     # Refresh from FDB before reading peer_node.status. Callers commonly
     # build a sec_nodes list at the top of recreate_lvstore (line ~5223)
@@ -11042,7 +11104,10 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
     # "connected" is bounded by the TTL and by the operation itself failing
     # and re-checking; a stale "disconnected" only delays inclusion of a
     # just-recovered peer by the same window.
-    from simplyblock_core.utils.ttl_cache import quorum_verdict_cache, QUORUM_VERDICT_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import (
+        QUORUM_VERDICT_TTL_SEC,
+        quorum_verdict_cache,
+    )
     verdict = quorum_verdict_cache.get_or_compute(
         (peer_node.get_id(), tuple(lvs_peer_ids or ())), QUORUM_VERDICT_TTL_SEC,
         lambda: is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids))
@@ -11243,7 +11308,8 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {
                 ex.submit(add_lvol_thread, lv, snode,
-                          lvol_ana_state=lvol_ana_state): lv
+                          lvol_ana_state=lvol_ana_state,
+                          defer_listener=True): lv
                 for lv in items
             }
             for fut, lv in futures.items():
@@ -11273,6 +11339,41 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
             len(failures), len(lvol_list), sorted(failures))
         failures = _submit_all(
             [lv for lv in lvol_list if lv.get_id() in failures])
+
+    # Every future is in: only now is it safe to make these subsystems
+    # reachable. The registrations above run concurrently, and on a shared
+    # subsystem each member used to publish the listener as soon as its own
+    # namespace landed -- so the subsystem answered while its remaining members
+    # were still being added, and a client reading one of those got "Invalid
+    # Namespace or Format" with DNR, which is not retried on another path
+    # (2026-09-13: an 838ms window on worker-1, fio took EREMOTEIO).
+    #
+    # A failed member withholds the listener for its whole SUBSYSTEM, not just
+    # for itself. On a shared subsystem every member answers on one NQN, so
+    # publishing a healthy member's listener makes that NQN reachable while the
+    # failed member's namespace is absent -- which is the reachable-but-empty
+    # state this barrier exists to prevent, reached by a different door.
+    # Skipping only the failed lvol id is therefore not enough.
+    #
+    # A subsystem held back this way is already reported as INCOMPLETE
+    # REGISTRATION below, and the lvol monitor's repair cycle is what gives it a
+    # listener once every member's namespace is there.
+    blocked_nqns = {lv.nqn for lv in lvol_list if lv.get_id() in failures}
+    if blocked_nqns:
+        logger.warning(
+            "withholding listeners on %s for %d subsystem(s) with an "
+            "unregistered member: %s",
+            snode.get_id()[:8], len(blocked_nqns), sorted(blocked_nqns))
+    listener_rpc = snode.rpc_client(timeout=10, retry=2)
+    for lvol in lvol_list:
+        if lvol.get_id() in failures or lvol.nqn in blocked_nqns:
+            continue
+        try:
+            ok, msg = _publish_lvol_listener(lvol, snode, listener_rpc, lvol_ana_state)
+        except Exception as e:
+            ok, msg = False, "raised: %s" % e
+        if not ok:
+            failures.setdefault(lvol.get_id(), msg or "listener publication failed")
 
     try:
         probe = snode.rpc_client(timeout=10, retry=1)
@@ -13701,7 +13802,73 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             pass
 
 
-def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
+
+def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
+    """Publish one lvol's listener on ``snode``.
+
+    Split out of add_lvol_thread so the batch registration can run it
+    AFTER every namespace in the batch is attached. On a shared subsystem
+    the members register concurrently, and each one used to publish as soon
+    as its own namespace landed -- which makes the subsystem reachable while
+    the remaining members are still arriving. A client reading one of those
+    namespaces in the gap gets "Invalid Namespace or Format" with DNR, which
+    the kernel does not retry on another path.
+
+    2026-09-13, shared subsystem lvol:64b116a4 rebuilt on worker-1:
+    nsid=1 at 15:50:25.929, nsid=2 at .936, listener at .26.144, nsid=3 at
+    .26.982 -- 838ms reachable-but-incomplete, and fio took EREMOTEIO on the
+    clone at nsid 3.
+
+    Returns ``(True, None)`` or ``(False, reason)``.
+    """
+    db_controller = DBController()
+    # Use per-lvstore port for this lvol's lvstore. get_lvol_subsys_port()'s
+    # fallback to snode.lvol_subsys_port is only correct for lvol.lvs_name ==
+    # snode.lvstore (this node's OWN primary, which legitimately has no
+    # lvstore_ports entry -- it uses the plain node-level port). For any
+    # OTHER lvs_name, a missing entry means the relocation that assigned
+    # snode this non-leader role hasn't finished committing lvstore_ports
+    # yet -- snode here can be a stale, caller-held object (same hazard as
+    # the in_deletion check above). Silently falling back would register
+    # the listener on snode's OWN leader port instead of lvol.lvs_name's
+    # real one (2026-08-18: raced a node-removal relocation live, leaving
+    # two lvols' secondaries listening on the wrong port indefinitely, with
+    # nothing to ever revisit or correct it). Re-fetch once and refuse
+    # rather than guess; the next lvol_monitor repair cycle retries.
+    if lvol.lvs_name != snode.lvstore and lvol.lvs_name not in snode.lvstore_ports:
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if lvol.lvs_name not in snode.lvstore_ports:
+            msg = (f"{snode.get_id()} has no lvstore_ports entry for "
+                   f"{lvol.lvs_name} yet; refusing to add a listener for "
+                   f"{lvol.nqn} on a guessed port")
+            logger.warning(msg)
+            return False, msg
+    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            tr = iface.trtype
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            tr = "TCP"
+        else:
+            continue
+        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.ip4_address, listener_port):
+            logger.info("Listener %s %s:%s already on %s, skipping",
+                        tr, iface.ip4_address, listener_port, lvol.nqn)
+            continue
+        logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
+        # listeners_create returns the RPC result and answers None on an RPC
+        # error without raising, so an unchecked call reports a listener this
+        # subsystem does not have -- and the caller then records the lvol as
+        # serving.
+        if not rpc_client.listeners_create(
+                lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state):
+            msg = (f"Failed to add listener {tr} {iface.ip4_address}:{listener_port} "
+                   f"for {lvol.nqn} on {snode.get_id()}")
+            logger.error(msg)
+            return False, msg
+    return True, None
+
+def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_listener=False):
     db_controller = DBController()
 
     # Refuse to (re)register an lvol that is being torn down: the delete
@@ -13799,42 +13966,11 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
         logger.error(msg)
         return False, msg
 
-    # Use per-lvstore port for this lvol's lvstore. get_lvol_subsys_port()'s
-    # fallback to snode.lvol_subsys_port is only correct for lvol.lvs_name ==
-    # snode.lvstore (this node's OWN primary, which legitimately has no
-    # lvstore_ports entry -- it uses the plain node-level port). For any
-    # OTHER lvs_name, a missing entry means the relocation that assigned
-    # snode this non-leader role hasn't finished committing lvstore_ports
-    # yet -- snode here can be a stale, caller-held object (same hazard as
-    # the in_deletion check above). Silently falling back would register
-    # the listener on snode's OWN leader port instead of lvol.lvs_name's
-    # real one (2026-08-18: raced a node-removal relocation live, leaving
-    # two lvols' secondaries listening on the wrong port indefinitely, with
-    # nothing to ever revisit or correct it). Re-fetch once and refuse
-    # rather than guess; the next lvol_monitor repair cycle retries.
-    if lvol.lvs_name != snode.lvstore and lvol.lvs_name not in snode.lvstore_ports:
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        if lvol.lvs_name not in snode.lvstore_ports:
-            msg = (f"{snode.get_id()} has no lvstore_ports entry for "
-                   f"{lvol.lvs_name} yet; refusing to add a listener for "
-                   f"{lvol.nqn} on a guessed port")
-            logger.warning(msg)
+    if not defer_listener:
+        ok, msg = _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state)
+        if not ok:
             return False, msg
-    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
-    for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-            tr = iface.trtype
-        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-            tr = "TCP"
-        else:
-            continue
-        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.ip4_address, listener_port):
-            logger.info("Listener %s %s:%s already on %s, skipping",
-                        tr, iface.ip4_address, listener_port, lvol.nqn)
-            continue
-        logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
-        rpc_client.listeners_create(
-            lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
+
 
     # Guarded CAS instead of read-modify-write: a delete can land between the
     # entry guard and this point, and an unconditional full-object write both
@@ -14468,7 +14604,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
-        logger.debug(f"online_jms: {str(jm_ids)}")
+        logger.debug(f"online_jms: {jm_ids!s}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
@@ -15283,7 +15419,7 @@ def dump_lvstore(node_id):
 
     rpc_client = snode.rpc_client(timeout=120)
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
-    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
+    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{datetime.datetime.now().isoformat()!s}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
     ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
     if not ret:
@@ -15327,7 +15463,29 @@ def safe_delete_bdev(name, node_id):
 
     db_controller = DBController()
     primary_node = db_controller.get_storage_node_by_id(node_id)
-    secondary_node = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    # Every replica peer, in the role order lvol_controller uses. A blank id
+    # means the role is not wired up (ha_type single has no secondary), and a
+    # blank id is a KeyError by contract -- see tests/unit/test_blank_id_
+    # lookups.py -- so each needs guarding; every other caller does this and
+    # this one did not, so the first orphan on such a node aborted the whole
+    # repair with a traceback.
+    #
+    # The tertiary leg matters for the same reason the secondary one does: the
+    # normal delete path fans out to EVERY replica (lvol_controller.py:2235
+    # tears subsystems down tertiary -> secondary -> primary, and :2310 issues
+    # a sync delete or a durable FN_LVOL_SYNC_DEL task per non-leader). Deleting
+    # on two of three nodes left the blob alive on the tertiary, where nothing
+    # would ever find it again -- auto_repair dumps a node's OWN lvstore, and
+    # the tertiary holds a replica of the primary's.
+    peer_nodes = []
+    for role_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+        if not role_id:
+            continue
+        try:
+            peer_nodes.append(db_controller.get_storage_node_by_id(role_id))
+        except KeyError:
+            logger.warning(f"Replica peer {role_id} of {primary_node.get_id()} "
+                           f"has no record; skipping its delete leg")
     bdev_name = f"{primary_node.lvstore}/{name}"
     logger.info(f"deleting from primary: {bdev_name}")
     ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
@@ -15355,17 +15513,91 @@ def safe_delete_bdev(name, node_id):
                 return False
 
             logger.info(f"deletion completed on primary: {bdev_name}")
-            logger.info(f"deleting from secondary: {bdev_name}")
-            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, sync=True)
-            if not ret:
-                logger.error(f"Failed to delete bdev: {bdev_name} from node: {secondary_node.get_id()}")
-                return False
-            else:
-                logger.info(f"deletion completed on secondary: {bdev_name}")
-            return True
+            if not peer_nodes:
+                logger.info(f"no replica peers for {primary_node.get_id()}; "
+                            f"deletion completed: {bdev_name}")
+                return True
+
+            # Every peer is attempted even when an earlier one fails. Same
+            # reasoning as the sync-delete loop in lvol_controller ("Never
+            # abort the loop -- the remaining non-leaders must still be
+            # processed"): the primary's blob is already gone by this point, so
+            # a peer skipped here is a replica stranded with nothing scheduled
+            # to clean it.
+            all_deleted = True
+            for peer in peer_nodes:
+                logger.info(f"deleting from peer {peer.get_id()}: {bdev_name}")
+                ret, _ = peer.rpc_client().delete_lvol(bdev_name, sync=True)
+                if not ret:
+                    logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}")
+                    all_deleted = False
+                else:
+                    logger.info(f"deletion completed on peer {peer.get_id()}: {bdev_name}")
+            return all_deleted
         else:
             logger.error(f"failed to delete bdev: {bdev_name}, status code: {ret}")
             return False
+
+
+#: Lvstore residents that belong to the NODE, not to any volume or snapshot
+#: record, so they are never orphans. Kept in one place because auto_repair and
+#: the lvol monitor's periodic sweep must agree on it.
+NON_OBJECT_LVSTORE_BLOB_NAMES = ("hublvol", "transferhub")
+
+
+def find_orphan_lvstore_blobs(node_id):
+    """Blobs in ``node_id``'s lvstore that no LVol/SnapShot record claims.
+
+    The same comparison ``auto_repair`` performs for its ``diff_list``, lifted
+    out so it can also run unattended. auto_repair is an operator-invoked CLI
+    command that prints to stdout: it is the only thing in the product that
+    ever compared SPDK's inventory against the database, so a record dropped
+    while its blob survived stayed invisible until somebody thought to run it
+    by hand — which is how four such volumes accumulated unnoticed in R26.3.
+
+    Matching is on BLOBID, not name: the blobid is the identity SPDK and the
+    records actually share, and it survives the name-shape differences between
+    them (``snap_bdev`` is stored qualified as ``<lvstore>/<name>`` while the
+    lvstore dump names blobs bare).
+
+    Records are collected cluster-wide rather than per-node on purpose. A
+    record whose ``node_id`` has moved (fail-over, migration) still owns its
+    blob, and reporting a live volume as an orphan is far worse than missing
+    one.
+
+    Returns a list of ``{"blobid", "name", "uuid", "ref"}`` dicts. Raises on
+    RPC or lookup failure — the caller decides how loud that is.
+    """
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+
+    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        raise RPCException(f"Failed to get lvstore info for {snode.lvstore}")
+    lvs_uuid = ret[0].get("uuid")
+    if not lvs_uuid:
+        raise RPCException(f"Failed to get lvstore uuid for {snode.lvstore}")
+
+    dump = snode.rpc_client().bdev_lvs_dump_tree(lvs_uuid)
+    if not dump or "lvols" not in dump:
+        raise RPCException(f"Failed to dump the lvstore tree of {snode.lvstore}")
+
+    claimed = {lv.blobid for lv in db_controller.get_lvols(snode.cluster_id) if lv.blobid}
+    claimed |= {sn.blobid for sn in db_controller.get_snapshots(snode.cluster_id) if sn.blobid}
+
+    orphans = []
+    for entry in dump["lvols"]:
+        if entry.get("name") in NON_OBJECT_LVSTORE_BLOB_NAMES:
+            continue
+        if entry.get("blobid") in claimed:
+            continue
+        orphans.append({
+            "blobid": entry.get("blobid"),
+            "name": entry.get("name"),
+            "uuid": entry.get("uuid"),
+            "ref": entry.get("ref"),
+        })
+    return orphans
 
 
 def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, force_remove_worng_ref=False):
@@ -15390,7 +15622,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")
@@ -15436,7 +15668,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
 
     for blob in out_blobid_dict_keys:
         if blob not in (lvols_blobid_dict_keys + snaps_blobid_dict_keys):
-            if out_blobid_dict[blob]["name"] == "hublvol":
+            if out_blobid_dict[blob]["name"] in ["hublvol", "transferhub"]:
                 continue
             else:
                 # all blob ID in spdk but not in mgmt
@@ -15447,7 +15679,14 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
                     inconsistent_dict[blob] = out_blobid_dict[blob]
                     inconsistent_dict[blob]["type"] = "lvol|clone"
             if blob in snaps_blobid_dict_keys:
-                if out_blobid_dict[blob]["name"] != snaps_blobid_dict[blob]["name"] or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]:
+                # snap_bdev is stored qualified ("<lvstore>/<name>", see
+                # snapshot_controller.create_snapshot); the lvstore dump names
+                # the blob bare. lvol_bdev is bare on both sides, so only this
+                # branch qualifies -- comparing the two shapes raw flagged
+                # every snapshot on the node as inconsistent, which
+                # --force-remove-inconsistent would then have deleted.
+                if (f"{snode.lvstore}/{out_blobid_dict[blob]['name']}" != snaps_blobid_dict[blob]["name"]
+                        or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]):
                     inconsistent_dict[blob] = out_blobid_dict[blob]
                     inconsistent_dict[blob]["type"] = "snap"
 
@@ -15484,48 +15723,57 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
             else:
                 diff_clone_dict[blob] = out_blobid_dict[blob]
 
+    # Capture the status to restore. The entry guard above admits DEGRADED as
+    # well as ACTIVE, so writing ACTIVE back unconditionally promoted a
+    # degraded cluster to healthy just for having run a repair.
+    prev_cluster_status = cluster.status
     if not validate_only:
         cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_ACTIVATION)
         time.sleep(3)
 
-    print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
-    print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
-    print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
-    print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
-    print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
-    print("#########################################")
-    print("Safe lvols to be deleted:")
-    for blob, value in diff_lvol_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+    # try/finally, because every safe_delete_bdev below can raise (a node
+    # lookup, an RPC timeout, a wedged delete-status poll). Without it the
+    # first failure left the cluster parked in IN_ACTIVATION with no path back
+    # -- the repair looked destructive and was in fact completely ineffective.
+    try:
+        print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
+        print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
+        print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
+        print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
+        print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
+        print("#########################################")
+        print("Safe lvols to be deleted:")
+        for blob, value in diff_lvol_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Safe snaps to be deleted:")
+        for blob, value in diff_snap_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Safe clones to be deleted:")
+        for blob, value in diff_clone_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Manual bdeves to be deleted that have wrong ref number:")
+        for blob, value in manual_del.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only and force_remove_worng_ref:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Inconsistent bdeves to be checked:")
+        for blob, value in inconsistent_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only and force_remove_inconsistent:
+                safe_delete_bdev(value['name'], node_id)
+    finally:
         if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Safe snaps to be deleted:")
-    for blob, value in diff_snap_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Safe clones to be deleted:")
-    for blob, value in diff_clone_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Manual bdeves to be deleted that have wrong ref number:")
-    for blob, value in manual_del.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only and force_remove_worng_ref:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Inconsistent bdeves to be checked:")
-    for blob, value in inconsistent_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only and force_remove_inconsistent:
-            safe_delete_bdev(value['name'], node_id)
-
-    if not validate_only:
-        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_ACTIVE)
+            cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
 
     print("#########################################")
     print("All mgmt bdeves to be checked:")
@@ -15556,7 +15804,7 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")

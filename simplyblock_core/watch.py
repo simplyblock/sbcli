@@ -2,7 +2,7 @@
 
 Change signal: every write/remove of a watched model class atomically maintains a
 hierarchical version index in the same FDB transaction as the mutation (see
-:mod:`simplyblock_core.watches`): a per-scope ``rollup`` counter and a per-entity
+:mod:`simplyblock_core.models.watches`): a per-scope ``rollup`` counter and a per-entity
 ``version`` counter, keyed by the model's ``watch_scope()`` path.
 
 A subscription watches a single FDB key — the scope's rollup key (a *list*) or an
@@ -22,13 +22,13 @@ earlier counter+full-re-read backend without touching controllers or the API.
 import asyncio
 import logging
 import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
-from collections.abc import Callable, Sequence
 
 import fdb
 
-from simplyblock_core import watches
+from simplyblock_core.models import watches
 
 logger = logging.getLogger(__name__)
 

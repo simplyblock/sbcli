@@ -13,8 +13,8 @@ ARG PYTHON_VERSION=3.14
 # Busts the cache of the OS-package layers below. Those layers are pinned only
 # by package name, so without this they would keep serving whatever `dnf`
 # resolved to the first time and never pick up a security update. CI and
-# build_image.sh pass the current ISO week, giving an upstream fix at most seven
-# days to reach the image. A build that passes nothing keeps this default and so
+# build_image.sh pass the current UTC date, giving an upstream fix at most one
+# day to reach the image. A build that passes nothing keeps this default and so
 # re-uses whatever it has cached.
 ARG CACHE_KEY=local
 
@@ -167,9 +167,9 @@ COPY . .
 # compatibility scaffolding, not the intended end state: the Helm charts, the
 # Swarm compose file and the operator still name source files
 # (`python3 simplyblock_core/services/<name>.py`), which only resolve because
-# /app is the package. Once those consumers use the `simplyblock-service` and
-# `sbctl` entry points, this becomes `--no-editable` and the `COPY . /app` in
-# the runtime stage goes away. See AGENTS.md.
+# /app is the package. Once those consumers use the `simplyblock-task-runner`,
+# `simplyblock-service` and `sbctl` entry points, this becomes `--no-editable`
+# and the `COPY . /app` in the runtime stage goes away. See AGENTS.md.
 #
 # uv creates the environment without pip, setuptools or wheel, so there is
 # nothing to uninstall afterwards and no vendored pip bundle for the image scan
