@@ -142,6 +142,58 @@ class TestBackupConfig:
         assert "s3cr3t" not in repr(config)
 
 
+class TestPathStyleDefault:
+    """Which addressing style a store gets when nobody said.
+
+    The data plane's S3 client has no automatic mode: virtual-hosted addressing
+    asks DNS for ``<bucket>.<host>``, a name an in-cluster or on-premises store
+    does not have, so the S3 device fails to create and cluster activation
+    reverts. Only AWS S3 hosts are addressed that way.
+    """
+
+    # Regression: 2026-10-01-backup-minio-path-style. Cluster activation failed
+    # on bdev_s3_create against an in-cluster MinIO because use_path_style
+    # defaulted to False for every endpoint.
+    @pytest.mark.parametrize("endpoint", [
+        "http://minio:9000",
+        "http://simplyblock-minio.simplyblock.svc.cluster.local:9000",
+        "https://minio.example.com",
+        "http://10.43.56.11:9000",
+        "https://amazonaws.com.evil.example",
+        "https://notamazonaws.com",
+    ])
+    def test_a_store_off_aws_is_addressed_by_path(self, endpoint):
+        for model in (BackupLocation, BackupConfig, UnresolvedBackupConfig):
+            assert model.model_validate({**MINIMAL, "endpoint": endpoint}).use_path_style is True
+
+    @pytest.mark.parametrize("endpoint", [
+        "https://s3.amazonaws.com",
+        "https://s3.eu-central-1.amazonaws.com",
+        "https://S3.EU-WEST-1.AMAZONAWS.COM",
+    ])
+    def test_an_aws_endpoint_keeps_virtual_hosted_addressing(self, endpoint):
+        assert BackupConfig.model_validate({**MINIMAL, "endpoint": endpoint}).use_path_style is False
+
+    def test_no_endpoint_means_aws_and_keeps_virtual_hosted_addressing(self):
+        assert BackupConfig.model_validate(MINIMAL).use_path_style is False
+
+    def test_a_stated_value_wins_over_the_default(self):
+        config = BackupConfig.model_validate(
+            {**MINIMAL, "endpoint": "http://minio:9000", "use_path_style": False})
+        assert config.use_path_style is False
+
+    def test_a_legacy_local_endpoint_is_judged_like_an_endpoint(self):
+        config = BackupConfig.model_validate(
+            {**MINIMAL, "local_endpoint": "http://minio:9000"})
+        assert config.use_path_style is True
+
+    def test_a_stored_config_keeps_the_value_it_was_written_with(self):
+        """Dumped configs always carry the key, so the default never rewrites them."""
+        stored = BackupConfig.model_validate(
+            {**MINIMAL, "endpoint": "http://minio:9000", "use_path_style": False}).model_dump()
+        assert BackupConfig.model_validate(stored).use_path_style is False
+
+
 class TestLegacyMigration:
     """The untyped dicts already stored on existing clusters must keep working."""
 

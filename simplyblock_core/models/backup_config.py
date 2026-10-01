@@ -23,6 +23,7 @@ own ``unwrap_secrets`` pass, at the last possible moment.
 """
 from enum import IntEnum
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -53,6 +54,21 @@ class S3Credentials(BaseModel):
 
     access_key_id: SecretStr
     secret_access_key: SecretStr
+
+
+def _is_aws_endpoint(endpoint: Any) -> bool:
+    """Whether an endpoint is AWS S3, or absent, which means the same thing.
+
+    Only AWS addresses a bucket as ``<bucket>.<host>``. The data plane's S3
+    client has no automatic mode and asks DNS for that name, so every other store
+    (MinIO, an on-premises S3, anything behind an in-cluster Service name) has to
+    be addressed as ``<host>/<bucket>`` or the S3 device cannot be created.
+    Absent means the SDK resolves the endpoint from the region, i.e. AWS.
+    """
+    if not endpoint:
+        return True
+    host = (urlsplit(str(endpoint)).hostname or "").lower()
+    return host == "amazonaws.com" or host.endswith(".amazonaws.com")
 
 
 class BackupLocation(BaseModel):
@@ -148,6 +164,11 @@ class BackupLocation(BaseModel):
         # 0 meant "let the data plane pick"; that is now an absent value.
         if data.get("s3_thread_pool_size") == 0:
             del data["s3_thread_pool_size"]
+
+        # Judged last, so a legacy ``local_endpoint`` and a ``local_testing`` that
+        # already decided the question are both taken into account.
+        if "use_path_style" not in data and not _is_aws_endpoint(data.get("endpoint")):
+            data["use_path_style"] = True
 
         return data
 
