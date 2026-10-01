@@ -49,9 +49,20 @@ def test_offline_from_online_still_applies():
     assert node.status == StorageNode.STATUS_OFFLINE
 
 
-def test_pending_removal_can_still_go_offline():
-    """PENDING_REMOVAL is departing but still running; it is not a shut-down
-    status, so a real outage must still be recorded."""
-    ok, node, _ = _set_status(StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_OFFLINE)
-    assert ok is True
-    assert node.status == StorageNode.STATUS_OFFLINE
+@pytest.mark.parametrize("new_status", [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_SHUTDOWN])
+def test_pending_removal_is_not_undone(new_status):
+    """There is no way back from pending_removal. The removal's own shutdown
+    runs after it is stamped (prepare-removal), and its in_shutdown/offline
+    writes made the node read as a plain offline node for ~10s -- auto-restart
+    material, and not shrinking (2026-09-30, run 43)."""
+    ok, node, events = _set_status(StorageNode.STATUS_PENDING_REMOVAL, new_status)
+    assert ok is False
+    assert node.status == StorageNode.STATUS_PENDING_REMOVAL
+    events.snode_status_change.assert_not_called()
+
+
+@pytest.mark.parametrize("status", StorageNode.REMOVAL_SHUT_DOWN_STATUSES)
+def test_in_shutdown_does_not_undo_a_removal_status(status):
+    ok, node, _ = _set_status(status, StorageNode.STATUS_IN_SHUTDOWN)
+    assert ok is False
+    assert node.status == status

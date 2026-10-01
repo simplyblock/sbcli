@@ -263,10 +263,30 @@ def _collect_status_probes(snodes):
 
 
 def get_next_cluster_status(cluster_id):
+    return _cluster_status_verdicts(cluster_id)[0]
+
+
+def _cluster_status_verdicts(cluster_id):
+    """``(status, status_without_removal)`` for the cluster.
+
+    ``status`` is the calculated cluster status. A node in a removal
+    shut-down status (migrating_devices .. removed_failed) counts only while
+    some of its devices are not yet failed_and_migrated -- until then its data
+    really has one replica fewer -- and not at all once its data is rebuilt.
+    It used to count until it was REMOVED, which kept a k=1 cluster DEGRADED
+    for the whole removal and stalled any driver that waits for ACTIVE.
+
+    A PENDING_REMOVAL node is counted like any other node -- it may still be
+    serving -- but when it counts as affected, it counts as the removal's.
+
+    ``status_without_removal`` leaves those nodes out entirely: the status the
+    cluster would have if the removal were not happening. DEGRADED with an
+    ACTIVE here means the removal alone causes it (Cluster.is_degraded_by_removal).
+    """
     logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
-        return Cluster.STATUS_UNREADY
+        return Cluster.STATUS_UNREADY, Cluster.STATUS_UNREADY
 
     # Phase 1: slow, RPC-dependent signals on a throwaway snapshot.
     probe_snapshot = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
@@ -284,7 +304,9 @@ def get_next_cluster_status(cluster_id):
     offline_devices = 0
     jm_replication_tasks = False
 
-    affected_physical_nodes = []
+    affected_physical_nodes: list[str] = []
+    # Hosts affected only through a node that is being removed (see above).
+    removal_affected_ips: list[str] = []
 
     # One task-table fetch for the whole verdict: is_new_migrated_node runs
     # once per ONLINE node below and used to re-fetch the full per-cluster
@@ -298,6 +320,24 @@ def get_next_cluster_status(cluster_id):
 
         if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED]:
             continue
+
+        if node.status in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+            pending = [d for d in node.nvme_devices
+                       if d.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED]
+            if pending:
+                offline_nodes += 1
+                offline_devices += len(pending)
+                if node.mgmt_ip not in removal_affected_ips:
+                    removal_affected_ips.append(node.mgmt_ip)
+            continue
+
+        # A PENDING_REMOVAL node may still be serving, so it goes through the
+        # ordinary counting below. But once it does count as affected, that is
+        # the removal's own shutdown (prepare_node_for_removal stops it before
+        # it reaches MIGRATING_DEVICES), not an outage beside the removal.
+        affected_hosts = (removal_affected_ips
+                          if node.status == StorageNode.STATUS_PENDING_REMOVAL
+                          else affected_physical_nodes)
 
         if node.status == StorageNode.STATUS_ONLINE:
             if is_new_migrated_node(cluster_id, node, tasks=cluster_tasks):
@@ -326,8 +366,8 @@ def get_next_cluster_status(cluster_id):
                 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED)
                 or node.status == StorageNode.STATUS_OFFLINE):
             affected_nodes += 1
-            if node.mgmt_ip not in affected_physical_nodes:
-                affected_physical_nodes.append(node.mgmt_ip)
+            if node.mgmt_ip not in affected_hosts:
+                affected_hosts.append(node.mgmt_ip)
         elif node.status == StorageNode.STATUS_OFFLINE:
             # OFFLINE is a terminal mgmt escalation: data-plane loss was
             # already confirmed (_check_data_plane_and_escalate), the node
@@ -338,8 +378,8 @@ def get_next_cluster_status(cluster_id):
             # states) gates suspension on RPC probes against a node that is
             # already declared gone, and returns ACTIVE for whole-domain
             # outages (2026-07 failure-domain suspend regressions).
-            if node.mgmt_ip not in affected_physical_nodes:
-                affected_physical_nodes.append(node.mgmt_ip)
+            if node.mgmt_ip not in affected_hosts:
+                affected_hosts.append(node.mgmt_ip)
         elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
                                  StorageNode.STATUS_DOWN]:
             # Non-ONLINE (UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN / RESTARTING)
@@ -366,19 +406,33 @@ def get_next_cluster_status(cluster_id):
             # that entered a transient state after the probe pass defaults
             # to "connected" (don't count) — same conservative bias as the
             # inline probe had, and the next fast tick re-evaluates it.
-            if (node.mgmt_ip not in affected_physical_nodes
+            if (node.mgmt_ip not in affected_hosts
                     and dp_quorum_by_node.get(node.get_id(), False)):
-                affected_physical_nodes.append(node.mgmt_ip)
+                affected_hosts.append(node.mgmt_ip)
 
         online_devices += node_online_devices
         offline_devices += node_offline_devices
 
-    affected_nodes = len(affected_physical_nodes)
+    affected_all = affected_physical_nodes + [
+        ip for ip in removal_affected_ips if ip not in affected_physical_nodes]
     logger.debug(f"online_nodes: {online_nodes}")
     logger.debug(f"offline_nodes: {offline_nodes}")
-    logger.debug(f"affected_nodes: {affected_nodes}")
+    logger.debug(f"affected_nodes: {len(affected_all)} "
+                 f"({len(removal_affected_ips)} through a removal)")
     logger.debug(f"online_devices: {online_devices}")
     logger.debug(f"offline_devices: {offline_devices}")
+    status = _status_verdict(cluster, snodes, affected_all, online_nodes,
+                             online_devices, jm_replication_tasks)
+    if not removal_affected_ips:
+        return status, status
+    return status, _status_verdict(cluster, snodes, affected_physical_nodes,
+                                   online_nodes, online_devices, jm_replication_tasks)
+
+
+def _status_verdict(cluster, snodes, affected_physical_nodes, online_nodes,
+                    online_devices, jm_replication_tasks):
+    """The cluster status for one set of affected hosts."""
+    affected_nodes = len(affected_physical_nodes)
     # ndcs n = 2
     # npcs k = 1
     n = cluster.distr_ndcs
@@ -955,19 +1009,26 @@ def _update_cluster_status_impl(cluster_id):
     # a re-admitted device stops counting toward affected_nodes on this tick.
     _readmit_stranded_devices(cluster_id)
 
-    next_current_status = get_next_cluster_status(cluster_id)
+    next_current_status, status_without_removal = _cluster_status_verdicts(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
+    degraded_by_removal = (next_current_status == Cluster.STATUS_DEGRADED
+                           and status_without_removal == Cluster.STATUS_ACTIVE)
+    shrinking = any(n.status in StorageNode.REMOVAL_IN_PROGRESS_STATUSES
+                    for n in db.get_storage_nodes_by_cluster_id(cluster_id))
 
     is_re_balancing, is_data_rebalancing, active_lvol_migrations = _rebalancing_flags(
         db.get_job_tasks(cluster_id))
     cluster = db.get_cluster_by_id(cluster_id)
     # Atomic: a full write here would clobber a concurrent cluster.status change
     # committed by set_cluster_status (same lost-update class as incident
-    # 2026-06-18). Mutate only is_re_balancing on the freshly-read row.
-    def _set_rebalancing_flags(c, rb=is_re_balancing, drb=is_data_rebalancing, lm=active_lvol_migrations):
+    # 2026-06-18). Mutate only the flags on the freshly-read row.
+    def _set_rebalancing_flags(c, rb=is_re_balancing, drb=is_data_rebalancing, lm=active_lvol_migrations,
+                               sh=shrinking, dbr=degraded_by_removal):
         c.is_re_balancing = rb
         c.is_data_rebalancing = drb
         c.active_lvol_migrations = lm
+        c.is_shrinking = sh
+        c.is_degraded_by_removal = dbr
 
     cluster = db.atomic_update(cluster, _set_rebalancing_flags)
 
