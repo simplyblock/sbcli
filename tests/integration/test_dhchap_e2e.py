@@ -342,7 +342,7 @@ class TestDHCHAPE2E(unittest.TestCase):
         dhchap_ctrlr_key = generate_dhchap_key()
 
         # Create subsystem
-        rpc_client._request("nvmf_create_subsystem", {"nqn": subsys_nqn})
+        rpc_client._request3("nvmf_create_subsystem", nqn=subsys_nqn)
 
         # Write key files
         safe_host = host_nqn.replace(":", "_").replace(".", "_")

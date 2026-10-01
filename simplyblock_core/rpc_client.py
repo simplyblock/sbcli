@@ -328,10 +328,6 @@ class RPCClient:
         self.retry = retry
         self.session = _session_pool.get(host, port, username, password, retry, settings)
 
-    def _request(self, method, params=None, request_timeout=None):
-        ret, _ = self._request2(method, params, request_timeout=request_timeout)
-        return ret
-
     def _request2(self, method, params=None, request_timeout=None):
         payload: dict = {'id': 1, 'method': method}
         if params:
