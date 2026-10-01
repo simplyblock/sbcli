@@ -7,11 +7,16 @@ probes its controllers in another order hands each kernel name to another disk.
 So the operator sends the persistent name udev published, and the selection has
 to resolve it.
 
+A kernel name is therefore refused rather than resolved. sn_config_file is
+discarded and written whole on every configure, so nothing carries a resolution
+forward: the selector is the device's only durable identity and it is read again
+at every restart. Accepting a kernel name would mean the identity of a disk in a
+deployment is whichever disk the kernel enumerated into that position this boot.
+
 Covered:
-  - filter_eligible_block_devices: a selector that is a path is matched against
-    the device's own paths -- its kernel path and every /dev/disk link it
-    answers to -- while a bare name is matched against the kernel name as
-    before.
+  - filter_eligible_block_devices: a selector is matched against every
+    persistent /dev/disk link the device answers to, and a kernel name or
+    kernel path is a hard error that says what to use instead.
   - Both selection channels that take names: include and exclude.
   - The hard error a requested-but-absent persistent name produces, spelled the
     way the caller spelled it.
@@ -105,15 +110,42 @@ class TestSelectionByPersistentName(unittest.TestCase):
             devices, include_names=[SDB_BY_PATH])
         self.assertEqual([d["name"] for d in selected], ["sdb"])
 
-    def test_a_kernel_path_still_selects(self):
-        selected, _ = utils.filter_eligible_block_devices(
-            self._fleet(), include_names=["/dev/sdb"])
-        self.assertEqual([d["name"] for d in selected], ["sdb"])
+    def test_a_bare_kernel_name_is_refused(self):
+        # sn_config_file is discarded and regenerated on every configure, so the
+        # selector is the only durable identity a device has in a deployment and
+        # it is resolved again at every node restart. A kernel name there is
+        # resolved against whatever order the controllers came up in this time.
+        with self.assertRaises(ValueError) as caught:
+            utils.filter_eligible_block_devices(self._fleet(), include_names=["sdb"])
+        self.assertIn("sdb", str(caught.exception))
 
-    def test_a_bare_kernel_name_still_selects(self):
-        selected, _ = utils.filter_eligible_block_devices(
-            self._fleet(), include_names=["sdb"])
-        self.assertEqual([d["name"] for d in selected], ["sdb"])
+    def test_a_kernel_path_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            utils.filter_eligible_block_devices(self._fleet(), include_names=["/dev/sdb"])
+        self.assertIn("/dev/sdb", str(caught.exception))
+
+    def test_the_refusal_names_what_the_device_does_answer_to(self):
+        # A refusal nobody can act on is a refusal that costs a trip to
+        # `ls -l /dev/disk/by-id`, so it carries the names to use instead.
+        with self.assertRaises(ValueError) as caught:
+            utils.filter_eligible_block_devices(self._fleet(), include_names=["sdb"])
+        self.assertIn(SDB_BY_ID, str(caught.exception))
+
+    def test_a_kernel_name_in_the_exclude_list_is_refused(self):
+        # The exclude list is the worse half. A name that fails to match does
+        # not fail loudly: it stops excluding, and the disk somebody named to
+        # protect is taken and formatted.
+        with self.assertRaises(ValueError) as caught:
+            utils.filter_eligible_block_devices(self._fleet(), exclude_names=["sda"])
+        self.assertIn("sda", str(caught.exception))
+
+    def test_a_device_with_no_persistent_name_cannot_be_selected_by_one(self):
+        # Nothing to fall back on: a device udev published no link for has no
+        # identity to record, and the refusal says which channel does carry one.
+        devices = [_blk("sdb", paths=[])]
+        with self.assertRaises(ValueError) as caught:
+            utils.filter_eligible_block_devices(devices, include_names=["sdb"])
+        self.assertIn("--blk-serials", str(caught.exception))
 
     def test_an_absent_persistent_name_is_a_hard_error_spelled_as_given(self):
         missing = "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi9"

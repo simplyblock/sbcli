@@ -1791,15 +1791,22 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
 
 
 def device_selectors(dev) -> set:
-    """Every spelling one block device answers to in a selection.
+    """Every spelling one block device may be selected by.
 
-    Three kinds, and the caller does not have to say which it is using. The
-    kernel name (``sdb``) and the kernel path (``/dev/sdb``) name a position in
-    this boot's enumeration order. The persistent /dev/disk links name the
-    device: on the lab workers, the disk the kernel calls sdb is the one the
-    hypervisor calls drive-scsi0 and sda is drive-scsi2, so a host that probes
-    its controllers in another order hands each kernel name to another disk
-    while the links follow the devices.
+    The persistent /dev/disk links, and only those. They are built from what the
+    device reports about itself and they follow it: on the lab workers the disk
+    the kernel calls sdb is the one the hypervisor calls drive-scsi0 and sda is
+    drive-scsi2, so a host that probes its controllers in another order hands
+    each kernel name to another disk while the links stay put.
+
+    The kernel name (``sdb``) and the kernel path (``/dev/sdb``) are not here.
+    They name a position in one boot's enumeration order, and a selection is not
+    resolved once: ``sn_config_file`` is discarded and written whole on every
+    configure, so nothing carries a resolution forward and the selector is read
+    again at every node restart. A kernel name in it means the identity of a disk
+    in a deployment is whichever disk the kernel enumerated into that position
+    this time, which is the defect persistent names exist to close rather than a
+    convenience to keep beside them.
 
     Every link the device answers to is a selector, not only the preferred one.
     The side that records a device and the side that looks it up again run
@@ -1808,11 +1815,41 @@ def device_selectors(dev) -> set:
     ``by_id_path`` is included beside ``by_id_paths`` so an inventory taken
     before the second existed still resolves.
     """
-    selectors = {dev.get("name", ""), dev.get("device_path", ""),
-                 dev.get("by_id_path", "")}
-    selectors.update(dev.get("by_id_paths") or [])
+    selectors = set(dev.get("by_id_paths") or [])
+    selectors.add(dev.get("by_id_path", ""))
     selectors.discard("")
     return selectors
+
+
+def _refuse_impersistent_names(names, devices, flag) -> None:
+    """Refuse a selector that is a kernel name, saying what to use instead.
+
+    The message carries the persistent names the device does answer to, so the
+    correction is a copy rather than a trip to ``ls -l /dev/disk/by-id``, and
+    names ``--blk-serials`` for a device udev published no link for: that device
+    has no persistent name to offer and its serial is the only identity it has.
+    """
+    impersistent = {}
+    for dev in devices:
+        for kernel in (dev.get("name", ""), dev.get("device_path", "")):
+            if kernel and kernel in names:
+                impersistent[kernel] = sorted(device_selectors(dev))
+    if not impersistent:
+        return
+
+    parts = []
+    for kernel, persistent in sorted(impersistent.items()):
+        if persistent:
+            parts.append(f"{kernel} (use {' or '.join(persistent)})")
+        else:
+            parts.append(f"{kernel} (udev published no persistent name for it; "
+                         f"select it with --blk-serials instead)")
+    raise ValueError(
+        f"{flag} takes a persistent /dev/disk name, and these are kernel names: "
+        f"{', '.join(parts)}. A kernel name is a position in this boot's "
+        f"enumeration order, and the selection is resolved again at every node "
+        f"restart, so it names another disk after a reboot that probes the "
+        f"controllers in another order")
 
 
 def _index_by_selector(devices) -> dict:
@@ -1857,10 +1894,10 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
     eligible whole disk is taken (partitions are never auto-selected — they
     must be requested explicitly by name or serial).
 
-    The two name channels take any spelling a device answers to: its kernel
-    name, its kernel path, or one of the persistent /dev/disk links udev
-    published for it. ``device_selectors`` is where that set is built, and says
-    why the last is the spelling a deployment records.
+    The two name channels take a persistent /dev/disk name and refuse a kernel
+    name or kernel path, because the selection is re-resolved at every node
+    restart and a kernel name does not survive one. ``device_selectors`` is
+    where that set is built and says why the kernel spellings are gone.
 
     Returns ``(eligible_devices, rejected)`` where rejected is a list of
     ``(device_dict, reason)``. Raises ValueError on a requested-but-
@@ -1897,6 +1934,9 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
             rejected.append((dev, reason))
         else:
             eligible.append(dev)
+
+    _refuse_impersistent_names(include_names, devices, "--blk-names")
+    _refuse_impersistent_names(exclude_names, devices, "--blk-names-exclude")
 
     by_selector = _index_by_selector(eligible)
     rejected_by_selector = {
