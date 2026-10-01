@@ -4083,6 +4083,33 @@ def demote_lvol(lvol_id):
         replication_final_step.fence_source_paths(
             source_node, source_node.lvstore, lvol.nqn, lvol.ns_id)
 
+        rep = _replication_for_lvol(db_controller, lvol_id)
+
+        if (rep is not None and rep.state == LVolReplication.STATE_FAILED_OVER
+                and rep.source_lvol and rep.source_lvol.get_id() == lvol_id):
+            # The SOURCE side of an unplanned failover being demoted: the
+            # recovered old primary that Ramen is making Secondary before a
+            # relocate home. It is SUPERSEDED -- the target's clone already
+            # carries every post-failover write -- so there is nothing to ship.
+            # Taking a demote snapshot here would wait forever for a reverse pipe
+            # that does not exist. Fence (done above) and mark demoted at once,
+            # the same net effect as a standalone recovered source's unprotect.
+            #
+            # Keyed on the relationship state alone, NOT on do_replicate: an
+            # UNPLANNED failover shuts this source's data plane down, so
+            # replication_stop never runs to clear do_replicate and the recovered
+            # old primary comes back with it still set. Gating this branch on
+            # do_replicate=False missed exactly that case -- the single volume
+            # happened to come back clear, but a consistency group's members did
+            # not, so demote_group fell to ship-home and never converged ("group
+            # demote is still converging" indefinitely, live 2026-09-27 /
+            # 2026-10-01). A planned-relocate source is never FAILED_OVER, so it
+            # never enters here. Clear the stale forward flag so nothing reuses it.
+            lvol.do_replicate = False
+            lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+            lvol.write_to_db(db_controller.kv_store)
+            return {"demoted": True}
+
         # Relocating HOME after an unplanned failover demotes the failed-over
         # clone -- but the failover severed its forward pipe (replication_stop
         # left do_replicate=False, replication_node_id=""), so the demote
@@ -4094,27 +4121,11 @@ def demote_lvol(lvol_id):
         # source's own promote can clone from it. A volume still replicating
         # forward (the planned-relocate path) already has a live pipe and needs
         # none of this.
-        if not lvol.do_replicate:
-            rep = _replication_for_lvol(db_controller, lvol_id)
-            if rep is not None and rep.state == LVolReplication.STATE_FAILED_OVER:
-                if rep.target_lvol and rep.target_lvol.get_id() == lvol_id:
-                    replication_failback(lvol_id)
-                    lvol = db_controller.get_lvol_by_id(lvol_id)
-                elif rep.source_lvol and rep.source_lvol.get_id() == lvol_id:
-                    # The SOURCE side of an unplanned failover being demoted: the
-                    # recovered old primary that Ramen is making Secondary before
-                    # a relocate home. It is SUPERSEDED -- the target's clone
-                    # already carries every post-failover write -- so there is
-                    # nothing to ship. Taking a demote snapshot here would wait
-                    # forever for a reverse pipe that does not exist (do_replicate
-                    # is False and this side has no fail-back to configure). Fence
-                    # (done above) and mark demoted at once, the same net effect
-                    # as a standalone recovered source's unprotect. Without this
-                    # the whole group demote never converges ("group demote is
-                    # still converging" indefinitely, live 2026-09-27).
-                    lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
-                    lvol.write_to_db(db_controller.kv_store)
-                    return {"demoted": True}
+        if (not lvol.do_replicate and rep is not None
+                and rep.state == LVolReplication.STATE_FAILED_OVER
+                and rep.target_lvol and rep.target_lvol.get_id() == lvol_id):
+            replication_failback(lvol_id)
+            lvol = db_controller.get_lvol_by_id(lvol_id)
 
         snap_id, err = snapshot_controller.add(
             lvol_id, f"demote_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)

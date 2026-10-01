@@ -637,12 +637,20 @@ def _members_are_superseded_source(members):
     """True when every member is the SOURCE side of a failed-over relationship --
     the recovered old primary after an unplanned failover. Such a source is
     superseded (the peer's clone already holds every post-failover write), so it
-    demotes by fencing alone, with nothing to ship."""
+    demotes by fencing alone, with nothing to ship.
+
+    The discriminator is the relationship state alone: being the SOURCE of a
+    FAILED_OVER relationship. do_replicate is deliberately NOT required to be
+    clear -- an UNPLANNED failover shuts the source's data plane down, so
+    replication_stop never runs to clear it, and the recovered old primary comes
+    back with do_replicate still True. Gating on do_replicate=False missed exactly
+    that case, so demote_group fell to the ship-home path and never converged
+    ("group demote is still converging" indefinitely, 2026-10-01). A
+    planned-relocate source -- the live-pipe case that gate was protecting -- is
+    never FAILED_OVER, so the state check already excludes it."""
     from simplyblock_core.controllers import lvol_controller
     from simplyblock_core.models.lvol_model import LVolReplication
     for m in members:
-        if getattr(m, "do_replicate", False):
-            return False
         rep = lvol_controller._replication_for_lvol(db, m.get_id())
         if rep is None or rep.state != LVolReplication.STATE_FAILED_OVER:
             return False
