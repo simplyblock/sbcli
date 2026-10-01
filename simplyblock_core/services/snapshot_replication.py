@@ -761,13 +761,14 @@ def _counterpart_on_destination(snapshot, remote_node):
     snapshot). Only a copy on the destination's own lvstore counts: a chain
     can only be built on a snapshot in the same lvstore.
     """
-    if not snapshot.data_uuid or not remote_node.lvstore:
+    lvstore = getattr(remote_node, "lvstore", "")
+    if not snapshot.data_uuid or not lvstore:
         return None
     for cand in db.get_snapshots(remote_node.cluster_id):
         if (cand.get_id() != snapshot.get_id()
                 and cand.data_uuid == snapshot.data_uuid
                 and cand.status != SnapShot.STATUS_IN_DELETION
-                and cand.lvol and cand.lvol.lvs_name == remote_node.lvstore):
+                and cand.lvol and cand.lvol.lvs_name == lvstore):
             return cand
     return None
 
