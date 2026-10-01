@@ -14,7 +14,7 @@ import uuid as uuid_module
 from simplyblock_core import db_controller as db_module, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVolReplication
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core import snapshot_retention
 from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
@@ -360,6 +360,25 @@ def detach_policy(lvol_id):
 
     # Stops streaming and cancels the non-DONE FN_SNAPSHOT_REPLICATION tasks.
     lvol_controller.replication_stop(lvol_id, from_policy=True)
+
+    if lvol.replication_demote_state in (LVol.REPLICATION_DEMOTE_PENDING,
+                                         LVol.REPLICATION_DEMOTE_DONE):
+        # A demoted volume is a fail-over source whose successor is being
+        # (or is about to be) cloned on the other side from the newest
+        # replicated copy. That copy's data lives in its CHAIN -- every
+        # internal snapshot below it -- so none of them may go while the
+        # volume is demoted: Ramen's relocate deletes the source side's
+        # VolumeReplication right after the demote, the driver turns that
+        # into this detach, and the purge deleted the 13 ancestors of the
+        # fail-over point 13 seconds before the promote cloned from it
+        # (2026-10-01, wp-db on the real test bed). The chain goes with the
+        # volume: the promote deletes the demoted predecessor, and
+        # delete_lvol takes its snapshots along.
+        logger.info("Volume %s detached from its replication policy; it is "
+                    "demoted (%s), so its internal replication snapshots stay "
+                    "until the volume itself is deleted",
+                    lvol_id, lvol.replication_demote_state)
+        return True
 
     removed = _purge_internal_replication_snapshots(lvol_id)
     logger.info("Volume %s detached from its replication policy (%d internal "

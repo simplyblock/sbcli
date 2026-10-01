@@ -379,6 +379,28 @@ def test_detach_refused_while_a_cutover_is_in_flight(monkeypatch):
     assert db.get_lvol_by_id("LV1").replication_policy_id == "CL_SRC/P1", "must not be cleared"
 
 
+def test_detach_of_a_demoted_volume_keeps_its_chain(monkeypatch):
+    """Relocate, 2026-10-01: Ramen deletes the demoted side's
+    VolumeReplication -> DisableVolumeReplication -> detach. The purge then
+    deleted the fail-over point's 13 ancestors 13 s before the promote on the
+    other side cloned from it. A demoted volume keeps every internal
+    snapshot; they go with the volume when the promote deletes it."""
+    for state in (LVol.REPLICATION_DEMOTE_PENDING, LVol.REPLICATION_DEMOTE_DONE):
+        lv = _lvol("LV1", policy_id="CL_SRC/P1", demote_snapshot_id="DEMOTE_SNAP")
+        lv.replication_demote_state = state
+        db = _FakeDB(lvols=[lv])
+        _install(monkeypatch, db)
+        monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+        stopped: list[str] = []
+        purged: list[str] = []
+        monkeypatch.setattr(rpc.lvol_controller, "replication_stop", _recording(stopped))
+        monkeypatch.setattr(rpc, "_purge_internal_replication_snapshots", _recording(purged))
+        assert rpc.detach_policy("LV1") is True
+        assert stopped == ["LV1"]
+        assert purged == [], f"a {state} volume's chain must survive the detach"
+        assert db.get_lvol_by_id("LV1").replication_policy_id == ""
+
+
 def test_detach_stops_and_purges_both_sides(monkeypatch):
     lv = _lvol("LV1", policy_id="CL_SRC/P1")
     db = _FakeDB(lvols=[lv])
