@@ -164,8 +164,8 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         self.mock_reconcile.return_value = ["refreshed-records"]
 
         # Batched probe uses the controllers inventory (2026-07-27); an empty
-        # inventory means "fetch failed -> per-device filtered get_bdevs
-        # fallback", which is the behavior most tests here stub via get_bdevs.
+        # inventory means "fetch failed -> per-device filtered bdev_get
+        # fallback", which is the behavior most tests here stub via bdev_get.
         self.rpc.bdev_nvme_controller_list.return_value = []
 
     def _set_cluster(self, *peers):
@@ -191,7 +191,7 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         offline = _make_node("node-c", status=StorageNode.STATUS_OFFLINE)
         offline.nvme_devices = [_make_dev("dev-2", "node-c")]
         self._set_cluster(restarting, offline)
-        self.rpc.get_bdevs.return_value = []  # nothing attached at all
+        self.rpc.bdev_get.return_value = None  # nothing attached at all
 
         missing = storage_node_ops._verify_online_device_coverage(self.snode)
 
@@ -225,7 +225,7 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         peer = _make_node("node-b")
         peer.nvme_devices = [_make_dev("dev-1", "node-b")]
         self._set_cluster(peer)
-        self.rpc.get_bdevs.return_value = []  # absent before AND after repair
+        self.rpc.bdev_get.return_value = None  # absent before AND after repair
 
         missing = storage_node_ops._verify_online_device_coverage(self.snode)
 
@@ -238,7 +238,7 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         peer = _make_node("node-b")
         peer.nvme_devices = [_make_dev("dev-1", "node-b")]
         self._set_cluster(peer)
-        self.rpc.get_bdevs.return_value = []
+        self.rpc.bdev_get.return_value = None
 
         missing = storage_node_ops._verify_online_device_coverage(
             self.snode, repair=False)

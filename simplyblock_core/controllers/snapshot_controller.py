@@ -768,12 +768,12 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             if not ret:
                 return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
-            snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
+            snap_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{snap_bdev_name}")
             if snap_bdev:
-                snap_uuid = snap_bdev[0]['uuid']
-                blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+                snap_uuid = snap_bdev['uuid']
+                blobid = snap_bdev['driver_specific']['lvol']['blobid']
                 cluster_size = cluster.page_size_in_blocks
-                num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+                num_allocated_clusters = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
                 used_size = int(num_allocated_clusters*cluster_size)
         else:
             msg = f"Host node is not online {snode.get_id()}"
@@ -857,12 +857,12 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 # the lock exists to keep lvstore mutations from interleaving,
                 # and holding it across this read serialized every other
                 # waiter behind a query that mutates nothing.
-                snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
+                snap_bdev = rpc_client.bdev_get(f"{lvol.lvs_name}/{snap_bdev_name}")
                 if snap_bdev:
-                    snap_uuid = snap_bdev[0]['uuid']
-                    blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+                    snap_uuid = snap_bdev['uuid']
+                    blobid = snap_bdev['driver_specific']['lvol']['blobid']
                     cluster_size = cluster.page_size_in_blocks
-                    num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+                    num_allocated_clusters = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
                     used_size = int(num_allocated_clusters*cluster_size)
                 else:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"

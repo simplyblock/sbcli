@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import simplyblock_core.services.tasks_runner_lvol_migration as runner
+from simplyblock_core.rpc_client import RPCClient
 
 
 def _snap(size=10 * 1024 ** 3):
@@ -38,11 +39,11 @@ def _node(node_id, lvstore):
 def _setup(existing_bdev_info):
     src_node = _node("src-node", "LVS_7")
     tgt_node = _node("tgt-node", "LVS_1")
-    src_rpc = MagicMock()
-    tgt_rpc = MagicMock()
+    src_rpc = MagicMock(spec=RPCClient)
+    tgt_rpc = MagicMock(spec=RPCClient)
     short = runner._snap_tgt_short_name(_snap())
-    bdev = [{"uuid": "u", "driver_specific": {"lvol": {"blobid": 1}}}]
-    tgt_rpc.get_bdevs.return_value = bdev
+    bdev = {"uuid": "u", "driver_specific": {"lvol": {"blobid": 1}}}
+    tgt_rpc.bdev_get.return_value = bdev
     tgt_rpc.create_lvol.return_value = True
     tgt_rpc.bdev_lvol_set_migration_flag.return_value = True
     tgt_rpc.bdev_lvol_get_lvols.return_value = [{"name": short, "map_id": 7}]

@@ -927,7 +927,7 @@ def cleanup_migration_target(migration_id):
             errors.append({**tag, "bdev": bdev_path, "error": "Internal error during cleanup operation"})
             return
         try:
-            if not primary_rpc.get_bdevs(bdev_path):
+            if not primary_rpc.bdev_get(bdev_path):
                 not_found.append({**tag, "bdev": bdev_path})
                 return
             lvs_name = bdev_path.split('/', 1)[0]
@@ -984,7 +984,7 @@ def cleanup_migration_target(migration_id):
         bdev_name = next(
             (f"{lvstore}/{n}"
              for n in (short_m, short_base, short_base + _DONE_SUFFIX)
-             if primary_rpc.get_bdevs(f"{lvstore}/{n}")),
+             if primary_rpc.bdev_get(f"{lvstore}/{n}")),
             None,
         )
         if bdev_name:
@@ -1270,7 +1270,7 @@ def create_migration(lvol_id, target_node_id,
     tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
 
     # ── 1. Bdev ──────────────────────────────────────────────────────────────
-    _bdev_info = tgt_rpc.get_bdevs(composite)
+    _bdev_info = tgt_rpc.bdev_get(composite)
     if not _bdev_info:
         ok, err = _ensure_lvstore_primary_leader(tgt_rpc, tgt_node.lvstore, target_node_id)
         if not ok:
@@ -1282,17 +1282,17 @@ def create_migration(lvol_id, target_node_id,
         if not ret:
             raise ValueError(f"bdev_lvol_create failed for {composite} on {target_node_id}")
         logger.info(f"create_migration: created bdev {composite}")
-        _bdev_info = tgt_rpc.get_bdevs(composite)
+        _bdev_info = tgt_rpc.bdev_get(composite)
     else:
         logger.info(f"create_migration: bdev {composite} already exists — skipping create")
 
     # ── 1b. Get bdev info for secondary registration ──────────────────────────
     _tgt_blobid = None
     _tgt_uuid   = None
-    if _bdev_info and isinstance(_bdev_info[0], dict):
-        _tgt_blobid = (_bdev_info[0].get('driver_specific', {})
+    if _bdev_info and isinstance(_bdev_info, dict):
+        _tgt_blobid = (_bdev_info.get('driver_specific', {})
                        .get('lvol', {}).get('blobid'))
-        _tgt_uuid   = _bdev_info[0].get('uuid')
+        _tgt_uuid   = _bdev_info.get('uuid')
 
     # ── 1c. Set migration flag on TGT-prim ────────────────────────────────────
     if not tgt_rpc.bdev_lvol_set_migration_flag(composite):
@@ -1307,7 +1307,7 @@ def create_migration(lvol_id, target_node_id,
             _pre_sec_node = _target_replica_for_registration(tgt_node.secondary_node_id, "secondary", composite)
             if _pre_sec_node is not None:
                 _sec_rpc_reg  = _pre_sec_node.rpc_client()
-                if _sec_rpc_reg.get_bdevs(composite):
+                if _sec_rpc_reg.bdev_get(composite):
                     logger.info(
                         f"create_migration: {composite} already on secondary "
                         f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
@@ -1337,7 +1337,7 @@ def create_migration(lvol_id, target_node_id,
             _pre_ter_node = _target_replica_for_registration(tgt_node.tertiary_node_id, "tertiary", composite)
             if _pre_ter_node is not None:
                 _ter_rpc_reg  = _pre_ter_node.rpc_client()
-                if _ter_rpc_reg.get_bdevs(composite):
+                if _ter_rpc_reg.bdev_get(composite):
                     logger.info(
                         f"create_migration: {composite} already on tertiary "
                         f"{_pre_ter_node.get_id()} — skipping bdev_lvol_register")
@@ -1453,7 +1453,7 @@ def create_migration(lvol_id, target_node_id,
         _ns_bdev = composite
         if lvol.crypto_bdev:
             _crypto_short = f"crypto_{bdev_short}"
-            if _rpc.get_bdevs(_crypto_short):
+            if _rpc.bdev_get(_crypto_short):
                 logger.info(f"create_migration: crypto bdev {_crypto_short} "
                             f"already exists on {_node_id[:8]}")
                 _ns_bdev = _crypto_short

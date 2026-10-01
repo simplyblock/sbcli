@@ -518,14 +518,14 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
         created_ids: list = []
         for p in plan:
             lvol = p["lvol"]
-            snap_bdev = rpc_client.get_bdevs(f"{group.lvs_name}/{p['snap_bdev_name']}")
+            snap_bdev = rpc_client.bdev_get(f"{group.lvs_name}/{p['snap_bdev_name']}")
             if not snap_bdev:
                 _rollback_all()
                 return None, (f"group snapshot {p['snap_bdev_name']} not readable "
                               f"after creation")
-            p["snap_uuid"] = snap_bdev[0]["uuid"]
-            p["blobid"] = snap_bdev[0]["driver_specific"]["lvol"]["blobid"]
-            num_allocated = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+            p["snap_uuid"] = snap_bdev["uuid"]
+            p["blobid"] = snap_bdev["driver_specific"]["lvol"]["blobid"]
+            num_allocated = snap_bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
             p["used_size"] = int(num_allocated * cluster.page_size_in_blocks)
 
             for sec in secondary_nodes:

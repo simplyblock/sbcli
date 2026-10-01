@@ -59,6 +59,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError, DbLockUnavailableError
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import (
@@ -239,7 +240,7 @@ def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
 def _rpc_bdev_exists(rpc_client, name):
     """True iff a bdev with the given name is visible to SPDK."""
     try:
-        ret = rpc_client.get_bdevs(name)
+        ret = rpc_client.bdev_get(name)
         return bool(ret)
     except Exception:
         return False
@@ -851,7 +852,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
     # paths must not dump the whole table to check one name.
     if not is_multipath:
         bdev_name = f"{name}n1"
-        if rpc_client.get_bdevs(bdev_name):
+        if rpc_client.bdev_get(bdev_name):
             logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev_name}")
             return bdev_name
 
@@ -966,7 +967,7 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
             raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
-            ret = rpc_client.get_bdevs(bdev_name)
+            ret = rpc_client.bdev_get(bdev_name)
             if ret:
                 bdev_found = True
                 break
@@ -1022,7 +1023,7 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
                     "Controller %s still missing paths after attach: %s (now %d/%d)",
                     name, still_missing, len(now_attached), len(expected_ips))
 
-    if rpc_client.get_bdevs(bdev_name):
+    if rpc_client.bdev_get(bdev_name):
         return bdev_name
     return None
 
@@ -1199,9 +1200,7 @@ def get_next_physical_device_order(snode, exclude_node_id=None):
 def _search_for_partitions(rpc_client, nvme_device):
     partitioned_devices = []
     # Node-add cold path: full dump is fine here, the node carries no lvols yet.
-    bdevs = rpc_client.get_bdevs(all_bdevs=True)
-    if bdevs is None:
-        raise RPCException(f"get_bdevs failed on {rpc_client.host}")
+    bdevs = rpc_client.bdev_list()
     for bdev in bdevs:
         name = bdev['name']
         if name.startswith(f"{nvme_device.nvme_bdev}p"):
@@ -1351,7 +1350,11 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
 
-        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+        pt_bdev_info = rpc_client.bdev_get(pt_name)
+        if pt_bdev_info is None:
+            logger.error(f"Failed to read back pt bdev: {pt_name}")
+            return False
+        pt_spdk_uuid = pt_bdev_info["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -1373,12 +1376,12 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
         IP = next((iface.ip4_address for iface in snode.data_nics if iface.ip4_address), "")
         multipath = False
 
-    ret = rpc_client.get_bdevs(raid_bdev)
+    ret = rpc_client.bdev_get(raid_bdev)
 
     return JMDevice({
         'uuid': alceml_id,
         'device_name': jm_bdev,
-        'size': ret[0]["block_size"] * ret[0]["num_blocks"],
+        'size': ret["block_size"] * ret["num_blocks"],
         'status': JMDevice.STATUS_ONLINE,
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
@@ -1443,7 +1446,11 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
         if not ret:
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
-        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+        pt_bdev_info = rpc_client.bdev_get(pt_name)
+        if pt_bdev_info is None:
+            logger.error(f"Failed to read back pt bdev: {pt_name}")
+            return False
+        pt_spdk_uuid = pt_bdev_info["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -1534,7 +1541,11 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return None
 
-    pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+    pt_bdev_info = rpc_client.bdev_get(pt_name)
+    if pt_bdev_info is None:
+        logger.error(f"Failed to read back pt bdev: {pt_name}")
+        return None
+    pt_spdk_uuid = pt_bdev_info["aliases"][0]
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
@@ -1674,12 +1685,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     # create jm device
     jm_devices = []
     # Node-add cold path: full dump is fine here, the node carries no lvols yet.
-    bdevs = snode.rpc_client().get_bdevs(all_bdevs=True)
-    if bdevs is None:
-        # None means the RPC failed (timeout / non-200), not "no bdevs".
-        # Without this guard the comprehension below crashes with an opaque
-        # TypeError; raise a clear, catchable error instead.
-        raise RPCException(f"get_bdevs failed on node {snode.get_id()}")
+    bdevs = snode.rpc_client().bdev_list()
     bdevs_names = [d['name'] for d in bdevs]
     for nvme in new_devices:
         if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
@@ -1789,7 +1795,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
     if jm_device.jm_nvme_bdev_list:
         if len(jm_device.jm_nvme_bdev_list) == 1:
-            ret = rpc_client.get_bdevs(jm_device.jm_nvme_bdev_list[0])
+            ret = rpc_client.bdev_get(jm_device.jm_nvme_bdev_list[0])
             if not ret:
                 logger.error(f"BDev not found: {jm_device.jm_nvme_bdev_list[0]}")
                 jm_device.status = JMDevice.STATUS_REMOVED
@@ -1804,7 +1810,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
         jm_bdevs_found = []
         for bdev_name in jm_device.jm_nvme_bdev_list:
-            ret = rpc_client.get_bdevs(bdev_name)
+            ret = rpc_client.bdev_get(bdev_name)
             if ret:
                 logger.info(f"JM bdev found: {bdev_name}")
                 jm_bdevs_found.append(bdev_name)
@@ -1861,7 +1867,11 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
                 return False
 
-            pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+            pt_bdev_info = rpc_client.bdev_get(pt_name)
+            if pt_bdev_info is None:
+                logger.error(f"Failed to read back pt bdev: {pt_name}")
+                return False
+            pt_spdk_uuid = pt_bdev_info["aliases"][0]
             jm_device.pt_bdev_uuid = pt_spdk_uuid
             subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
             logger.info("creating subsystem %s", subsystem_nqn)
@@ -2005,9 +2015,9 @@ def _connect_to_remote_devs(
         # (2026-07-10 activation regression, all deploys after SFAM-2774).
         # Devices without the new field fall back to the name-based probe.
         if dev.pt_bdev_uuid:
-            ret = rpc_client.get_bdevs(dev.pt_bdev_uuid)
+            ret = rpc_client.bdev_get(dev.pt_bdev_uuid)
             if ret:
-                name = ret[0]["name"]
+                name = ret["name"]
                 # A remote attach must resolve to the attached nvme bdev,
                 # never to a local base bdev that shares the table.
                 if name.startswith("remote_"):
@@ -2018,7 +2028,7 @@ def _connect_to_remote_devs(
                     dev.pt_bdev_uuid, dev.get_id(), name, this_node.get_id())
         expected = f"remote_{dev.alceml_bdev}n1"
         try:
-            return expected if rpc_client.get_bdevs(expected) else ""
+            return expected if rpc_client.bdev_get(expected) else ""
         except Exception:
             return ""
 
@@ -2054,7 +2064,7 @@ def _connect_to_remote_devs(
     for dev, remote_bdev in pending.values():
         if not remote_bdev.remote_bdev and dev.get_id() in existing_remote_devices:
             existing_remote_device = existing_remote_devices[dev.get_id()]
-            if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+            if existing_remote_device.remote_bdev and rpc_client.bdev_get(existing_remote_device.remote_bdev):
                 remote_bdev.remote_bdev = existing_remote_device.remote_bdev
         if not remote_bdev.remote_bdev:
             logger.error(f"Failed to connect to remote device {dev.alceml_name}")
@@ -2105,7 +2115,7 @@ def _connect_to_remote_devs(
                     continue
             else:
                 try:
-                    if not rpc_client.get_bdevs(expected_bdev):
+                    if not rpc_client.bdev_get(expected_bdev):
                         continue
                 except Exception:
                     continue
@@ -2258,7 +2268,7 @@ def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
                     out[bdev] = dev
             else:
                 try:
-                    if not rpc_client.get_bdevs(bdev):
+                    if not rpc_client.bdev_get(bdev):
                         out[bdev] = dev
                 except Exception:
                     out[bdev] = dev
@@ -2321,7 +2331,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode):
             if _sweep_bdev_names is not None:
                 if expected_bdev not in _sweep_bdev_names:
                     continue
-            elif not rpc_client.get_bdevs(expected_bdev):
+            elif not rpc_client.bdev_get(expected_bdev):
                 continue
             remote_dev = remote_by_id.get(dev.get_id())
             if remote_dev:
@@ -2517,7 +2527,7 @@ def verify_jm_mesh_coverage(cluster_id, repair=True):
             if owner is not None and owner.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
-                present = bool(rpc_client.get_bdevs(remote_bdev))
+                present = bool(rpc_client.bdev_get(remote_bdev))
             except Exception:
                 present = False
             if not present:
@@ -2538,7 +2548,7 @@ def verify_jm_mesh_coverage(cluster_id, repair=True):
                     for entry in (fresh.remote_jm_devices or []):
                         if entry.node_id == owner_id and entry.remote_bdev:
                             try:
-                                fixed = bool(rpc_client.get_bdevs(entry.remote_bdev))
+                                fixed = bool(rpc_client.bdev_get(entry.remote_bdev))
                             except Exception:
                                 fixed = False
                             break
@@ -2707,15 +2717,15 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
             # otherwise every closure would share the loop's final values by
             # the time Retrying actually invokes it (ruff B023).
             for _ in range(1 if connect_failed else 10):
-                if remote_device.remote_bdev and rpc_client.get_bdevs(remote_device.remote_bdev):
+                if remote_device.remote_bdev and rpc_client.bdev_get(remote_device.remote_bdev):
                     return
-                if rpc_client.get_bdevs(expected_bdev):
+                if rpc_client.bdev_get(expected_bdev):
                     remote_device.remote_bdev = expected_bdev
                     return
                 time.sleep(0.5)
             if not remote_device.remote_bdev and org_dev.get_id() in existing_remote_jm_devices:
                 existing_remote_device = existing_remote_jm_devices[org_dev.get_id()]
-                if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+                if existing_remote_device.remote_bdev and rpc_client.bdev_get(existing_remote_device.remote_bdev):
                     remote_device.remote_bdev = existing_remote_device.remote_bdev
 
         try:
@@ -2934,40 +2944,6 @@ def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
         )
 
     return ha_jm_count
-
-
-def _acquire_cluster_add_lock_blocking(db_controller, cluster_id, owner, timeout=300, poll=2):
-    """Block until the per-cluster node-add mesh lock is held by ``owner``.
-
-    Returns True once acquired, or False if ``timeout`` seconds elapse without
-    acquiring (caller should fail the task so it is retried — failing here is
-    cheaper than re-running the whole node-local setup). A lock abandoned by a
-    crashed holder is reclaimed automatically once its heartbeat goes stale
-    (constants.CLUSTER_ADD_LOCK_TTL_SEC), so the effective wait is bounded even
-    if a holder died."""
-    deadline = time.time() + timeout
-    while True:
-        won, current_owner = db_controller.acquire_cluster_add_lock(cluster_id, owner)
-        if won:
-            return True
-        if time.time() >= deadline:
-            logger.error(
-                f"Timed out waiting for cluster node-add lock (held by {current_owner})")
-            return False
-        logger.info(f"Cluster node-add lock held by {current_owner}; waiting")
-        time.sleep(poll)
-
-
-def _cluster_add_lock_heartbeat(db_controller, cluster_id, owner, stop_event):
-    """Refresh the node-add lock until ``stop_event`` is set, so a long mesh
-    section on a large cluster isn't reclaimed out from under a live holder."""
-    while not stop_event.wait(constants.CLUSTER_ADD_LOCK_HEARTBEAT_SEC):
-        if not db_controller.refresh_cluster_add_lock(cluster_id, owner):
-            # Lost the lock (reclaimed after a stall). Stop heartbeating; the
-            # critical section will finish and its owner-scoped release is a
-            # no-op against whoever holds it now.
-            logger.warning("Lost cluster node-add lock heartbeat (reclaimed)")
-            return
 
 
 def _find_flagged_journal_device(snode, devices):
@@ -4342,21 +4318,152 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # the reverse-connect loop does full-object writes of *other* nodes,
         # and a correct A<->B mesh requires whoever runs second to observe the
         # first as ONLINE. So this whole block is serialized per cluster while
-        # the slow node-local setup above ran in parallel. A heartbeat keeps a
-        # long section on a large cluster from being reclaimed; the lock is
-        # always released (finally), including on the early `continue` and the
-        # reverse-connect failure path.
-        lock_owner = f"{socket.gethostname()}:{os.getpid()}:{node_uuid}"
-        if not _acquire_cluster_add_lock_blocking(
-                db_controller, cluster_id, lock_owner,
-                timeout=constants.CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC):
+        # the slow node-local setup above ran in parallel. DbLock heartbeats
+        # the lease so a long section on a large cluster is not reclaimed from
+        # a live holder; `with` releases it on every exit, including the
+        # early `continue` and the reverse-connect failure path.
+        mesh_lock = DbLock(
+            f"cluster_add/{cluster_id}",
+            timeout=constants.CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC)
+        try:
+            with mesh_lock:
+                # Assign the cluster-wide device ordering under the lock. Both
+                # physical_label and cluster_device_order are sequential cluster-
+                # wide counters (get_next_physical_device_order /
+                # get_next_cluster_device_order are read-max-then-+1 over all
+                # nodes). Computed in the parallel node-local section — as they were
+                # via addNvmeDevices() and _prepare_cluster_devices_*() — concurrent
+                # adds read the same "next free" value and collide, producing
+                # DUPLICATE ids / physical labels in the distr cluster map, which
+                # makes bdev_lvol_create_lvstore fail with "Input/output error" at
+                # activation. Recompute them here: the lock serializes adds and this
+                # node's devices are persisted (snode.write_to_db below) before the
+                # lock is released, so the next add sees them and picks the next
+                # free values. The provisional values assigned earlier are
+                # overwritten here before they are ever persisted.
+                snode.physical_label = 0 if cluster.is_single_node else get_next_physical_device_order(
+                    snode, exclude_node_id=snode.get_id())
+                dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
+                for dev in snode.nvme_devices:
+                    dev.physical_label = snode.physical_label
+                    if dev.status == NVMeDevice.STATUS_ONLINE:
+                        dev.cluster_device_order = dev_order
+                        dev_order += 1
+
+                logger.info("Connecting to remote devices")
+                remote_devices = _connect_to_remote_devs(snode)
+                snode.remote_devices = remote_devices
+
+                if snode.enable_ha_jm:
+                    logger.info("Connecting to remote JMs")
+                    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+
+                snode.write_to_db(kv_store)
+
+                # Route the IN_CREATION -> ONLINE transition through set_node_status
+                # rather than a raw status write. set_node_status enforces the
+                # _ALLOWED_PRE_STATUSES_FOR_ONLINE guard (OFFLINE -> ONLINE is rejected),
+                # so a concurrent/stale path can no longer clobber a freshly-detected
+                # OFFLINE back to ONLINE through this code -- the raw write here was the
+                # node-side stale re-online hole (incident 2026-06-24: node re-marked
+                # online seconds after the monitor downed it, undoing the OFFLINE and
+                # forcing a duplicate offline/auto-restart cycle). set_node_status also
+                # emits the status event, broadcasts to peers, and cancels stale
+                # auto-restart tasks -- all previously done by hand here.
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="monitor"):
+                    logger.error(
+                        f"Failed to bring node {snode.get_id()} ONLINE "
+                        f"(illegal transition from {snode.status})")
+                    return False
+
+                logger.info("Make other nodes connect to the node devices")
+                snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+                for node in snodes:
+                    if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                        continue
+                    try:
+                        node.remote_devices = _connect_to_remote_devs(node)
+                    except RuntimeError:
+                        logger.error('Failed to connect to remote devices')
+                        return False
+                    node.write_to_db(kv_store)
+
+                if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
+                                          Cluster.STATUS_IN_EXPANSION]:
+                    logger.warning(
+                        f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
+                    continue
+
+                logger.info("Sending cluster map add node")
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+                for node_index, node in enumerate(snodes):
+                    if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
+                        continue
+                    ret = distr_controller.send_cluster_map_add_node(snode, node)
+
+                # for dev in snode.nvme_devices:
+                #     if dev.status == NVMeDevice.STATUS_ONLINE:
+                #         device_controller.device_set_unavailable(dev.get_id())
+
+                # logger.info("Setting node status to suspended")
+                # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+                # logger.info("Done")
+
+                logger.info("Setting node status to Active")
+                set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
+
+                # In --expansion mode the expand-task runner triggers expansion
+                # migration explicitly *after* integrate_new_node_into_cluster has
+                # built the post-rotation lvstore_stack and flipped cluster status
+                # back to ACTIVE. Skipping it here avoids racing the half-built
+                # rotation and double-queueing.
+                if not expansion:
+                    for dev in snode.nvme_devices:
+                        if dev.status == NVMeDevice.STATUS_ONLINE:
+                            tasks_controller.add_new_device_mig_task(dev.get_id())
+                else:
+                    # Queue the integration HERE so every entry point gets it —
+                    # CLI, web API and the k8s node-add task runner all funnel
+                    # through add_node, but only clibase used to queue the
+                    # cluster-expand task, so CRD-driven adds completed without
+                    # the rebalance ever starting (2026-07-17, vm15).
+                    expand_task_id = tasks_controller.add_cluster_expand_task(
+                        cluster.get_id(), snode.get_id())
+                    if expand_task_id:
+                        logger.info(
+                            f"expansion: queued cluster-expand task "
+                            f"{expand_task_id} for {snode.get_id()}")
+                    else:
+                        logger.warning(
+                            f"expansion: a cluster-expand task is already open "
+                            f"for this cluster; node {snode.get_id()} will NOT "
+                            f"be integrated by it — re-add it after the current "
+                            f"expansion completes")
+
+                storage_events.snode_add(snode)
+
+                # Legacy (non --expansion) flow only: the follow-up
+                # cluster_ops.cluster_expand accepts IN_EXPANSION and flips back
+                # to ACTIVE when done. In --expansion mode the status must stay
+                # ACTIVE: integrate_new_node_into_cluster's preconditions require
+                # it and the executor owns the IN_EXPANSION transition itself —
+                # setting it here deadlocks the cluster-expand task ("cluster
+                # status is in_expansion, expansion requires active").
+                if not expansion:
+                    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+        except (DbLockBusyError, DbLockUnavailableError):
             # Nothing keeps driving this registration after the failure, but
             # the record written above stays in_creation — retries and
             # watchers read that as a live in-flight add (2026-07-16 perf
             # deploy: 20-minute ghost waits per retry). Tear down the same
             # way the stale-record path does: kill this node's SPDK and drop
-            # the record so a retry starts from a clean slate.
-            logger.error("Could not acquire cluster node-add lock; failing for retry")
+            # the record so a retry starts from a clean slate. DbLockBusyError/
+            # DbLockUnavailableError can only come from entering the lock (no
+            # other DbLock is taken inside this section), so this except can't
+            # accidentally swallow one from the body.
+            logger.exception("Could not acquire cluster node-add lock; failing for retry")
             try:
                 snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             except Exception:
@@ -4365,142 +4472,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             storage_events.snode_delete(snode)
             snode.remove(db_controller.kv_store)
             return False
-        stop_heartbeat = threading.Event()
-        hb_thread = threading.Thread(
-            target=_cluster_add_lock_heartbeat,
-            args=(db_controller, cluster_id, lock_owner, stop_heartbeat),
-            daemon=True)
-        hb_thread.start()
-        try:
-            # Assign the cluster-wide device ordering under the lock. Both
-            # physical_label and cluster_device_order are sequential cluster-
-            # wide counters (get_next_physical_device_order /
-            # get_next_cluster_device_order are read-max-then-+1 over all
-            # nodes). Computed in the parallel node-local section — as they were
-            # via addNvmeDevices() and _prepare_cluster_devices_*() — concurrent
-            # adds read the same "next free" value and collide, producing
-            # DUPLICATE ids / physical labels in the distr cluster map, which
-            # makes bdev_lvol_create_lvstore fail with "Input/output error" at
-            # activation. Recompute them here: the lock serializes adds and this
-            # node's devices are persisted (snode.write_to_db below) before the
-            # lock is released, so the next add sees them and picks the next
-            # free values. The provisional values assigned earlier are
-            # overwritten here before they are ever persisted.
-            snode.physical_label = 0 if cluster.is_single_node else get_next_physical_device_order(
-                snode, exclude_node_id=snode.get_id())
-            dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-            for dev in snode.nvme_devices:
-                dev.physical_label = snode.physical_label
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    dev.cluster_device_order = dev_order
-                    dev_order += 1
-
-            logger.info("Connecting to remote devices")
-            remote_devices = _connect_to_remote_devs(snode)
-            snode.remote_devices = remote_devices
-
-            if snode.enable_ha_jm:
-                logger.info("Connecting to remote JMs")
-                snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-
-            snode.write_to_db(kv_store)
-
-            # Route the IN_CREATION -> ONLINE transition through set_node_status
-            # rather than a raw status write. set_node_status enforces the
-            # _ALLOWED_PRE_STATUSES_FOR_ONLINE guard (OFFLINE -> ONLINE is rejected),
-            # so a concurrent/stale path can no longer clobber a freshly-detected
-            # OFFLINE back to ONLINE through this code -- the raw write here was the
-            # node-side stale re-online hole (incident 2026-06-24: node re-marked
-            # online seconds after the monitor downed it, undoing the OFFLINE and
-            # forcing a duplicate offline/auto-restart cycle). set_node_status also
-            # emits the status event, broadcasts to peers, and cancels stale
-            # auto-restart tasks -- all previously done by hand here.
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="monitor"):
-                logger.error(
-                    f"Failed to bring node {snode.get_id()} ONLINE "
-                    f"(illegal transition from {snode.status})")
-                return False
-
-            logger.info("Make other nodes connect to the node devices")
-            snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-            for node in snodes:
-                if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-                    continue
-                try:
-                    node.remote_devices = _connect_to_remote_devs(node)
-                except RuntimeError:
-                    logger.error('Failed to connect to remote devices')
-                    return False
-                node.write_to_db(kv_store)
-
-            if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
-                                      Cluster.STATUS_IN_EXPANSION]:
-                logger.warning(
-                    f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
-                continue
-
-            logger.info("Sending cluster map add node")
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-            for node_index, node in enumerate(snodes):
-                if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
-                    continue
-                ret = distr_controller.send_cluster_map_add_node(snode, node)
-
-            # for dev in snode.nvme_devices:
-            #     if dev.status == NVMeDevice.STATUS_ONLINE:
-            #         device_controller.device_set_unavailable(dev.get_id())
-
-            # logger.info("Setting node status to suspended")
-            # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
-            # logger.info("Done")
-
-            logger.info("Setting node status to Active")
-            set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
-
-            # In --expansion mode the expand-task runner triggers expansion
-            # migration explicitly *after* integrate_new_node_into_cluster has
-            # built the post-rotation lvstore_stack and flipped cluster status
-            # back to ACTIVE. Skipping it here avoids racing the half-built
-            # rotation and double-queueing.
-            if not expansion:
-                for dev in snode.nvme_devices:
-                    if dev.status == NVMeDevice.STATUS_ONLINE:
-                        tasks_controller.add_new_device_mig_task(dev.get_id())
-            else:
-                # Queue the integration HERE so every entry point gets it —
-                # CLI, web API and the k8s node-add task runner all funnel
-                # through add_node, but only clibase used to queue the
-                # cluster-expand task, so CRD-driven adds completed without
-                # the rebalance ever starting (2026-07-17, vm15).
-                expand_task_id = tasks_controller.add_cluster_expand_task(
-                    cluster.get_id(), snode.get_id())
-                if expand_task_id:
-                    logger.info(
-                        f"expansion: queued cluster-expand task "
-                        f"{expand_task_id} for {snode.get_id()}")
-                else:
-                    logger.warning(
-                        f"expansion: a cluster-expand task is already open "
-                        f"for this cluster; node {snode.get_id()} will NOT "
-                        f"be integrated by it — re-add it after the current "
-                        f"expansion completes")
-
-            storage_events.snode_add(snode)
-
-            # Legacy (non --expansion) flow only: the follow-up
-            # cluster_ops.cluster_expand accepts IN_EXPANSION and flips back
-            # to ACTIVE when done. In --expansion mode the status must stay
-            # ACTIVE: integrate_new_node_into_cluster's preconditions require
-            # it and the executor owns the IN_EXPANSION transition itself —
-            # setting it here deadlocks the cluster-expand task ("cluster
-            # status is in_expansion, expansion requires active").
-            if not expansion:
-                cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
-        finally:
-            stop_heartbeat.set()
-            db_controller.release_cluster_add_lock(cluster_id, lock_owner)
         # --- End cluster-wide mesh critical section ---------------------
     logger.info("Done")
     return "Success"
@@ -7054,7 +7025,7 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # call made -- never one already serving some other
                     # legitimate purpose (e.g. a hosted-replica JC membership).
                     try:
-                        pre_existing = bool(node.rpc_client().get_bdevs(expected_bdev))
+                        pre_existing = bool(node.rpc_client().bdev_get(expected_bdev))
                     except Exception:
                         pre_existing = False
                     try:
@@ -11134,7 +11105,7 @@ def _check_hublvol_connected(snode: StorageNode, peer_node):
         rpc_client = snode.rpc_client(timeout=5, retry=1)
         if peer_node.hublvol and peer_node.hublvol.bdev_name:
             remote_bdev = f"{peer_node.hublvol.bdev_name}n1"
-            bdevs = rpc_client.get_bdevs(remote_bdev)
+            bdevs = rpc_client.bdev_get(remote_bdev)
             if bdevs:
                 logger.info("HubLVol to %s is still connected from %s",
                             peer_node.get_id(), snode.get_id())
@@ -12036,7 +12007,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             def _lvol_bdev_registered(lv):
                 for candidate in (lv.lvol_uuid, f"{lv.lvs_name}/{lv.lvol_bdev}"):
                     try:
-                        if snode_rpc_client.get_bdevs(candidate):
+                        if snode_rpc_client.bdev_get(candidate):
                             return True
                     except Exception:
                         pass
@@ -14923,7 +14894,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
     # costs seconds of SPDK app-thread time on large clusters.
     def _stack_bdev_exists(bdev_name):
         try:
-            return bool(rpc_client.get_bdevs(bdev_name))
+            return bool(rpc_client.bdev_get(bdev_name))
         except Exception:
             return False
 

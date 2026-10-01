@@ -50,6 +50,7 @@ from simplyblock_core.models.cluster import (
 )
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -625,7 +626,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 atomic_4k=False,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
-    for the same name behind a ClusterCreateLock.
+    for the same name behind a DbLock.
 
     The duplicate-name check inside _add_cluster_impl is a plain
     read-then-write with no atomicity: concurrent/retried create calls for the
@@ -656,15 +657,17 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if not name:
         return _add_cluster_impl(**kwargs)
 
-    owner = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4()}"
-    acquired, holder = db_controller.acquire_cluster_create_lock(name, owner)
-    if not acquired:
-        raise ValueError(f"A cluster with the name '{name}' already exists or is currently being created "
-                          f"(held by {holder})")
+    # timeout=0: a create for a name someone else is already creating is
+    # answered, not queued — the queued one would only reach the duplicate-name
+    # check and fail there. DbLockUnavailableError deliberately propagates: an
+    # unreachable database is not a name collision.
+    lock = DbLock(f"cluster_create/{name}", timeout=0)
     try:
-        return _add_cluster_impl(**kwargs)
-    finally:
-        db_controller.release_cluster_create_lock(name, owner)
+        with lock:
+            return _add_cluster_impl(**kwargs)
+    except DbLockBusyError as busy:
+        raise ValueError(f"A cluster with the name '{name}' already exists or is currently being created "
+                          f"(held by {busy.owner or 'unknown'})") from busy
 
 
 def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,

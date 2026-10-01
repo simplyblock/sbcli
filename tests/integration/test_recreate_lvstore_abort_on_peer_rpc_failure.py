@@ -215,7 +215,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
             "lvs_primary": False,
             "uuid": "lvs-uuid",
         }]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True

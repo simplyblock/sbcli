@@ -303,29 +303,15 @@ RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
 RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
 
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
-# per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
-# CLUSTER_ADD_LOCK_HEARTBEAT_SEC; a lock whose heartbeat is older than
-# CLUSTER_ADD_LOCK_TTL_SEC is treated as abandoned (holder crashed) and may be
-# reclaimed. TTL is kept well under TASK_LEASE_TTL_SEC so a dead holder's lock
-# is reclaimed before its task lease, and is several heartbeats wide so a live
-# (but momentarily slow) holder is never falsely preempted. The slow part of
-# add_node (SPDK boot) is OUTSIDE this lock, so the locked section is short.
-CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
-CLUSTER_ADD_LOCK_TTL_SEC = 120
-
-# Cluster creation concurrency: add_cluster()'s duplicate-name check
-# (does a cluster named X already exist?) is otherwise a plain read-then-write
-# with no atomicity, so concurrent/retried create calls for the same name can
-# all pass the check before any of them has committed — observed 2026-07-28:
-# a control-plane readiness flap caused the operator to retry cluster-create
-# ~6 times in a burst, producing 6 separate "simplyblock-cluster" records
-# instead of one. A ClusterCreateLock keyed by name serializes create attempts
-# for that name; no heartbeat (create is a single synchronous call, not a
-# long-lived section), just a generous TTL so a crashed holder's lock is
-# eventually reclaimable. Sized above add_cluster's worst realistic runtime
-# (the first-cluster bootstrap path retries opensearch/graylog up to ~150s
-# each, sequentially).
-CLUSTER_CREATE_LOCK_TTL_SEC = 600
+# per cluster behind a DbLock named "cluster_add/<cluster_id>". Cluster
+# creation is serialized per name behind "cluster_create/<name>", because
+# add_cluster()'s duplicate-name check is a plain read-then-write: concurrent
+# retries for one name can all pass it before any of them commits (2026-07-28:
+# an operator retry burst produced 6 "simplyblock-cluster" records).
+#
+# Neither takes a lease constant here — DbLock's LEASE_SEC covers crash
+# detection for every lock, and a live holder heartbeats for as long as its
+# section runs. Only the wait timeout below is per-call-site.
 
 # How long a queued add_node waits for the lock before failing for retry.
 # "Short" is relative: one mesh section takes minutes on a 32-node cluster,
@@ -340,6 +326,16 @@ CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
 # persisting the node record (which spans the SPDK boot), so a live add never
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
+
+# add_node_add_task's dedup check (by node_addr) is itself a plain
+# read-then-write: two concurrent posts for one host can both pass it before
+# either commits, queuing two FN_NODE_ADD tasks for the same host (the
+# create-time twin of the cluster_add mesh race above). Serialized per
+# (cluster, node_addr) behind "node_add_task/<cluster_id>/<node_addr>". Short,
+# unlike CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC: the guarded section is a couple of
+# FDB round trips, not the mesh section of add_node itself, so a waiter only
+# needs to outlast the holder's own read-then-write.
+NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC = 10
 
 # Snapshot create concurrency: the primary-create + replica-register sequence of
 # a snapshot is serialized per lvstore behind an LVStoreMutationLock so that

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.exceptions import ChainLockTimeout, PreconditionError
+from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.services import tasks_runner_lvol_migration as runner
 
 
@@ -99,7 +100,7 @@ def test_a_failed_transfer_is_resent_without_a_new_snapshot():
         transfer_context={'stage': 'intermediate_transfer',
                           'transfer': {'snap_uuid': 'snap-r0', 'transfer_done': False}})
     src_rpc = MagicMock(**{"bdev_lvol_transfer_stat.return_value": {'transfer_state': 'Failed'}})
-    tgt_rpc = MagicMock(**{"get_bdevs.return_value": []})
+    tgt_rpc = MagicMock(spec=RPCClient, **{"bdev_get.return_value": None})
     take = MagicMock()
     setup = MagicMock(return_value=({'snap_uuid': 'snap-r0'}, None))
 
@@ -129,9 +130,9 @@ def test_a_busy_chain_suspends_without_an_error():
 # --- the duplicate-sentinel log bug ------------------------------------------
 
 def test_the_size_log_queries_on_its_default_path():
-    rpc = MagicMock(**{"get_bdevs.return_value": [{'num_blocks': 1310720, 'block_size': 4096}]})
+    rpc = MagicMock(spec=RPCClient, **{"bdev_get.return_value": {'num_blocks': 1310720, 'block_size': 4096}})
     assert runner._log_spdk_bdev_size(rpc, "LVS_2/SNAP_1", "SRC") == 1310720 * 4096
-    rpc.get_bdevs.assert_called_once_with("LVS_2/SNAP_1")
+    rpc.bdev_get.assert_called_once_with("LVS_2/SNAP_1")
 
 
 # --- batch final step ---------------------------------------------------------

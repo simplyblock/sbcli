@@ -27,9 +27,7 @@ write transaction detects it. Its value is not a duplicate of anything — it is
 the only record of which entity holds the key.
 
 Stdlib-only leaf module — importable from ``models/`` without a cycle, exactly
-like :mod:`simplyblock_core.models.watches`. In particular it does not import ``fdb``:
-the binding injects its API at ``fdb.api_version()`` time and is stubbed out in
-the unit tier, and models must stay importable without it.
+like :mod:`simplyblock_core.models.watches`.
 """
 
 from collections.abc import Callable, Iterable, Sequence

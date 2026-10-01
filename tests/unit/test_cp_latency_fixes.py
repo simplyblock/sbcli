@@ -365,15 +365,15 @@ class TestBlockedPortsBatching:
 # ---------------------------------------------------------------------------
 class TestAttachOnlyPrestage:
     def _wire(self, monkeypatch, bdev_present_after=0):
-        """Node whose rpc counts calls; get_bdevs turns truthy after N polls."""
-        calls = {"set_opts": 0, "connect": 0, "get_bdevs": 0, "reconcile": 0}
+        """Node whose rpc counts calls; bdev_get turns truthy after N polls."""
+        calls = {"set_opts": 0, "connect": 0, "bdev_get": 0, "reconcile": 0}
 
-        def get_bdevs(name=None):
-            calls["get_bdevs"] += 1
-            return ([{"name": name}]
-                    if calls["get_bdevs"] > bdev_present_after else [])
+        def bdev_get(name=None):
+            calls["bdev_get"] += 1
+            return ({"name": name}
+                    if calls["bdev_get"] > bdev_present_after else None)
         rpc = types.SimpleNamespace(
-            get_bdevs=get_bdevs,
+            bdev_get=bdev_get,
             bdev_lvol_set_lvs_opts=lambda *a, **k: calls.__setitem__(
                 "set_opts", calls["set_opts"] + 1) or True,
             bdev_lvol_connect_hublvol=lambda *a, **k: calls.__setitem__(
@@ -420,7 +420,7 @@ class TestAttachOnlyPrestage:
         ok = n.connect_to_hublvol(primary, role="secondary")
         assert ok is True
         assert calls["set_opts"] == 1 and calls["connect"] == 1
-        assert calls["get_bdevs"] >= 4  # initial + reconcile-path + polls
+        assert calls["bdev_get"] >= 4  # initial + reconcile-path + polls
 
     def test_preblock_attach_wired_in_both_impls(self):
         import inspect
@@ -540,7 +540,7 @@ class TestDeferredHublvolPersist:
             StorageNode, "write_to_db",
             lambda self, *a, **k: wrote.__setitem__("n", wrote["n"] + 1))
         rpc = types.SimpleNamespace(
-            get_bdevs=lambda name=None: [{"name": name, "uuid": "u-t"}],
+            bdev_get=lambda name=None: {"name": name, "uuid": "u-t"},
             subsystem_get=lambda nqn: {"listen_addresses": [],
                                        "namespaces": [{"uuid": "u-t"}]},
         )

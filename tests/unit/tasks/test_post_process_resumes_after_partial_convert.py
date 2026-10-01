@@ -21,9 +21,10 @@ from unittest.mock import MagicMock, patch
 
 import simplyblock_core.services.tasks_runner_lvol_migration as runner
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.rpc_client import RPCClient
 
-WRITABLE = [{"driver_specific": {"lvol": {"is_snapshot": False, "blobid": 7}}, "uuid": "u"}]
-IMMUTABLE = [{"driver_specific": {"lvol": {"is_snapshot": True, "blobid": 7}}, "uuid": "u"}]
+WRITABLE = {"driver_specific": {"lvol": {"is_snapshot": False, "blobid": 7}}, "uuid": "u"}
+IMMUTABLE = {"driver_specific": {"lvol": {"is_snapshot": True, "blobid": 7}}, "uuid": "u"}
 
 
 def _snap(uuid="snap-1"):
@@ -87,33 +88,33 @@ class TestBdevIsImmutableSnapshot(unittest.TestCase):
 class TestReplicaWithoutTheBdevIsSkipped(unittest.TestCase):
 
     def test_convert_is_not_attempted_on_a_replica_that_has_no_such_bdev(self):
-        tgt_rpc = MagicMock()
-        tgt_rpc.get_bdevs.return_value = WRITABLE
+        tgt_rpc = MagicMock(spec=RPCClient)
+        tgt_rpc.bdev_get.return_value = WRITABLE
         tgt_rpc.bdev_lvol_convert.return_value = True
-        sec_rpc = MagicMock()
-        sec_rpc.get_bdevs.return_value = []  # overlap node: never registered
+        sec_rpc = MagicMock(spec=RPCClient)
+        sec_rpc.bdev_get.return_value = None  # overlap node: never registered
         ok, err = _post_process(tgt_rpc, sec_rpc)
         self.assertEqual((ok, err), (True, None))
         tgt_rpc.bdev_lvol_convert.assert_called_once_with("LVS_10/SNAP_46m")
         sec_rpc.bdev_lvol_convert.assert_not_called()
 
     def test_a_replica_that_has_the_bdev_is_still_converted(self):
-        tgt_rpc = MagicMock()
-        tgt_rpc.get_bdevs.return_value = WRITABLE
+        tgt_rpc = MagicMock(spec=RPCClient)
+        tgt_rpc.bdev_get.return_value = WRITABLE
         tgt_rpc.bdev_lvol_convert.return_value = True
-        sec_rpc = MagicMock()
-        sec_rpc.get_bdevs.return_value = WRITABLE
+        sec_rpc = MagicMock(spec=RPCClient)
+        sec_rpc.bdev_get.return_value = WRITABLE
         sec_rpc.bdev_lvol_convert.return_value = True
         ok, err = _post_process(tgt_rpc, sec_rpc)
         self.assertEqual((ok, err), (True, None))
         sec_rpc.bdev_lvol_convert.assert_called_once_with("LVS_10/SNAP_46m")
 
     def test_a_replica_convert_failure_still_fails(self):
-        tgt_rpc = MagicMock()
-        tgt_rpc.get_bdevs.return_value = WRITABLE
+        tgt_rpc = MagicMock(spec=RPCClient)
+        tgt_rpc.bdev_get.return_value = WRITABLE
         tgt_rpc.bdev_lvol_convert.return_value = True
-        sec_rpc = MagicMock()
-        sec_rpc.get_bdevs.return_value = WRITABLE
+        sec_rpc = MagicMock(spec=RPCClient)
+        sec_rpc.bdev_get.return_value = WRITABLE
         sec_rpc.bdev_lvol_convert.return_value = None
         ok, err = _post_process(tgt_rpc, sec_rpc)
         self.assertFalse(ok)
@@ -123,10 +124,10 @@ class TestReplicaWithoutTheBdevIsSkipped(unittest.TestCase):
 class TestRetryResumesAfterThePrimaryConvert(unittest.TestCase):
 
     def test_primary_already_converted_is_not_converted_again(self):
-        tgt_rpc = MagicMock()
-        tgt_rpc.get_bdevs.return_value = IMMUTABLE
-        sec_rpc = MagicMock()
-        sec_rpc.get_bdevs.return_value = WRITABLE
+        tgt_rpc = MagicMock(spec=RPCClient)
+        tgt_rpc.bdev_get.return_value = IMMUTABLE
+        sec_rpc = MagicMock(spec=RPCClient)
+        sec_rpc.bdev_get.return_value = WRITABLE
         sec_rpc.bdev_lvol_convert.return_value = True
         ok, err = _post_process(tgt_rpc, sec_rpc)
         self.assertEqual((ok, err), (True, None))
@@ -150,9 +151,9 @@ class TestRetryResumesAfterThePrimaryConvert(unittest.TestCase):
         composite = "LVS_10/" + runner._snap_tgt_short_name(snap)
         migration.target_snap_bdevs = [composite]
 
-        src_rpc = MagicMock()
-        tgt_rpc = MagicMock()
-        tgt_rpc.get_bdevs.return_value = IMMUTABLE
+        src_rpc = MagicMock(spec=RPCClient)
+        tgt_rpc = MagicMock(spec=RPCClient)
+        tgt_rpc.bdev_get.return_value = IMMUTABLE
 
         lvol = MagicMock()
         lvol.lvol_bdev = "LVOL_1"
@@ -209,9 +210,9 @@ class TestFailedIntermediateSnapshotTakesNothing(unittest.TestCase):
         mock_db = MagicMock()
         mock_db.get_lvol_by_id.return_value = lvol
         mock_db.get_snapshot_by_id.return_value = _snap("snap-p")
-        tgt_rpc = MagicMock()
+        tgt_rpc = MagicMock(spec=RPCClient)
         tgt_rpc.bdev_lvol_get_lvols.return_value = []
-        tgt_rpc.get_bdevs.return_value = IMMUTABLE
+        tgt_rpc.bdev_get.return_value = IMMUTABLE
 
         def failed_take(m):
             m.intermediate_snap_rounds = m.max_intermediate_snap_rounds  # as the real one does
@@ -230,8 +231,8 @@ class TestFailedIntermediateSnapshotTakesNothing(unittest.TestCase):
         self.assertEqual(migration.snaps_migrated, ["snap-p"])
 
     def test_listing_a_snapshot_as_migrated_is_idempotent(self):
-        tgt_rpc = MagicMock()
-        tgt_rpc.get_bdevs.return_value = WRITABLE
+        tgt_rpc = MagicMock(spec=RPCClient)
+        tgt_rpc.bdev_get.return_value = WRITABLE
         tgt_rpc.bdev_lvol_convert.return_value = True
         snap = _snap()
         tgt_node = _node("tgt", "LVS_10")

@@ -11,6 +11,7 @@ from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import device_controller, tasks_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
@@ -927,13 +928,42 @@ def add_node_add_task(cluster_id, function_params):
 
     A task that already exists is the answer to "add this host", so it is
     returned, which is what `ensure_node_restart_task` does with its own repeat.
+
+    But the dedup check is itself a plain read-then-write, so two concurrent
+    posts for the same host can both pass it before either commits, and both
+    go on to create a task (the create-time twin of the cluster_add mesh race
+    -- see constants.py). Serialize check-then-create per (cluster, node_addr)
+    behind a DbLock so only one of them writes.
     """
-    existing = _validate_new_task_node_add(
-        cluster_id, (function_params or {}).get("node_addr"))
-    if existing:
-        return existing
-    return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
-                     function_params=function_params, max_retry=11)
+    node_addr = (function_params or {}).get("node_addr")
+    if not node_addr:
+        # No host identity to dedup or serialize on; unchanged from before.
+        return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
+                         function_params=function_params, max_retry=11)
+
+    lock = DbLock(f"node_add_task/{cluster_id}/{node_addr}",
+                  timeout=constants.NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC)
+    try:
+        with lock:
+            existing = _validate_new_task_node_add(cluster_id, node_addr)
+            if existing:
+                return existing
+            return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
+                             function_params=function_params, max_retry=11)
+    except DbLockBusyError as busy:
+        # The holder is inside this same read-then-write, not the add_node
+        # mesh section -- a couple of FDB round trips, done well within the
+        # wait above. If it is somehow still not done, its write has already
+        # landed or is about to: look for what it left rather than failing an
+        # otherwise-valid request. DbLockBusyError only ever comes from
+        # entering the lock (the block above can't raise it), so this except
+        # can't accidentally swallow one from `_add_task`.
+        existing = _validate_new_task_node_add(cluster_id, node_addr)
+        if existing:
+            return existing
+        raise ValueError(
+            f"An add-node task for '{node_addr}' is already being created "
+            f"(held by {busy.owner or 'unknown'})") from busy
 
 
 def add_node_removal_task(cluster_id, node_id, function_params=None):

@@ -2533,7 +2533,7 @@ class TestDecommissionDevices(unittest.TestCase):
             "timed out connecting to the new JM bdev", code=-6)
         # The replacement's bdev did not exist before this call -- the
         # connect step created it fresh, so it's eligible for cleanup.
-        consumer.rpc_client.return_value.get_bdevs.return_value = None
+        consumer.rpc_client.return_value.bdev_get.return_value = None
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "device_controller", dc), \
              patch.object(storage_node_ops, "get_sorted_ha_jms",
@@ -2581,7 +2581,7 @@ class TestDecommissionDevices(unittest.TestCase):
         connected_new.remote_bdev = "remote_jm_replacementn1"
         consumer.rpc_client.return_value.jc_replace_jm.side_effect = RPCRemoteError(
             "this jm_vuid uses name_new already", code=-14)
-        consumer.rpc_client.return_value.get_bdevs.return_value = {"name": "remote_jm_replacementn1"}
+        consumer.rpc_client.return_value.bdev_get.return_value = {"name": "remote_jm_replacementn1"}
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "device_controller", dc), \
              patch.object(storage_node_ops, "get_sorted_ha_jms",
@@ -2986,7 +2986,7 @@ class TestFinalizeNodeRemovalClearsLvstorePorts(unittest.TestCase):
 # transient RPC/DNS failure during the fallback bdev-existence poll
 #
 # The primary connect_device() failure already degrades gracefully (logs
-# "Failed to connect to ...", sets connect_failed=True). The get_bdevs()
+# "Failed to connect to ...", sets connect_failed=True). The bdev_get()
 # poll called right after it, against the same rpc_client, hits the
 # identical transport and gets a bounded retry (3 attempts, 1s apart) to
 # ride out a DNS blip; only once that's exhausted does it degrade to "this
@@ -3023,12 +3023,12 @@ class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
 
         return this_node, rpc_client, db
 
-    def test_get_bdevs_rpc_exception_exhausts_retries_and_does_not_raise(self):
+    def test_bdev_get_rpc_exception_exhausts_retries_and_does_not_raise(self):
         # Persistent failure (all 3 bounded-retry attempts fail): must
         # still degrade, not raise -- this is the exact call chain that
         # took down a live node-removal task before the retry was added.
         this_node, rpc_client, db = self._owner_setup()
-        rpc_client.get_bdevs.side_effect = RPCException("connection error")
+        rpc_client.bdev_get.side_effect = RPCException("connection error")
 
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "connect_device",
@@ -3037,16 +3037,16 @@ class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
                 this_node, jm_ids=["jm-owner"])
 
         self.assertEqual(result, [])
-        # 3 bounded-retry attempts, one get_bdevs call each (remote_bdev
+        # 3 bounded-retry attempts, one bdev_get call each (remote_bdev
         # is empty so the first branch short-circuits without calling).
-        self.assertEqual(rpc_client.get_bdevs.call_count, 3)
+        self.assertEqual(rpc_client.bdev_get.call_count, 3)
 
     def test_transient_failure_recovers_on_retry(self):
         # A blip that clears within the retry budget must be caught, not
         # just tolerated -- the whole point of adding the bounded retry
         # instead of degrading on the very first failure.
         this_node, rpc_client, db = self._owner_setup()
-        rpc_client.get_bdevs.side_effect = [
+        rpc_client.bdev_get.side_effect = [
             RPCException("connection error"),
             RPCException("connection error"),
             {"name": "remote_jm_owner_bdevn1"},
@@ -3061,13 +3061,13 @@ class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].remote_bdev, "remote_jm_owner_bdevn1")
-        self.assertEqual(rpc_client.get_bdevs.call_count, 3)
+        self.assertEqual(rpc_client.bdev_get.call_count, 3)
 
     def test_transient_failure_does_not_block_a_clean_connect(self):
         # Once the blip has cleared, the same code path must still succeed
         # normally -- the new guard must not swallow a real success too.
         this_node, rpc_client, db = self._owner_setup()
-        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
+        rpc_client.bdev_get.return_value = {"name": "remote_jm_owner_bdevn1"}
 
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "connect_device",
@@ -3130,7 +3130,7 @@ class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
 
     def test_connects_under_owners_own_natural_name(self):
         this_node, rpc_client, db = self._owner_setup()
-        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
+        rpc_client.bdev_get.return_value = {"name": "remote_jm_owner_bdevn1"}
 
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "connect_device",
@@ -3413,7 +3413,7 @@ class TestJcRemoveJmBeforeBdevDelete(unittest.TestCase):
         rpc.jc_remove_jm = jc_remove_jm
         rpc.jc_replace_jm = MagicMock(return_value=True)
         rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
-        rpc.get_bdevs = MagicMock(return_value=[])
+        rpc.bdev_get = MagicMock(return_value=None)
         return rpc
 
     def _run(self, jc_remove_jm, replica_peer_ids=("peer",)):
@@ -3500,7 +3500,7 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
         rpc.jc_replace_jm = jc_replace_jm or MagicMock(return_value=True)
         rpc.jc_remove_jm = MagicMock(return_value=True)
         rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
-        rpc.get_bdevs = MagicMock(return_value=[])
+        rpc.bdev_get = MagicMock(return_value=None)
         peer.rpc_client = MagicMock(return_value=rpc)
 
         db = FakeDB(cl, [removed, peer, spare])
@@ -3569,7 +3569,7 @@ class TestLeftoverVuidOnReplicaPeers(unittest.TestCase):
         rpc.jc_replace_jm = MagicMock(return_value=True)
         rpc.jc_remove_jm = MagicMock(return_value=True)
         rpc.bdev_nvme_detach_controller = MagicMock(return_value=True)
-        rpc.get_bdevs = MagicMock(return_value=[])
+        rpc.bdev_get = MagicMock(return_value=None)
         peer.rpc_client = MagicMock(return_value=rpc)
 
         db = FakeDB(cl, [removed, peer, spare])
@@ -3818,7 +3818,7 @@ class TestDecommissionSkipsTheNodeBeingRemoved(unittest.TestCase):
             r.jc_replace_jm = MagicMock(return_value=True)
             r.jc_remove_jm = MagicMock(return_value=True)
             r.bdev_nvme_detach_controller = MagicMock(return_value=True)
-            r.get_bdevs = MagicMock(return_value=[])
+            r.bdev_get = MagicMock(return_value=None)
         removed.rpc_client = MagicMock(return_value=dead_rpc)
         other.rpc_client = MagicMock(return_value=other_rpc)
 

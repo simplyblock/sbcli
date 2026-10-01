@@ -1355,9 +1355,9 @@ def _count_data_plane_votes_uncached(node):
         # bdev_nvme_get_controllers on a `resetting` / `reconnect_is_delayed`
         # ctrlr can sit on locks during reset.
         try:
-            bdevs = peer_rpc.get_bdevs(bdev_name)
+            bdevs = peer_rpc.bdev_get(bdev_name)
         except Exception as e:
-            logger.debug("get_bdevs(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
+            logger.debug("bdev_get(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
             return
 
         if not bdevs:

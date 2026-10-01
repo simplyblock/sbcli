@@ -227,9 +227,9 @@ def collect_lvol_record(cluster, lvol, snode, rpc_client):
             ret = rpc_client.get_lvol_stats(lvol.lvol_uuid)
             if ret:
                 stats.append(ret["bdevs"][0])
-            ret = rpc_client.get_bdevs(lvol.lvol_uuid)
+            ret = rpc_client.bdev_get(lvol.lvol_uuid)
             if ret:
-                capacity_dict = ret[0]
+                capacity_dict = ret
 
         if lvol.ha_type == "ha":
             for sec_id in lvol.nodes[1:]:
@@ -244,9 +244,9 @@ def collect_lvol_record(cluster, lvol, snode, rpc_client):
                     if ret:
                         stats.append(ret["bdevs"][0])
                     if not capacity_dict:
-                        ret = sec_rpc_client.get_bdevs(lvol.lvol_uuid)
+                        ret = sec_rpc_client.bdev_get(lvol.lvol_uuid)
                         if ret:
-                            capacity_dict = ret[0]
+                            capacity_dict = ret
     except RPCException as e:
         logger.warning("Stat poll for lvol %s failed (%s); skipping this sample", lvol.get_id(), e)
         return None
