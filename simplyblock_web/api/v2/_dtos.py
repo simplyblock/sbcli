@@ -218,17 +218,16 @@ class ClusterLogEntryDTO(BaseModel):
     event: str
     level: str
     message: str
-    storage_id: int | None
+    storage_id: util.OptionalIndex
     vuid: int | None
     status: str
 
     @staticmethod
     def from_model(model: EventObj):
-        storage_id = None
-        if model.storage_id >= 0:
-            storage_id = model.storage_id
-        elif 'cluster_device_order' in model.object_dict:
-            storage_id = model.object_dict['cluster_device_order']
+        storage_id = (
+            model.storage_id if model.storage_id >= 0
+            else model.object_dict.get('cluster_device_order')
+        )
 
         message = model.message
         if model.event in ("device_status", "node_status"):
@@ -263,7 +262,8 @@ class DeviceDTO(BaseModel):
     health_check: bool | None
     retries_exhausted: bool
     size: int
-    cluster_device_order: util.Unsigned
+    # None until the device joins the cluster map (i.e. while it is `new`)
+    cluster_device_order: util.OptionalIndex
     io_error: bool
     is_partition: bool
     nvmf_ips: list[IPv4Address]
@@ -290,7 +290,8 @@ class DeviceDTO(BaseModel):
             cluster_device_order=model.cluster_device_order,
             io_error=model.io_error,
             is_partition=model.is_partition,
-            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",")],
+            # Empty until the device stack is created, so a `new` device has none
+            nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(",") if ip],
             nvmf_nqn=model.nvmf_nqn,
             nvmf_port=model.nvmf_port,
             capacity=CapacityStatDTO.from_model(
