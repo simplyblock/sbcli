@@ -1551,16 +1551,25 @@ def node_port_check_fun(snode):
                 port_lvs_owner[_p] = n.get_id()
                 if advisory:
                     advisory_ports.add(_p)
+        own_port = None
         if not snode.is_secondary_node:
             _p = snode.get_lvol_subsys_port(snode.lvstore)
             ports.append(_p)
             port_lvs_owner[_p] = snode.get_id()
+            own_port = _p
 
         # Batched: one nvmf_get_blocked_ports fetch answers every port, so
         # carrying the advisory ports costs no extra RPC.
         try:
             port_results = health_controller.check_ports_on_node(snode, ports)
+            deliberate = (own_port is not None and port_results.get(own_port) is False
+                          and _own_port_block_is_deliberate(snode, own_port, port_results))
             for port, ret in port_results.items():
+                if port == own_port and deliberate:
+                    logger.info(
+                        f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
+                        f"(advisory: a peer is re-wiring this LVS and fences it meanwhile)")
+                    continue
                 if port in advisory_ports:
                     logger.info(
                         f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
@@ -1595,6 +1604,67 @@ def node_port_check_fun(snode):
                 f"(SnodeAPI ping_ip timed out); ignoring this cycle")
 
     return node_port_check
+
+
+#: How long to wait before re-reading a node's own lvstore port that read
+#: blocked, when no restart phase explains the block. A deliberate fence --
+#: a follower restart or a removal's replica relocation attaching a new
+#: secondary -- holds the leader's port for well under a second (0.394s in
+#: run 50), so one sample can land inside it; a real fence is still there a
+#: second later. Must stay well inside PORT_CHECK_JOIN_TIMEOUT_SEC.
+PORT_BLOCK_CONFIRM_SEC = 1.0
+
+_ACTIVE_RESTART_PHASES = (
+    StorageNode.RESTART_PHASE_PRE_BLOCK,
+    StorageNode.RESTART_PHASE_BLOCKED,
+    StorageNode.RESTART_PHASE_POST_UNBLOCK,
+)
+
+
+def _lvs_rewiring_in_progress(snode):
+    """True if some node is in a restart phase for ``snode``'s own lvstore.
+
+    Whoever fences a leader's port on purpose stamps a phase for that lvstore
+    on ITS OWN record first: a restarting follower, or a node a removal is
+    relocating a replica onto -- which the primary's secondary/tertiary
+    pointers do not name until the move completes, so every node is looked
+    at, not just those. The phase is read through get_restart_phase, which
+    clears a phase no flow owns any more: a leaked phase must not exempt the
+    port for ever.
+    """
+    lvs = snode.lvstore
+    if not lvs:
+        return False
+    for n in db.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if not (getattr(n, "restart_phases", None) or {}).get(lvs):
+            continue
+        if storage_node_ops.get_restart_phase(n.get_id(), lvs) in _ACTIVE_RESTART_PHASES:
+            return True
+    return False
+
+
+def _own_port_block_is_deliberate(snode, own_port, port_results):
+    """The node's own lvstore port read blocked: is the block deliberate --
+    another flow's fence, exempt from this cycle's verdict -- or a real one?
+
+    One blocked sample used to be enough for set_node_down. A removal's
+    replica relocation fenced htthx's port for 0.394s while attaching its new
+    secondary; the monitor sampled inside that window and marked a healthy
+    node DOWN for 7s, broadcasting the DOWN to every distrib (run 50,
+    2026-10-01 15:16:46). So: a restart phase for the lvstore explains the
+    block; failing that, a second read a moment later must agree before the
+    sample counts. A block that has cleared on the re-read is recorded as
+    open, which also keeps the stale-fence remediation from aging it.
+    """
+    if _lvs_rewiring_in_progress(snode):
+        return True
+    time.sleep(PORT_BLOCK_CONFIRM_SEC)
+    again = health_controller.check_ports_on_node(snode, [own_port]).get(own_port)
+    if again is True:
+        logger.info(f"Check: node port {snode.mgmt_ip}, {own_port} ... blocked only "
+                    f"momentarily (open {PORT_BLOCK_CONFIRM_SEC:.0f}s later); not a port-down")
+        port_results[own_port] = True
+    return False
 
 
 # Bounded wait (s) for the parallel port/data-nic check to finish before we

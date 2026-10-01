@@ -81,6 +81,13 @@ def _restart_owns_lvs(primary_node, db_controller=None) -> bool:
     fenced. Pass ``db_controller`` to check the follower records too; a
     follower that cannot be read counts as owning, because "unknown" must
     never license lifting a fence.
+
+    With ``db_controller`` it also checks every other node in the cluster. A
+    node removal relocating a replica builds the lvstore on a node the
+    primary's record does not name yet -- ``secondary_node_id`` still points
+    at the node being removed until the move completes -- and that build
+    fences the primary's port like any follower restart (2026-10-01, run 50:
+    LVS_10 rebuilt on jj7dr while htthx still named the removed 8hhg5).
     """
     lvs = getattr(primary_node, "lvstore", None)
     if not lvs:
@@ -105,7 +112,14 @@ def _restart_owns_lvs(primary_node, db_controller=None) -> bool:
             continue
         if _owns(follower):
             return True
-    return False
+    cluster_id = getattr(primary_node, "cluster_id", None)
+    if not cluster_id:
+        return False
+    try:
+        peers = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    except Exception:
+        return True  # unreadable cluster -> assume a restart owns it
+    return any(_owns(n) for n in peers or [])
 
 
 def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
