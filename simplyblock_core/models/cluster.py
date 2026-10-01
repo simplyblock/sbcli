@@ -163,6 +163,13 @@ class Cluster(BaseModel):
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False
+    # is_re_balancing covers every data-moving task, the cluster's own volume
+    # migrations included. is_data_rebalancing covers only the device and
+    # balancing tasks -- data the cluster is moving by itself -- so a caller
+    # that drives volume migrations (a node drain) can wait for the one
+    # without waiting on its own work. active_lvol_migrations counts the rest.
+    is_data_rebalancing: bool = False
+    active_lvol_migrations: int = 0
     # Suspend-recovery drain phase marker.
     #
     # When a cluster becomes SUSPENDED, recovering it by auto-restarting nodes

@@ -13,9 +13,14 @@ Policy under test (2026-08-04 design decision):
   one host (``check_fd_admission_for_add`` / ``_for_remove``); removal
   additionally keeps >= 2 hosts per domain once an HA layout exists.
 * FD migration is forbidden — a known host cannot change domains.
-* Expansion planning — ``_plan_moves_with_failure_domains`` recovers the
-  actual rotation from secondary pointers and refuses plans that would
-  violate the invariant (e.g. FTT1 growing to odd populations).
+* Expansion planning — ``_plan_moves_with_failure_domains`` asks the
+  removal's global planner (``replica_placement``) for the cheapest layout
+  with primary/secondary/tertiary in pairwise-distinct domains and runs the
+  moves in an order that only ever lands on a free slot. Where full
+  diversity is unreachable (two domains, odd populations with too few
+  domains) it falls back to the rotation-shift search, which holds the
+  >=1-cross-domain floor, and still refuses plans below that floor (e.g.
+  FTT1 growing to odd populations).
 """
 
 import unittest
@@ -394,6 +399,139 @@ class TestFdAwarePlanning(unittest.TestCase):
             _plan_moves_with_failure_domains(
                 _cluster(ftt=2), MagicMock(), existing, newcomer)
         self.assertIn("one", str(ctx.exception))
+
+
+
+
+def _apply_role_moves(existing_nodes, moves, ftt):
+    """Replay ``moves`` on a layout dict, in order, the way the executor
+    would -- and fail the moment a re-home lands on a slot that is still
+    occupied, because that is the one thing the executor cannot survive
+    (its recipient write overwrites the back-reference in place)."""
+    layout = {n.get_id(): [n.secondary_node_id or "", n.tertiary_node_id or ""]
+              for n in existing_nodes}
+    holders = {("secondary", sec): p for p, (sec, _t) in layout.items() if sec}
+    holders.update({("tertiary", ter): p for p, (_s, ter) in layout.items() if ter})
+    for m in moves:
+        if m.role == "primary":
+            layout.setdefault(m.to_node_id, ["", ""])
+            continue
+        idx = 0 if m.role == "secondary" else 1
+        occupant = holders.get((m.role, m.to_node_id))
+        if occupant is not None and occupant != m.lvs_primary_node_id:
+            raise AssertionError(
+                f"move {m} lands on {m.to_node_id}'s {m.role} slot while "
+                f"{occupant} still holds it")
+        if m.from_node_id:
+            holders.pop((m.role, m.from_node_id), None)
+        layout.setdefault(m.lvs_primary_node_id, ["", ""])[idx] = m.to_node_id
+        holders[(m.role, m.to_node_id)] = m.lvs_primary_node_id
+    return {p: tuple(v) for p, v in layout.items()}
+
+
+class TestPlannerDrivenExpansion(unittest.TestCase):
+    """Expansion now reaches for the same guarantee the removal does."""
+
+    def _ring(self, domains, hosts_per_domain, newcomer_domain=0):
+        """An interleaved, fully diverse FTT2 ring: a b c .. a b c .. and a
+        newcomer for ``newcomer_domain`` that makes that domain the odd one."""
+        ids, fds = [], {}
+        for i in range(hosts_per_domain):
+            for d in range(domains):
+                n = f"{chr(97 + d)}{i + 1}"
+                ids.append(n)
+                fds[n] = d
+        nodes = [_node(n, f"10.0.0.{i + 1}", fds[n],
+                       secondary=ids[(i + 1) % len(ids)], tertiary=ids[(i + 2) % len(ids)])
+                 for i, n in enumerate(ids)]
+        new_id = f"{chr(97 + newcomer_domain)}{hosts_per_domain + 1}"
+        fds[new_id] = newcomer_domain
+        newcomer = _node(new_id, f"10.0.0.{len(ids) + 1}", newcomer_domain, lvstore="")
+        return nodes, newcomer, fds
+
+    def test_on_four_domains_a_ninth_node_lands_with_every_lvs_pairwise_diverse(self):
+        """The case the rotation-shift planner deliberately left degraded --
+        FTT2 growing to an odd population -- is fully diverse whenever the
+        domains allow it. Four domains is the activation floor for a 2+2
+        cluster (npcs+2), so this is the realistic shape."""
+        nodes, newcomer, fds = self._ring(4, 2)
+        moves = _plan_moves_with_failure_domains(_cluster(ftt=2), MagicMock(), nodes, newcomer)
+        final = _apply_role_moves(nodes, moves, 2)
+        self.assertIn(newcomer.get_id(), final)
+        for primary, (sec, ter) in final.items():
+            domains = [fds[primary], fds[sec], fds[ter]]
+            self.assertEqual(len(set(domains)), 3,
+                             f"LVS@{primary}: sec={sec} ter={ter} domains={domains}")
+
+    def test_on_three_domains_the_odd_host_is_degraded_by_necessity(self):
+        """With three domains and three roles, the odd host's tertiary has no
+        domain left to land in (the planner reports the tertiary-blocking
+        pattern), so full diversity is unreachable and the rotation floor
+        decides: every LVS still keeps at least one cross-domain role."""
+        nodes, newcomer, fds = self._ring(3, 2)
+        moves = _plan_moves_with_failure_domains(_cluster(ftt=2), MagicMock(), nodes, newcomer)
+        final = _apply_role_moves(nodes, moves, 2)
+        degraded = [p for p, (sec, ter) in final.items()
+                    if not (fds[sec] != fds[p] and fds[ter] != fds[p] and fds[sec] != fds[ter])]
+        self.assertTrue(degraded, "three domains cannot be fully diverse at an odd population")
+        for primary, (sec, ter) in final.items():
+            self.assertTrue(fds[sec] != fds[primary] or fds[ter] != fds[primary],
+                            f"LVS@{primary} keeps no cross-domain role: sec={sec} ter={ter}")
+
+    def test_moves_never_land_on_an_occupied_slot(self):
+        """The executor overwrites the recipient's back-reference, so the
+        plan's order is part of its correctness: replaying it must never hit
+        a slot whose occupant has not moved out yet -- on the planner path
+        and on the fallback alike."""
+        for domains in (4, 3):
+            with self.subTest(domains=domains):
+                nodes, newcomer, _ = self._ring(domains, 2)
+                moves = _plan_moves_with_failure_domains(
+                    _cluster(ftt=2), MagicMock(), nodes, newcomer)
+                _apply_role_moves(nodes, moves, 2)  # raises on an occupied landing
+
+    def test_the_newcomer_primary_is_created_before_its_replicas(self):
+        """On the planner path the newcomer's own replica creates may be
+        sequenced anywhere; its primary LVS therefore comes first."""
+        nodes, newcomer, _ = self._ring(4, 2)
+        moves = _plan_moves_with_failure_domains(_cluster(ftt=2), MagicMock(), nodes, newcomer)
+        self.assertEqual((moves[0].role, moves[0].to_node_id), ("primary", newcomer.get_id()))
+        own = [i for i, m in enumerate(moves)
+               if m.lvs_primary_node_id == newcomer.get_id() and m.role != "primary"]
+        self.assertEqual(len(own), 2)
+
+    def test_two_domains_fall_back_to_the_rotation_floor(self):
+        """Pairwise diversity needs three domains for three roles; on two the
+        planner cannot deliver it and its own fallback drops domains entirely.
+        The rotation search still holds the >=1-cross-domain floor, so that
+        is what decides the degraded case -- exactly the pre-planner result."""
+        nodes = [
+            _node("a1", "10.0.0.1", 0, secondary="b1", tertiary="a2"),
+            _node("b1", "10.0.0.2", 1, secondary="a2", tertiary="b2"),
+            _node("a2", "10.0.0.3", 0, secondary="b2", tertiary="a1"),
+            _node("b2", "10.0.0.4", 1, secondary="a1", tertiary="b1"),
+        ]
+        fds = {"a1": 0, "b1": 1, "a2": 0, "b2": 1, "a3": 0}
+        newcomer = _node("a3", "10.0.0.5", 0, lvstore="")
+        moves = _plan_moves_with_failure_domains(_cluster(ftt=2), MagicMock(), nodes, newcomer)
+        final = _apply_role_moves(nodes, moves, 2)
+        for primary, (sec, ter) in final.items():
+            self.assertTrue(fds[sec] != fds[primary] or fds[ter] != fds[primary],
+                            f"LVS@{primary} keeps no cross-domain role: sec={sec} ter={ter}")
+
+    def test_a_layout_below_the_floor_is_still_refused(self):
+        """FTT1 growing to an odd population on two domains: the odd primary
+        can have no cross-domain role at all. Refused before any move."""
+        nodes = [
+            _node("a1", "10.0.0.1", 0, secondary="b1"),
+            _node("b1", "10.0.0.2", 1, secondary="a2"),
+            _node("a2", "10.0.0.3", 0, secondary="b2"),
+            _node("b2", "10.0.0.4", 1, secondary="a1"),
+        ]
+        newcomer = _node("a3", "10.0.0.5", 0, lvstore="")
+        with self.assertRaises(RuntimeError) as ctx:
+            _plan_moves_with_failure_domains(_cluster(ftt=1), MagicMock(), nodes, newcomer)
+        self.assertIn("cross-domain", str(ctx.exception))
 
 
 if __name__ == "__main__":

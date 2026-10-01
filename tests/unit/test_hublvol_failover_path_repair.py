@@ -122,11 +122,25 @@ class TestStaleFenceRemediation:
         src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)
         assert "_restart_owns_lvs(owner, db)" in src
 
-    def test_it_requires_the_node_to_be_online(self):
+    def test_it_is_gated_on_the_node_being_reachable(self):
+        """Was "the node must be ONLINE", which deadlocked: a fence on a
+        node's OWN lvstore port flips it DOWN within ~6s, so it was never
+        ONLINE on the tick that crossed the 12s staleness threshold and the
+        remediation skipped it for ever (k8s 2026-09-15, node 2f59f60f: 70+
+        minutes fenced with SPDK up and every other probe passing). DOWN is
+        admitted now; see test_fence_remediation_down_node.py for the
+        behavioural cover and for the gates that did not change."""
         import inspect as _i
+        from simplyblock_core.models.storage_node import StorageNode
         from simplyblock_core.services import storage_node_monitor
         src = _i.getsource(storage_node_monitor._remediate_stale_port_blocks)
-        assert "snode.status != StorageNode.STATUS_ONLINE" in src
+        assert "snode.status not in _REMEDIABLE_FENCE_STATUSES" in src
+        assert StorageNode.STATUS_ONLINE in storage_node_monitor._REMEDIABLE_FENCE_STATUSES
+        assert StorageNode.STATUS_DOWN in storage_node_monitor._REMEDIABLE_FENCE_STATUSES
+        # Still not a free-for-all: a node that is genuinely gone stays gone.
+        for status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE,
+                       StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+            assert status not in storage_node_monitor._REMEDIABLE_FENCE_STATUSES
 
     def test_the_threshold_is_under_the_client_ctrl_loss_tmo(self):
         """ctrl_loss_tmo is 30 x 2s = 60s; after that the kernel deletes the

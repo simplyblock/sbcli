@@ -913,6 +913,38 @@ def _maybe_switch_write_protection(cluster, cluster_id, current_cluster_status):
             "Auto write-protection switch raised for cluster %s", cluster_id)
 
 
+_DATA_REBALANCING_TASKS = frozenset({
+    JobSchedule.FN_DEV_MIG,
+    JobSchedule.FN_NEW_DEV_MIG,
+    JobSchedule.FN_FAILED_DEV_MIG,
+    JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+    JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+    JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
+})
+_LVOL_MIGRATION_TASKS = frozenset({JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG})
+
+
+def _rebalancing_flags(tasks):
+    """``(is_re_balancing, is_data_rebalancing, active_lvol_migrations)`` for
+    the cluster's tasks.
+
+    is_re_balancing keeps its meaning -- any data-moving task, volume
+    migrations included -- for the guards that must wait on those too
+    (shared-placement toggle, write-protection switch, shutdown headroom).
+    is_data_rebalancing is the device and balancing tasks alone: a node drain
+    migrates volumes itself and must not pause on its own migrations, which
+    it did for the whole of every removal (2026-09-29)."""
+    data = lvol = 0
+    for task in tasks:
+        if task.canceled or task.status == JobSchedule.STATUS_DONE:
+            continue
+        if task.function_name in _DATA_REBALANCING_TASKS:
+            data += 1
+        elif task.function_name in _LVOL_MIGRATION_TASKS:
+            lvol += 1
+    return (data + lvol) > 0, data > 0, lvol
+
+
 def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -926,33 +958,18 @@ def _update_cluster_status_impl(cluster_id):
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
-    rebalancing_task_names = {
-        JobSchedule.FN_DEV_MIG,
-        JobSchedule.FN_NEW_DEV_MIG,
-        JobSchedule.FN_FAILED_DEV_MIG,
-        JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
-        JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
-        JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
-        JobSchedule.FN_LVOL_MIG,
-        JobSchedule.FN_LVOL_BATCH_MIG,
-    }
-    active_rebalancing_tasks = 0
-    cluster_tasks = db.get_job_tasks(cluster_id)
-    for task in cluster_tasks:
-        if task.canceled:
-            continue
-        if task.status == JobSchedule.STATUS_DONE:
-            continue
-        if task.function_name in rebalancing_task_names:
-            active_rebalancing_tasks += 1
-
+    is_re_balancing, is_data_rebalancing, active_lvol_migrations = _rebalancing_flags(
+        db.get_job_tasks(cluster_id))
     cluster = db.get_cluster_by_id(cluster_id)
     # Atomic: a full write here would clobber a concurrent cluster.status change
     # committed by set_cluster_status (same lost-update class as incident
     # 2026-06-18). Mutate only is_re_balancing on the freshly-read row.
-    is_re_balancing = active_rebalancing_tasks > 0
-    cluster = db.atomic_update(
-        cluster, lambda c, v=is_re_balancing: setattr(c, "is_re_balancing", v))
+    def _set_rebalancing_flags(c, rb=is_re_balancing, drb=is_data_rebalancing, lm=active_lvol_migrations):
+        c.is_re_balancing = rb
+        c.is_data_rebalancing = drb
+        c.active_lvol_migrations = lm
+
+    cluster = db.atomic_update(cluster, _set_rebalancing_flags)
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
@@ -1601,6 +1618,37 @@ _blocked_port_since: dict = {}
 #: not this timeout, is what keeps the remediation off deliberate fences.
 STALE_PORT_BLOCK_SEC = 12.0
 
+#: Node statuses in which a stale fence may be lifted.
+#:
+#: ONLINE alone was a deadlock, and a self-inflicted one: it excluded exactly
+#: the case this remediation exists for. When SPDK fences a node's OWN lvstore
+#: port, that port is not advisory, so node_port_check_fun returns False on the
+#: very next tick and set_node_down flips the node DOWN -- at t+6s, half the
+#: 12s the fence needs to age into "stale". The node is therefore never ONLINE
+#: on the tick that crosses the threshold, the `continue` here skips it on
+#: every pass thereafter, and the DOWN->ONLINE clear at the end of the node
+#: check cannot fire because it needs the port check to pass. Each side waits
+#: for the other for ever.
+#:
+#: Live on k8s 2026-09-15: an lvol-migration subtask on 2f59f60f hit a device
+#: belonging to the node being removed, the failed IO demoted LVS_16 and fenced
+#: ports 4442/4443 at 17:23:58, the node went DOWN at 17:24:05, and it was
+#: still fenced 70+ minutes later with SPDK up, the pod at 0 restarts and every
+#: other probe passing. The peer b30f8f0c was rescued by this very function at
+#: 17:24:28 -- its copy of 4442 is advisory, so it stayed ONLINE long enough to
+#: qualify. Only the owner, the node that actually needed it, could not.
+#:
+#: DOWN is safe to admit here because reaching this loop at all means
+#: check_ports_on_node just answered over JSON-RPC, so SPDK is alive and the
+#: unblock RPC has somewhere to land; and because DOWN is precisely the status
+#: set_node_down assigns when every liveness probe passed and only the port
+#: check failed. The three gates that keep this off deliberate fences --
+#: restart-owns-LVS, hublvol health, and the 12s age -- are unchanged.
+_REMEDIABLE_FENCE_STATUSES = (
+    StorageNode.STATUS_ONLINE,
+    StorageNode.STATUS_DOWN,
+)
+
 
 def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
     """Lift a client port that SPDK fenced and nothing ever released.
@@ -1625,7 +1673,9 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
     finally cleared incidentally by an unrelated restart at 09:06:16.
 
     Preconditions, all required:
-      * the node is ONLINE -- a fence on a node that is down is not a leak;
+      * the node is ONLINE or DOWN -- see _REMEDIABLE_FENCE_STATUSES. DOWN is
+        usually a consequence of the fence rather than an independent fault,
+        and excluding it deadlocked this remediation against the node check;
       * no restart task owns that LVS -- the restart flow is the legitimate
         author of port blocks during its phases and must not be raced;
       * the block has persisted past STALE_PORT_BLOCK_SEC;
@@ -1645,7 +1695,7 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
         held = time.monotonic() - first_seen
         if held < STALE_PORT_BLOCK_SEC:
             continue
-        if snode.status != StorageNode.STATUS_ONLINE:
+        if snode.status not in _REMEDIABLE_FENCE_STATUSES:
             continue
 
         owner_id = port_lvs_owner.get(port)
@@ -1686,10 +1736,10 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
             continue
 
         logger.error(
-            "Port %s on %s has been blocked %.0fs on an ONLINE node with a "
+            "Port %s on %s has been blocked %.0fs on a %s node with a "
             "healthy hublvol and no restart owning %s -- SPDK fenced it and "
             "nothing released it. Unblocking.",
-            port, snode.get_id(), held, owner.lvstore)
+            port, snode.get_id(), held, snode.status, owner.lvstore)
         try:
             from simplyblock_core.utils import port_block
             port_block.set_port(snode, port, block=False, timeout=5, retry=1)

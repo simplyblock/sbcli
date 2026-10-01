@@ -269,7 +269,33 @@ def _handle_snap_copy_barrier(group, member_migrations, tgt_node, tgt_rpc):
     return True, None
 
 
-def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rpc):
+def _group_source_nodes(group):
+    """``(primary_src_node, src_node)`` for a group: the primary the volumes
+    belong to, and the node the migration actually reads from.
+
+    They differ for the whole of a node removal: the drained primary is shut
+    down before its volumes move, and create_batch_migration pins an online
+    replica as ``group.active_source_node_id``. The solo runner has read that
+    field since the drain work landed; the orchestrator kept loading
+    ``source_node_id``, so its liveness guard saw the stopped primary
+    (status migrating_lvols), suspended five times and failed the group on
+    every target the operator offered (2026-09-28, run 6: four targets burnt,
+    "1 of 6 volumes migrated" for good). RPCs, the liveness guard and the
+    hub go to ``src_node``; lvstore names and the replica set are the
+    primary's, so those keep using ``primary_src_node``.
+
+    Raises KeyError when either node record is missing."""
+    primary = db.get_storage_node_by_id(group.source_node_id)
+    active_id = getattr(group, "active_source_node_id", "")
+    if not isinstance(active_id, str) or not active_id:
+        active_id = group.source_node_id
+    if active_id == group.source_node_id:
+        return primary, primary
+    return primary, db.get_storage_node_by_id(active_id)
+
+
+def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rpc,
+                            primary_src_node=None):
     """
     Build the argument lists for bdev_lvol_batch_final_step, ordered by ns_id.
 
@@ -295,7 +321,8 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
             raise ValueError(f"migration {migration_id} not found in member_migrations")
 
         lvol = db.get_lvol_by_id(m.lvol_id)
-        src_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+        # The bdevs are named after the PRIMARY's lvstore, wherever they are read.
+        src_composite = f"{(primary_src_node or src_node).lvstore}/{lvol.lvol_bdev}"
         lvol_names.append(src_composite)
 
         tgt_bdev_short = _lvol_tgt_bdev_name(lvol.lvol_bdev)
@@ -464,7 +491,8 @@ def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_
     return None
 
 
-def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc):
+def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc,
+                           primary_src_node=None):
     """
     After a successful bdev_lvol_batch_final_step, drive clients to the new target.
 
@@ -487,7 +515,8 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
       4. Remove old SRC-port listener from overlap TGT nodes if port changed
     """
     nqn = group.target_nqn
-    src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    src_paths, tgt_paths, overlap_ids = _build_paths(
+        src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
     src_port_by_id = {p['node_id']: p['port'] for p in src_paths}
 
     # Detect and repair a target-side node restart that wiped the migration's
@@ -674,7 +703,8 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                                 f"{tgt['node_id'][:8]} (non-fatal): {e}")
 
 
-def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc):
+def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc,
+                                 primary_src_node=None):
     """
     Wait for all workers to reach intermediates_done, then call
     bdev_lvol_batch_final_step.  Returns (batch_ok, error).
@@ -714,7 +744,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
 
     try:
         lvol_names, lvol_ids, snapshot_names = _build_batch_final_args(
-            group, member_migrations, src_node, tgt_node, tgt_rpc)
+            group, member_migrations, src_node, tgt_node, tgt_rpc,
+            primary_src_node=primary_src_node)
     except (ValueError, KeyError) as e:
         # Hub controller left attached — hub_manager owns its lifecycle
         # entirely via its own idle timeout.
@@ -729,7 +760,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     # synchronous final-step transfer below (see the diagnostic block further
     # down for the current, temporarily-widened version of this).
     nqn = group.target_nqn
-    src_paths, tgt_paths, _ = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    src_paths, tgt_paths, _ = _build_paths(
+        src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
     src_replica_paths = src_paths[1:]  # secondary/tertiary only; used for the failure-path revert below
 
     def _flip(rpc, ip, port, trtype, state, label):
@@ -787,7 +819,12 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         # This call moves real data and can legitimately run longer than the
         # 5s blanket timeout _make_rpc()/src_rpc uses for every other RPC in
         # this file -- use a dedicated, longer-timeout client just for it.
-        final_step_rpc = src_node.rpc_client(timeout=15, retry=2)
+        #
+        # 20s, above SPDK's own 15s bound on the step: the answer is then
+        # SPDK's verdict. At 15s this client gave up first, called the step
+        # failed while SPDK went on to finish it, and every retry failed on
+        # bdev_lvol_convert (2026-09-30, run 21).
+        final_step_rpc = src_node.rpc_client(timeout=20, retry=2)
         ret = final_step_rpc.bdev_lvol_batch_transfer_final_step(
             lvol_names, lvol_ids, snapshot_names,
             constants.LVOL_MIG_TRANSFER_BATCH_SIZE, hub_bdev, "migrate")
@@ -833,36 +870,25 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             group.intermediate_more_needed = []
             group.write_to_db(db.kv_store)
 
-            # bdev_lvol_set_migration_flag drives the distrib-level special_io
-            # machinery for the target bdev (see snapshot_replication.py's
-            # comment on the same flag); it's only ever set once, at initial
-            # target-bdev creation (migration_controller.create_migration).
-            # A failed/aborted final_step attempt may clear it on the target,
-            # so re-assert it on every member's target bdev before retrying —
-            # otherwise the retry's cutover could run without the target
-            # being treated as migration-aware.
-            tgt_sec_node, _ = _get_target_secondary_node(tgt_node, src_node.get_id())
-            tgt_ter_node, _ = _get_target_tertiary_node(tgt_node, src_node.get_id())
-            tgt_sec_rpc_reflag = _make_rpc(tgt_sec_node) if tgt_sec_node else None
-            tgt_ter_rpc_reflag = _make_rpc(tgt_ter_node) if tgt_ter_node else None
-            for m in member_migrations:
-                try:
-                    m_lvol = db.get_lvol_by_id(m.lvol_id)
-                    m_tgt_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(m_lvol.lvol_bdev)}"
-                except KeyError:
-                    continue
-                if not tgt_rpc.bdev_lvol_set_migration_flag(m_tgt_composite):
-                    logger.warning(
-                        f"Group {group.uuid[:8]}: re-assert migration flag on primary "
-                        f"failed for {m_tgt_composite} (may already be flagged)")
-                for _extra_rpc in (tgt_sec_rpc_reflag, tgt_ter_rpc_reflag):
-                    if _extra_rpc:
-                        try:
-                            _extra_rpc.bdev_lvol_set_migration_flag(m_tgt_composite)
-                        except Exception as e:
-                            logger.warning(
-                                f"Group {group.uuid[:8]}: re-assert migration flag on "
-                                f"replica failed for {m_tgt_composite} (non-fatal): {e}")
+            # bdev_lvol_set_migration_flag used to be re-asserted here, on every
+            # member's target bdev (primary + secondary + tertiary), on every
+            # failed-cutover retry. DISABLED as of 2026-09-28: this call drives
+            # SPDK's leadership-sensitive special_io machinery, and re-firing it
+            # once per retry gives a live leadership race (check-then-act across
+            # a separate RPC round-trip -- see set_migration_flag_on_primary's
+            # docstring) one more roll every time. Live node-removal runs traced
+            # this session showed the reassert landing squarely on nodes whose
+            # leadership had just moved, triggering spdk_lvs_queued_failed_IO ->
+            # self-demotion -> port block -> the node reported "down", failing
+            # the round and forcing yet another retry (and another reassert) --
+            # solo migrations, which only ever set the flag once at creation,
+            # never hit this. Skipping the reassert trades that frequent,
+            # self-inflicted failure for a narrower, pre-existing risk: if a
+            # failed final_step attempt genuinely cleared the flag on the
+            # target, a later successful cutover could run against a target
+            # not marked migration-aware. This is a stopgap pending the real
+            # fix, which is on the SPDK side (a failed special_io due to
+            # non-leadership should be a clean rejection, not a self-demotion).
 
             logger.warning(
                 f"Group {group.uuid[:8]}: batch_final_step failed; forcing another "
@@ -910,7 +936,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                     logger.warning(
                         f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
 
-        _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
+        _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc,
+                               primary_src_node=primary_src_node)
 
     # Hub controller left attached on both success and failure — hub_manager
     # owns its lifecycle entirely via its own idle timeout. Detaching it here
@@ -954,14 +981,16 @@ def _handle_cleanup_source_barrier(group):
     return expected.issubset(done_set)
 
 
-def _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
+def _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc, primary_src_node=None):
     """
     Delete the source NVMe-oF subsystem on all SRC replicas (primary, secondary,
     tertiary).  Overlap nodes (which also host TGT replicas) are skipped because
     the subsystem is still in use on those nodes.  Best-effort.
     """
     nqn = group.target_nqn
-    _, _, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    primary_src_node = primary_src_node or src_node
+    _, _, overlap_ids = _build_paths(
+        src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
 
     def _try_delete(rpc, node_id, label):
         if node_id in overlap_ids:
@@ -973,24 +1002,26 @@ def _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
         except Exception as e:
             logger.warning(f"Group {group.uuid[:8]}: {label} source subsystem delete (non-fatal): {e}")
 
-    _try_delete(src_rpc, src_node.get_id(), "primary")
+    # The replica set is the primary's; the node the migration read from is
+    # one of them when the primary is gone, and is deleted once, as "source".
+    _try_delete(src_rpc, src_node.get_id(), "source")
 
-    if src_node.secondary_node_id:
+    if primary_src_node.secondary_node_id and primary_src_node.secondary_node_id != src_node.get_id():
         try:
-            sec_node = db.get_storage_node_by_id(src_node.secondary_node_id)
+            sec_node = db.get_storage_node_by_id(primary_src_node.secondary_node_id)
             sec_rpc = _make_rpc(sec_node)
             _try_delete(sec_rpc, sec_node.get_id(), "secondary")
         except Exception as e:
             logger.warning(
                 f"Group {group.uuid[:8]}: secondary src node lookup (non-fatal): {e}")
 
-    tert_node = _get_source_tertiary_node(src_node)
-    if tert_node:
+    tert_node = _get_source_tertiary_node(primary_src_node)
+    if tert_node and tert_node.get_id() != src_node.get_id():
         tert_rpc = _make_rpc(tert_node)
         _try_delete(tert_rpc, tert_node.get_id(), "tertiary")
 
 
-def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
+def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc, primary_src_node=None):
     """Delete the target NVMe-oF subsystem on all TGT replicas.  Best-effort.
 
     Nodes that appear in both SRC and TGT replica sets (overlap nodes) share the
@@ -1000,7 +1031,8 @@ def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
     nqn = group.target_nqn
 
     try:
-        _, _, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+        _, _, overlap_ids = _build_paths(
+            src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
     except Exception as e:
         logger.warning(
             f"Group {group.uuid[:8]}: _build_paths in _delete_target_subsystem (non-fatal): {e}")
@@ -1104,10 +1136,11 @@ def task_runner(task):
         return True
 
     try:
-        src_node = db.get_storage_node_by_id(group.source_node_id)
+        primary_src_node, src_node = _group_source_nodes(group)
     except KeyError:
         return _batch_budget_suspend(
-            task, group, group_id, f"source node {group.source_node_id} not found")
+            task, group, group_id,
+            f"source node {group.active_source_node_id or group.source_node_id} not found")
 
     try:
         tgt_node = db.get_storage_node_by_id(group.target_node_id)
@@ -1171,7 +1204,9 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
-        fresh_src = db.get_storage_node_by_id(group.source_node_id)
+        # The node the migration reads from, not the primary: for the whole of
+        # a drain the primary is stopped and an online replica stands in.
+        fresh_src = db.get_storage_node_by_id(src_node.get_id())
         if fresh_src.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
             logger.warning(
                 f"Group {group_id[:8]}: source node unavailable "
@@ -1213,7 +1248,8 @@ def task_runner(task):
         # ── PHASE_INTERMEDIATE: wait for intermediates, then batch_final_step ────
         if phase == LVolMigrationGroup.PHASE_INTERMEDIATE:
             batch_ok, err = _handle_intermediate_barrier(
-                group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc)
+                group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc,
+                primary_src_node=primary_src_node)
 
             if err:
                 logger.error(f"Group {group_id[:8]}: intermediate barrier error: {err}")
@@ -1262,7 +1298,8 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
-        _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc)
+        _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc,
+                                 primary_src_node=primary_src_node)
 
         group.phase = LVolMigrationGroup.PHASE_COMPLETED
         group.status = LVolMigrationGroup.STATUS_DONE
@@ -1282,7 +1319,8 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
-        _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc)
+        _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc,
+                                 primary_src_node=primary_src_node)
 
         group.status = LVolMigrationGroup.STATUS_FAILED
         group.write_to_db(db.kv_store)

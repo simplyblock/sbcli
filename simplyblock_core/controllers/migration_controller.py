@@ -73,11 +73,17 @@ db = DBController()
 
 def start_migration(migration_id,
                     max_retries=constants.LVOL_MIG_MAX_RETRIES,
-                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC,
+                    retry_on_failure=False):
     """
     Promote a PHASE_PRE_CREATED migration record to PHASE_SNAP_COPY and launch
     the task runner.  Always call create_migration first to set up target
     infrastructure and obtain the migration_id and connect strings.
+
+    retry_on_failure: if this migration later ends in STATUS_FAILED (not
+    cancelled), the task runner automatically starts a brand-new migration
+    for the same lvol/target once preconditions hold again -- see
+    tasks_runner_lvol_migration.py's terminal-FAILED handling.
 
     Returns migration_uuid on success; raises ValueError on failure.
     """
@@ -103,10 +109,28 @@ def start_migration(migration_id,
     if lvol.status != LVol.STATUS_ONLINE:
         raise ValueError(f"Volume is not online (status={lvol.status})")
 
-    source_node_id = lvol.node_id
+    # source_node_id / active_source_node_id are read from the migration record
+    # (set once by create_migration()), never re-derived from lvol.node_id here —
+    # re-deriving could pick a different fallback than create_migration did if
+    # node health changed in between.
+    source_node_id = migration.source_node_id
 
     try:
-        source_node = db.get_storage_node_by_id(source_node_id)
+        db.get_storage_node_by_id(source_node_id)
+    except KeyError as e:
+        raise ValueError(str(e))
+
+    # "Which node actually serves the source side?", not "is the primary up?".
+    #
+    # A removal shuts the node down before it moves anything, so by the time the
+    # volumes migrate the primary is never up -- it is MIGRATING_DEVICES or
+    # MIGRATING_LVOLS, both of which mean its SPDK is stopped. Asking the
+    # primary's own status therefore refuses every migration a drain issues:
+    # with the primary down, source-side RPCs are served by an online replica,
+    # chosen once by create_migration() and pinned as active_source_node_id.
+    active_source_node_id = migration.active_source_node_id or source_node_id
+    try:
+        active_source_node = db.get_storage_node_by_id(active_source_node_id)
     except KeyError as e:
         raise ValueError(str(e))
 
@@ -118,19 +142,33 @@ def start_migration(migration_id,
     if source_node_id == target_node_id:
         raise ValueError("Source and target nodes must be different")
 
-    if source_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
-        raise ValueError(f"Source node is not online (status={source_node.status})")
+    if active_source_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        raise ValueError(f"Source node is not online (status={active_source_node.status})")
 
     if target_node.status != StorageNode.STATUS_ONLINE:
         raise ValueError(f"Target node is not online (status={target_node.status})")
 
+    is_fallback_source = active_source_node_id != source_node_id
+    if is_fallback_source:
+        logger.info(
+            f"start_migration {migration.uuid}: source primary {source_node_id} is offline; "
+            f"continuing with pre-selected fallback source {active_source_node_id}")
+
     cluster = db.get_cluster_by_id(migration.cluster_id)
-    if cluster.status != Cluster.STATUS_ACTIVE:
+    # A fallback migration exists precisely because its primary source node is
+    # down, which is what drives the cluster to DEGRADED in the first place
+    # (storage_node_monitor's one-node-down verdict) — requiring strict ACTIVE
+    # here would make the feature unusable in the scenario it exists for.
+    # Ordinary (non-fallback) migrations keep the stricter ACTIVE-only gate.
+    allowed_statuses = (
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        else (Cluster.STATUS_ACTIVE,))
+    if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
     if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
 
-    for node_id in (source_node_id, target_node_id):
+    for node_id in {source_node_id, active_source_node_id, target_node_id}:
         if tasks_controller.get_active_node_mig_task(migration.cluster_id, node_id):
             raise PreconditionError(f"Node {node_id} has a data migration in progress; wait for it to finish")
 
@@ -150,6 +188,7 @@ def start_migration(migration_id,
     migration.started_at = int(time.time())
     migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
     migration.max_retries = max_retries
+    migration.retry_on_failure = retry_on_failure
     # RUNNING, not NEW: _cancel_stale_new_migrations treats STATUS_NEW as
     # "operator never called migrate-continue" and auto-cancels it after 5
     # minutes. Once continued, the migration is actively in progress even if
@@ -472,6 +511,137 @@ def get_snapshot_chain(lvol_id, source_node_id=None):
         _add(snap.uuid)
 
     return result
+
+
+def check_target_viable(lvol_id, target_node_id):
+    """Would a migration of *lvol_id* to *target_node_id* be admitted right now?
+
+    Returns ``(ok, reason)``. Read-only and cheap -- no RPCs, no side effects --
+    so a caller choosing between candidate targets can ask before committing.
+
+    This exists so target selection and target admission cannot disagree.
+    _pick_drain_target used to choose a target, hand it to create_migration, and
+    learn from the exception that it was never eligible -- spending one of the
+    drain's ten attempts per target, and NODE_DRAIN_RETRY_WAIT_SEC of wall clock,
+    to discover something knowable for free. Every rule checked here is a rule
+    create_migration or the task runner enforces; this is the same list asked in
+    advance, not a second opinion.
+
+    Deliberately NOT checked: cluster status and rebalance state, which are not
+    properties of the candidate (rejecting one target for them would reject all
+    of them, and the caller should surface that once rather than per node).
+    """
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return False, f"lvol {lvol_id} not found"
+
+    try:
+        tgt = db.get_storage_node_by_id(target_node_id)
+    except KeyError:
+        return False, "target node not found"
+
+    # --- the target itself ---
+    if tgt.status != StorageNode.STATUS_ONLINE:
+        return False, f"target is {tgt.status}, not online"
+    if not tgt.lvstore:
+        return False, "target has no lvstore"
+    if lvol.node_id == target_node_id:
+        return False, "target already hosts this volume"
+
+    # --- the source side: never migrate onto the node acting as source ---
+    try:
+        src = db.get_storage_node_by_id(lvol.node_id)
+    except KeyError:
+        return False, "source node not found"
+    try:
+        if resolve_source_node(src).get_id() == target_node_id:
+            return False, "target is currently serving as the fallback source"
+    except ValueError as e:
+        return False, str(e)
+
+    # --- the target's own replicas, which gate the migration ---
+    # Imported lazily: the runner imports this module, so a module-level import
+    # would close the cycle.
+    from simplyblock_core.services.tasks_runner_lvol_migration import (
+        _get_target_secondary_node, _get_target_tertiary_node)
+    for _get, label in ((_get_target_secondary_node, "secondary"),
+                        (_get_target_tertiary_node, "tertiary")):
+        try:
+            _node, err = _get(tgt, lvol.node_id)
+        except Exception as e:                       # noqa: BLE001 - advisory check
+            return False, f"target {label} check failed: {e}"
+        if err:
+            return False, err
+
+    # --- in-flight work that would refuse us anyway ---
+    if tasks_controller.get_active_node_mig_task(tgt.cluster_id, target_node_id):
+        return False, "target has a data migration in progress"
+
+    return True, ""
+
+
+def resolve_source_node(primary_node):
+    """Which node will actually serve source-side RPCs for a migration off
+    *primary_node*: itself when reachable, otherwise its first online replica
+    (secondary, then tertiary).
+
+    Public because callers need the answer BEFORE they choose a target -- the
+    node standing in as the source cannot also be the destination. Asking here
+    rather than re-deriving it keeps one owner of the rule; a second copy would
+    be free to disagree with the one the migration actually uses.
+
+    Raises ValueError if the primary is unreachable and no replica is online.
+    """
+    if primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        return primary_node
+    if primary_node.status == StorageNode.STATUS_RESTARTING:
+        # Transient, and the one case where standing a replica in is wrong:
+        # the primary takes its lvstore's leadership back when it returns,
+        # so a migration pinned to the replica would run its source-side
+        # cutover on a node that is no longer the leader. Wait instead.
+        raise PreconditionError(
+            f"Source node {primary_node.get_id()} is restarting; retry once it is back online")
+
+    for replica_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+        if not replica_id:
+            continue
+        try:
+            replica = db.get_storage_node_by_id(replica_id)
+        except KeyError:
+            continue
+        if replica.status == StorageNode.STATUS_ONLINE:
+            return replica
+
+    raise ValueError(
+        f"Source node is not online (status={primary_node.status}) "
+        f"and no online secondary/tertiary replica is available")
+
+
+def _resolve_active_source_node(primary_node, target_node_id):
+    """
+    Decide which node the migration will actually issue source-side RPCs
+    against, and refuse a target that is that node.
+
+    This is called exactly once, at create time (create_migration /
+    create_batch_migration). The result is persisted as
+    migration.active_source_node_id / group.active_source_node_id and must
+    never be re-derived afterward — start_migration/start_batch_migration and
+    the task runners only ever read it.
+
+    Raises ValueError if the primary is unreachable and no replica is
+    online either. Raises PreconditionError if the resolved node is the
+    same as target_node_id (can't migrate a replica onto itself).
+    """
+    active_node = resolve_source_node(primary_node)
+
+    if active_node.get_id() == target_node_id:
+        raise PreconditionError(
+            f"Cannot migrate to node {target_node_id}: source primary "
+            f"{primary_node.get_id()} is offline and {target_node_id} is "
+            f"currently serving as the fallback source for this volume")
+
+    return active_node
 
 
 def _is_snap_on_node(snap_id, node_id):
@@ -935,6 +1105,68 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
     return True, ""
 
 
+def _refuse_restarting_target_replicas(tgt_node, lvol):
+    """Refuse a create whose target has a replica mid-restart, before anything
+    is built.
+
+    The runner already waits for such a replica (its target-replica lookups
+    answer "cannot create on target primary" and the task is suspended and
+    retried), but create_migration kept it in the replica set and RPC'd it:
+    the restart's window is exactly when its SPDK does not answer, the call
+    raised RPCConnectionError deep inside, and the create failed after the
+    target bdev and subsystem were already on the primary. Failing here is
+    the same outcome with nothing to clean up, and the message says what to
+    do. Raises PreconditionError."""
+    roles = [("secondary", tgt_node.secondary_node_id)] if lvol.ha_type != "single" else []
+    roles.append(("tertiary", tgt_node.tertiary_node_id))
+    for role, replica_id in roles:
+        if not replica_id:
+            continue
+        try:
+            replica = db.get_storage_node_by_id(replica_id)
+        except KeyError:
+            continue
+        if replica.status == StorageNode.STATUS_RESTARTING:
+            raise PreconditionError(
+                f"Target {role} {replica.get_id()} is restarting; retry once it is back online")
+
+
+def replica_is_departing(node) -> bool:
+    """The one rule for "this replica is leaving the cluster and gets no
+    target-side work": its status is one of DEPARTING_STATUSES.
+
+    That set is REMOVAL_SHUT_DOWN_STATUSES plus PENDING_REMOVAL. A node at
+    PENDING_REMOVAL still serves, but its shutdown is seconds away: anything
+    registered or created on it now is torn down with it and has to be
+    redone. create_migration filtered with the shut-down set only, while the
+    runner's _get_target_secondary_node/_get_target_tertiary_node skipped the
+    whole departing set, so the same replica could be given a subsystem and a
+    registration by the create and then be skipped by every runner step. Both
+    ask here now."""
+    return node is not None and node.status in StorageNode.DEPARTING_STATUSES
+
+
+def _target_replica_for_registration(replica_id, role, composite):
+    """The target's ``role`` replica to pre-register ``composite`` on, or
+    ``None`` when that replica is a node under removal.
+
+    Its SPDK is stopped and its proxy name no longer resolves, so every RPC
+    to it burns the client's connect retries (~6 s) before the tolerant
+    registration gives up and moves on. Per volume that is a nuisance; a
+    batch create runs it once per member, and five members pushed the
+    request past the operator's 30 s client timeout, so the operator never
+    saw the answer, asked again, and a new backend group was created every
+    minute (2026-09-28, run 8: seven volumes stuck at "2 of 7 migrated").
+    The subsystem step below already drops such replicas; this is the same
+    rule for the registration step."""
+    node = db.get_storage_node_by_id(replica_id)
+    if replica_is_departing(node):
+        logger.info(
+            f"create_migration: target {role} {node.get_id()[:8]} is {node.status} "
+            f"(being removed); skipping registration of {composite} there")
+        return None
+    return node
+
 def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                          host_nqn=None,
@@ -970,6 +1202,7 @@ def create_migration(lvol_id, target_node_id,
 
     if not tgt_node.lvstore:
         raise ValueError(f"Target node {target_node_id} has no lvstore")
+    _refuse_restarting_target_replicas(tgt_node, lvol)
 
     # ── Shared-namespace detection ───────────────────────────────────────────
     # _get_shared_subsystem_members includes lvol itself, so a subsystem that
@@ -1003,13 +1236,27 @@ def create_migration(lvol_id, target_node_id,
     except KeyError:
         raise ValueError(f"Source node {src_node_id} not found")
 
+    active_src_node = _resolve_active_source_node(src_node, target_node_id)
+    is_fallback_source = active_src_node.get_id() != src_node_id
+    if is_fallback_source:
+        logger.warning(
+            f"create_migration: source primary {src_node_id} is offline; "
+            f"using {active_src_node.get_id()} as the effective source for lvol={lvol_id}")
+
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
-    if cluster.status != Cluster.STATUS_ACTIVE:
+    # See the matching comment in start_migration(): a fallback migration's
+    # primary is down, which is what drives the cluster to DEGRADED, so the
+    # strict ACTIVE-only gate would make the feature unusable for the
+    # scenario it exists for. Non-fallback migrations keep the stricter gate.
+    allowed_statuses = (
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        else (Cluster.STATUS_ACTIVE,))
+    if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
     if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
 
-    for node_id in (src_node_id, target_node_id):
+    for node_id in {src_node_id, active_src_node.get_id(), target_node_id}:
         if tasks_controller.get_active_node_mig_task(tgt_node.cluster_id, node_id):
             raise PreconditionError(f"Node {node_id} has a data migration in progress; wait for it to finish")
 
@@ -1055,28 +1302,29 @@ def create_migration(lvol_id, target_node_id,
     _pre_sec_node = None
     if lvol.ha_type != "single" and tgt_node.secondary_node_id:
         try:
-            _pre_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
-            _sec_rpc_reg  = _pre_sec_node.rpc_client()
-            if _sec_rpc_reg.get_bdevs(composite):
-                logger.info(
-                    f"create_migration: {composite} already on secondary "
-                    f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
-            elif _tgt_blobid is not None and _tgt_uuid is not None:
-                ret_sec = _sec_rpc_reg.bdev_lvol_register(
-                    bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
-                    lvol.lvol_priority_class)
-                if ret_sec:
-                    _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
+            _pre_sec_node = _target_replica_for_registration(tgt_node.secondary_node_id, "secondary", composite)
+            if _pre_sec_node is not None:
+                _sec_rpc_reg  = _pre_sec_node.rpc_client()
+                if _sec_rpc_reg.get_bdevs(composite):
                     logger.info(
-                        f"create_migration: registered {composite} on "
-                        f"secondary {_pre_sec_node.get_id()}")
+                        f"create_migration: {composite} already on secondary "
+                        f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
+                elif _tgt_blobid is not None and _tgt_uuid is not None:
+                    ret_sec = _sec_rpc_reg.bdev_lvol_register(
+                        bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                        lvol.lvol_priority_class)
+                    if ret_sec:
+                        _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
+                        logger.info(
+                            f"create_migration: registered {composite} on "
+                            f"secondary {_pre_sec_node.get_id()}")
+                    else:
+                        logger.warning(
+                            f"create_migration: bdev_lvol_register on secondary "
+                            f"{_pre_sec_node.get_id()} failed (continuing)")
                 else:
                     logger.warning(
-                        f"create_migration: bdev_lvol_register on secondary "
-                        f"{_pre_sec_node.get_id()} failed (continuing)")
-            else:
-                logger.warning(
-                    f"create_migration: no bdev info for secondary registration of {composite}")
+                        f"create_migration: no bdev info for secondary registration of {composite}")
         except Exception as _e:
             logger.warning(
                 f"create_migration: secondary registration error (continuing): {_e}")
@@ -1084,28 +1332,29 @@ def create_migration(lvol_id, target_node_id,
     _pre_ter_node = None
     if tgt_node.tertiary_node_id:
         try:
-            _pre_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
-            _ter_rpc_reg  = _pre_ter_node.rpc_client()
-            if _ter_rpc_reg.get_bdevs(composite):
-                logger.info(
-                    f"create_migration: {composite} already on tertiary "
-                    f"{_pre_ter_node.get_id()} — skipping bdev_lvol_register")
-            elif _tgt_blobid is not None and _tgt_uuid is not None:
-                ret_ter = _ter_rpc_reg.bdev_lvol_register(
-                    bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
-                    lvol.lvol_priority_class)
-                if ret_ter:
-                    _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)
+            _pre_ter_node = _target_replica_for_registration(tgt_node.tertiary_node_id, "tertiary", composite)
+            if _pre_ter_node is not None:
+                _ter_rpc_reg  = _pre_ter_node.rpc_client()
+                if _ter_rpc_reg.get_bdevs(composite):
                     logger.info(
-                        f"create_migration: registered {composite} on "
-                        f"tertiary {_pre_ter_node.get_id()}")
+                        f"create_migration: {composite} already on tertiary "
+                        f"{_pre_ter_node.get_id()} — skipping bdev_lvol_register")
+                elif _tgt_blobid is not None and _tgt_uuid is not None:
+                    ret_ter = _ter_rpc_reg.bdev_lvol_register(
+                        bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                        lvol.lvol_priority_class)
+                    if ret_ter:
+                        _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)
+                        logger.info(
+                            f"create_migration: registered {composite} on "
+                            f"tertiary {_pre_ter_node.get_id()}")
+                    else:
+                        logger.warning(
+                            f"create_migration: bdev_lvol_register on tertiary "
+                            f"{_pre_ter_node.get_id()} failed (continuing)")
                 else:
                     logger.warning(
-                        f"create_migration: bdev_lvol_register on tertiary "
-                        f"{_pre_ter_node.get_id()} failed (continuing)")
-            else:
-                logger.warning(
-                    f"create_migration: no bdev info for tertiary registration of {composite}")
+                        f"create_migration: no bdev info for tertiary registration of {composite}")
         except Exception as _e:
             logger.warning(
                 f"create_migration: tertiary registration error (continuing): {_e}")
@@ -1122,6 +1371,32 @@ def create_migration(lvol_id, target_node_id,
     if src_node.tertiary_node_id:
         src_node_ids.add(src_node.tertiary_node_id)
 
+    # A target replica that is being removed is not a usable entry. Its SPDK is
+    # stopped and its mgmt hostname no longer resolves, so every RPC in the
+    # tgt_entries loop below raises -- and unlike the pre-registration above,
+    # that loop is not tolerant: one unreachable replica fails the entire
+    # create_migration.
+    #
+    # The blast radius is wider than the removal's own drain. The replica set
+    # belongs to the TARGET, so a migration between two perfectly healthy nodes
+    # is refused whenever the target happens to list the departing node as its
+    # secondary or tertiary. Live 2026-09-16 on cluster 5aaf0a5d: migrating a
+    # volume from healthy rpksz to healthy zqhjg died with
+    # "Could not reach remote" against 94dtj, the node under removal, which was
+    # involved only as the target's replica.
+    #
+    # Skipping is also the correct end state: a departing node cannot hold a
+    # replica of anything, and the removal's own relocation re-places it.
+    def _usable_replica(node):
+        if node is None:
+            return None
+        if replica_is_departing(node):
+            logger.info(
+                f"create_migration: skipping target replica {node.get_id()[:8]} "
+                f"(status={node.status}); it is leaving the cluster")
+            return None
+        return node
+
     tgt_sec_node = None
     if lvol.ha_type != "single" and tgt_node.secondary_node_id:
         tgt_sec_node = (_pre_sec_node if _pre_sec_node is not None else None)
@@ -1130,6 +1405,7 @@ def create_migration(lvol_id, target_node_id,
                 tgt_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
             except KeyError:
                 pass
+    tgt_sec_node = _usable_replica(tgt_sec_node)
 
     tgt_ter_node = None
     if tgt_node.tertiary_node_id:
@@ -1139,6 +1415,7 @@ def create_migration(lvol_id, target_node_id,
                 tgt_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
             except KeyError:
                 pass
+    tgt_ter_node = _usable_replica(tgt_ter_node)
 
     tgt_node_ids = {target_node_id}
     if tgt_sec_node is not None:
@@ -1315,6 +1592,7 @@ def create_migration(lvol_id, target_node_id,
     migration.cluster_id = tgt_node.cluster_id
     migration.lvol_id = lvol_id
     migration.source_node_id = lvol.node_id
+    migration.active_source_node_id = active_src_node.get_id()
     migration.target_node_id = target_node_id
     migration.phase = LVolMigration.PHASE_PRE_CREATED
     migration.status = LVolMigration.STATUS_NEW
@@ -1337,6 +1615,30 @@ def create_migration(lvol_id, target_node_id,
 # ---------------------------------------------------------------------------
 # Batch (shared-namespace) migration
 # ---------------------------------------------------------------------------
+
+# A batch-migration group written with no members is a reservation of its
+# NQN by a create still in progress (see create_batch_migration). One older
+# than this is a leftover of a crashed create and is dropped.
+_BATCH_RESERVATION_MAX_AGE_S = 600
+
+
+def _batch_reservation_age_s(group):
+    try:
+        return (datetime.now() - datetime.fromisoformat(str(group.create_dt))).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _batch_reservation_in_flight(group):
+    """A pre-created group with no members that a create wrote moments ago."""
+    return (group.phase == LVolMigrationGroup.PHASE_PRE_CREATED and not group.members
+            and _batch_reservation_age_s(group) < _BATCH_RESERVATION_MAX_AGE_S)
+
+
+def _batch_reservation_is_stale(group):
+    return (group.phase == LVolMigrationGroup.PHASE_PRE_CREATED and not group.members
+            and _batch_reservation_age_s(group) >= _BATCH_RESERVATION_MAX_AGE_S)
+
 
 def create_batch_migration(lvol_id, target_node_id,
                            ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
@@ -1395,24 +1697,80 @@ def create_batch_migration(lvol_id, target_node_id,
                         f"Batch migration group {g.uuid} for NQN {lvol.nqn} is already "
                         f"past pre-create (phase={g.phase}). Use /continue or cancel it."
                     )
+                if _batch_reservation_in_flight(g):
+                    # Worded so the operator treats it as "not accepting yet"
+                    # and retries, rather than as a conflict to cancel.
+                    raise PreconditionError(
+                        f"Batch migration for NQN {lvol.nqn} is being created by another "
+                        f"request (data migration in progress); retry shortly")
+                if _batch_reservation_is_stale(g):
+                    logger.warning(
+                        f"create_batch_migration: dropping stale reservation {g.uuid} for "
+                        f"NQN={lvol.nqn} (older than {_BATCH_RESERVATION_MAX_AGE_S}s, no members)")
+                    g.status = LVolMigrationGroup.STATUS_CANCELLED
+                    g.write_to_db(db_inst.kv_store)
+                    continue
                 existing_group = g
 
     source_node_id = lvol.node_id
+
+    # Reserve the NQN before the members are created. Member creation takes
+    # seconds per volume; a second request for the same subsystem arriving in
+    # that window (the operator re-submitting after its client timeout, to
+    # the other API replica) found no group yet and built its own. Two groups
+    # then shared the same member migrations, and the cleanup of whichever
+    # failed first tore the other's target bdevs down under it ("target bdev
+    # LVOL_29m not found", 2026-09-28, run 8). The reservation is the group
+    # record itself, written with no members; it is filled in below, and
+    # removed if member creation fails.
+    reservation = None
+    if existing_group is None:
+        reservation = LVolMigrationGroup()
+        reservation.uuid = str(uuid.uuid4())
+        reservation.cluster_id = tgt_node.cluster_id
+        reservation.source_node_id = source_node_id
+        reservation.target_node_id = target_node_id
+        reservation.target_nqn = lvol.nqn
+        reservation.members = []
+        reservation.phase = LVolMigrationGroup.PHASE_PRE_CREATED
+        reservation.status = LVolMigrationGroup.STATUS_RUNNING
+        reservation.create_dt = str(datetime.now())
+        reservation.write_to_db(db_inst.kv_store)
 
     # Pre-create individual migration records for each member.
     # connect_strings come from the master (ns_id=1) since the NQN is shared.
     member_records = []   # list of (ns_id, migration_id)
     master_connect_strings = []
-    for member in members:
-        migration_id, connect_strings = create_migration(
-            member.uuid, target_node_id,
-            ctrl_loss_tmo=ctrl_loss_tmo,
-            host_nqn=host_nqn,
-            batch=True,
-        )
-        member_records.append({"ns_id": member.ns_id, "migration_id": migration_id})
-        if member.ns_id == 1:
-            master_connect_strings = connect_strings
+    try:
+        for member in members:
+            migration_id, connect_strings = create_migration(
+                member.uuid, target_node_id,
+                ctrl_loss_tmo=ctrl_loss_tmo,
+                host_nqn=host_nqn,
+                batch=True,
+            )
+            member_records.append({"ns_id": member.ns_id, "migration_id": migration_id})
+            if member.ns_id == 1:
+                master_connect_strings = connect_strings
+    except Exception:
+        if reservation is not None:
+            try:
+                reservation.remove(db_inst.kv_store)
+            except Exception as _rm_err:  # noqa: BLE001 - best effort, the create already failed
+                logger.warning(f"create_batch_migration: could not drop reservation {reservation.uuid}: {_rm_err}")
+        raise
+
+    # The group inherits the source its members already resolved rather than
+    # resolving again: every member went through create_migration(), which
+    # pinned the same primary's active source, and a second resolution here
+    # could disagree with theirs if a replica's health changed in between.
+    active_source_node_id = source_node_id
+    if member_records:
+        try:
+            active_source_node_id = db.get_migration_by_id(
+                member_records[0]["migration_id"]).active_source_node_id or source_node_id
+        except KeyError:
+            pass
 
     # Compute snap ownership: snap_uuid → lvol_uuid, then remap to migration_id.
     lvol_uuid_to_migration_id = {
@@ -1434,10 +1792,14 @@ def create_batch_migration(lvol_id, target_node_id,
         return existing_group.uuid, master_connect_strings
 
     # Stamp migration_group_id on each worker record.
-    group = LVolMigrationGroup()
-    group.uuid = str(uuid.uuid4())
-    group.cluster_id = tgt_node.cluster_id
-    group.source_node_id = source_node_id
+    # existing_group returned above, so this create owns the reservation.
+    assert reservation is not None
+    group = reservation
+    group.active_source_node_id = active_source_node_id
+    if active_source_node_id != source_node_id:
+        logger.warning(
+            f"create_batch_migration: source primary {source_node_id} is offline; "
+            f"using {active_source_node_id} as the effective source for group NQN={lvol.nqn}")
     group.target_node_id = target_node_id
     group.target_nqn = lvol.nqn
     group.members = member_records
@@ -1482,16 +1844,39 @@ def start_batch_migration(group_id,
             f"Group {group_id} is not in PHASE_PRE_CREATED (phase={group.phase})"
         )
 
+    # active_source_node_id is read-only here — it was resolved once, at
+    # create_batch_migration() time, and must never be re-derived.
+    active_source_node_id = group.active_source_node_id or group.source_node_id
+    is_fallback_source = active_source_node_id != group.source_node_id
+
     # Same preconditions as start_migration's single-lvol path — these are
     # only checked at create_batch_migration (precreate) time today, so a
     # cluster rebalance / conflicting node migration starting in the gap
     # before migrate-continue --batch would otherwise go unnoticed here.
+    # A fallback group's primary is down, which is what drives the cluster to
+    # DEGRADED in the first place, so the strict ACTIVE-only gate would make
+    # the feature unusable for the scenario it exists for (see the matching
+    # comment in start_migration()). Non-fallback groups keep the stricter gate.
     cluster = db.get_cluster_by_id(group.cluster_id)
-    if cluster.status != Cluster.STATUS_ACTIVE:
+    allowed_statuses = (
+        (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED) if is_fallback_source
+        else (Cluster.STATUS_ACTIVE,))
+    if cluster.status not in allowed_statuses:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
     if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
-    for node_id in (group.source_node_id, group.target_node_id):
+    try:
+        active_source_node = db.get_storage_node_by_id(active_source_node_id)
+    except KeyError as e:
+        raise ValueError(str(e))
+    if active_source_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        raise ValueError(f"Source node is not online (status={active_source_node.status})")
+    if is_fallback_source:
+        logger.info(
+            f"start_batch_migration {group_id}: source primary {group.source_node_id} is offline; "
+            f"continuing with pre-selected fallback source {active_source_node_id}")
+
+    for node_id in {group.source_node_id, active_source_node_id, group.target_node_id}:
         if tasks_controller.get_active_node_mig_task(group.cluster_id, node_id):
             raise PreconditionError(f"Node {node_id} has a data migration in progress; wait for it to finish")
 
@@ -1524,7 +1909,6 @@ def start_batch_migration(group_id,
                                  if s not in snaps_on_target
                                  and group.snap_owners.get(s) != migration_id]
 
-        migration.source_node_id = lvol.node_id
         migration.phase = LVolMigration.PHASE_SNAP_COPY
         migration.snap_migration_plan = owned_snaps
         migration.snaps_migrated = []

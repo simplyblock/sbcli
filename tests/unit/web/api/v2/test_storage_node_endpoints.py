@@ -120,6 +120,22 @@ class TestGetStorageNode:
         assert response.status_code == 200
         assert response.json()['status'] == status
 
+    def test_both_replica_ids_are_reported(self, client, db, storage_node):
+        """The operator's drain avoids migration targets whose replica set
+        includes the node being removed, so it needs both replica ids."""
+        storage_node.secondary_node_id = '22222222-2222-2222-2222-222222222222'
+        storage_node.tertiary_node_id = '33333333-3333-3333-3333-333333333333'
+
+        body = client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()
+
+        assert body['secondary_node_id'] == '22222222-2222-2222-2222-222222222222'
+        assert body['tertiary_node_id'] == '33333333-3333-3333-3333-333333333333'
+
+    def test_no_tertiary_is_null(self, client, db, storage_node):
+        storage_node.tertiary_node_id = ''
+
+        assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['tertiary_node_id'] is None
+
 
 class TestDeleteStorageNode:
 
