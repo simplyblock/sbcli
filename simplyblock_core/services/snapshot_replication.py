@@ -1170,7 +1170,8 @@ def _previous_replicated_snapshot(snapshot, replicate_to_source):
         except KeyError as e:
             logger.error("clone parent %s unresolvable: %s", parent_uuid, e)
             return None
-    if parent is not None and getattr(parent, attr, ""):
+    parent_marker = getattr(parent, attr, "") if parent is not None else ""
+    if parent is not None and parent_marker:
         logger.info("Chain parent for %s is the clone's origin snapshot %s",
                     snapshot.get_id(), parent.get_id())
         return parent
