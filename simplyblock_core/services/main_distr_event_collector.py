@@ -756,7 +756,11 @@ def ensure_collectors(nodes):
             key = f"{node_id}:{source}"
             thread = threads_maps.get(key)
             if thread is None or thread.is_alive() is False:
-                t = threading.Thread(target=target, args=(node_id,))
+                t = threading.Thread(
+                    target=target,
+                    args=(node_id,),
+                    daemon=True,  # prevents main thread failures from keeping the process alive
+                )
                 t.start()
                 threads_maps[key] = t
 
