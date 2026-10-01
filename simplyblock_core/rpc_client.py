@@ -577,7 +577,8 @@ class RPCClient:
         try:
             return self._request3("bdev_nvme_get_controllers", **kwargs)
         except RPCRemoteError as e:
-            if name and e.code == -errno.EINVAL:
+            # bdev_nvme_rpc.c sends EINVAL un-negated here, unlike ENODEV elsewhere.
+            if name and abs(e.code) == errno.EINVAL:
                 return []
             raise
 

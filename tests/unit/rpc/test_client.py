@@ -15,6 +15,40 @@ from simplyblock_core.rpc_client import (
 )
 
 
+class TestBdevNvmeControllerList(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request3")
+    def test_unmatched_name_negative_einval_returns_empty(self, mock_req):
+        # Sign SPDK uses for most RPC errors (e.g. bdev_get_bdevs's ENODEV).
+        mock_req.side_effect = RPCRemoteError("Controller foo does not exist", code=-errno.EINVAL)
+        client = _make_client()
+        self.assertEqual(client.bdev_nvme_controller_list("foo"), [])
+
+    @patch.object(RPCClient, "_request3")
+    def test_unmatched_name_positive_einval_returns_empty(self, mock_req):
+        # bdev_nvme_rpc.c:687 sends EINVAL un-negated for this RPC specifically
+        # (spdk_jsonrpc_send_error_response_fmt(request, EINVAL, ...)) -- the
+        # regression this guards: a sign-only check missed this case entirely.
+        mock_req.side_effect = RPCRemoteError("Controller foo does not exist", code=errno.EINVAL)
+        client = _make_client()
+        self.assertEqual(client.bdev_nvme_controller_list("foo"), [])
+
+    @patch.object(RPCClient, "_request3")
+    def test_other_rpc_error_propagates(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.ENODEV)
+        client = _make_client()
+        with self.assertRaises(RPCException):
+            client.bdev_nvme_controller_list("foo")
+
+    @patch.object(RPCClient, "_request3")
+    def test_no_name_einval_propagates(self, mock_req):
+        # The [] translation only applies to a filtered (named) lookup.
+        mock_req.side_effect = RPCRemoteError("bad request", code=errno.EINVAL)
+        client = _make_client()
+        with self.assertRaises(RPCException):
+            client.bdev_nvme_controller_list()
+
+
 def _make_client(**kwargs):
     """Create an RPCClient without hitting the network."""
     with patch("requests.session"):
