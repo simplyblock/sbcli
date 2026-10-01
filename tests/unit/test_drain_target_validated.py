@@ -112,11 +112,9 @@ class TestTheCheckCoversTheAdmissionRules(unittest.TestCase):
 
     def test_it_is_read_only(self):
         """It runs inside target selection; it must not mutate anything."""
-        import inspect
-
         from simplyblock_core.controllers import migration_controller as mc
-        fn = mc.check_target_viable
-        body = inspect.getsource(fn).replace(fn.__doc__ or "", "")
+        from tests._source import code_of
+        body = code_of(mc.check_target_viable)
         for forbidden in ("write_to_db", "rpc_client", "create_migration"):
             self.assertNotIn(forbidden, body,
                              f"a selection-time check must not {forbidden}")

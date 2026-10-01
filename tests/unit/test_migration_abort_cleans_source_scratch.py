@@ -128,9 +128,8 @@ class TestTheRollbackCallsIt(unittest.TestCase):
     def test_only_intermediates_are_named(self):
         """snap_migration_plan carries the user's snapshots; the cleanup must
         never reach for it."""
-        import inspect
-        fn = runner._delete_source_intermediates
-        body = inspect.getsource(fn).replace(fn.__doc__ or "", "")
+        from tests._source import code_of
+        body = code_of(runner._delete_source_intermediates)
         self.assertIn("migration.intermediate_snaps", body)
         self.assertNotIn("snap_migration_plan", body,
                          "the user's own snapshots are not this function's to delete")
