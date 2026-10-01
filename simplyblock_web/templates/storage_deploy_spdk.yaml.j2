@@ -107,6 +107,10 @@ spec:
           value: "{{ NSOCKET }}"
         - name: FW_PORT
           value: "{{ FW_PORT }}"
+{% if DISABLE_IMDS %}
+        - name: AWS_EC2_METADATA_DISABLED
+          value: "true"
+{% endif %}
       lifecycle:
         postStart:
           exec:
