@@ -341,10 +341,13 @@ class Cluster(BaseModel):
         The AWS SDK probes 169.254.169.254 while it creates a client. Off AWS
         those packets are dropped, so creation blocks an SPDK reactor for about
         8 s, long enough for the journal manager to drop its clients and the
-        journal controller to abort the node. The probe is only useful when the
-        credentials come from the instance role, so it is skipped when the
-        configuration states both a key pair and an explicit endpoint, which
-        is a store the instance role says nothing about.
+        journal controller to abort the node.
+
+        The probe is how the SDK reads credentials from an instance role, so it
+        is only skipped when the configuration states a key pair. It may also be
+        how the SDK learns the region, so it is skipped only when the
+        configuration pins down where requests go as well, with an explicit
+        endpoint or an explicit region. A key pair with neither keeps the probe.
         """
         if not self.backup_config:
             return False
@@ -352,7 +355,8 @@ class Cluster(BaseModel):
             config = self.get_backup_config()
         except ValueError:
             return False
-        return config.credentials is not None and config.endpoint is not None
+        return config.credentials is not None and (
+            config.endpoint is not None or config.region is not None)
 
     def get_backup_config(self) -> BackupConfig:
         """Validate and return this cluster's volume-backup configuration.
