@@ -16,6 +16,11 @@ Percent = Annotated[int, Field(ge=0, le=100)]
 Port = Annotated[int, Field(ge=0, lt=65536)]
 # Records spell an unset reference as an empty string rather than omitting it.
 OptionalUUID = Annotated[UUID | None, BeforeValidator(lambda value: value or None)]
+# Records spell an unassigned slot in the cluster map as -1 rather than omitting it.
+OptionalIndex = Annotated[
+    Unsigned | None,
+    BeforeValidator(lambda value: None if isinstance(value, int) and value < 0 else value),
+]
 
 #: Re-exported rather than redefined: the manifest in the core layer needs the
 #: same type, and one definition is what keeps the two from drifting. Here so

@@ -20,6 +20,10 @@ from simplyblock_core.utils.helpers import single_or_none
 # comfortably exceeds the 4 s timeout_us + reset round-trip.
 DEVICE_FLAP_DEBOUNCE_SEC = 10.0
 
+# Appended to a failed device's serial number once it has been replaced by a
+# fresh device record, marking the original as spent.
+FAILED_SERIAL_SUFFIX = "_failed"
+
 logger = logging.getLogger()
 
 
@@ -1592,7 +1596,7 @@ def new_device_from_failed(device_id):
         logger.error(f"Device status: {device.status} but expected status is {NVMeDevice.STATUS_FAILED_AND_MIGRATED}")
         return False
 
-    if device.serial_number.endswith("_failed"):
+    if device.serial_number.endswith(FAILED_SERIAL_SUFFIX):
         logger.error("Device is already added back from failed")
         return False
 
@@ -1651,7 +1655,7 @@ def new_device_from_failed(device_id):
     def _mut(n, nd=new_device, old_id=device_id):
         for d in n.nvme_devices:
             if d.get_id() == old_id:
-                d.serial_number = f"{d.serial_number}_failed"
+                d.serial_number = f"{d.serial_number}{FAILED_SERIAL_SUFFIX}"
                 break
         n.nvme_devices.append(nd)
         return True
