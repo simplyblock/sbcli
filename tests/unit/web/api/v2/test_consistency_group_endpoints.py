@@ -2,6 +2,8 @@
 (design-csi-addons-replication.md §14.4/§14.5): the whole group promotes as one
 unit through its policy, and its replication status is the roll-up of its members.
 """
+from unittest.mock import MagicMock
+
 import simplyblock_core.controllers.consistency_group_controller as cgc
 from simplyblock_core.controllers.consistency_group_controller import ConsistencyGroupError
 
@@ -97,10 +99,14 @@ class TestGroupReplicationStatus:
         db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
         monkeypatch.setattr(cgc, 'list_members',
                             lambda group: [{"lvol_id": "v1"}, {"lvol_id": "v2"}])
-        lvol_controller.get_replication_info.side_effect = [
-            {"role": "source", "state": "in_sync", "last_replicated_at": 100.0, "lag_seconds": 3},
-            {"role": "source", "state": "degraded", "last_replicated_at": 80.0, "lag_seconds": 9},
-        ]
+        db.get_lvol_by_id.side_effect = lambda i: MagicMock(**{"get_id.return_value": i})
+        lvol_controller.get_replication_info_bulk.return_value = {
+            "v1": {"state": "in_sync", "last_replicated_at": 100.0, "lag_seconds": 3,
+                   "outstanding_count": 0, "outstanding_bytes": 0, "resyncing": False},
+            "v2": {"state": "degraded", "last_replicated_at": 80.0, "lag_seconds": 9,
+                   "outstanding_count": 0, "outstanding_bytes": 0, "resyncing": False},
+        }
+        lvol_controller.replication_role.return_value = "source"
         resp = client.get(f'{BASE}/replication/status')
         assert resp.status_code == 200
         body = resp.json()
@@ -109,11 +115,36 @@ class TestGroupReplicationStatus:
         assert body["state"] == "degraded"   # worst member
         assert body["lag_seconds"] == 9      # worst member
 
+    def test_group_status_uses_one_bulk_read_not_per_member(self, client, db, cluster,
+                                                            lvol_controller, monkeypatch):
+        # Regression: 2026-10-01 -- replication_status read per member
+        # (get_replication_info once each); for an 8-member group its N
+        # unscoped table scans exceeded the csi-addons status RPC deadline, so
+        # the VGR's lastSyncTime -- and Ramen's lastGroupSyncTime -- never
+        # populated and the DR protect/failover gate hung, even though the data
+        # was replicating. The rollup must do ONE bulk read, not N.
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        monkeypatch.setattr(cgc, 'list_members',
+                            lambda group: [{"lvol_id": f"v{i}"} for i in range(8)])
+        db.get_lvol_by_id.side_effect = lambda i: MagicMock(**{"get_id.return_value": i})
+        lvol_controller.get_replication_info_bulk.return_value = {
+            f"v{i}": {"state": "in_sync", "last_replicated_at": 100.0, "lag_seconds": 2,
+                      "outstanding_count": 0, "outstanding_bytes": 0, "resyncing": False}
+            for i in range(8)}
+        lvol_controller.replication_role.return_value = "source"
+        resp = client.get(f'{BASE}/replication/status')
+        assert resp.status_code == 200
+        assert resp.json()["member_count"] == 8
+        # The N+1 is gone: exactly one bulk read, and no per-member scan.
+        lvol_controller.get_replication_info_bulk.assert_called_once()
+        assert lvol_controller.get_replication_info.call_count == 0
+
     def test_never_404s_for_an_unreplicated_group(self, client, db, cluster,
                                                   lvol_controller, monkeypatch):
         db.get_consistency_group_by_id.return_value = factories.make_consistency_group(policy_id="")
         monkeypatch.setattr(cgc, 'list_members', lambda group: [{"lvol_id": "v1"}])
-        lvol_controller.get_replication_info.return_value = None
+        db.get_lvol_by_id.side_effect = lambda i: MagicMock(**{"get_id.return_value": i})
+        lvol_controller.get_replication_info_bulk.return_value = {}   # nothing replicating
         resp = client.get(f'{BASE}/replication/status')
         assert resp.status_code == 200
         assert resp.json()["state"] == "not_replicating"

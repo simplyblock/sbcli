@@ -195,10 +195,37 @@ def replication_status(cluster: Cluster, group: ConsistencyGroupResource) -> Con
     §14.4/§14.6). Never 404s -- a group with no replicating member reports
     ``state: not_replicating``.
     """
+    members = consistency_group_controller.list_members(group)
+    present = []
+    for member in members:
+        try:
+            present.append(db.get_lvol_by_id(member["lvol_id"]))
+        except KeyError:
+            pass   # a member whose volume is gone reports not_replicating below
+
+    # ONE cluster-wide bulk read for every member's lag, backlog and recovery
+    # point, instead of a get_replication_info per member -- each of which is
+    # several unscoped table scans. An 8-member group's N of those exceeded the
+    # csi-addons status RPC deadline, so the VGR's lastSyncTime (and Ramen's
+    # lastGroupSyncTime) never populated and the DR gate hung even though the
+    # data was replicating (root-caused live 2026-10-01).
+    bulk = lvol_controller.get_replication_info_bulk(cluster.get_id(), present)
+
+    # Role is the one field the bulk read omits -- it needs _replication_role's
+    # unscoped relationship scan. A consistency group promotes/demotes as one
+    # unit, so its members share a role: resolve it ONCE from any replicating
+    # member rather than per member.
+    group_role = "none"
+    for lvol in present:
+        if lvol.get_id() in bulk:
+            group_role = lvol_controller.replication_role(lvol)
+            break
+
     infos = []
-    for member in consistency_group_controller.list_members(group):
-        info = lvol_controller.get_replication_info(member["lvol_id"])
-        infos.append(info or {"role": "none", "state": "not_replicating"})
+    for member in members:
+        info = bulk.get(member["lvol_id"])
+        infos.append({**info, "role": group_role} if info
+                     else {"role": "none", "state": "not_replicating"})
     agg = consistency_group_controller.aggregate_group_replication_info(infos)
     return ConsistencyGroupReplicationStatusDTO.from_info(agg)
 

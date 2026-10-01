@@ -3017,6 +3017,16 @@ def _replication_role(db_controller: DBController, lvol: LVol) -> str:
     return "none"
 
 
+def replication_role(lvol: LVol) -> str:
+    """The replication role (source, secondary, failed_over, or none) of an
+    already-fetched volume. Public entry to _replication_role for a caller that
+    holds the LVol and wants only the role -- e.g. a consistency group resolving
+    its single shared role once, rather than paying _replication_role's unscoped
+    relationship scan once per member (get_replication_info_bulk deliberately
+    omits role for the same reason)."""
+    return _replication_role(DBController(), lvol)
+
+
 def _task_shipped(task):
     """True when a snapshot-replication task ended by shipping its snapshot.
 
