@@ -574,9 +574,19 @@ def process_snap_replicate_start(task, snapshot):
         # replication on a node that is already full, which is precisely when
         # the transfers that would let retention free those slots are needed.
         _t_landing = xfer_timing.now()
+        # Carry the source volume's subsystem-packing capacity onto the landing
+        # copy. Without it the copy defaults to a one-namespace subsystem, which
+        # can never be joined by later namespaced volumes -- so every replicated
+        # copy, and every clone taken from it (test-failover, fail-over), lands in
+        # its own subsystem at NSID 1, ignoring the source's
+        # max_namespace_per_subsys. namespaced is not a persisted field; a
+        # max_namespace_per_subsys > 1 IS the "shareable subsystem" signal.
+        src_max_ns = snapshot.lvol.max_namespace_per_subsys
         lv_id, err = lvol_controller.add_lvol_ha(
             f"REP_{snapshot.snap_name}", snapshot.size, remote_node_uuid.get_id(), snapshot.lvol.ha_type,
-            remote_pool_uuid, internal=True)
+            remote_pool_uuid, internal=True,
+            namespaced=src_max_ns > 1,
+            max_namespace_per_subsys=src_max_ns)
         if lv_id:
             task.function_params["remote_lvol_id"] = lv_id
             task.write_to_db()

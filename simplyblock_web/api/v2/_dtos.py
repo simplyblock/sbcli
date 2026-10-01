@@ -91,6 +91,11 @@ ReplicationHealthState = Literal[
     "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
 ]
 
+# Every value of JobSchedule's FN_* constants: the /tasks endpoints serialize a
+# task of any type the scheduler can persist, so an omission here is not a
+# narrower API -- it is a 500 (pydantic literal_error) the moment such a task
+# exists. Keep in lockstep with simplyblock_core.models.job_schedule.JobSchedule;
+# test_task_endpoints.test_serializes_every_task_function_name pins the two together.
 TaskFunctionName = Literal[
     "device_restart",
     "node_restart",
@@ -98,6 +103,7 @@ TaskFunctionName = Literal[
     "failed_device_migration",
     "new_device_migration",
     "node_add",
+    "node_removal",
     "port_allow",
     "balancing_on_restart",
     "balancing_on_dev_rem",
@@ -105,10 +111,15 @@ TaskFunctionName = Literal[
     "jc_comp_resume",
     "snapshot_replication",
     "lvol_sync_del",
+    "lvol_sync_op",
     "lvol_migration",
+    "lvol_batch_migration",
     "s3_backup",
     "s3_backup_restore",
     "s3_backup_merge",
+    "cluster_expand",
+    "replication_final",
+    "fdb_backup",
 ]
 
 
@@ -735,6 +746,7 @@ class ConsistencyGroupDTO(BaseModel):
     name: str
     node_id: util.OptionalUUID = None
     lvs_name: str = ""
+    policy_id: util.OptionalUUID = None
     member_count: int
     last_group_seq: int
 
@@ -748,6 +760,11 @@ class ConsistencyGroupDTO(BaseModel):
             name=model.group_name,
             node_id=UUID(model.node_id) if model.node_id else None,
             lvs_name=model.lvs_name,
+            # The group carries its replication policy (attach_group_policy sets
+            # group.policy_id); expose it so a client can find the group's policy
+            # without the placement/flag heuristic, which a group-first attach
+            # leaves empty.
+            policy_id=UUID(model.policy_id.split('/')[-1]) if model.policy_id else None,
             member_count=current,
             last_group_seq=model.last_group_seq,
         )

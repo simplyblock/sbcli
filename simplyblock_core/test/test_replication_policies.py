@@ -894,6 +894,58 @@ def test_failover_group_promote_proceeds_when_members_are_demoted(monkeypatch):
         "a demoted (relocating) member is a hand-off, not the live primary"
 
 
+def test_latest_generation_resolves_by_membership_not_the_policy_flag(monkeypatch):
+    """Regression (2026-09-30): the test-failover drill's group recovery point
+    read refused a group-first policy outright. A group attached with
+    attach_group_policy sets group.policy_id, NOT the legacy policy.consistency_group
+    flag, so the flag gate raised "has no consistency group" for every live group
+    and the group drill failed at ResolvingPoint. The generation must resolve by
+    MEMBERSHIP, the same signal the fail-over path keys on."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "group-first", target_id)  # no consistency_group flag
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=1)
+    db._groups.append(group)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    lv1.group_id = group.get_id()
+    lv2.group_id = group.get_id()
+    db._lvols.extend([lv1, lv2])
+    remote = _lvol("REP")
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"), _snap("T1_LV1", remote),
+        _group_snap("S1_LV2", lv2, group, 1, target="T1_LV2"), _snap("T1_LV2", remote),
+    ])
+    db._tasks.extend([_done_replication_task("S1_LV1"), _done_replication_task("S1_LV2")])
+
+    seq, members = rpc.latest_replicated_generation(policy_id)
+    assert seq == 1
+    assert {lvol_id: snap.get_id() for lvol_id, snap in members.items()} == \
+        {"LV1": "T1_LV1", "LV2": "T1_LV2"}, \
+        "every member's cloneable point is its target copy at the common generation"
+
+
+def test_latest_generation_ignores_a_standalone_sharing_the_policy(monkeypatch):
+    """Regression (2026-09-30): the group recovery point read resolved the
+    generation over ALL of the policy's volumes. A policy shared by the group and
+    a single-PVC workload (STD, no group_id, not replicated at the group's
+    generation) then poisoned the read -- "generation 1 lacks STD" -- so the group
+    drill could never find a recovery point in the live shared-policy shape. The
+    generation is a property of the group's MEMBERS; a volume that merely shares
+    the policy must not enter the cut."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _shared_policy_group_and_standalone(monkeypatch, db)
+
+    seq, members = rpc.latest_replicated_generation(policy_id)
+    assert seq == 1
+    assert {lvol_id: snap.get_id() for lvol_id, snap in members.items()} == \
+        {"LV1": "T1_LV1", "LV2": "T1_LV2"}, \
+        "the standalone must not be demanded in the group's generation"
+    assert "STD" not in members, "a volume that only shares the policy is not a member"
+
+
 def _failback_scenario(monkeypatch, db, unshipped=()):
     """A failed-over consistency group ready to fail BACK: an EMPTY local group on
     CL_SRC whose members now live in the peer group on CL_TGT, with a demote cut
