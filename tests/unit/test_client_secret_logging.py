@@ -156,11 +156,42 @@ def test_bdev_s3_create_omits_absent_credentials(rpc_client):
     # Same for every other optional: the data plane reads 0 as "unset" for the
     # masks and the pool size, so sending one would be indistinguishable from
     # omitting it while reading as a deliberate choice.
-    for absent in ("endpoint", "bdb_lcpu_mask", "s3_lcpu_mask", "s3_thread_pool_size"):
+    for absent in (
+        "endpoint", "bdb_lcpu_mask", "s3_lcpu_mask", "s3_thread_pool_size",
+        "s3_request_timeout_ms", "s3_request_hard_abort_ms",
+        "s3_request_max_attempts", "s3_retry_burst", "s3_retry_refill_ms",
+    ):
         assert absent not in params
 
     # ... and what is not optional is always present.
     assert params["region"] == "eu-central-1"
+
+
+def test_bdev_s3_create_forwards_retry_and_timeout_params(rpc_client):
+    # Regression test: these five were accepted by the method signature but
+    # dropped before the RPC body was built, so callers configuring the S3
+    # watchdog's timeouts (e.g. restore's create_restore_s3_bdev) silently
+    # got the data plane's defaults instead.
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    rpc_client.bdev_s3_create(
+        name="s3_lvs_test", bucket_name="bucket",
+        secondary_target=0, with_compression=False, snapshot_backups=True,
+        s3_request_timeout_ms=4000,
+        s3_request_hard_abort_ms=6000,
+        s3_request_max_attempts=2,
+        s3_retry_burst=16,
+        s3_retry_refill_ms=1000,
+    )
+
+    params = _sent_params(rpc_client)
+    assert params["s3_request_timeout_ms"] == 4000
+    assert params["s3_request_hard_abort_ms"] == 6000
+    assert params["s3_request_max_attempts"] == 2
+    assert params["s3_retry_burst"] == 16
+    assert params["s3_retry_refill_ms"] == 1000
 
 
 @pytest.fixture
