@@ -1112,9 +1112,8 @@ jobs:
             name: encryption-pool
             namespace: ${NAMESPACE}
           spec:
-            clusterRef: simplyblock-cluster
-            volumeDefaults:
-              enableEncryption: true"
+            clusterRef: simplyblock-cluster"
+            echo "::warning::encryption-pool is created WITHOUT encryption: v1alpha2 StoragePool has no encryption field (spec is allowedNodes/clusterRef/limits/volumeDefaults, and volumeDefaults has no enableEncryption). The pool exists so CRYPTO_POOL_NAME resolves, but its volumes are NOT encrypted -- do not read a passing crypto lane as proof of encryption."
           fi
 
           # --- v1alpha2 bring-up inputs -------------------------------------
