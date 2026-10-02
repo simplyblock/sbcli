@@ -63,7 +63,7 @@ class TestFailoverPathRepairIsReachable:
         before."""
         src = _check_src()
         i = src.index("len(ctrlrs) < 2")
-        assert "_restart_owns_lvs(primary_node)" in src[i:i + 200]
+        assert "_restart_owns_lvs(primary_node, db_controller)" in src[i:i + 200]
 
 
 class TestOrderingWithinTheCheck:

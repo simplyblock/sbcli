@@ -387,6 +387,19 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
         logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
 
         is_sec2 = (node.lvstore_stack_tertiary == primary_node.get_id())
+        # Mid-relocation a node can carry BOTH back-references for one
+        # primary: a cascade sets the new secondary back-reference on the
+        # old tertiary before the tertiary move clears the old one. is_sec2
+        # then reads "tertiary" for a node the relocation just built as
+        # secondary, and the repair below re-stamped that role 10 s after
+        # the relocation set the right one (run 51, 2026-10-02, LVS_11 on
+        # hbdzq). With no single role to repair towards, the repair waits.
+        role_ambiguous = (node.lvstore_stack_secondary == primary_node.get_id()
+                          and node.lvstore_stack_tertiary == primary_node.get_id())
+        if role_ambiguous:
+            logger.info("hublvol %s on %s: node carries both replica roles of %s "
+                        "(relocation in progress); not repairing this cycle",
+                        primary_node.hublvol.bdev_name, node.get_id(), primary_node.get_id())
 
         if not passed and auto_fix and primary_node.lvstore_status == "ready" \
                 and primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -455,7 +468,8 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             # hiccup -- left the peer single-pathed indefinitely. This is that
             # re-check.
             ctrlrs = ret[0].get("ctrlrs", []) if ret else []
-            if len(ctrlrs) < 2 and not _restart_owns_lvs(primary_node):
+            if len(ctrlrs) < 2 and not _restart_owns_lvs(primary_node, db_controller) \
+                    and not role_ambiguous:
                 try:
                     sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
                     if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -501,7 +515,10 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
         # flow is the exclusive author of hublvol (re)attaches during its
         # phases, and a concurrent repair here is what produced the
         # attach-during-destroy race before.
-        if passed and (auto_fix or repair_paths) and ret                 and not _restart_owns_lvs(primary_node)                 and repairs_allowed(node) and repairs_allowed(primary_node):
+        if passed and (auto_fix or repair_paths) and ret \
+                and not _restart_owns_lvs(primary_node, db_controller) \
+                and not role_ambiguous \
+                and repairs_allowed(node) and repairs_allowed(primary_node):
             # SPDK multipath reports one ctrlrs entry PER PATH, so the attached
             # set must be unioned across entries before comparing. Built per
             # entry (as this was), a healthy two-path controller looks like each
