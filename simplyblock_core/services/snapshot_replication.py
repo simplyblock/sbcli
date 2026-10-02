@@ -1554,8 +1554,16 @@ def process_snap_replicate_finish(task, snapshot):
                                lvol=snapshot.lvol.get_id(), node="secondary"):
             ret = sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
         if not ret:
-            logger.error("Failed to convert to snapshot on secondary node")
-            return False
+            if _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
+                # The landing volume never reached the secondary (its
+                # registration there failed while the site recovered); the
+                # primary's convert is the copy, and the lvstore sync, not
+                # this task, repairs the secondary (2026-10-02, LVS_2 on B).
+                logger.warning("Secondary %s does not hold %s; nothing to convert there",
+                               sec_node.get_id(), remote_lv.top_bdev)
+            else:
+                logger.error("Failed to convert to snapshot on secondary node")
+                return False
         _mark_converted(sec_node)
 
     new_snapshot_uuid = str(uuid.uuid4())
