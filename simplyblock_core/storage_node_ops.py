@@ -5866,7 +5866,73 @@ def _relocate_replicas_hosted_on(removed_node: StorageNode):
         moved = [pid for pid, ptrs in _replica_pointers(removed_node.cluster_id, db_controller).items()
                  if before.get(pid) != ptrs]
         _rewindow_moved_replica_subsystems(moved, db_controller)
+        _reassert_moved_replica_roles(moved, db_controller)
     return handled
+
+
+def _replica_role_held(node, lvstore):
+    """The role ``node``'s SPDK holds for ``lvstore``: "secondary" /
+    "tertiary", or None when it cannot be told -- the lvstore is absent or
+    unreachable, or it is the leader after a failover."""
+    try:
+        ret = node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore)
+    except RPCException as e:
+        logger.warning(f"[REMOVAL] could not read {lvstore} on {node.get_id()} ({e})")
+        return None
+    info = ret[0] if isinstance(ret, list) and ret else ret
+    if not isinstance(info, dict) or "lvs_tertiary" not in info or info.get("lvs leadership"):
+        return None
+    return "tertiary" if info["lvs_tertiary"] else "secondary"
+
+
+def _reassert_moved_replica_roles(primary_ids, db_controller):
+    """Give the moved replicas' roles in SPDK the removal's last word.
+
+    The relocation builds each replica in its role, but the periodic hublvol
+    repair stamps roles too, from the node's back-references -- and in the
+    middle of a cascade those name one primary twice, so it stamped
+    "tertiary" over a replica the relocation had just built as secondary
+    (run 51, 2026-10-02 10:01:11, LVS_11 on hbdzq, 10 s after the build).
+    The repair now stands aside in that state, but it is a different
+    process on its own clock, so the removal does not rely on it: once
+    every move has landed and the DB is final, each moved replica whose
+    SPDK role differs from the recorded one is stamped again. A replica
+    that already agrees, or whose role cannot be read, is left alone.
+    """
+    for pid in primary_ids:
+        try:
+            primary = db_controller.get_storage_node_by_id(pid)
+        except KeyError:
+            continue
+        if not primary.lvstore or primary.secondary_node_id == primary.tertiary_node_id:
+            continue
+        for rid, role in ((primary.secondary_node_id, "secondary"),
+                          (primary.tertiary_node_id, "tertiary")):
+            if not rid:
+                continue
+            try:
+                replica = db_controller.get_storage_node_by_id(rid)
+            except KeyError:
+                continue
+            if replica.status != StorageNode.STATUS_ONLINE:
+                continue
+            held = _replica_role_held(replica, primary.lvstore)
+            if held is None or held == role:
+                continue
+            logger.warning(
+                f"[REMOVAL] {rid} holds {primary.lvstore} as {held} but is its {role}; "
+                f"re-asserting the role (a concurrent repair re-stamped it)")
+            try:
+                ok = replica.rpc_client(timeout=10, retry=1).bdev_lvol_set_lvs_opts(
+                    primary.lvstore, groupid=primary.jm_vuid,
+                    subsystem_port=primary.get_lvol_subsys_port(primary.lvstore),
+                    hublvol_port=primary.get_hublvol_port(primary.lvstore), role=role)
+            except RPCException as e:
+                ok = False
+                logger.error(f"[REMOVAL] set_lvs_opts({role}) on {rid} for {primary.lvstore} raised: {e}")
+            if not ok:
+                logger.error(f"[REMOVAL] could not re-assert {role} on {rid} for {primary.lvstore}; "
+                             f"phase 3c will report it")
 
 
 def _relocate_replicas_one_by_one(removed_node, db_controller):
