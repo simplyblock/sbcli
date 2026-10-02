@@ -253,5 +253,52 @@ class TestReusedStackIsReWindowed(unittest.TestCase):
         rewindow.assert_called_once_with(["tt9v7"], db)
 
 
+class TestTheRelocationAnnouncesTheRebuild(unittest.TestCase):
+    """The rebuild blocks the leader's port; the relocation marks the leader
+    in_creation for it, as a node restart does, so the monitor skips the
+    leader instead of sampling its blocked port (run 50, htthx DOWN for 7 s)."""
+
+    def _run(self, outcome):
+        tt9v7 = _node("tt9v7", lvstore="LVS_2", secondary_id="v7ppl", tertiary_id="wzkz2")
+        tt9v7.lvstore_status = "ready"
+        wzkz2 = _node("wzkz2")
+        db = FakeDB(_cluster(npcs=2, ndcs=2, ft=2), [tt9v7, wzkz2])
+        seen = {}
+
+        def _build(new_host, leader, primary, role=None, **_kw):
+            seen["during"] = tt9v7.lvstore_status
+            if isinstance(outcome, Exception):
+                raise outcome
+            if outcome:
+                tt9v7.lvstore_status = "ready"   # the rebuild's own success path
+            return outcome
+
+        with patch.object(sno, "recreate_lvstore_on_non_leader", side_effect=_build):
+            try:
+                ret = sno._rebuild_replica_for_relocation(wzkz2, tt9v7, "secondary", db)
+            except RuntimeError:
+                ret = "raised"
+        return ret, seen["during"], tt9v7.lvstore_status
+
+    def test_the_leader_is_marked_in_creation_during_the_rebuild(self):
+        ret, during, after = self._run(True)
+        self.assertEqual((ret, during, after), (True, "in_creation", "ready"))
+
+    def test_a_failed_rebuild_clears_the_marker(self):
+        ret, during, after = self._run(False)
+        self.assertEqual((ret, during, after), (False, "in_creation", "ready"))
+
+    def test_a_raising_rebuild_clears_the_marker_and_re_raises(self):
+        ret, during, after = self._run(RuntimeError("boom"))
+        self.assertEqual((ret, during, after), ("raised", "in_creation", "ready"))
+
+    def test_both_relocation_paths_use_it(self):
+        import inspect
+        for fn in (sno._relocate_replica_between, sno._relocate_one_replica):
+            src = inspect.getsource(fn)
+            self.assertIn("_rebuild_replica_for_relocation(", src, fn.__name__)
+            self.assertNotIn("recreate_lvstore_on_non_leader(", src, fn.__name__)
+
+
 if __name__ == "__main__":
     unittest.main()

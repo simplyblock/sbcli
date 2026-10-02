@@ -1,26 +1,19 @@
-"""A deliberate, sub-second fence on a node's own lvstore port is not a
-port-down.
+"""A sub-second fence on a node's own lvstore port is not a port-down.
 
 Run 50, 2026-10-01 15:16:46. Removing 8hhg5 relocated the secondary of htthx's
-LVS_10 onto jj7dr. Building it there is the follower-restart sequence, which
-fences the leader's client port while the new secondary attaches: port 4445
-on htthx was blocked from 15:16:46.358 to 15:16:46.754 (0.394s). The monitor's
-routine port check sampled htthx at 15:16:46.665, read 4445 blocked, and
-set_node_down marked a healthy node DOWN for 7s -- a DOWN that is broadcast to
-every distrib.
+LVS_10 onto jj7dr. The rebuild blocks the leader's client port while the new
+secondary examines the lvstore: port 4445 on htthx was blocked for 0.394s. The
+monitor's routine port check sampled inside that window and set_node_down
+marked a healthy node DOWN for 7s -- a DOWN that is broadcast to every distrib.
 
-Two things now stand between one blocked sample and set_node_down:
+A node restart announces that rebuild on the leader (lvstore_status
+"in_creation", which check_node skips); the relocation did not, and now does
+-- see test_cascade_relocation_roles.TestTheRelocationAnnouncesTheRebuild.
 
-* a restart phase for the lvstore on ANY node explains the block. jj7dr
-  carried ``LVS_10: blocked`` from 15:16:46.038, but htthx's record still
-  named the removed 8hhg5 as its secondary, so looking only at the named
-  followers would have missed it;
-* failing that, a second read a moment later must agree. A fence that has
-  already lifted is not evidence against the node.
-
-A real fence -- still blocked on the re-read, no phase owning it -- still
-flips the verdict, and a leaked phase (one get_restart_phase clears) does not
-exempt the port.
+What stays here is the monitor's own guard for a block nobody announced, such
+as SPDK's own fence on a writer conflict or a leadership change: one blocked
+sample is re-read a moment later, and only a block that is still there counts.
+A restart phase on some node is not, by itself, an exemption.
 """
 
 import unittest
@@ -95,18 +88,18 @@ class TestOwnPortFence(unittest.TestCase):
             verdict = snm.node_port_check_fun(htthx)
         return verdict, calls, sleep, seen.get("results", {})
 
-    def test_the_run_50_relocation_fence_is_not_a_port_down(self):
-        """jj7dr is building htthx's LVS_10 (phase ``blocked``) while htthx
-        still names the removed node as its secondary."""
+    def test_a_restart_phase_alone_does_not_exempt_the_port(self):
+        """The rebuild is announced by the leader's in_creation marker, which
+        check_node honours before the port check runs. A phase on another node
+        no longer exempts the port: the re-read decides."""
         verdict, calls, sleep, _ = self._check(
-            [False], rewiring_node_phase=StorageNode.RESTART_PHASE_BLOCKED,
+            [False, False], rewiring_node_phase=StorageNode.RESTART_PHASE_BLOCKED,
             phase_lookup=StorageNode.RESTART_PHASE_BLOCKED)
-        self.assertTrue(verdict)
-        sleep.assert_not_called()
-        self.assertEqual(len(calls), 1, "a phase-explained block needs no re-read")
+        self.assertFalse(verdict)
+        sleep.assert_called_once_with(snm.PORT_BLOCK_CONFIRM_SEC)
 
     def test_a_block_gone_on_the_re_read_is_not_a_port_down(self):
-        """The sample landed in the fence after its phase had already cleared."""
+        """The sample landed inside a fence that lifted a moment later."""
         verdict, calls, sleep, results = self._check([False, True])
         self.assertTrue(verdict)
         sleep.assert_called_once_with(snm.PORT_BLOCK_CONFIRM_SEC)
@@ -118,15 +111,6 @@ class TestOwnPortFence(unittest.TestCase):
         verdict, _calls, _sleep, results = self._check([False, False])
         self.assertFalse(verdict)
         self.assertIs(results[OWN_PORT], False)
-
-    def test_a_leaked_phase_does_not_exempt_the_port(self):
-        """jj7dr's record carries a phase no flow owns any more:
-        get_restart_phase clears it and answers "not in restart"."""
-        verdict, _calls, sleep, _ = self._check(
-            [False, False], rewiring_node_phase=StorageNode.RESTART_PHASE_BLOCKED,
-            phase_lookup="")
-        self.assertFalse(verdict)
-        sleep.assert_called_once()
 
     def test_an_open_port_costs_nothing_extra(self):
         verdict, calls, sleep, _ = self._check([True])
