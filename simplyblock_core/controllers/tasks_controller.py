@@ -304,8 +304,15 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             return False
 
     elif function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+        # One task per snapshot, whatever its direction flag: a forward task
+        # and a replicate_to_source task of the same snapshot resolve to the
+        # same destination once the volume's replication_node_id points at
+        # the fail-back site, and the second one transferred into the
+        # landing volume the first had already converted -- a write into a
+        # snapshot, which dropped the target LVS's leadership (2026-10-02,
+        # LVS_1 on site A, snapshot 06f40e39).
         task_id = get_snapshot_replication_task(
-            cluster_id, function_params['snapshot_id'], function_params['replicate_to_source'])
+            cluster_id, function_params['snapshot_id'], None)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -1231,11 +1238,13 @@ def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
     return False
 
 def get_snapshot_replication_task(cluster_id, snapshot_id, replicate_to_source):
+    """The unfinished replication task of *snapshot_id*, or False.
+    ``replicate_to_source`` None matches either direction."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.function_params["snapshot_id"] == snapshot_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                if task.function_params["replicate_to_source"] == replicate_to_source:
+                if replicate_to_source is None or task.function_params.get("replicate_to_source") == replicate_to_source:
                     return task.uuid
     return False
 

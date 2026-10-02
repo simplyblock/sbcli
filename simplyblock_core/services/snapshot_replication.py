@@ -602,6 +602,13 @@ def process_snap_replicate_start(task, snapshot):
     # return to the recorded node on its own after an outage.
     remote_lv_node = _receiving_leader_node(remote_lv)
     if remote_lv_node is None:
+        # Leadership does not come back on its own: SPDK drops it on a
+        # failed write and the control plane grants it only on restart,
+        # activation or its leaderless-LVS recovery -- which nothing ran
+        # while this task waited (2026-10-02, LVS_1 on site A leaderless
+        # for 20 minutes, every convert refused). Run that recovery now.
+        remote_lv_node = _recover_target_leader(remote_lv)
+    if remote_lv_node is None:
         # Waiting, not failing: the target's leadership is not this transfer's
         # fault, and counting it let a leaderless window kill the task.
         _suspend_for_retry(task, f"No online LVS leader on the target "
@@ -814,6 +821,39 @@ def _receiving_leader_node(remote_lv):
     the recorded node; nothing moves leadership back on its own.
     """
     return _lvs_leader_among(remote_lv.nodes, remote_lv.node_id, remote_lv.lvs_name)
+
+
+def _recover_target_leader(remote_lv):
+    """The control plane's leaderless-LVS recovery for the target lvstore;
+    the node that leads afterwards, or None."""
+    from simplyblock_core import storage_node_ops
+    nodes = []
+    for node_id in (getattr(remote_lv, "nodes", None) or [remote_lv.node_id]):
+        try:
+            nodes.append(db.get_storage_node_by_id(node_id))
+        except KeyError:
+            continue
+    try:
+        leader = storage_node_ops.find_leader_with_failover(nodes, remote_lv.lvs_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Leaderless-LVS recovery of %s failed: %s", remote_lv.lvs_name, e)
+        return None
+    if isinstance(leader, tuple):
+        leader = leader[0]
+    if not leader:
+        return None
+    logger.info("Leadership of %s recovered on %s for the transfer", remote_lv.lvs_name,
+                leader.get_id())
+    return _receiving_leader_node(remote_lv)
+
+
+def _secondary_lacks_bdev(node, bdev_name):
+    """True when *node* has no bdev *bdev_name* (the add_clone's -19)."""
+    try:
+        return not node.rpc_client(timeout=10).get_bdevs(bdev_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not probe %s on %s: %s", bdev_name, node.get_id(), e)
+        return False
 
 
 def _lvs_leader_among(nodes_ids, preferred_id, lvs_name):
@@ -1488,8 +1528,21 @@ def process_snap_replicate_finish(task, snapshot):
                                    lvol=snapshot.lvol.get_id(), node="secondary"):
                 ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
             if not ret:
-                logger.error("Failed to chain replicated snapshot on secondary node")
-                return False
+                if _secondary_lacks_bdev(sec_node, target_prev_snap['snap_bdev']):
+                    # The secondary does not hold the base (-19 No such
+                    # device): its view of the chain is already behind, and
+                    # failing here only re-runs the finish until the task
+                    # gives up, then re-transfers into a converted landing
+                    # (2026-10-02, LVS_1 site A: 8 retries, a duplicate
+                    # landing, a write into a snapshot). The primary's
+                    # convert made the copy; the secondary is repaired by
+                    # the lvstore sync, not by this task.
+                    logger.warning("Secondary %s does not hold %s; the chain of %s "
+                                   "is not repeated there", sec_node.get_id(),
+                                   target_prev_snap['snap_bdev'], remote_lv.top_bdev)
+                else:
+                    logger.error("Failed to chain replicated snapshot on secondary node")
+                    return False
         elif target_prev_snap:
             logger.info("Landing volume %s was already chained to %s on %s "
                         "before the transfer; skipping the redundant add_clone",
