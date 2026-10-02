@@ -27,7 +27,7 @@ draft back, edits it as one object, replaces it, and only then approves.
 expansion.go looks at whether a group lists devices.nvme or devices.block, and
 sets the cluster's immutable deviceClass from that. So lblk is not a flag we
 set on the cluster: it is a discovery that scanned block devices instead of
-NVMe ones, which is deviceFilter.enableLogicalBlockDevices. There is no
+NVMe ones, which is discover.enableLogicalBlockDevices. There is no
 deviceMode and no enableLblk in v1alpha2; both were removed.
 
 We raise our own discovery rather than using the one a fresh install performs by
@@ -293,12 +293,6 @@ def build_discovery(name: str) -> dict:
     lblk = is_lblk()
     device_filter: dict = {}
 
-    # The class is chosen here and nowhere else. Scanning block devices is what
-    # makes the draft's groups carry devices.block, which is what makes the
-    # cluster LogicalBlock.
-    if lblk:
-        device_filter["enableLogicalBlockDevices"] = True
-
     size_range = (os.environ.get("DRIVE_SIZE_RANGE", "") or "").strip()
     if size_range:
         device_filter["driveSizeRange"] = size_range
@@ -328,6 +322,21 @@ def build_discovery(name: str) -> dict:
         # development cluster fails loudly rather than quietly enrolling etcd.
         "enableControlPlaneNodes": False,
     }
+
+    # The class is chosen here and nowhere else. Scanning block devices is what
+    # makes the draft's groups carry devices.block, which is what makes the
+    # cluster LogicalBlock.
+    #
+    # On spec.discover, NOT under deviceFilter. It was written one level too
+    # deep and the apiserver rejects the document outright, so every lblk k8s
+    # bring-up failed all three discovery attempts with
+    #   strict decoding error: unknown field
+    #   "spec.discover.deviceFilter.enableLogicalBlockDevices"
+    # Strict decoding is doing us a favour here: a tolerant apiserver would
+    # have dropped the field and silently given us an NVMe cluster under an
+    # lblk name.
+    if lblk:
+        discover["enableLogicalBlockDevices"] = True
     if device_filter:
         discover["deviceFilter"] = device_filter
 
