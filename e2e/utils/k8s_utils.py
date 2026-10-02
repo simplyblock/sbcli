@@ -32,8 +32,16 @@ from utils.common_utils import sleep_n_sec
 #: v1alpha2's typed volumeDefaults. storageClassParameters was a free-form map;
 #: volumeDefaults is a struct, so a key with no field here is an error rather
 #: than something to pass through and have the apiserver prune.
+#:
+#: "encryption" is deliberately absent. v1alpha2 has no encryption field on
+#: StoragePool at all -- spec is allowedNodes/clusterRef/limits/volumeDefaults,
+#: and volumeDefaults has no such key, so asking for one is rejected outright:
+#:   strict decoding error: unknown field
+#:   "spec.volumeDefaults.enableEncryption"
+#: Encryption is a StorageClass setting again, bound to a pool by the
+#: storage.simplyblock.io/{namespace,cluster,pool} labels. See
+#: create_storage_class.
 _SCP_TO_VOLUME_DEFAULTS = {
-    "encryption": "enableEncryption",
     "compression": "enableCompression",
     "filesystem": "filesystem",
     "csi.storage.k8s.io/fstype": "filesystem",
@@ -42,7 +50,7 @@ _SCP_TO_VOLUME_DEFAULTS = {
 #: The fields volumeDefaults actually has, for the error message.
 _VOLUME_DEFAULT_FIELDS = (
     "iops, throughput, filesystem, enableCompression, enableClientCompression, "
-    "enableClientDeduplication, enableEncryption, enableReplication, "
+    "enableClientDeduplication, enableReplication, "
     "enableDHCHAP, priorityClass, fabric, maxNamespacesPerSubsystem, "
     "tune2fsReservedBlocks"
 )
@@ -1560,13 +1568,46 @@ class K8sUtils:
 
     # ── StorageClass & VolumeSnapshotClass (cluster-scoped) ──────────────────
 
+    def _storage_cluster_cr_name(self, namespace: str = None):
+        """The StorageCluster CR's metadata.name, or "" if none is found.
+
+        This is the name the storage.simplyblock.io/cluster label wants, which
+        is NOT the cluster uuid that goes in StorageClass parameters. Returns
+        "" rather than guessing a default: a label pointing at a cluster that
+        does not exist binds the class to nothing, and a caller that knows the
+        name should pass it rather than rely on this.
+        """
+        ns = namespace or self.namespace
+        try:
+            out, _err = self._exec_kubectl(
+                f"kubectl get storageclusters -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true",
+                supress_logs=True)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[K8sUtils] could not resolve the "
+                                "StorageCluster CR name: %s", str(exc)[:120])
+            return ""
+        names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
+        return names[0] if names else ""
+
     def create_storage_class(self, name: str, cluster_id: str, pool_name: str,
                              ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
                              compression: bool = False, encryption: bool = False,
                              fabric: str = "tcp",
                              max_namespace_per_subsys: int = 1,
-                             dhchap_node_label: str = None):
+                             dhchap_node_label: str = None,
+                             cluster_name: str = None, namespace: str = None):
         """Create a simplyblock CSI StorageClass.
+
+        cluster_name/namespace: used for the three labels that attach this
+            class to its StoragePool --
+            ``storage.simplyblock.io/{namespace,cluster,pool}``. Encryption is
+            a StorageClass setting again in v1alpha2 (there is no encryption
+            field on StoragePool), and the labels are what tie the setting to
+            a pool; a class carrying ``encryption`` with no labels is not
+            associated with any pool. cluster_name is the StorageCluster CR
+            NAME, deliberately separate from cluster_id, which is its uuid and
+            goes in parameters. Resolved from the cluster when not given.
 
         dhchap_node_label: the pool's node label key
             (``simplyblock.io/pool.<ns>.<cluster>.<pool>``). Required for a
@@ -1583,20 +1624,40 @@ class K8sUtils:
             f"  dhchap_node_label: {dhchap_node_label}\n"
             if dhchap_node_label else ""
         )
+        ns = namespace or self.namespace
+        cl_name = cluster_name or self._storage_cluster_cr_name()
+        # Lowercase, matching the documented example. These are CSI parameter
+        # STRINGS, not YAML booleans, so the driver compares them as text and
+        # str(True) == "True" is not obviously equal to "true".
+        _b = lambda v: "true" if v else "false"       # noqa: E731
+        labels = ""
+        if cl_name:
+            labels = (
+                f"  labels:\n"
+                f"    storage.simplyblock.io/namespace: {ns}\n"
+                f"    storage.simplyblock.io/cluster: {cl_name}\n"
+                f"    storage.simplyblock.io/pool: {pool_name}\n"
+            )
+        else:
+            self.logger.warning(
+                "[K8sUtils] StorageClass '%s': no StorageCluster CR name "
+                "resolved, so it carries no pool labels. encryption=%s will "
+                "not be associated with pool '%s'.", name, encryption, pool_name)
         yaml_content = (
             f"allowVolumeExpansion: true\n"
             f"apiVersion: storage.k8s.io/v1\n"
             f"kind: StorageClass\n"
             f"metadata:\n"
             f"  name: {name}\n"
+            f"{labels}"
             f"parameters:\n"
             f"  cluster_id: \"{cluster_id}\"\n"
-            f"  compression: \"{str(compression)}\"\n"
+            f"  compression: \"{_b(compression)}\"\n"
             f"  csi.storage.k8s.io/fstype: {fs_type}\n"
             f"{dhchap_param}"
             f"  distr_ndcs: \"{ndcs}\"\n"
             f"  distr_npcs: \"{npcs}\"\n"
-            f"  encryption: \"{str(encryption)}\"\n"
+            f"  encryption: \"{_b(encryption)}\"\n"
             f"  fabric: {fabric}\n"
             f"  lvol_priority_class: \"0\"\n"
             f"  max_namespace_per_subsys: \"{max_namespace_per_subsys}\"\n"
@@ -1605,7 +1666,7 @@ class K8sUtils:
             f"  qos_rw_iops: \"0\"\n"
             f"  qos_rw_mbytes: \"0\"\n"
             f"  qos_w_mbytes: \"0\"\n"
-            f"  replicate: \"False\"\n"
+            f"  replicate: \"false\"\n"
             f"  tune2fs_reserved_blocks: \"0\"\n"
             f"provisioner: csi.simplyblock.io\n"
             f"reclaimPolicy: Delete\n"
@@ -5133,15 +5194,23 @@ class K8sSbcliUtils:
             )
         # v1alpha2, for the reason the other pool writer in this file states:
         # v1alpha1 needs a conversion webhook these installs do not deploy.
-        # storageClassParameters is gone -- encryption is a typed field under
-        # volumeDefaults, which is immutable once set because the StorageClass
-        # it produces is.
+        #
+        # The pool carries NO encryption setting. v1alpha2's spec is
+        # allowedNodes/clusterRef/limits/volumeDefaults and volumeDefaults has
+        # no encryption key, so the volumeDefaults.enableEncryption this used
+        # to emit was rejected outright and failed every bring-up at
+        # "Applying pools". Encryption is a StorageClass setting again,
+        # attached to a pool by the
+        # storage.simplyblock.io/{namespace,cluster,pool} labels -- see
+        # create_storage_class. The encryption argument is kept so callers do
+        # not have to change, and is logged rather than silently dropped.
         sc_params = ""
         if encryption:
-            sc_params = (
-                "  volumeDefaults:\n"
-                "    enableEncryption: true\n"
-            )
+            self.logger.info(
+                "[pool] Pool %r requested with encryption=True. v1alpha2 "
+                "StoragePool has no encryption field, so the pool is created "
+                "plain; encryption comes from a StorageClass labelled to it. "
+                "Use create_storage_class(encryption=True).", pool_name)
 
         yaml_content = (
             f"apiVersion: storage.simplyblock.io/v1alpha2\n"

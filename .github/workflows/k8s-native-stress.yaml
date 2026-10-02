@@ -1480,7 +1480,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             clusterRef: simplyblock-cluster"
-            echo "::warning::encryption-pool is created WITHOUT encryption: v1alpha2 StoragePool has no encryption field (spec is allowedNodes/clusterRef/limits/volumeDefaults, and volumeDefaults has no enableEncryption). The pool exists so CRYPTO_POOL_NAME resolves, but its volumes are NOT encrypted -- do not read a passing crypto lane as proof of encryption."
+            echo "encryption-pool is created plain: v1alpha2 StoragePool has no encryption field. Encryption is a StorageClass setting, bound to this pool by the storage.simplyblock.io/{namespace,cluster,pool} labels, and the tests create that class themselves (create_storage_class(encryption=True))."
           fi
 
           echo "=== Bringing the cluster up through the deployment config ==="
