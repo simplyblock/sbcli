@@ -50,7 +50,7 @@ ARG CACHE_KEY
 # slow, source-built extension.
 RUN echo "OS package layer cache key: ${CACHE_KEY}" && \
     dnf install -y \
-        https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm && \
+        https://download.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm && \
     dnf install -y \
         ca-certificates \
         curl \
