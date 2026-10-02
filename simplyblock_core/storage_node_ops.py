@@ -6683,38 +6683,67 @@ def _release_jm_from_jc(node, name_old) -> bool:
     return True
 
 
-def _release_jm_from_leftover_groups(node, name_old) -> None:
-    """Release ``name_old`` on a node the DB says has no use for it.
+def _release_orphaned_jm(node, name, *, may_be_in_use=False) -> None:
+    """Release JC's context for JM ``name`` on ``node`` if no vuid uses it.
 
-    An earlier removal leaves its node's own lvstore group behind on that
-    node's replica peers: the lvstore is destroyed, but the group keeps its
-    remaining members and nothing in the DB records it. When one of those
-    members is removed later, the peer's JC retries the dead JM forever --
-    no surviving group names it, so no replace or remove ever reaches it
-    (run 53 1+1, 2026-10-02: 90f75d0e kept LVS_1's leftover group of the
-    first removal and retried the second removal's JM every few seconds).
+    Deleting a vuid's distribs ends that vuid in JC, but JC keeps its context
+    for every JM the vuid had as a member -- open descriptor, IO channel --
+    even when no remaining vuid on the node uses that JM. Nothing in the DB
+    records such a context. When the JM's node is removed later, JC retries
+    it forever (run 53 1+1, 2026-10-02: 90f75d0e kept 0f47d57a's JM after
+    LVS_1's vuid 1 was torn down, and retried it every 5 s once 0f47d57a went
+    away). jc_remove_jm releases such a context (True, measured there) and
+    refuses one a live vuid still uses (-22).
 
-    jc_remove_jm releases a JM that only a leftover group holds (measured on
-    that node), so it is tried on every such node by the JM's deterministic
-    name. -13 ("not used by JC") is the normal answer and stays silent.
+    ``may_be_in_use``: the caller is releasing every former member of a
+    deleted vuid, some of which live vuids on ``node`` still use; -22 is then
+    the expected answer for those and stays silent. -13 ("not used by JC") is
+    silent either way.
     """
     try:
-        ret = node.rpc_client(timeout=10, retry=1).jc_remove_jm(name_old)
+        ret = node.rpc_client(timeout=10, retry=1).jc_remove_jm(name)
     except RPCRemoteError as re:
         if re.code == JC_REMOVE_JM_NOT_USED:
             return
+        if re.code == JC_REMOVE_JM_STILL_IN_USE and may_be_in_use:
+            return
         logger.error(
-            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) failed ({re.code}) "
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name}) failed ({re.code}) "
             f"on a node with no recorded use of it: {re}")
         return
     except RPCException as e:
         logger.warning(
-            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) raised: {e}")
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name}) raised: {e}")
         return
     if ret != RPC_UNSUPPORTED:
         logger.info(
-            f"[REMOVAL] {node.get_id()}: jc_remove_jm released {name_old}, held "
-            f"only by a leftover group of an earlier removal")
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm released {name}, which no "
+            f"vuid on this node uses any more")
+
+
+def _release_former_members_of_removed_vuid(peer, removed_node) -> None:
+    """On a replica peer of ``removed_node``, release JC's context for every
+    other member of the removed node's own vuid that no live vuid on the peer
+    still uses.
+
+    Phase 3a deleted that vuid's distribs here, which ends the vuid in JC but
+    leaves its members' JM contexts open (see _release_orphaned_jm). The
+    removed node's own JM is handled by the caller; this covers the rest, so
+    nothing is left for a later removal to trip over. The names are the ones
+    the vuid was built with on this peer (get_node_jm_names); the peer's own
+    local JM is skipped -- its own vuid always uses it.
+    """
+    try:
+        names = get_node_jm_names(removed_node, remote_node=peer)[1:]
+    except AttributeError as e:
+        # A member's JM record is gone; nothing to name, nothing to release.
+        logger.warning(
+            f"[REMOVAL] {peer.get_id()}: cannot name the members of "
+            f"{removed_node.get_id()}'s vuid {removed_node.jm_vuid}: {e}")
+        return
+    for name in names:
+        if name.startswith("remote_"):
+            _release_orphaned_jm(peer, name, may_be_in_use=True)
 
 
 def _drop_superseded_jm_bdev(node, name_old, removed_jm_id) -> None:
@@ -6930,11 +6959,13 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
             if not targets:
                 if not carries_removed_lvs:
                     # No surviving group here uses the dying JM, and this node
-                    # never carried removed_node's lvstore either. A leftover
-                    # group of an EARLIER removal still can, unrecorded -- see
-                    # _release_jm_from_leftover_groups. No detach: nothing
-                    # live here uses the bdev.
-                    _release_jm_from_leftover_groups(node, removed_jm_name)
+                    # never carried removed_node's lvstore either. JC can still
+                    # hold a context for it, orphaned when an EARLIER removal
+                    # deleted a vuid it belonged to -- see _release_orphaned_jm.
+                    # A safety net: _release_former_members_of_removed_vuid
+                    # releases those at the earlier removal already. No detach:
+                    # nothing live here uses the bdev.
+                    _release_orphaned_jm(node, removed_jm_name)
                     #
                     # Then reconcile the DB record.
                     # remote_jm_devices is derived from three sources (an
@@ -6978,8 +7009,8 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # avoid. Keep describing what is actually there.
                     node.write_to_db()
                 else:
-                    # No record, but the leftover group still names the JM.
-                    _release_jm_from_leftover_groups(node, removed_jm_name)
+                    # No record, but JC may still hold the JM's context.
+                    _release_orphaned_jm(node, removed_jm_name)
                 continue
 
             # Capture the exact bdev name node's JC currently has live for
@@ -7169,6 +7200,13 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # 2026-09-02).
                     node.jm_ids.remove(removed_jm_id)
             node.write_to_db()
+
+        # Phase 3a deleted removed_node's own vuid on its replica peers; release
+        # the contexts JC kept for that vuid's other members now, rather than
+        # leave them for whichever later removal takes one of them out.
+        for node in live_nodes:
+            if node.get_id() in replica_peer_ids:
+                _release_former_members_of_removed_vuid(node, removed_node)
 
 
 def _decommission_node_devices(removed_node: StorageNode):
