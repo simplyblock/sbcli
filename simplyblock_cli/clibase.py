@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, constants, db_controller, utils
@@ -114,13 +115,15 @@ def _bucket_config(args) -> BackupConfig:
     cluster -- which is the point of them, since after a disaster there may be no
     cluster left to ask.
     """
+    # Left to the model's default unless the flag is given.
+    addressing: dict[str, Any] = {"use_path_style": True} if getattr(args, 'path_style', False) else {}
     return BackupConfig(
         bucket_name=args.bucket,
         region=getattr(args, 'region', None) or None,
         endpoint=getattr(args, 'endpoint', None) or None,
         verify_tls=not getattr(args, 'no_verify_tls', False),
-        use_path_style=getattr(args, 'path_style', False),
         credentials=_s3_credentials(args),
+        **addressing,
     )
 
 
