@@ -3727,14 +3727,19 @@ class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
         rpc.bdev_nvme_detach_controller.assert_not_called()
         self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
 
-    def test_node_without_the_dying_jm_is_left_completely_alone(self):
+    def test_replica_peer_without_a_record_is_released_by_name_only(self):
+        """No connection is recorded, but the leftover group still names the
+        JM; the release goes by its deterministic name, and with no bdev
+        recorded there is nothing to detach."""
         cl = _cluster()
         removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2")
+        removed.jm_device.jm_bdev = "jm_dead"
         peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37")
         removed.jm_ids = ["jm-dead"]
         peer.jm_ids = ["jm-peer"]
         peer.remote_jm_devices = []          # never had it
         rpc = MagicMock()
+        rpc.jc_remove_jm = MagicMock(side_effect=RPCRemoteError("not used by JC", -13))
         peer.rpc_client = MagicMock(return_value=rpc)
         db = FakeDB(cl, [removed, peer])
         db.get_jm_device_by_id = MagicMock(
@@ -3744,8 +3749,77 @@ class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
              patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
              patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
             storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
-        rpc.jc_remove_jm.assert_not_called()
+        rpc.jc_remove_jm.assert_called_once_with("remote_jm_deadn1")
         rpc.bdev_nvme_detach_controller.assert_not_called()
+
+
+class TestLeftoverGroupOfAnEarlierRemoval(unittest.TestCase):
+    """Run 53 1+1, 2026-10-02. The first removal left its node's own lvstore
+    group (vuid 1) on 90f75d0e, the peer that hosted that lvstore's replica,
+    still listing 0f47d57a's JM among its members. The second removal took out
+    0f47d57a: 90f75d0e had no surviving group using that JM, was not one of
+    0f47d57a's replica peers and recorded no connection to it, so phase 2 did
+    nothing there -- and its JC retried the dead JM every few seconds, for
+    good. jc_remove_jm by name released it (measured on that node)."""
+
+    def _run(self, jc_remove_jm, *, record=False):
+        cl = _cluster()
+        removed = _node("0f47", with_jm=True, jm_vuid=19, lvstore="LVS_19")
+        removed.jm_device.jm_bdev = "jm_0f47"
+        holder = _node("90f7", with_jm=True, jm_vuid=10, lvstore="LVS_10")
+        removed.jm_ids = ["jm-0f47"]
+        holder.jm_ids = ["jm-90f7"]
+        if record:
+            rd = RemoteJMDevice()
+            rd.uuid = "jm-0f47"
+            rd.remote_bdev = "remote_jm_0f47n1"
+            holder.remote_jm_devices = [rd]
+        else:
+            holder.remote_jm_devices = []
+        bystander = _node("bbb0", with_jm=True, jm_vuid=2, lvstore="LVS_2")
+        bystander.jm_ids = ["jm-bbb0"]
+        bystander.remote_jm_devices = []
+        rpcs = {}
+        for n in (holder, bystander):
+            rpc = MagicMock()
+            rpc.jc_remove_jm = jc_remove_jm if n is holder else MagicMock(
+                side_effect=RPCRemoteError("not used by JC", -13))
+            n.rpc_client = MagicMock(return_value=rpc)
+            rpcs[n.get_id()] = rpc
+        db = FakeDB(cl, [removed, holder, bystander])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-0f47": removed.jm_device}.get(i))
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]), \
+             self.assertLogs(storage_node_ops.logger, level="DEBUG") as logs:
+            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("other",))
+        return rpcs, logs.output
+
+    def test_the_holder_releases_the_dead_jm_by_name(self):
+        rpcs, logs = self._run(MagicMock(return_value=True))
+        rpcs["90f7"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
+        rpcs["90f7"].jc_replace_jm.assert_not_called()
+        rpcs["90f7"].bdev_nvme_detach_controller.assert_not_called()
+        self.assertTrue(any("held only by a leftover group" in m for m in logs))
+
+    def test_a_recorded_connection_is_released_too(self):
+        rpcs, _ = self._run(MagicMock(return_value=True), record=True)
+        rpcs["90f7"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
+
+    def test_not_used_by_jc_is_the_normal_silent_answer(self):
+        _, logs = self._run(MagicMock(side_effect=RPCRemoteError("not used by JC", -13)))
+        self.assertFalse([m for m in logs if "jc_remove_jm" in m])
+
+    def test_still_in_use_is_reported_and_does_not_abort(self):
+        rpcs, logs = self._run(MagicMock(side_effect=RPCRemoteError("in use", -22)))
+        self.assertTrue(any("ERROR" in m and "-22" in m for m in logs))
+        rpcs["bbb0"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
+
+    def test_an_unreachable_node_does_not_abort_the_pass(self):
+        rpcs, _ = self._run(MagicMock(side_effect=RPCConnectionError("unreachable")))
+        rpcs["bbb0"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
 
 
 class TestJcRemoveJmClient(unittest.TestCase):

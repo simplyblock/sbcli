@@ -7003,6 +7003,40 @@ def _release_jm_from_jc(node, name_old) -> bool:
     return True
 
 
+def _release_jm_from_leftover_groups(node, name_old) -> None:
+    """Release ``name_old`` on a node the DB says has no use for it.
+
+    An earlier removal leaves its node's own lvstore group behind on that
+    node's replica peers: the lvstore is destroyed, but the group keeps its
+    remaining members and nothing in the DB records it. When one of those
+    members is removed later, the peer's JC retries the dead JM forever --
+    no surviving group names it, so no replace or remove ever reaches it
+    (run 53 1+1, 2026-10-02: 90f75d0e kept LVS_1's leftover group of the
+    first removal and retried the second removal's JM every few seconds).
+
+    jc_remove_jm releases a JM that only a leftover group holds (measured on
+    that node), so it is tried on every such node by the JM's deterministic
+    name. -13 ("not used by JC") is the normal answer and stays silent.
+    """
+    try:
+        ret = node.rpc_client(timeout=10, retry=1).jc_remove_jm(name_old)
+    except RPCRemoteError as re:
+        if re.code == JC_REMOVE_JM_NOT_USED:
+            return
+        logger.error(
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) failed ({re.code}) "
+            f"on a node with no recorded use of it: {re}")
+        return
+    except RPCException as e:
+        logger.warning(
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) raised: {e}")
+        return
+    if ret != RPC_UNSUPPORTED:
+        logger.info(
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm released {name_old}, held "
+            f"only by a leftover group of an earlier removal")
+
+
 def _drop_superseded_jm_bdev(node, name_old, removed_jm_id) -> None:
     """Detach the controller behind ``name_old`` and drop its bookkeeping.
 
@@ -7081,6 +7115,7 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
         logger.info(f"[REMOVAL] {removed_node.get_id()}: removing JM device")
         device_controller.remove_jm_device(removed_node.jm_device.get_id(), force=True)
         removed_jm_id = removed_node.jm_device.get_id()
+        removed_jm_name = f"remote_{removed_node.jm_device.jm_bdev}n1"
         removed_fd = removed_node.failure_domain
 
         # get_storage_nodes_by_cluster_id returns every node regardless of
@@ -7215,11 +7250,13 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
             if not targets:
                 if not carries_removed_lvs:
                     # No surviving group here uses the dying JM, and this node
-                    # never carried removed_node's lvstore either -- so no JC
-                    # operation applies: no jc_remove_jm, no detach. Nothing on
-                    # this node references the JM.
+                    # never carried removed_node's lvstore either. A leftover
+                    # group of an EARLIER removal still can, unrecorded -- see
+                    # _release_jm_from_leftover_groups. No detach: nothing
+                    # live here uses the bdev.
+                    _release_jm_from_leftover_groups(node, removed_jm_name)
                     #
-                    # The one thing still done is reconciling the DB record.
+                    # Then reconcile the DB record.
                     # remote_jm_devices is derived from three sources (an
                     # explicit jm_ids list, the node's own jm_ids, and the JM of
                     # whichever primary it hosts -- see
@@ -7260,6 +7297,9 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # bookkeeping-vs-reality split this sequence exists to
                     # avoid. Keep describing what is actually there.
                     node.write_to_db()
+                else:
+                    # No record, but the leftover group still names the JM.
+                    _release_jm_from_leftover_groups(node, removed_jm_name)
                 continue
 
             # Capture the exact bdev name node's JC currently has live for
