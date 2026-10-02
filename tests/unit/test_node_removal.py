@@ -126,6 +126,14 @@ class FakeDB:
             return self.nodes[nid]
         raise KeyError(nid)
 
+    def atomic_update(self, obj, mutate):
+        """Apply ``mutate`` to the stored record, as DBController does on a
+        freshly read copy; returns the record, or None when it declines."""
+        target = self.nodes.get(obj.get_id(), obj)
+        if mutate(target) is False:
+            return None
+        return target
+
     def get_lvols_by_node_id(self, nid):
         return self.lvols.get(nid, [])
 

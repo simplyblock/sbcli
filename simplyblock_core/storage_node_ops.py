@@ -6572,6 +6572,30 @@ def _plan_driven_relocation(removed_node: StorageNode, db_controller):
     return True
 
 
+def _rebuild_replica_for_relocation(new_host, primary, role, db_controller):
+    """Build ``role`` of ``primary``'s lvstore on ``new_host``, announcing the
+    rebuild on the leader the way a node restart does.
+
+    The rebuild blocks the leader's client port while ``new_host`` examines
+    the lvstore. A node restart marks the leader ``lvstore_status=
+    "in_creation"`` for that window (_recreate_all_lvstores_serial), and the
+    storage-node monitor skips the leader's checks while it is set. The
+    relocation made the same call without the marker, so the monitor sampled
+    the leader's blocked port and marked a healthy node DOWN for 7 s (run 50,
+    2026-10-01 15:16:46, htthx). The rebuild's success path clears the marker
+    itself; a failure clears it here, as the restart's does.
+    """
+    _set_lvstore_status_atomic(primary.get_id(), "in_creation", db_controller)
+    try:
+        built = recreate_lvstore_on_non_leader(new_host, primary, primary, role=role)
+    except Exception:
+        _restore_peer_lvstore_status_ready(primary.get_id(), db_controller)
+        raise
+    if not built:
+        _restore_peer_lvstore_status_ready(primary.get_id(), db_controller)
+    return built
+
+
 def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     """Re-host ``primary_id``'s ``role`` replica off ``removed_node``.
 
@@ -6628,7 +6652,7 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     # Build the replica on the new node. The primary is online and remains the
     # leader, so recreate_lvstore_on_non_leader wires distribs/raid/lvstore,
     # role + ANA, and the hublvol connection exactly as the restart path does.
-    ret = recreate_lvstore_on_non_leader(new_node, primary, primary, role=role)
+    ret = _rebuild_replica_for_relocation(new_node, primary, role, db_controller)
     if not ret:
         logger.error(
             f"[REMOVAL] failed to rebuild {role} replica of {primary_id} on {new_id}, will retry")
@@ -6821,8 +6845,7 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
             new_host = db_controller.get_storage_node_by_id(new_host_id)
 
         try:
-            built = recreate_lvstore_on_non_leader(new_host, occupant_primary, occupant_primary,
-                                                   role=role)
+            built = _rebuild_replica_for_relocation(new_host, occupant_primary, role, db_controller)
         except Exception as e:
             logger.error(
                 f"[REMOVAL] splice: failed to build {role} replica of "
