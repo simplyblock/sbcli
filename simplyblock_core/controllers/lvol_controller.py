@@ -4047,6 +4047,25 @@ def replication_trigger(lvol_id):
     return out
 
 
+def _reset_demote_state(new_lvol):
+    """A promote's clone starts its life never demoted.
+
+    The clone is a deep copy of the SOURCE record, and the source was just
+    demoted: replication_demote_state == done and the id of the source's
+    demote snapshot came along with the copy. Left in place, the clone's own
+    first demote -- the next planned relocate, i.e. every fail-back -- short-
+    circuits on "already demoted" without fencing and without a final
+    snapshot, and the peer's promote clones from the last INTERVAL copy: up
+    to one replication interval of acknowledged writes is lost on a planned
+    move (live 2026-10-02: WordPress relocate B->A, demote answered in 63 ms,
+    the post written 50 s before the move was gone on A; the inherited
+    snapshot id was the ORIGINAL A volume's demote snapshot from the day
+    before).
+    """
+    new_lvol.replication_demote_state = ""
+    new_lvol.replication_demote_snapshot_id = ""
+
+
 def demote_lvol(lvol_id):
     """Fence the source and confirm the last write replicated (P0-3).
 
@@ -4884,6 +4903,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # the other cluster, where it names nothing and would block fail-back.
     new_lvol.replication_policy_id = ""
     new_lvol.cloned_from_snap = snapshot.get_id()
+    _reset_demote_state(new_lvol)
     new_lvol.place_in_pool(db_controller.get_pool_by_id(pool_uuid))
     new_lvol.lvs_name = target_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
@@ -6053,6 +6073,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.from_source = True
+    _reset_demote_state(new_lvol)
     new_lvol.node_id = source_node.get_id()
     new_lvol.nodes = [source_node.get_id(), source_node.secondary_node_id]
     new_lvol.status = LVol.STATUS_IN_CREATION
