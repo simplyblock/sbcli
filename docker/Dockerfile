@@ -2,7 +2,7 @@
 
 ARG UBI_VERSION=10.2
 ARG FDB_VERSION=7.3.69
-ARG UV_VERSION=0.12.5
+ARG UV_VERSION=0.12.22
 
 # The application interpreter, free-threaded ("t" suffix). Managed by uv rather
 # than dnf: UBI carries no free-threaded build, and tying the runtime to the
