@@ -3816,81 +3816,96 @@ class TestOrphanedJmContextAtALaterRemoval(unittest.TestCase):
         rpcs["bbb0"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
 
 
-class TestFormerMembersReleasedAtTheFirstRemoval(unittest.TestCase):
-    """The same run-53 fault, closed where it starts. Removing 6b25 deletes its
-    own vuid 1 on its replica peer 90f7, whose JC then keeps contexts for vuid
-    1's other members (0f47, 440c). Phase 2 now releases each of them on the
-    peer right away: a member no live vuid uses goes (True), one a live vuid
-    still uses stays (-22, expected, silent), and the peer's own local JM is
-    never touched."""
+class TestJmContextsReleasedWhereTheVuidIsDeleted(unittest.TestCase):
+    """The run-53 fault, closed where it starts. Deleting a vuid's distribs on
+    a node that stays in the cluster ends the vuid in JC but leaves its member
+    JMs' contexts open; one no other vuid uses is retried forever once its
+    node goes away (90f75d0e kept 0f47d57a's JM after 6b25's vuid 1 was torn
+    down). Every path that deletes a replica's distribs now releases those
+    members right after: a member no live vuid uses goes (True), one a live
+    vuid still uses stays (-22, expected, silent), and the host's own local JM
+    is never touched."""
 
-    def _run(self, member_answers, *, missing=()):
-        cl = _cluster()
-        removed = _node("6b25", with_jm=True, jm_vuid=1, lvstore="LVS_1")
-        peer = _node("90f7", with_jm=True, jm_vuid=10, lvstore="LVS_10")
-        bystander = _node("bbb0", with_jm=True, jm_vuid=2, lvstore="LVS_2")
-        others = {i: _node(i, with_jm=True) for i in ("0f47", "440c")}
-        for n in (removed, peer, bystander, *others.values()):
+    def _setup(self, answers=None, missing=()):
+        answers = answers or {}
+        owner = _node("6b25", with_jm=True, jm_vuid=1, lvstore="LVS_1")
+        host = _node("90f7", with_jm=True, jm_vuid=10, lvstore="LVS_10")
+        others = [_node(i, with_jm=True) for i in ("0f47", "440c")]
+        for n in (owner, host, *others):
             n.jm_device.jm_bdev = f"jm_{n.get_id()}"
-        removed.enable_ha_jm = True
-        removed.ha_jm_count = 4
-        removed.jm_ids = ["jm-0f47", "jm-440c", "jm-90f7"]
-        peer.jm_ids = ["jm-440c"]
-        bystander.jm_ids = ["jm-440c"]
-        rd = RemoteJMDevice()
-        rd.uuid = "jm-6b25"
-        rd.remote_bdev = "remote_jm_6b25n1"
-        peer.remote_jm_devices = [rd]
-        bystander.remote_jm_devices = []
-        rpcs = {}
-        for n in (peer, bystander):
-            rpc = MagicMock()
+        owner.enable_ha_jm = True
+        owner.ha_jm_count = 4
+        owner.jm_ids = ["jm-0f47", "jm-440c", "jm-90f7"]
+        owner.hublvol = None
+        host.lvstore_ports = {}
+        rpc = MagicMock()
 
-            def _remove(name, _n=n):
-                ans = member_answers.get(name, True) if _n is peer else -13
-                if isinstance(ans, int) and ans < 0:
-                    raise RPCRemoteError("jc_remove_jm", ans)
-                return ans
-            rpc.jc_remove_jm = MagicMock(side_effect=_remove)
-            n.rpc_client = MagicMock(return_value=rpc)
-            rpcs[n.get_id()] = rpc
-        jms = {n.jm_device.get_id(): n.jm_device
-               for n in (removed, peer, bystander, *others.values())}
+        def _remove(name):
+            ans = answers.get(name, True)
+            if isinstance(ans, int) and ans < 0:
+                raise RPCRemoteError("jc_remove_jm", ans)
+            return ans
+        rpc.jc_remove_jm = MagicMock(side_effect=_remove)
+        host.rpc_client = MagicMock(return_value=rpc)
+        jms = {n.jm_device.get_id(): n.jm_device for n in (owner, host, *others)}
         for m in missing:
             jms.pop(m)
-        db = FakeDB(cl, [removed, peer, bystander])
+        db = MagicMock()
         db.get_jm_device_by_id = MagicMock(side_effect=jms.get)
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "device_controller"), \
-             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
-             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]), \
-             self.assertLogs(storage_node_ops.logger, level="DEBUG") as logs:
-            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("90f7",))
-        return rpcs, logs.output
+        db.get_lvols_by_node_id.return_value = []
+        db.get_storage_node_by_id.return_value = host
+        return owner, host, rpc, db
 
     def _released(self, rpc):
         return [c.args[0] for c in rpc.jc_remove_jm.call_args_list]
 
-    def test_the_peer_releases_every_former_member_but_its_own(self):
-        rpcs, logs = self._run({})
-        self.assertEqual(self._released(rpcs["90f7"]),
-                         ["remote_jm_6b25n1", "remote_jm_0f47n1", "remote_jm_440cn1"])
-        self.assertTrue(any("remote_jm_0f47n1, which no vuid" in m for m in logs))
+    def _run(self, call, answers=None, missing=()):
+        owner, host, rpc, db = self._setup(answers, missing)
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             self.assertLogs(storage_node_ops.logger, level="DEBUG") as logs:
+            call(owner, host)
+        return rpc, logs.output
+
+    @staticmethod
+    def _removal(owner, host):
+        storage_node_ops._delete_replica_on_peer(host, owner, _cluster())
+
+    @staticmethod
+    def _relocation(owner, host):
+        storage_node_ops._delete_replica_on_peer(host, owner, _cluster(),
+                                                 destroy_lvstore=False)
+
+    @staticmethod
+    def _expansion(owner, host):
+        storage_node_ops.teardown_non_leader_lvstore(host, owner, slot="secondary")
+
+    def test_every_path_releases_every_member_but_the_hosts_own(self):
+        for path in (self._removal, self._relocation, self._expansion):
+            with self.subTest(path=path.__name__):
+                rpc, logs = self._run(path)
+                self.assertEqual(
+                    self._released(rpc),
+                    ["remote_jm_6b25n1", "remote_jm_0f47n1", "remote_jm_440cn1"])
+                self.assertTrue(any("remote_jm_0f47n1, which no vuid" in m for m in logs))
+
+    def test_the_release_comes_after_the_distribs_are_deleted(self):
+        for path in (self._removal, self._relocation, self._expansion):
+            with self.subTest(path=path.__name__):
+                rpc, _ = self._run(path)
+                names = [c[0] for c in rpc.mock_calls]
+                self.assertLess(names.index("bdev_distrib_delete"),
+                                names.index("jc_remove_jm"))
 
     def test_a_member_a_live_vuid_still_uses_stays_silently(self):
-        rpcs, logs = self._run({"remote_jm_440cn1": -22})
-        self.assertIn("remote_jm_440cn1", self._released(rpcs["90f7"]))
-        self.assertFalse([m for m in logs if "ERROR" in m and "440c" in m])
+        rpc, logs = self._run(self._relocation, {"remote_jm_440cn1": -22})
+        self.assertIn("remote_jm_440cn1", self._released(rpc))
+        self.assertFalse([m for m in logs if "ERROR" in m])
         self.assertFalse([m for m in logs if "released remote_jm_440cn1" in m])
 
-    def test_only_the_replica_peers_release_former_members(self):
-        rpcs, _ = self._run({})
-        self.assertEqual(self._released(rpcs["bbb0"]), ["remote_jm_6b25n1"])
-
-    def test_a_member_whose_record_is_gone_does_not_abort_phase_2(self):
-        rpcs, logs = self._run({}, missing=("jm-440c",))
+    def test_a_member_whose_record_is_gone_does_not_abort_the_teardown(self):
+        rpc, logs = self._run(self._expansion, missing=("jm-440c",))
         self.assertTrue(any("WARNING" in m and "cannot name the members" in m for m in logs))
-        self.assertIn("remote_jm_6b25n1", self._released(rpcs["90f7"]))
+        rpc.bdev_distrib_delete.assert_called()
 
 
 class TestJcRemoveJmClient(unittest.TestCase):

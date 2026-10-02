@@ -5706,6 +5706,7 @@ def _delete_replica_on_peer(peer, primary, cluster, destroy_lvstore=True):
                            remove_distr_only=not destroy_lvstore)
     except RPCException as e:
         logger.warning(f"replica bdev-stack teardown for {lvstore} on {peer.get_id()} failed: {e}")
+    _release_jm_contexts_of_deleted_vuid(peer, primary)
 
 
 def _prune_stale_lvstore_ports(node_id, lvstore, db_controller):
@@ -6721,29 +6722,32 @@ def _release_orphaned_jm(node, name, *, may_be_in_use=False) -> None:
             f"vuid on this node uses any more")
 
 
-def _release_former_members_of_removed_vuid(peer, removed_node) -> None:
-    """On a replica peer of ``removed_node``, release JC's context for every
-    other member of the removed node's own vuid that no live vuid on the peer
+def _release_jm_contexts_of_deleted_vuid(host, owner) -> None:
+    """``owner``'s vuid has just been deleted on ``host`` (its distribs torn
+    down): release JC's context for every member JM no live vuid on ``host``
     still uses.
 
-    Phase 3a deleted that vuid's distribs here, which ends the vuid in JC but
-    leaves its members' JM contexts open (see _release_orphaned_jm). The
-    removed node's own JM is handled by the caller; this covers the rest, so
-    nothing is left for a later removal to trip over. The names are the ones
-    the vuid was built with on this peer (get_node_jm_names); the peer's own
-    local JM is skipped -- its own vuid always uses it.
+    Deleting the distribs ends the vuid in JC but leaves its members' JM
+    contexts open (see _release_orphaned_jm). Every path that deletes a
+    replica's distribs on a node that stays in the cluster calls this right
+    after: removal's own-replica teardown and a relocation vacating an old
+    host (_delete_replica_on_peer), and the expansion's donor teardown
+    (teardown_non_leader_lvstore). The names are the ones the vuid was built
+    with on ``host`` (get_node_jm_names); ``host``'s own local JM is skipped
+    -- its own vuid always uses it. Members a live vuid still uses answer
+    -22 and stay.
     """
     try:
-        names = get_node_jm_names(removed_node, remote_node=peer)[1:]
+        names = get_node_jm_names(owner, remote_node=host)
     except AttributeError as e:
         # A member's JM record is gone; nothing to name, nothing to release.
         logger.warning(
-            f"[REMOVAL] {peer.get_id()}: cannot name the members of "
-            f"{removed_node.get_id()}'s vuid {removed_node.jm_vuid}: {e}")
+            f"{host.get_id()}: cannot name the members of {owner.get_id()}'s "
+            f"vuid {owner.jm_vuid}: {e}")
         return
     for name in names:
         if name.startswith("remote_"):
-            _release_orphaned_jm(peer, name, may_be_in_use=True)
+            _release_orphaned_jm(host, name, may_be_in_use=True)
 
 
 def _drop_superseded_jm_bdev(node, name_old, removed_jm_id) -> None:
@@ -6962,8 +6966,8 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # never carried removed_node's lvstore either. JC can still
                     # hold a context for it, orphaned when an EARLIER removal
                     # deleted a vuid it belonged to -- see _release_orphaned_jm.
-                    # A safety net: _release_former_members_of_removed_vuid
-                    # releases those at the earlier removal already. No detach:
+                    # A safety net: _release_jm_contexts_of_deleted_vuid
+                    # releases those where the vuid is deleted. No detach:
                     # nothing live here uses the bdev.
                     _release_orphaned_jm(node, removed_jm_name)
                     #
@@ -7200,13 +7204,6 @@ def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> Non
                     # 2026-09-02).
                     node.jm_ids.remove(removed_jm_id)
             node.write_to_db()
-
-        # Phase 3a deleted removed_node's own vuid on its replica peers; release
-        # the contexts JC kept for that vuid's other members now, rather than
-        # leave them for whichever later removal takes one of them out.
-        for node in live_nodes:
-            if node.get_id() in replica_peer_ids:
-                _release_former_members_of_removed_vuid(node, removed_node)
 
 
 def _decommission_node_devices(removed_node: StorageNode):
@@ -15326,6 +15323,7 @@ def teardown_non_leader_lvstore(donor_node: StorageNode, primary_node: StorageNo
         # back into primary_node.lvstore_stack on subsequent writes.
         stack_copy = [dict(b) for b in primary_node.lvstore_stack]
         _remove_bdev_stack(stack_copy, rpc_client, remove_distr_only=True)
+        _release_jm_contexts_of_deleted_vuid(donor_node, primary_node)
 
 
     # 4. Clear the back-reference on the donor and persist. Re-fetch so we
