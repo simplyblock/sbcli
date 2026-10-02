@@ -1536,15 +1536,19 @@ def node_port_check_fun(snode):
                 port_lvs_owner[_p] = n.get_id()
                 if advisory:
                     advisory_ports.add(_p)
+        own_port = None
         if not snode.is_secondary_node:
             _p = snode.get_lvol_subsys_port(snode.lvstore)
             ports.append(_p)
             port_lvs_owner[_p] = snode.get_id()
+            own_port = _p
 
         # Batched: one nvmf_get_blocked_ports fetch answers every port, so
         # carrying the advisory ports costs no extra RPC.
         try:
             port_results = health_controller.check_ports_on_node(snode, ports)
+            if own_port is not None and port_results.get(own_port) is False:
+                _reread_blocked_own_port(snode, own_port, port_results)
             for port, ret in port_results.items():
                 if port in advisory_ports:
                     logger.info(
@@ -1580,6 +1584,34 @@ def node_port_check_fun(snode):
                 f"(SnodeAPI ping_ip timed out); ignoring this cycle")
 
     return node_port_check
+
+
+#: How long to wait before re-reading a node's own lvstore port that read
+#: blocked. A fence nobody announced -- SPDK's own, on a writer conflict or a
+#: leadership change -- can last well under a second, so one sample can land
+#: inside it; a real fence is still there a second later. Must stay well
+#: inside PORT_CHECK_JOIN_TIMEOUT_SEC.
+PORT_BLOCK_CONFIRM_SEC = 1.0
+
+
+def _reread_blocked_own_port(snode, own_port, port_results):
+    """The node's own lvstore port read blocked: read it once more before the
+    sample counts against the node.
+
+    One blocked sample used to be enough for set_node_down, which broadcasts
+    the DOWN to every distrib. A block the control plane makes on purpose is
+    announced instead -- a replica rebuild sets the leader's lvstore_status to
+    "in_creation" first, and check_node skips the leader for that window --
+    but a fence nobody announced gets no such cover. A block that has cleared
+    on the re-read is recorded as open, which also keeps the stale-fence
+    remediation from aging it.
+    """
+    time.sleep(PORT_BLOCK_CONFIRM_SEC)
+    again = health_controller.check_ports_on_node(snode, [own_port]).get(own_port)
+    if again is True:
+        logger.info(f"Check: node port {snode.mgmt_ip}, {own_port} ... blocked only "
+                    f"momentarily (open {PORT_BLOCK_CONFIRM_SEC:.0f}s later); not a port-down")
+        port_results[own_port] = True
 
 
 # Bounded wait (s) for the parallel port/data-nic check to finish before we
