@@ -571,6 +571,17 @@ class SecurityTestBase(TestClusterBase):
             f"allowedNodes={wanted} — assuming CRD name {derived!r}")
         return derived
 
+    #: Node-label prefixes the operator may use for a DHCHAP pool, newest
+    #: first. The key was renamed and reshaped (dev, 2026-10-03): the trailing
+    #: segment is now the pool UUID rather than <ns>.<cluster>.<pool>. Both are
+    #: accepted because the lab still runs older operator builds, and a test
+    #: that only knows the new spelling reports a missing label as a product
+    #: fault when it is really a version difference.
+    POOL_LABEL_PREFIXES = (
+        "storage.simplyblock.io/storage-pool.",
+        "simplyblock.io/pool.",
+    )
+
     def _k8s_pool_node_label(self, allowed_nodes=None):
         """Return the operator's node label key for the current pool.
 
@@ -595,13 +606,14 @@ class SecurityTestBase(TestClusterBase):
                 labels = {}
             pool_keys = [
                 key for key, val in labels.items()
-                if key.startswith("simplyblock.io/pool.") and val == "allowed"
+                if key.startswith(self.POOL_LABEL_PREFIXES) and val == "allowed"
             ]
             # Match on the CRD name first: the operator derives the key from
             # the StoragePool CRD's metadata.name, while self.pool_name is the
             # *backend* pool name, and the two diverge under the timestamp
             # suffix / 63-char truncation in add_storage_pool.
-            for candidate in (self._pool_crd_name, self.pool_name):
+            for candidate in (self._k8s_pool_uuid(), self._pool_crd_name,
+                              self.pool_name):
                 if not candidate:
                     continue
                 exact = [k for k in pool_keys
@@ -634,6 +646,28 @@ class SecurityTestBase(TestClusterBase):
             f"vacuously. Check that the operator reconciled the StoragePool "
             f"and labelled its allowedNodes.")
 
+    def _k8s_pool_uuid(self):
+        """The StoragePool's uuid, which the new label key ends with.
+
+        Returns "" when it cannot be read: the caller treats that as "no
+        candidate to match on" and falls through to the name-based matches,
+        which is what older operator builds need anyway.
+        """
+        k8s = self._ensure_k8s_utils()
+        name = self._pool_crd_name or self.pool_name
+        if not name:
+            return ""
+        try:
+            out, _err = k8s._exec_kubectl(
+                f"kubectl get storagepool {name} -n {k8s.namespace} "
+                f"-o jsonpath='{{.status.uuid}}' 2>/dev/null || true",
+                supress_logs=True)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[dhchap] could not read the pool uuid for "
+                                "%s: %s", name, str(exc)[:120])
+            return ""
+        return (out or "").strip().strip("'")
+
     def _k8s_pool_node_label_computed(self):
         """Best-effort construction of the pool label key (fallback only)."""
         k8s = self._ensure_k8s_utils()
@@ -643,9 +677,17 @@ class SecurityTestBase(TestClusterBase):
         )
         names = [n.strip() for n in (out or "").strip().splitlines() if n.strip()]
         cluster_cr = names[0] if names else "simplyblock-cluster"
-        label = (
-            f"simplyblock.io/pool.{k8s.namespace}.{cluster_cr}.{self.pool_name}"
-        )
+        # New shape first, when the uuid is readable. The old
+        # ns.cluster.pool form is kept only for an older operator, and
+        # cluster_cr is still resolved above for that case.
+        uuid = self._k8s_pool_uuid()
+        if uuid:
+            label = f"storage.simplyblock.io/storage-pool.{uuid}"
+        else:
+            label = (
+                f"simplyblock.io/pool.{k8s.namespace}.{cluster_cr}"
+                f".{self.pool_name}"
+            )
         self.logger.info(f"[dhchap] pool node label: {label}")
         return label
 
@@ -6099,7 +6141,8 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
                     f"-o jsonpath='{{.spec.nodeAffinity}}' "
                     f"2>/dev/null || true")
                 affinity = (aff_out or "").strip()
-                assert "simplyblock.io/pool." not in affinity, (
+                assert not any(p in affinity
+                               for p in self.POOL_LABEL_PREFIXES), (
                     f"TC-SEC-103: a non-DHCHAP pool's PV {pv_name} carries a "
                     f"pool nodeAffinity: {affinity!r}")
                 target = denied.node if denied else None

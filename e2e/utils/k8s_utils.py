@@ -1595,7 +1595,7 @@ class K8sUtils:
                              compression: bool = False, encryption: bool = False,
                              fabric: str = "tcp",
                              max_namespace_per_subsys: int = 1,
-                             dhchap_node_label: str = None,
+                             dhchap_node_selector: str = None,
                              cluster_name: str = None, namespace: str = None):
         """Create a simplyblock CSI StorageClass.
 
@@ -1609,8 +1609,11 @@ class K8sUtils:
             NAME, deliberately separate from cluster_id, which is its uuid and
             goes in parameters. Resolved from the cluster when not given.
 
-        dhchap_node_label: the pool's node label key
-            (``simplyblock.io/pool.<ns>.<cluster>.<pool>``). Required for a
+        dhchap_node_selector: the pool's node label key, shaped
+            ``storage.simplyblock.io/storage-pool.<pool uuid>``. Renamed and
+            reshaped from the old ``dhchap_node_label`` /
+            ``simplyblock.io/pool.<ns>.<cluster>.<pool>``, which dev confirmed
+            does not work any more. Required for a
             DHCHAP pool: without it the CSI driver provisions the volume with
             no ``nodeAffinity``, so any node mounts it and allowedNodes is not
             enforced at all. With it, the driver writes a matching
@@ -1621,8 +1624,8 @@ class K8sUtils:
             driver has re-registered and picked the label up as a topology key.
         """
         dhchap_param = (
-            f"  dhchap_node_label: {dhchap_node_label}\n"
-            if dhchap_node_label else ""
+            f"  dhchap_node_selector: {dhchap_node_selector}\n"
+            if dhchap_node_selector else ""
         )
         ns = namespace or self.namespace
         cl_name = cluster_name or self._storage_cluster_cr_name()
