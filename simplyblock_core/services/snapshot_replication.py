@@ -1528,7 +1528,7 @@ def process_snap_replicate_finish(task, snapshot):
                                    lvol=snapshot.lvol.get_id(), node="secondary"):
                 ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
             if not ret:
-                if _secondary_lacks_bdev(sec_node, target_prev_snap['snap_bdev']):
+                if _secondary_lacks_bdev(sec_node, target_prev_snap['snap_bdev']) or                         _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
                     # The secondary does not hold the base (-19 No such
                     # device): its view of the chain is already behind, and
                     # failing here only re-runs the finish until the task
@@ -1537,8 +1537,8 @@ def process_snap_replicate_finish(task, snapshot):
                     # landing, a write into a snapshot). The primary's
                     # convert made the copy; the secondary is repaired by
                     # the lvstore sync, not by this task.
-                    logger.warning("Secondary %s does not hold %s; the chain of %s "
-                                   "is not repeated there", sec_node.get_id(),
+                    logger.warning("Secondary %s does not hold %s or %s; the chain is "
+                                   "not repeated there", sec_node.get_id(),
                                    target_prev_snap['snap_bdev'], remote_lv.top_bdev)
                 else:
                     logger.error("Failed to chain replicated snapshot on secondary node")
