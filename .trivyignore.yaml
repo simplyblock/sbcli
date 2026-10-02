@@ -14,3 +14,8 @@ vulnerabilities:
   - id: CVE-2025-47273
   # setuptools 70.3.0 pinned in pip's vendor.txt; fixed upstream in 83.0.0
   - id: CVE-2026-59890
+  # urllib3 2.7.0 pinned in pip's vendor.txt (pip 26.2.1 and main); fixed
+  # upstream in 2.8.0. The application's own urllib3 is 2.8.0 (uv.lock).
+  - id: CVE-2026-97687
+  - id: CVE-2026-97688
+  - id: CVE-2026-97689
