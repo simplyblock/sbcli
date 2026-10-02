@@ -22,24 +22,16 @@ ignore:
       name: python
       type: binary
 
-  # stringprep/idna table mismatch: IDNA domain-name normalization can drift
-  # from RFC 3454 tables B.2/B.3, letting one Unicode hostname decode to two
-  # different ASCII (punycode) domains. Fixed in 3.15.0rc2 only.
-  # Nothing in the image calls `str.encode('idna')` or otherwise touches
-  # `stringprep`/the idna codec: hosts are addressed by IP or plain-ASCII
-  # name, never resolved through IDNA.
-  - vulnerability: CVE-2026-17084
-    package:
-      name: python
-      type: binary
-
-  # urllib.request.HTTPPasswordMgr (and its subclasses) matched stored
-  # credentials to a request URL without checking the scheme, so an
-  # HTTPS-scoped credential could leak over a downgraded http:// request.
-  # Fixed in 3.15.0rc2 only.
-  # The control plane never constructs an HTTPPasswordMgr or any of its
-  # subclasses — it doesn't use urllib.request's basic-auth handling at all.
-  - vulnerability: CVE-2026-15806
+  # tarfile extraction filter bypass: when extracting a link on a system
+  # without link support, tarfile falls back to extracting the member and runs
+  # the extraction filter twice, ignoring one of the results, so a member the
+  # filter should skip can still be written (arbitrary file write).
+  # Fixed in 3.15.0 only; there is no 3.14.x release carrying it, so
+  # `only-fixed` does not filter it out.
+  # The control plane only *creates* tarballs (`tarfile.open(..., "w:gz")` in
+  # scripts/collect_logs.py) and never extracts an archive, so the affected
+  # extraction path is not reachable.
+  - vulnerability: CVE-2026-87910
     package:
       name: python
       type: binary
