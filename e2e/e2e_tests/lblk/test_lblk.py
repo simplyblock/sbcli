@@ -1018,13 +1018,99 @@ class _LblkBase(TestClusterBase):
                 f"[lblk] iptables did not take on {node_ip}: wanted {len(peers)} "
                 f"peers blocked, saw {applied}. Rules undone. iptables -S said: "
                 f"{(out or '<nothing>')[:300]}")
-        # Backstop only; the test restores explicitly in a finally.
-        k8s.exec_in_spdk_container(node_ip, (
-            f"sudo sh -c {shlex.quote(f'(sleep {duration + 30}; {undo}) >/dev/null 2>&1 &')}"))
+        # Backstop only; the test restores explicitly after the window.
+        #
+        # Armed on the HOST, not in the pod. Point 2 above is about what the
+        # POD can reach, and it stands; what it does not cover is that
+        # run_on_node gets onto the host by a different road entirely -- a
+        # debug pod that chroots /host, so real PID 1 and real systemd -- and
+        # that road does not care whether the SPDK pod exists.
+        #
+        # This matters because a long enough cut takes the node offline and the
+        # pod goes with it. Run 20261002-202420: a 120s cut, the node marked
+        # offline 171s in, and the in-pod `sleep 150; undo` died in its sleep
+        # without ever restoring. The cut then had no timer AND no reachable
+        # route to undo it. A backstop that lives in the thing the outage can
+        # destroy is not a backstop.
+        on_host = self._arm_host_undo(node_ip, peers, duration + 30)
+        if not on_host:
+            # Talos has no host shell, so the pod is all there is. Keep the
+            # in-pod timer, and say what we are exposed to rather than letting
+            # it look equivalent.
+            k8s.exec_in_spdk_container(node_ip, (
+                f"sudo sh -c {shlex.quote(f'(sleep {duration + 30}; {undo}) >/dev/null 2>&1 &')}"))
+            self.logger.warning(
+                "[lblk] backstop for %s is in the SPDK pod, not on the host. "
+                "If this cut takes the node offline the pod goes with it and "
+                "the cut will not be undone.", node_ip)
         self.logger.info(
-            "[lblk] %s cut off from %d peer(s) %s for %ds; kubelet left "
-            "reachable so the restore cannot strand the node",
-            node_ip, len(peers), ",".join(peers), duration)
+            "[lblk] %s cut off from %d peer(s) %s for %ds; undo armed %s, "
+            "kubelet left reachable so the restore cannot strand the node",
+            node_ip, len(peers), ",".join(peers), duration,
+            "on the host" if on_host else "in the pod (fallback)")
+
+    def _arm_host_undo(self, node_ip, peers, delay):
+        """Schedule the peer-DROP undo on the host, to fire in *delay* seconds.
+
+        Returns True when it is armed somewhere that outlives the SPDK pod.
+
+        Handed to systemd rather than backgrounded for the same reason
+        :meth:`K8sUtils.isolate_node` does it: the delivery vehicle is an
+        ephemeral debug pod, torn down the moment the command returns, taking
+        its cgroup and every child with it. A transient unit is owned by PID 1
+        instead. The SELinux relabel below is not optional either -- a script
+        written into /tmp is ``user_tmp_t``, which ``init_t`` may not execute,
+        and systemd reports that as "Failed to locate executable", which reads
+        like the file is missing.
+        """
+        k8s = self._ensure_k8s_utils()
+        # Not uuid.uuid4(): `uuid` is a local variable all over this module
+        # (the storage node's uuid), so importing the module invites a shadow
+        # that would only show up at runtime. time+random is plenty -- the
+        # name only has to not collide with a concurrent cycle, and --collect
+        # removes the unit as it exits.
+        unit = f"sb-netundo-{int(time.time())}-{random.getrandbits(16):04x}"
+        undo = self._undo_rules(peers)
+        script = (
+            f"set -e; "
+            f"cat > /tmp/sb_net_undo.sh <<'EOS'\n"
+            f"#!/bin/sh\n"
+            f"sleep {delay}\n"
+            f"{undo}\n"
+            f"date -u +'net-undo %Y-%m-%dT%H:%M:%SZ' >> {self.NET_UNDO_MARKER}\n"
+            f"EOS\n"
+            f"chmod +x /tmp/sb_net_undo.sh; "
+            f"chcon -t bin_t /tmp/sb_net_undo.sh 2>/dev/null || true; "
+            # The whole test sits in the `if` CONDITION, so systemd-run being
+            # present but unable to reach the host manager falls through to the
+            # fallback instead of tripping `set -e`.
+            f"if command -v systemd-run >/dev/null 2>&1 && "
+            f"systemd-run --collect --unit={unit} /tmp/sb_net_undo.sh; "
+            f"then echo armed-via-systemd; else "
+            f"echo armed-via-setsid; "
+            f"setsid nohup /tmp/sb_net_undo.sh </dev/null >/dev/null 2>&1 & "
+            f"fi"
+        )
+        try:
+            out, _err = k8s.run_on_node(node_ip, script, timeout=120,
+                                        check=False)
+        except Exception as exc:                      # noqa: BLE001
+            # Talos raises here by design: no host shell exists.
+            self.logger.warning(
+                "[lblk] could not arm the undo on the host for %s: %s",
+                node_ip, str(exc)[:160])
+            return False
+        if "armed-via" not in (out or ""):
+            self.logger.warning(
+                "[lblk] host undo for %s did not confirm it armed; said: %s",
+                node_ip, (out or "<nothing>").strip()[:200])
+            return False
+        return True
+
+    #: Where the host-armed undo records that it ran. Read it when a cut
+    #: appears not to have been restored: present means the timer fired and
+    #: something else is holding the rules, absent means it never got there.
+    NET_UNDO_MARKER = "/tmp/sb_net_undo.stamp"
 
     def _peer_ips(self, node_ip):
         """Every other storage node's mgmt_ip."""
@@ -1052,20 +1138,53 @@ class _LblkBase(TestClusterBase):
         ) + "; true"
 
     def _restore_network(self, node_ip):
-        """Remove every peer DROP we may have added. Safe to call twice."""
+        """Remove every peer DROP we may have added. Safe to call twice.
+
+        Returns True when the node was reached and no DROP rules remain.
+
+        Two routes, deliberately in this order. The SPDK pod is cheap and is
+        the only one Talos has, so it goes first; the host route costs a debug
+        pod but does not depend on the storage node being up at all, which is
+        the case that matters -- a cut long enough to take the node offline
+        removes the pod, and with it the only way in this method used to have.
+
+        Never raises. A failure to clean up should be reported as a problem for
+        the NEXT cycle, not substituted for the result of the outage this one
+        was testing: run 20261002-202420 ended with "No snode-spdk-pod found"
+        as its verdict on a cycle that was exercising a network cut, and the
+        real finding -- the cut was never undone -- had to be read out of the
+        timestamps.
+        """
         if not self.k8s_test:
-            return
+            return True
         k8s = self._ensure_k8s_utils()
         undo = self._undo_rules(self._peer_ips(node_ip))
-        k8s.exec_in_spdk_container(node_ip, f"sudo sh -c {shlex.quote(undo)}")
-        out, _err = k8s.exec_in_spdk_container(
-            node_ip, "sudo iptables -S INPUT; sudo iptables -S OUTPUT")
+        show = "iptables -S INPUT; iptables -S OUTPUT"
+        out = None
+        try:
+            k8s.exec_in_spdk_container(node_ip, f"sudo sh -c {shlex.quote(undo)}")
+            out, _err = k8s.exec_in_spdk_container(node_ip, f"sudo sh -c {shlex.quote(show)}")
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[lblk] cannot restore %s through its SPDK pod (%s); going in "
+                "through the host instead", node_ip, str(exc)[:140])
+            try:
+                k8s.run_on_node(node_ip, undo, timeout=120, check=False)
+                out, _err = k8s.run_on_node(node_ip, show, timeout=120,
+                                            check=False)
+            except Exception as exc2:                 # noqa: BLE001
+                self.logger.error(
+                    "[lblk] could not reach %s by either route, so its peer "
+                    "DROP rules are probably still in place: %s",
+                    node_ip, str(exc2)[:160])
+                return False
         left = [ln for ln in (out or "").splitlines() if "-j DROP" in ln]
         if left:
             self.logger.warning("[lblk] DROP rules still on %s after restore: "
                                 "%s", node_ip, left[:4])
-        else:
-            self.logger.info("[lblk] network restored on %s", node_ip)
+            return False
+        self.logger.info("[lblk] network restored on %s", node_ip)
+        return True
 
     def _any_storage_node(self):
         nodes = self.sbcli_utils.get_storage_nodes()["results"]
