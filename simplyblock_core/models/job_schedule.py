@@ -15,6 +15,21 @@ class JobSchedule(BaseModel):
         # point read instead of a scan of the entire (never-pruned) table.
         Index('uuid'),
         Index(('cluster_id', 'function_name', 'status')),
+        # The snapshot_replication task that ships a given snapshot, keyed by the
+        # snapshot_id buried in function_params. A volume's replication-status
+        # read resolves its own snapshots (SnapShot.lvol_uuid) and then the task
+        # per snapshot through this index -- a handful of point reads instead of
+        # a walk of the whole never-pruned task table to find the one task that
+        # ships each (6245 tasks -> a 30s status read, live 2026-10-03). Only
+        # snapshot_replication tasks carry a snapshot_id, so nothing else is
+        # indexed; the relationship is 1:1 in steady state.
+        Index('repl_snapshot_id', arity=1, extract=lambda t: (
+            [(t.function_params['snapshot_id'],)]
+            if t.function_name == t.FN_SNAPSHOT_REPLICATION
+            and isinstance(t.function_params, dict)
+            and t.function_params.get('snapshot_id')
+            else []
+        )),
     )
 
     STATUS_NEW = 'new'

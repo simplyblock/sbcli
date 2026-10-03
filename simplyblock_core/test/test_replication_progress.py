@@ -71,6 +71,21 @@ class _FakeDB:
     def get_snapshot_by_id(self, uuid):
         return self._snaps[uuid]
 
+    # get_replication_info now resolves the lvol's own snapshots and each
+    # snapshot's shipping task through indices rather than scanning the cluster's
+    # whole task table (2026-10-03), so the fake serves those scoped reads.
+    def get_snapshots_by_lvol_id(self, lvol_id):
+        return [s for s in self._snaps.values()
+                if s.lvol is not None and s.lvol.get_id() == lvol_id]
+
+    def get_replication_tasks_for_snapshot(self, snapshot_id):
+        return [t for t in self._tasks
+                if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                and t.function_params.get("snapshot_id") == snapshot_id]
+
+    def get_job_tasks_by_function(self, cluster_id, function_name):
+        return [t for t in self._tasks if t.function_name == function_name]
+
     def get_lvol_replication_objects(self):
         return []
 

@@ -662,6 +662,30 @@ class DBController(metaclass=Singleton):
             ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
         return sorted(ret, key=lambda x: x.date)
 
+    def get_job_tasks_by_function(self, cluster_id: str, function_name: str) -> list[JobSchedule]:
+        """One cluster's tasks of a single function, all statuses, date-ordered,
+        through the (cluster_id, function_name, status) index -- a scoped range
+        read rather than get_job_tasks' scan of the whole never-pruned task
+        table. The replication-status reads only ever need snapshot_replication
+        and replication_final tasks, so scanning every other function's history
+        to find them was pure overhead (2026-10-03).
+        """
+        return sorted(
+            self.query(JobSchedule, 'cluster_id+function_name+status',
+                       cluster_id, function_name),
+            key=lambda x: x.date)
+
+    def get_replication_tasks_for_snapshot(self, snapshot_id: str) -> list[JobSchedule]:
+        """The snapshot_replication task(s) that ship one snapshot, through the
+        repl_snapshot_id index -- a point/range read instead of walking the
+        cluster's never-pruned task table to find the one task per snapshot. The
+        relationship is 1:1 in steady state; a list tolerates a re-queued retry
+        reusing the snapshot_id.
+        """
+        return sorted(
+            self.query(JobSchedule, 'repl_snapshot_id', snapshot_id),
+            key=lambda x: x.date)
+
 
     def get_active_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
         """Return all non-done FN_LVOL_MIG tasks for the given cluster."""

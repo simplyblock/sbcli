@@ -3060,8 +3060,6 @@ def get_replication_info(lvol_id_or_name):
             logger.error(f"LVol id or name not found: {lvol_id_or_name}")
             return None
 
-    tasks = []
-    snaps = []
     # Heterogeneous status payload (str / int / None / list). Annotated so the
     # numeric comparisons further down ("lag > lag_budget",
     # "outstanding_count > 0") are not inferred as int-vs-object.
@@ -3107,29 +3105,28 @@ def get_replication_info(lvol_id_or_name):
     }
     node = db_controller.get_storage_node_by_id(lvol.node_id)
     out["role"] = _replication_role(db_controller, lvol)
+    # Resolve THIS lvol's replication work without ever walking the cluster's
+    # (never-pruned) task table: the lvol's own snapshots come from the
+    # lvol_uuid index, and each snapshot's shipping task from the
+    # repl_snapshot_id index -- a handful of point reads scaled to the volume,
+    # not to cluster history. The former code scanned every cluster task and
+    # point-read a snapshot per one, which made a single volume's status read
+    # ~30s on a cluster with a day of tasks (6245), over the csi-addons status
+    # deadline, so lastGroupSyncTime never set and DR protect failed (2026-10-03).
     # Each replication task maps 1:1 to a source snapshot for this lvol.
     items = []  # list of (task, snap)
-    final_cutover_active = False
-    for task in db_controller.get_job_tasks(node.cluster_id):
-        if (task.function_name == JobSchedule.FN_REPLICATION_FINAL
-                and not task.canceled and task.status != JobSchedule.STATUS_DONE
-                and task.function_params.get("lvol_id") == lvol.get_id()):
-            final_cutover_active = True
-        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-            logger.debug(task)
-            try:
-                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
-            except KeyError:
-                continue
-
-            if snap.lvol.get_id() != lvol.get_id():
-                continue
-            snaps.append(snap)
-            tasks.append(task)
+    for snap in db_controller.get_snapshots_by_lvol_id(lvol.get_id()):
+        for task in db_controller.get_replication_tasks_for_snapshot(snap.get_id()):
             items.append((task, snap))
 
-    # The final cutover reconciles independently of the snapshot pipeline, so
-    # it flags a resync even when no shipping task is queued.
+    # The final cutover reconciles independently of the snapshot pipeline, so it
+    # flags a resync even when no shipping task is queued. Final-cutover tasks are
+    # per fail-back (few), so the function-scoped index read is cheap.
+    final_cutover_active = any(
+        not task.canceled and task.status != JobSchedule.STATUS_DONE
+        and task.function_params.get("lvol_id") == lvol.get_id()
+        for task in db_controller.get_job_tasks_by_function(
+            node.cluster_id, JobSchedule.FN_REPLICATION_FINAL))
     out["resyncing"] = final_cutover_active
 
     if items:
@@ -3349,22 +3346,18 @@ def get_replication_info_bulk(cluster_id: str, lvols: list[LVol]) -> dict[str, d
 
     db_controller = DBController()
 
+    # One range read of the cluster's snapshots, keyed by id, instead of a
+    # get_snapshot_by_id point read per replication task -- the per-task point
+    # reads made this O(tasks) FDB round-trips, the same scan that made the
+    # single-volume status ~30s (2026-10-03). Tasks come from the function-scoped
+    # index rather than a scan of the whole never-pruned task table.
+    snaps_by_id = {s.get_id(): s for s in db_controller.get_snapshots(cluster_id)}
     items_by_lvol: dict[str, list[tuple[JobSchedule, SnapShot]]] = {}
-    snapshot_cache: dict[str, SnapShot] = {}
-    for task in db_controller.get_job_tasks(cluster_id):
-        if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
-            continue
-        snapshot_id = task.function_params.get("snapshot_id")
-        if not snapshot_id:
-            continue
-        snap = snapshot_cache.get(snapshot_id)
-        if snap is None:
-            try:
-                snap = db_controller.get_snapshot_by_id(snapshot_id)
-            except KeyError:
-                continue
-            snapshot_cache[snapshot_id] = snap
-        items_by_lvol.setdefault(snap.lvol.get_id(), []).append((task, snap))
+    for task in db_controller.get_job_tasks_by_function(
+            cluster_id, JobSchedule.FN_SNAPSHOT_REPLICATION):
+        snap = snaps_by_id.get(task.function_params.get("snapshot_id"))
+        if snap is not None and snap.lvol is not None:
+            items_by_lvol.setdefault(snap.lvol.get_id(), []).append((task, snap))
 
     policies = {p.get_id(): p for p in db_controller.get_replication_policies(cluster_id)}
     targets = {t.get_id(): t for t in db_controller.get_replication_targets(cluster_id)}

@@ -19,6 +19,7 @@ tier. Nothing above the database runs: no shipping, no RPC, no storage node.
 """
 
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -345,3 +346,74 @@ class TestReplicationInfoBulk:
 
         assert result[lvol_a.get_id()]["last_cycle_bytes"] == 1024
         assert result[lvol_b.get_id()]["last_cycle_bytes"] == 4096
+
+
+def _count_snapshot_point_reads():
+    """Spy that counts DBController.get_snapshot_by_id calls while delegating to
+    the real method (real-DB tier -- the records still have to read back)."""
+    orig = DBController.get_snapshot_by_id
+    calls = {"n": 0}
+
+    def counting(self, id):
+        calls["n"] += 1
+        return orig(self, id)
+
+    return calls, patch.object(DBController, "get_snapshot_by_id", counting)
+
+
+class TestStatusReadIsScoped:
+    """The per-volume replication status read must not point-read a snapshot for
+    every replication task in the cluster.
+
+    get_replication_info used to scan ALL cluster job tasks and call
+    get_snapshot_by_id on each snapshot_replication task just to discover which
+    lvol it belonged to. On a cluster with a day's worth of never-pruned
+    replication tasks that is tens of thousands of point reads and a ~30s status
+    call -- over the csi-addons status-RPC deadline, so the VolumeReplication
+    status went DeadlineExceeded, lastGroupSyncTime never set, and DR protect
+    failed (root-caused live 2026-10-03, a single volume's status measured at
+    30-32s). The read now resolves the lvol's own snapshots through the
+    lvol_uuid index and matches tasks against that set with no per-task DB read;
+    the bulk path reads the cluster's snapshots in one range read instead of a
+    point read per task.
+
+    Regression: 2026-10-03-replication-status-per-task-snapshot-scan
+    """
+
+    def test_get_replication_info_does_not_point_read_foreign_task_snapshots(self, db, node):
+        subject = _write_lvol(db, "scoped-subject", do_replicate=True)
+        now = int(time.time())
+        _write_shipped_snapshot(db, subject, "scoped-own-1", now - 120)
+        _write_shipped_snapshot(db, subject, "scoped-own-2", now - 60)
+        # A day's worth of OTHER volumes' replication tasks in the same cluster.
+        foreign = _write_lvol(db, "scoped-foreign", do_replicate=True)
+        for i in range(20):
+            _write_shipped_snapshot(db, foreign, f"scoped-foreign-{i}", now - 200 - i)
+
+        calls, spy = _count_snapshot_point_reads()
+        with spy:
+            info = lvol_controller.get_replication_info("scoped-subject")
+
+        # Correct: only the subject's two snapshots, none of the foreign ledger.
+        assert info["replicated_count"] == 2
+        # Scoped: the subject's snapshots come from the lvol_uuid index in one
+        # range read, so NO snapshot is point-read per cluster task. The pre-fix
+        # scan made one get_snapshot_by_id per snapshot_replication task (22 here).
+        assert calls["n"] == 0
+
+    def test_bulk_reads_snapshots_in_one_range_read_not_per_task(self, db, node):
+        lvol_a = _write_lvol(db, "scoped-bulk-a", do_replicate=True)
+        lvol_b = _write_lvol(db, "scoped-bulk-b", do_replicate=True)
+        now = int(time.time())
+        for i in range(15):
+            _write_shipped_snapshot(db, lvol_a, f"scoped-bulk-a-{i}", now - 100 - i)
+            _write_shipped_snapshot(db, lvol_b, f"scoped-bulk-b-{i}", now - 100 - i)
+
+        calls, spy = _count_snapshot_point_reads()
+        with spy:
+            result = lvol_controller.get_replication_info_bulk(CLUSTER_ID, [lvol_a, lvol_b])
+
+        assert result[lvol_a.get_id()]["replicated_count"] == 15
+        assert result[lvol_b.get_id()]["replicated_count"] == 15
+        # One range read of the cluster's snapshots, not a point read per task.
+        assert calls["n"] == 0
