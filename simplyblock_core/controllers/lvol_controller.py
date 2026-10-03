@@ -5186,6 +5186,16 @@ def latest_replicated_snapshot(lvol_id: str) -> SnapShot | None:
     exist.
     """
     db_controller = DBController()
+    # The caller addresses the volume by the id its PV carries, which stays
+    # the id the volume was created with across fail-overs while the data
+    # lives on in the chain's active volume (the operator's TestFailover,
+    # 2026-10-03: asked for 0aea4c3f, reaped the day before, and was told
+    # "no replicated snapshot yet"). Follow the relationships to the active
+    # volume first; a volume without any relationship is itself.
+    from simplyblock_core.controllers import replication_policy_controller
+    rel = replication_policy_controller.get_relationship(lvol_id)
+    if rel and rel.get("active_lvol_id"):
+        lvol_id = rel["active_lvol_id"]
     lvol = db_controller.get_lvol_by_id(lvol_id)
     node = db_controller.get_storage_node_by_id(lvol.node_id)
     return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id)
