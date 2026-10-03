@@ -31,7 +31,7 @@ def _rendered_script():
     job = yaml.safe_load(env.get_template('ubuntu_kernel_extra.yaml.j2').render(
         UBUNTU_JOBNAME='snode-spdk-ubuntu-extra-worker-1', NAMESPACE='simplyblock', HOSTNAME='worker-1'))
     container = job['spec']['template']['spec']['containers'][0]
-    assert container['command'] == ['/bin/sh', '-c']
+    assert container['command'] == ['chroot', '/host', '/bin/sh', '-c']
     return container['args'][0]
 
 
@@ -135,3 +135,22 @@ class TestCreateJobReplacingStale(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestUbuntuJobMountsTheHostBesideTheRoot(unittest.TestCase):
+    """runc refuses a mount over the container's own / ("mountpoint ... is on
+    the top of rootfs"); the Job never started and the storage node waited on
+    it until the cluster's deadline (2026-10-03). The host's root goes to
+    /host and the script runs under chroot of it."""
+
+    def test_host_root_is_mounted_at_host_and_chrooted(self):
+        env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
+        job = yaml.safe_load(env.get_template('ubuntu_kernel_extra.yaml.j2').render(
+            UBUNTU_JOBNAME='snode-spdk-ubuntu-extra-worker-1', NAMESPACE='simplyblock', HOSTNAME='worker-1'))
+        spec = job['spec']['template']['spec']
+        container = spec['containers'][0]
+        mounts = {m['name']: m['mountPath'] for m in container['volumeMounts']}
+        self.assertEqual(mounts['rootfs'], '/host')
+        self.assertNotIn('/', mounts.values())
+        self.assertEqual({v['name']: v['hostPath']['path'] for v in spec['volumes']}['rootfs'], '/')
+        self.assertEqual(container['command'][:2], ['chroot', '/host'])
