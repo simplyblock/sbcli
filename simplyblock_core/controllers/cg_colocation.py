@@ -401,14 +401,14 @@ def move_namespace(lvol, target_nqn, *, client_swap_ready=False):
         new_nsid += 1
 
     old_nqn, old_nsid = lvol.nqn, lvol.ns_id
-    removed = []
+    removed: list = []
     for node, rpc in zip(nodes, rpcs):
         if not lvol_controller._remove_lvol_subsys_from_node(lvol, rpc):
             _restore(lvol, removed, old_nqn, old_nsid)
             raise ColocationError(f"removing {lvol.get_id()} from {old_nqn} on "
                                   f"{node.get_id()[:8]} failed")
         removed.append(rpc)
-    added = []
+    added: list = []
     for node, rpc in zip(nodes, rpcs):
         _, err = rpc.nvmf_subsystem_add_ns2(target_nqn, lvol.top_bdev, lvol.get_ns_uuid(),
                                             lvol.guid, nsid=new_nsid)

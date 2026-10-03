@@ -190,15 +190,15 @@ def test_the_claim_prefers_the_group_subsystem_over_the_fullest_one():
     # wins when named.
     lvols = [_lv("f1", "F"), _lv("f2", "F", nsid=2), _lv("f3", "F", nsid=3), _lv("g1", "G")]
     pick = lvol_controller.get_next_available_subsystem_on_node("N1", lvols, pool_id="P1")
-    assert pick.nqn == "F"
+    assert pick is not None and pick.nqn == "F"
     pick = lvol_controller.get_next_available_subsystem_on_node("N1", lvols, pool_id="P1", prefer_nqn="G")
-    assert pick.nqn == "G"
+    assert pick is not None and pick.nqn == "G"
 
 
 def test_a_full_group_subsystem_falls_back_to_the_ordinary_pick():
     lvols = [_lv(f"g{i}", "G", nsid=i) for i in range(1, 5)] + [_lv("f1", "F")]
     pick = lvol_controller.get_next_available_subsystem_on_node("N1", lvols, pool_id="P1", prefer_nqn="G")
-    assert pick.nqn == "F"
+    assert pick is not None and pick.nqn == "F"
 
 
 def test_flip_victim_is_never_a_group_member_and_prefers_unattached_then_small():
