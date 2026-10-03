@@ -997,12 +997,24 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # a concurrent create/clone conflict-retries and recounts with this
     # record visible instead of racing it for the same last slot
     # (_resolve_lvol_subsystem above was only the advisory early-fail check).
+    # A consistency group's member takes the group's subsystem when it has a
+    # free slot (cg_colocation, design §4): create-time forcing.
+    group_nqn = ""
+    if cg_group is not None and namespaced:
+        from simplyblock_core.controllers import cg_colocation as _cgl
+        _members = []
+        for _mid in (cg_group.members or {}):
+            try:
+                _members.append(db_controller.get_lvol_by_id(_mid))
+            except KeyError:
+                continue
+        group_nqn = _cgl.group_subsystem_nqn(cg_group, _members)
     try:
         db_controller.claim_lvol_ns_slot(
             lvol, host_node, bool(namespaced),
             standalone_nqn=cl.nqn + ":lvol:" + lvol.uuid,
             standalone_allowed_hosts=standalone_allowed_hosts,
-            internal=internal)
+            internal=internal, prefer_nqn=group_nqn)
     except SubsystemCapacityError as e:
         logger.error(str(e))
         return False, str(e)
@@ -1238,6 +1250,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             logger.error("Volume %s created but could not join consistency group "
                          "%s: %s", lvol.get_id(), consistency_group, e)
             return lvol.uuid, f"Volume created but could not join consistency group: {e}"
+        if group_nqn and lvol.nqn != group_nqn:
+            # The group's subsystem was full: flip a non-member out of it and
+            # this (brand-new, not yet attached) volume in -- when namespace
+            # moves are enabled; otherwise the member stays in its own
+            # subsystem (best effort, as before) and the reason is logged.
+            from simplyblock_core.controllers import cg_colocation as _cgl
+            outcome = _cgl.colocate_new_member(cg_group, lvol, group_nqn)
+            logger.info("Consistency group %s: new member %s not in the group's "
+                        "subsystem %s: %s", cg_group.get_id()[:8], lvol.get_id(),
+                        group_nqn, outcome)
 
     return lvol.uuid, None
 
@@ -6346,7 +6368,7 @@ def get_namespaces_per_lvol(lvol):
 
 
 def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None,
-                                         *, pool_id) -> LVol | None:
+                                         *, pool_id, prefer_nqn="") -> LVol | None:
     """Pick the shared subsystem on ``node_id`` that a new namespaced lvol of
     pool ``pool_id`` should join, or ``None`` when it has to open a new one.
 
@@ -6363,6 +6385,10 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
     opened -- a new subsystem is created only when none of the pool's
     subsystems on the node has a free namespace slot (``None`` returned).
     Ties break on NQN so a conflict retry of the claim is deterministic.
+
+    ``prefer_nqn`` (a consistency group's subsystem, cg_colocation) outranks
+    the fill order when it is joinable and has a free slot: a group's members
+    share one subsystem when they can.
 
     ``exclude_nqns`` skips subsystems the caller knows are unusable even
     though the DB count says they have room (SPDK rejected the add with
@@ -6405,7 +6431,7 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
         used = ns_counts.get(lvol.nqn, 0)
         if used >= subsys_max:
             continue
-        key = (-used, lvol.nqn)
+        key = (bool(prefer_nqn) and lvol.nqn != prefer_nqn, -used, lvol.nqn)
         if best_key is None or key < best_key:
             best, best_key = lvol, key
 

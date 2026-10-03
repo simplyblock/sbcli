@@ -43,7 +43,7 @@ import uuid
 from datetime import datetime
 
 from simplyblock_core import constants
-from simplyblock_core.controllers import migration_events, tasks_controller
+from simplyblock_core.controllers import cg_colocation, migration_events, tasks_controller
 from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
@@ -935,7 +935,8 @@ def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
 def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                          host_nqn=None,
-                         batch=False):
+                         batch=False,
+                         group_scope=False):
     """
     Pre-create the target NVMe-oF infrastructure for a future migration of
     *lvol_id* to *target_node_id*.
@@ -979,6 +980,12 @@ def create_migration(lvol_id, target_node_id,
             f"{len(shared_members)} member(s) (NQN={lvol.nqn}). "
             f"Use --batch to migrate the whole subsystem together."
         )
+    # A consistency group's members live on one store: moving this volume
+    # alone (or its subsystem alone, for a batch member -- the batch checks the
+    # whole subsystem) would split the group it, or a subsystem sibling, is in.
+    # The group migration (create_group_migration) moves the whole scope.
+    if not batch and not group_scope:
+        cg_colocation.require_whole_groups([lvol_id], tgt_node.cluster_id)
 
     existing_migration = get_active_migration_for_lvol(lvol_id, tgt_node.cluster_id)
     if existing_migration:
@@ -1340,7 +1347,8 @@ def create_migration(lvol_id, target_node_id,
 
 def create_batch_migration(lvol_id, target_node_id,
                            ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
-                           host_nqn=None):
+                           host_nqn=None,
+                           group_scope=False):
     """
     Pre-create infrastructure for migrating all lvols that share an NVMe-oF
     subsystem with *lvol_id* to *target_node_id*.
@@ -1374,6 +1382,8 @@ def create_batch_migration(lvol_id, target_node_id,
             f"(max_namespace_per_subsys={lvol.max_namespace_per_subsys}). "
             f"Use create_migration instead."
         )
+    if not group_scope:
+        cg_colocation.require_whole_groups([m.get_id() for m in members], tgt_node.cluster_id)
 
     # Check for an existing active group for this NQN on this target. If it's
     # still PHASE_PRE_CREATED, treat this as an idempotent retry (e.g. a
@@ -1663,3 +1673,156 @@ def _can_add_lvol_migration(cluster_id):
             active_rebalancing_tasks += 1
 
     return bool(active_rebalancing_tasks==0)
+
+
+# --------------------------------------------------------------------------- #
+# Consistency-group migration (docs/consistency-group-colocation.md §3)
+# --------------------------------------------------------------------------- #
+
+def create_group_migration(lvol_id, target_node_id,
+                           ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
+                           host_nqn=None):
+    """Pre-create the migration of ``lvol_id``'s whole migration scope to
+    ``target_node_id``: every subsystem that holds a member of a consistency
+    group the volume (or a subsystem sibling) is in, transitively.
+
+    One migration per subsystem: a batch migration for a shared subsystem, a
+    single migration for a standalone one. All of them or none: a failure
+    cancels what was pre-created. The client side attaches every returned
+    connect string before :func:`start_group_migration` (the operator's
+    VolumeMigration validation does this per subsystem).
+
+    Returns ``{"target_node_id", "items": [{"nqn", "kind", "id", "lvol_ids",
+    "connect_strings"}]}`` and records it on every group in the scope.
+    """
+    try:
+        db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        raise ValueError(f"LVol {lvol_id} not found")
+    try:
+        tgt_node = db.get_storage_node_by_id(target_node_id)
+    except KeyError:
+        raise ValueError(f"Target node {target_node_id} not found")
+    cluster_id = tgt_node.cluster_id
+
+    scope, by_nqn = cg_colocation.scope_for(lvol_id, cluster_id)
+    groups = {}
+    for lid in scope:
+        g = consistency_group_for(lid)
+        if g is not None:
+            groups[g.get_id()] = g
+    for g in groups.values():
+        if g.migration:
+            raise MigrationConflictError(
+                f"Consistency group {g.get_id()} already has an active migration "
+                f"to {g.migration.get('target_node_id')}")
+
+    items = []
+    try:
+        for nqn, ids in by_nqn.items():
+            first = db.get_lvol_by_id(ids[0])
+            if len(_get_shared_subsystem_members(first, cluster_id)) > 1:
+                gid, conns = create_batch_migration(
+                    ids[0], target_node_id, ctrl_loss_tmo=ctrl_loss_tmo,
+                    host_nqn=host_nqn, group_scope=True)
+                items.append({"nqn": nqn, "kind": "batch", "id": gid,
+                              "lvol_ids": ids, "connect_strings": conns})
+            else:
+                mid, conns = create_migration(
+                    ids[0], target_node_id, ctrl_loss_tmo=ctrl_loss_tmo,
+                    host_nqn=host_nqn, group_scope=True)
+                items.append({"nqn": nqn, "kind": "single", "id": mid,
+                              "lvol_ids": ids, "connect_strings": conns})
+    except Exception:
+        _cancel_group_items(items)
+        raise
+
+    record = {"target_node_id": target_node_id,
+              "items": [{k: v for k, v in it.items() if k != "connect_strings"} for it in items]}
+    for g in groups.values():
+        g.migration = record
+        g.write_to_db(db.kv_store)
+    logger.info("create_group_migration: %d subsystem(s), %d volume(s) of %d group(s) -> %s",
+                len(items), len(scope), len(groups), target_node_id)
+    return {"target_node_id": target_node_id, "items": items}
+
+
+def start_group_migration(group_id,
+                          max_retries=constants.LVOL_MIG_MAX_RETRIES,
+                          deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+    """Start every pre-created migration of the group's active migration.
+    Started together so the group is split for as short a time as the slowest
+    subsystem takes; group snapshots are refused while it is (members off the
+    pinned store), and the pin follows once every member arrived."""
+    group = db.get_consistency_group_by_id(group_id)
+    record = group.migration or {}
+    if not record.get("items"):
+        raise ValueError(f"Consistency group {group_id} has no pre-created migration")
+    started = []
+    for it in record["items"]:
+        if it["kind"] == "batch":
+            start_batch_migration(it["id"], max_retries=max_retries, deadline_seconds=deadline_seconds)
+        else:
+            start_migration(it["id"], max_retries=max_retries, deadline_seconds=deadline_seconds)
+        started.append(it["id"])
+    return started
+
+
+def cancel_group_migration(group_id):
+    """Cancel every migration of the group's active migration and clear it."""
+    group = db.get_consistency_group_by_id(group_id)
+    record = group.migration or {}
+    _cancel_group_items(record.get("items") or [])
+    clear_group_migration(record)
+
+
+def clear_group_migration(record):
+    """Drop ``record`` from every group that carries it (all its migrations
+    are terminal or cancelled)."""
+    ids = {it["id"] for it in (record or {}).get("items") or []}
+    for g in db.get_consistency_groups():
+        if g.migration and {it["id"] for it in g.migration.get("items") or []} == ids:
+            g.migration = {}
+            g.write_to_db(db.kv_store)
+
+
+def group_migration_status(group_id):
+    """Aggregate state of the group's active migration: "none", "running",
+    "done" (every item finished), or "failed" (an item failed or was
+    cancelled)."""
+    group = db.get_consistency_group_by_id(group_id)
+    items = (group.migration or {}).get("items") or []
+    if not items:
+        return "none"
+    states = []
+    for it in items:
+        try:
+            rec = (db.get_migration_group_by_id(it["id"]) if it["kind"] == "batch"
+                   else db.get_migration_by_id(it["id"]))
+        except KeyError:
+            states.append("failed")
+            continue
+        states.append(rec.status)
+    if any(st in (LVolMigration.STATUS_FAILED, LVolMigration.STATUS_CANCELLED, "failed")
+           for st in states):
+        return "failed"
+    if all(st == LVolMigration.STATUS_DONE for st in states):
+        return "done"
+    return "running"
+
+
+def _cancel_group_items(items):
+    for it in items:
+        try:
+            if it["kind"] == "batch":
+                cancel_batch_migration(it["id"])
+            else:
+                cancel_migration(it["id"])
+        except Exception as e:  # noqa: BLE001
+            logger.error("cancel of %s migration %s failed: %s", it["kind"], it["id"], e)
+
+
+def consistency_group_for(lvol_id):
+    """The group ``lvol_id`` is an open member of, or None."""
+    from simplyblock_core.controllers import consistency_group_controller
+    return consistency_group_controller.group_for_lvol(lvol_id)
