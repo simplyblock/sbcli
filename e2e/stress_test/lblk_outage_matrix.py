@@ -127,7 +127,15 @@ class _LblkOutageMatrix(_LblkBase):
     #: design, live FIO included. For these, a FIO job that was rescheduled
     #: has behaved correctly and the continuity claim does not apply; for
     #: every other outage it still does.
-    DRAINING_OUTAGES = ("storage_node_reboot",)
+    #: Outages that remove the pod on purpose, so "live FIO stopped" is the
+    #: expected result and only "IO never came back" is a finding.
+    #:
+    #: node_network_isolation belongs here and was missing. NODE_ISOLATION_SEC
+    #: is 420s against an EVICTION_TOLERATION_SEC of 300s -- the constant
+    #: exists to outlast the toleration -- so a live FIO pod on the isolated
+    #: node is always evicted. Run 20261004-125130 failed cycle 14 asserting
+    #: continuity for a pod the outage had deliberately thrown off the node.
+    DRAINING_OUTAGES = ("storage_node_reboot", "node_network_isolation")
 
     #: How long a client may take to come back on another node.
     #:
@@ -1299,13 +1307,32 @@ class _LblkOutageMatrix(_LblkBase):
                     ("nsvol", dict(namespaced=True))]
 
         handles = []
+        #: job name -> zero-arg callable that starts that job again.
+        #: Needed because create_fio_job sets backoffLimit: 0, so an evicted
+        #: pod is never replaced by kubernetes and the only way to resume the
+        #: live lane after a draining outage is to launch it ourselves.
+        self._fio_relaunch = {}
         for label, opts in flavours:
             name = f"mxlive{label}{random.randint(100, 999)}"
             mount = self._provision_typed(name, pool, **opts)
             log = (None if self.k8s_test
                    else f"{self.log_path}/fio_mx_{label}.log")
             job = f"mxlive{label}"
-            handles.append((name, log, job, self._run_fio_dual(
+            # Bound as defaults, not closed over: the loop rebinds every
+            # one of these and a late-binding closure would relaunch four
+            # copies of the last flavour.
+            def _again(_n=name, _m=mount, _l=log, _j=job, _rt=runtime):
+                # Same placement rules as the first launch. A DHCHAP volume
+                # has allowed nodes, so dropping node_selector here would
+                # relaunch it somewhere it cannot attach.
+                return self._run_fio_dual(
+                    _n, mount_path=_m, log_path=_l, runtime=_rt, name=_j,
+                    rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
+                    time_based=True,
+                    node_selector=self._pin_for(_n),
+                    prefer_node=(None if self._pin_for(_n)
+                                 else getattr(self, "_fio_home_worker", None)))
+            started = self._run_fio_dual(
                 name, mount_path=mount, log_path=log,
                 runtime=runtime, name=job,
                 rw="randrw", bs="4K", numjobs=2, nrfiles=4, size="512M",
@@ -1327,7 +1354,13 @@ class _LblkOutageMatrix(_LblkBase):
                 # it could not have been written against the old placement.
                 node_selector=self._pin_for(name),
                 prefer_node=(None if self._pin_for(name)
-                             else getattr(self, "_fio_home_worker", None)))))
+                             else getattr(self, "_fio_home_worker", None)))
+            # Keyed by what _run_fio_dual RETURNS, which is the k8s Job name
+            # ("fio-mxlivedhchap"), not `job` ("mxlivedhchap"). _assert_fio_alive
+            # carries that same value as `handle`, so keying it any other way
+            # makes every relaunch lookup miss silently.
+            self._fio_relaunch[started] = _again
+            handles.append((name, log, job, started))
             self.logger.info("[matrix] live FIO started on %s volume %s",
                              label, name)
         return handles
@@ -1518,11 +1551,33 @@ class _LblkOutageMatrix(_LblkBase):
                         "outage evicted it on purpose -- but IO is flowing "
                         "again and the data checks still gate the run.", name)
                     continue
+                # Nothing is coming: create_fio_job sets backoffLimit: 0, so
+                # the evicted pod counts as a failed one and the Job is done.
+                # That is our Job spec, not a product failure, so relaunch
+                # rather than fail -- but relaunch explicitly and loudly
+                # rather than raising backoffLimit, which would also retry a
+                # genuinely failing FIO and bury the first pod's IO errors.
+                again = getattr(self, "_fio_relaunch", {}).get(handle)
+                if again is not None:
+                    self.logger.warning(
+                        "[matrix] live FIO on %s was evicted by %s and the "
+                        "Job cannot replace it (backoffLimit: 0). Relaunching "
+                        "it. Continuity is NOT claimed for this cycle, and "
+                        "the IO it would have done during the outage is not "
+                        "covered -- the static md5 and raw crc32c checks are "
+                        "what gate integrity here.", name, outage)
+                    try:
+                        again()
+                        continue
+                    except Exception as exc:          # noqa: BLE001
+                        raise LblkPreconditionError(
+                            f"[matrix] live FIO on {name} was evicted by "
+                            f"{outage} and could not be relaunched: "
+                            f"{str(exc)[:200]}") from exc
                 raise LblkPreconditionError(
                     f"[matrix] live FIO on {name} was evicted by the drain "
-                    f"during {outage} and did not come back. Being moved is "
-                    f"expected here; staying down is not -- the Job should "
-                    f"have been rescheduled onto a surviving node.")
+                    f"during {outage} and did not come back, and no relaunch "
+                    f"was recorded for job {handle!r}.")
             if not alive:
                 ran = time.time() - getattr(self, "_fio_started_at", 0)
                 if ran >= self._fio_runtime:
