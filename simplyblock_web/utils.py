@@ -3,8 +3,8 @@ import logging
 import random
 import re
 import string
-from typing import Literal
 import traceback
+from typing import Literal
 
 from flask import jsonify
 from pydantic import BaseModel, Field, SecretBytes, SecretStr, model_validator
@@ -12,7 +12,6 @@ from werkzeug.exceptions import HTTPException
 
 from simplyblock_core import constants
 from simplyblock_core.utils.pci import PCIAddress
-
 
 IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
 IFNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\\.]{1,15}$')
@@ -110,7 +109,7 @@ def get_int_value_or_default(data, key, default):
 
 
 def get_cluster_id(request):
-    if "Authorization" in request.headers and request.headers["Authorization"]:
+    if request.headers.get("Authorization"):
         au = request.headers["Authorization"]
         if len(au.split()) == 2:
             cluster_id = au.split()[0]

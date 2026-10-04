@@ -3,10 +3,9 @@ import logging
 
 from flask import Blueprint
 
-from simplyblock_web import utils
-
 from simplyblock_core import db_controller
 from simplyblock_core.utils import UUID_PATTERN
+from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
 

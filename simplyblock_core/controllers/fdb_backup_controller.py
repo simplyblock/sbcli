@@ -5,8 +5,7 @@ import time
 import uuid
 
 import docker
-
-from simplyblock_core import utils, constants
+from simplyblock_core import constants, utils
 from simplyblock_core.controllers import fdb_backup_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import DBBackup
@@ -30,7 +29,7 @@ def create_backup(cluster_id):
         cluster = db_controller.get_cluster_by_id(cluster_id)
         backup_path = cluster.get_backup_path()
         if cluster.backup_s3_bucket and cluster.backup_s3_cred:
-            folder = f"backup-{str(datetime.datetime.now())}"
+            folder = f"backup-{datetime.datetime.now()!s}"
             folder = folder.replace(" ", "-")
             folder = folder.replace(":", "-")
             folder = folder.split(".")[0]

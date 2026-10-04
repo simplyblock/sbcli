@@ -4,54 +4,91 @@ import datetime
 import json
 import logging
 import math
+import os
 import platform
 import socket
 import subprocess
-
-import psutil
+import threading
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-import threading
-
-import time
-import uuid
+import psutil
+from docker.types import LogConfig
+from kubernetes.client import ApiException
+from pydantic import SecretStr
+from tenacity import (
+    RetryError,
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 import docker
-from docker.types import LogConfig
-from pydantic import SecretStr
-from tenacity import RetryError, Retrying, before_sleep_log, retry_if_exception_type, stop_after_attempt, wait_fixed
-
-from simplyblock_core import constants, scripts, distr_controller, cluster_ops
-from simplyblock_core import utils
-from simplyblock_core import jm_raid
-from simplyblock_core.utils import port_block
-from simplyblock_core.utils import rpc_budget
-from simplyblock_core.utils import hublvol_reconnect
-from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
-from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
-from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core import (
+    cluster_ops,
+    constants,
+    distr_controller,
+    jm_raid,
+    scripts,
+    utils,
+)
 from simplyblock_core import db_controller as db_module
+from simplyblock_core import rpc_client as rpc_client_module
+from simplyblock_core.constants import (
+    LINUX_DRV_MASS_STORAGE_ID,
+    LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID,
+)
+from simplyblock_core.controllers import (
+    device_controller,
+    device_events,
+    health_controller,
+    lvol_controller,
+    qos_controller,
+    snapshot_controller,
+    storage_events,
+    tasks_controller,
+    tcp_ports_events,
+)
+from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lock import DbLock, DbLockBusyError, DbLockUnavailableError
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
+from simplyblock_core.models.nvme_device import (
+    JMDevice,
+    NVMeDevice,
+    RemoteDevice,
+    RemoteJMDevice,
+)
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.release_upgrades import jc_compression_upgrade
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches, evict_cached_session  # noqa: F401  (RPCClient kept as a patch target for tests)
-from simplyblock_core import rpc_client as rpc_client_module
+from simplyblock_core.release_upgrades import jc_compression_upgrade
+from simplyblock_core.rpc_client import (
+    JC_REMOVE_JM_NOT_USED,
+    JC_REMOVE_JM_STILL_IN_USE,
+    RPC_UNSUPPORTED,
+    RPCErrorCode,
+    RPCException,
+    RPCRemoteError,
+    evict_cached_session,
+    namespace_matches,
+)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
-from simplyblock_core.utils import dial_backoff
+from simplyblock_core.utils import (
+    dial_backoff,
+    hublvol_reconnect,
+    port_block,
+    pull_docker_image_with_retry,
+    rpc_budget,
+)
 from simplyblock_web import node_utils
-from simplyblock_core.utils import addNvmeDevices
-from simplyblock_core.utils import pull_docker_image_with_retry
-import os
-
 
 logger = utils.get_logger(__name__)
 
@@ -200,7 +237,7 @@ def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
 def _rpc_bdev_exists(rpc_client, name):
     """True iff a bdev with the given name is visible to SPDK."""
     try:
-        ret = rpc_client.get_bdevs(name)
+        ret = rpc_client.bdev_get(name)
         return bool(ret)
     except Exception:
         return False
@@ -228,9 +265,17 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
     silently left zombies behind. We now retry the kill until SPDK is
     confirmed down. Bounded total wall-clock = max_attempts *
     poll_per_attempt_sec so a wedged docker daemon cannot trap the caller.
-    Returns True if SPDK died, False if all attempts exhausted (caller is
-    responsible for whatever comes next; the node should still be marked
-    OFFLINE so it stops being treated as in_restart).
+    Returns True ONLY on a positive observation that SPDK is down -- a
+    liveness probe that answered and said "not up". A probe that could not be
+    made at all (node API unreachable) is UNKNOWN and never counts as death:
+    callers use the return value to decide whether it is safe to drop the
+    StorageNode record, and dropping it while the pod is still alive leaves a
+    pod that nothing references and nothing can reap.
+
+    False means "not confirmed dead" -- either SPDK was still up after every
+    attempt, or the probe never answered. The caller is responsible for
+    whatever comes next; the node should still be marked OFFLINE so it stops
+    being treated as in_restart.
     """
     snode_api = snode.client(timeout=5, retry=5)
     # Each attempt is bounded BOTH ways, and needs both. The wall-clock deadline
@@ -241,6 +286,7 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
     # no-op, which turns a bare deadline loop into a hot spin burning the whole
     # poll_per_attempt_sec of CPU per attempt.
     rounds_per_attempt = max(1, int(poll_per_attempt_sec / poll_interval))
+    last_probe_error = None
     for attempt in range(1, max_attempts + 1):
         # Prefer the authoritative container-level cleanup: it clears the
         # restart policy and removes synchronously, so success means the
@@ -281,9 +327,24 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
                 # kill loop would never observe SPDK as down (it would burn all
                 # attempts and log a false "did NOT die" even after a clean kill).
                 up, _ = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
-            except Exception:
-                up = False
-            if not up:
+                probed = True
+            except Exception as probe_err:
+                # UNKNOWN, not down. snode_client raises SNodeClientException
+                # whenever the node's API cannot be reached at all, which is
+                # the normal state in the very situation this function is
+                # called for -- the add failed BECAUSE that host stopped
+                # answering. Reporting "confirmed down" here makes the caller
+                # drop the StorageNode record while the pod is still running,
+                # and a pod with no record and no ownerReference is
+                # unreachable by every cleanup path there is: it keeps the
+                # host's hugepages and every later add-node attempt on it
+                # stays Pending (observed 2026-09-11, worker tqmtr, rpc_port
+                # 4426 -- the deploy wedged at 11/12 until the pod was deleted
+                # by hand).
+                last_probe_error = probe_err
+                probed = False
+                up = True
+            if probed and not up:
                 logger.info(
                     "SPDK on %s confirmed down (kill attempt %d/%d)",
                     snode.get_id(), attempt, max_attempts,
@@ -296,12 +357,22 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
             snode.get_id(), poll_per_attempt_sec, attempt, max_attempts,
         )
 
-    logger.error(
-        "SPDK on %s did NOT die after %d kill attempts (%ds total) — "
-        "investigate snode_api / docker daemon health on %s",
-        snode.get_id(), max_attempts,
-        max_attempts * poll_per_attempt_sec, snode.mgmt_ip,
-    )
+    if last_probe_error is not None:
+        logger.error(
+            "Could not confirm SPDK on %s is down after %d kill attempts (%ds total): "
+            "the liveness probe never answered (%s). Returning failure so the caller "
+            "keeps the node record — dropping it now would leave the pod running with "
+            "nothing referencing it. Investigate snode_api health on %s",
+            snode.get_id(), max_attempts,
+            max_attempts * poll_per_attempt_sec, last_probe_error, snode.mgmt_ip,
+        )
+    else:
+        logger.error(
+            "SPDK on %s did NOT die after %d kill attempts (%ds total) — "
+            "investigate snode_api / docker daemon health on %s",
+            snode.get_id(), max_attempts,
+            max_attempts * poll_per_attempt_sec, snode.mgmt_ip,
+        )
     return False
 
 
@@ -778,7 +849,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
     # paths must not dump the whole table to check one name.
     if not is_multipath:
         bdev_name = f"{name}n1"
-        if rpc_client.get_bdevs(bdev_name):
+        if rpc_client.bdev_get(bdev_name):
             logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev_name}")
             return bdev_name
 
@@ -893,7 +964,7 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
             raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
-            ret = rpc_client.get_bdevs(bdev_name)
+            ret = rpc_client.bdev_get(bdev_name)
             if ret:
                 bdev_found = True
                 break
@@ -949,7 +1020,7 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
                     "Controller %s still missing paths after attach: %s (now %d/%d)",
                     name, still_missing, len(now_attached), len(expected_ips))
 
-    if rpc_client.get_bdevs(bdev_name):
+    if rpc_client.bdev_get(bdev_name):
         return bdev_name
     return None
 
@@ -1126,9 +1197,7 @@ def get_next_physical_device_order(snode, exclude_node_id=None):
 def _search_for_partitions(rpc_client, nvme_device):
     partitioned_devices = []
     # Node-add cold path: full dump is fine here, the node carries no lvols yet.
-    bdevs = rpc_client.get_bdevs(all_bdevs=True)
-    if bdevs is None:
-        raise RPCException(f"get_bdevs failed on {rpc_client.host}")
+    bdevs = rpc_client.bdev_list()
     for bdev in bdevs:
         name = bdev['name']
         if name.startswith(f"{nvme_device.nvme_bdev}p"):
@@ -1278,7 +1347,11 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
 
-        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+        pt_bdev_info = rpc_client.bdev_get(pt_name)
+        if pt_bdev_info is None:
+            logger.error(f"Failed to read back pt bdev: {pt_name}")
+            return False
+        pt_spdk_uuid = pt_bdev_info["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -1300,12 +1373,12 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
         IP = next((iface.ip4_address for iface in snode.data_nics if iface.ip4_address), "")
         multipath = False
 
-    ret = rpc_client.get_bdevs(raid_bdev)
+    ret = rpc_client.bdev_get(raid_bdev)
 
     return JMDevice({
         'uuid': alceml_id,
         'device_name': jm_bdev,
-        'size': ret[0]["block_size"] * ret[0]["num_blocks"],
+        'size': ret["block_size"] * ret["num_blocks"],
         'status': JMDevice.STATUS_ONLINE,
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
@@ -1370,7 +1443,11 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
         if not ret:
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
-        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+        pt_bdev_info = rpc_client.bdev_get(pt_name)
+        if pt_bdev_info is None:
+            logger.error(f"Failed to read back pt bdev: {pt_name}")
+            return False
+        pt_spdk_uuid = pt_bdev_info["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -1461,7 +1538,11 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return None
 
-    pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+    pt_bdev_info = rpc_client.bdev_get(pt_name)
+    if pt_bdev_info is None:
+        logger.error(f"Failed to read back pt bdev: {pt_name}")
+        return None
+    pt_spdk_uuid = pt_bdev_info["aliases"][0]
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
@@ -1601,12 +1682,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     # create jm device
     jm_devices = []
     # Node-add cold path: full dump is fine here, the node carries no lvols yet.
-    bdevs = snode.rpc_client().get_bdevs(all_bdevs=True)
-    if bdevs is None:
-        # None means the RPC failed (timeout / non-200), not "no bdevs".
-        # Without this guard the comprehension below crashes with an opaque
-        # TypeError; raise a clear, catchable error instead.
-        raise RPCException(f"get_bdevs failed on node {snode.get_id()}")
+    bdevs = snode.rpc_client().bdev_list()
     bdevs_names = [d['name'] for d in bdevs]
     for nvme in new_devices:
         if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
@@ -1716,7 +1792,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
     if jm_device.jm_nvme_bdev_list:
         if len(jm_device.jm_nvme_bdev_list) == 1:
-            ret = rpc_client.get_bdevs(jm_device.jm_nvme_bdev_list[0])
+            ret = rpc_client.bdev_get(jm_device.jm_nvme_bdev_list[0])
             if not ret:
                 logger.error(f"BDev not found: {jm_device.jm_nvme_bdev_list[0]}")
                 jm_device.status = JMDevice.STATUS_REMOVED
@@ -1731,7 +1807,7 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
 
         jm_bdevs_found = []
         for bdev_name in jm_device.jm_nvme_bdev_list:
-            ret = rpc_client.get_bdevs(bdev_name)
+            ret = rpc_client.bdev_get(bdev_name)
             if ret:
                 logger.info(f"JM bdev found: {bdev_name}")
                 jm_bdevs_found.append(bdev_name)
@@ -1788,7 +1864,11 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
                 return False
 
-            pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+            pt_bdev_info = rpc_client.bdev_get(pt_name)
+            if pt_bdev_info is None:
+                logger.error(f"Failed to read back pt bdev: {pt_name}")
+                return False
+            pt_spdk_uuid = pt_bdev_info["aliases"][0]
             jm_device.pt_bdev_uuid = pt_spdk_uuid
             subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
             logger.info("creating subsystem %s", subsystem_nqn)
@@ -1932,9 +2012,9 @@ def _connect_to_remote_devs(
         # (2026-07-10 activation regression, all deploys after SFAM-2774).
         # Devices without the new field fall back to the name-based probe.
         if dev.pt_bdev_uuid:
-            ret = rpc_client.get_bdevs(dev.pt_bdev_uuid)
+            ret = rpc_client.bdev_get(dev.pt_bdev_uuid)
             if ret:
-                name = ret[0]["name"]
+                name = ret["name"]
                 # A remote attach must resolve to the attached nvme bdev,
                 # never to a local base bdev that shares the table.
                 if name.startswith("remote_"):
@@ -1945,7 +2025,7 @@ def _connect_to_remote_devs(
                     dev.pt_bdev_uuid, dev.get_id(), name, this_node.get_id())
         expected = f"remote_{dev.alceml_bdev}n1"
         try:
-            return expected if rpc_client.get_bdevs(expected) else ""
+            return expected if rpc_client.bdev_get(expected) else ""
         except Exception:
             return ""
 
@@ -1981,7 +2061,7 @@ def _connect_to_remote_devs(
     for dev, remote_bdev in pending.values():
         if not remote_bdev.remote_bdev and dev.get_id() in existing_remote_devices:
             existing_remote_device = existing_remote_devices[dev.get_id()]
-            if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+            if existing_remote_device.remote_bdev and rpc_client.bdev_get(existing_remote_device.remote_bdev):
                 remote_bdev.remote_bdev = existing_remote_device.remote_bdev
         if not remote_bdev.remote_bdev:
             logger.error(f"Failed to connect to remote device {dev.alceml_name}")
@@ -2032,7 +2112,7 @@ def _connect_to_remote_devs(
                     continue
             else:
                 try:
-                    if not rpc_client.get_bdevs(expected_bdev):
+                    if not rpc_client.bdev_get(expected_bdev):
                         continue
                 except Exception:
                     continue
@@ -2185,7 +2265,7 @@ def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
                     out[bdev] = dev
             else:
                 try:
-                    if not rpc_client.get_bdevs(bdev):
+                    if not rpc_client.bdev_get(bdev):
                         out[bdev] = dev
                 except Exception:
                     out[bdev] = dev
@@ -2248,7 +2328,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode):
             if _sweep_bdev_names is not None:
                 if expected_bdev not in _sweep_bdev_names:
                     continue
-            elif not rpc_client.get_bdevs(expected_bdev):
+            elif not rpc_client.bdev_get(expected_bdev):
                 continue
             remote_dev = remote_by_id.get(dev.get_id())
             if remote_dev:
@@ -2444,7 +2524,7 @@ def verify_jm_mesh_coverage(cluster_id, repair=True):
             if owner is not None and owner.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
-                present = bool(rpc_client.get_bdevs(remote_bdev))
+                present = bool(rpc_client.bdev_get(remote_bdev))
             except Exception:
                 present = False
             if not present:
@@ -2465,7 +2545,7 @@ def verify_jm_mesh_coverage(cluster_id, repair=True):
                     for entry in (fresh.remote_jm_devices or []):
                         if entry.node_id == owner_id and entry.remote_bdev:
                             try:
-                                fixed = bool(rpc_client.get_bdevs(entry.remote_bdev))
+                                fixed = bool(rpc_client.bdev_get(entry.remote_bdev))
                             except Exception:
                                 fixed = False
                             break
@@ -2634,15 +2714,15 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
             # otherwise every closure would share the loop's final values by
             # the time Retrying actually invokes it (ruff B023).
             for _ in range(1 if connect_failed else 10):
-                if remote_device.remote_bdev and rpc_client.get_bdevs(remote_device.remote_bdev):
+                if remote_device.remote_bdev and rpc_client.bdev_get(remote_device.remote_bdev):
                     return
-                if rpc_client.get_bdevs(expected_bdev):
+                if rpc_client.bdev_get(expected_bdev):
                     remote_device.remote_bdev = expected_bdev
                     return
                 time.sleep(0.5)
             if not remote_device.remote_bdev and org_dev.get_id() in existing_remote_jm_devices:
                 existing_remote_device = existing_remote_jm_devices[org_dev.get_id()]
-                if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+                if existing_remote_device.remote_bdev and rpc_client.bdev_get(existing_remote_device.remote_bdev):
                     remote_device.remote_bdev = existing_remote_device.remote_bdev
 
         try:
@@ -2863,40 +2943,6 @@ def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
     return ha_jm_count
 
 
-def _acquire_cluster_add_lock_blocking(db_controller, cluster_id, owner, timeout=300, poll=2):
-    """Block until the per-cluster node-add mesh lock is held by ``owner``.
-
-    Returns True once acquired, or False if ``timeout`` seconds elapse without
-    acquiring (caller should fail the task so it is retried — failing here is
-    cheaper than re-running the whole node-local setup). A lock abandoned by a
-    crashed holder is reclaimed automatically once its heartbeat goes stale
-    (constants.CLUSTER_ADD_LOCK_TTL_SEC), so the effective wait is bounded even
-    if a holder died."""
-    deadline = time.time() + timeout
-    while True:
-        won, current_owner = db_controller.acquire_cluster_add_lock(cluster_id, owner)
-        if won:
-            return True
-        if time.time() >= deadline:
-            logger.error(
-                f"Timed out waiting for cluster node-add lock (held by {current_owner})")
-            return False
-        logger.info(f"Cluster node-add lock held by {current_owner}; waiting")
-        time.sleep(poll)
-
-
-def _cluster_add_lock_heartbeat(db_controller, cluster_id, owner, stop_event):
-    """Refresh the node-add lock until ``stop_event`` is set, so a long mesh
-    section on a large cluster isn't reclaimed out from under a live holder."""
-    while not stop_event.wait(constants.CLUSTER_ADD_LOCK_HEARTBEAT_SEC):
-        if not db_controller.refresh_cluster_add_lock(cluster_id, owner):
-            # Lost the lock (reclaimed after a stall). Stop heartbeating; the
-            # critical section will finish and its owner-scoped release is a
-            # no-op against whoever holds it now.
-            logger.warning("Lost cluster node-add lock heartbeat (reclaimed)")
-            return
-
-
 def _find_flagged_journal_device(snode, devices):
     """The device matching a journal-flagged lblk config entry, or None.
 
@@ -3085,6 +3131,7 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
             ok, err = snode_api.persist_node_config(
                 max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
                 ssd_list=entry.get("ssd_pcis"),
+                lblk_serials=utils.lblk_device_serials(entry.get("lblk_devices")),
                 cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
                 l_cores=entry["l-cores"], distribution=entry["distribution"],
                 core_to_index={str(k): v for k, v in entry["core_to_index"].items()},
@@ -3142,6 +3189,7 @@ def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
     ok, err = snode_api.persist_node_config(
         max_lvol=None, huge_page_memory=huge_page_memory, numa_node=node_config.get("socket"),
         ssd_list=node_config.get("ssd_pcis"),
+        lblk_serials=utils.lblk_device_serials(node_config.get("lblk_devices")),
         small_pool_count=small_pool_count, large_pool_count=large_pool_count)
     if not ok:
         logger.error("Failed to persist the recalculated huge-page sizing: %s", err)
@@ -3184,6 +3232,136 @@ def reserve_cluster_hugepages(snode_api, nodes, cluster):
             return False
     snode_api.set_hugepages()
     return True
+
+
+class _SpdkPodStillPresent(Exception):
+    """The SPDK pod has not disappeared from the API server yet."""
+
+
+def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
+    """Delete the SPDK pod (and its fluentd companion) straight from the
+    Kubernetes API, without routing the request through the node agent.
+
+    ``snode_api.spdk_process_kill`` already does exactly this work -- see
+    ``spdk_process_kill`` in
+    simplyblock_web/api/internal/storage_node/kubernetes.py, which is a plain
+    ``delete_namespaced_pod``. Nothing about it is node-local. The catch is
+    WHERE it runs: on the agent hosted by the very node being torn down. In
+    the most common abort case the add failed BECAUSE that host went away --
+    an agent crash, or the one-off CPU-topology reboot -- so the request
+    cannot be delivered at all and the pod survives with nothing referencing
+    it (2026-09-11, worker gddnr, rpc_port 4436: the abort handler fired
+    correctly and then got "Connection refused" from the agent while the node
+    rebooted). Talking to the API server directly takes the dead host out of
+    the path.
+
+    Returns ``(ok, err)``. ``ok`` is True only once the pod is confirmed gone,
+    since a pod still Terminating is still holding the host's hugepages.
+    """
+    six = utils.first_six_chars(cluster_id)
+    pod_name = f"snode-spdk-pod-{rpc_port}-{six}"
+    fluent_pod_name = f"simplyblock-fluentd-{rpc_port}-{six}"
+    namespace = constants.K8S_NAMESPACE
+
+    try:
+        k8s_core = utils.get_k8s_core_client()
+    except Exception as e:
+        return False, f"no Kubernetes API client available: {e}"
+
+    try:
+        k8s_core.delete_namespaced_pod(pod_name, namespace)
+        logger.info(f"Deleted SPDK pod {pod_name} directly via the Kubernetes API")
+    except ApiException as e:
+        if e.status != 404:
+            return False, f"failed to delete pod {pod_name}: {e.body}"
+        logger.info(f"SPDK pod {pod_name} was already gone")
+    except Exception as e:
+        return False, f"failed to delete pod {pod_name}: {e}"
+
+    # Companion log shipper: best effort, never fails the teardown. It holds
+    # no hugepages, so leaving it behind does not block a later add.
+    try:
+        k8s_core.delete_namespaced_pod(fluent_pod_name, namespace)
+        logger.info(f"Deleted fluentd pod {fluent_pod_name}")
+    except ApiException as e:
+        if e.status != 404:
+            logger.warning(f"Failed to delete fluentd pod {fluent_pod_name}: {e.body}")
+    except Exception as e:
+        logger.warning(f"Failed to delete fluentd pod {fluent_pod_name}: {e}")
+
+    # Confirm it is really gone. Same budget as the agent-side implementation.
+    try:
+        for attempt in Retrying(
+            stop=stop_after_attempt(10),
+            wait=wait_fixed(3),
+            retry=retry_if_exception_type(_SpdkPodStillPresent),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        ):
+            with attempt:
+                pods = k8s_core.list_namespaced_pod(namespace)
+                if any(p.metadata.name.startswith(pod_name) for p in pods.items):
+                    raise _SpdkPodStillPresent(pod_name)
+    except _SpdkPodStillPresent:
+        return False, f"pod {pod_name} still present 30s after delete"
+    except Exception as e:
+        return False, f"could not confirm pod {pod_name} is gone: {e}"
+
+    return True, ""
+
+
+def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=None):
+    """Tear down the SPDK pod add_node just started, before bailing out.
+
+    Between ``spdk_process_start`` and the point the StorageNode record is
+    written there is no DB row pointing at the pod, so nothing else can ever
+    find it: it has no owner reference for Kubernetes to reap and no node
+    record for the control plane to reconcile. Left behind it keeps holding
+    the host's hugepages, and every later add-node attempt on that host gets
+    "Insufficient hugepages-2Mi" and stays Pending -- which stalls the
+    operator's serialised node-add queue and wedges the whole deployment
+    (observed on fresh 12-node deploys 2026-09-08 and 2026-09-11; recovery
+    was a manual delete of the unowned pod).
+
+    In kubernetes mode the teardown goes straight to the API server
+    (``_delete_spdk_pod_via_k8s``) rather than through the node agent,
+    because the agent runs ON the host we are abandoning and is routinely
+    unreachable in exactly this situation. The agent call remains the
+    fallback, and the only path in docker mode, where the control plane has
+    no way to reach the container itself.
+
+    The rpc_port reservation is deliberately NOT released: it has no release
+    API and ages out by TTL (see reserve_cluster_nvmf_port), and dropping it
+    here would hand the port to a concurrent add while this pod is still
+    shutting down.
+    """
+    logger.error(f"add_node aborting after SPDK start: {reason}")
+
+    if cluster_mode == "kubernetes":
+        ok, err = _delete_spdk_pod_via_k8s(rpc_port, cluster_id)
+        if ok:
+            logger.info(
+                f"Cleaned up SPDK pod on port {rpc_port} after failed add_node "
+                f"(direct Kubernetes delete)")
+            return
+        logger.warning(
+            f"Direct Kubernetes teardown of the SPDK pod on port {rpc_port} failed "
+            f"({err}); falling back to the node agent")
+
+    try:
+        ok, err = snode_api.spdk_process_kill(rpc_port, cluster_id)
+        if ok:
+            logger.info(f"Cleaned up SPDK pod on port {rpc_port} after failed add_node")
+        else:
+            logger.error(
+                f"Could not clean up SPDK pod on port {rpc_port} after failed add_node: "
+                f"{err}. It holds this host's hugepages and will block further "
+                f"add-node attempts until deleted by hand.")
+    except Exception as e:
+        logger.error(
+            f"Could not clean up SPDK pod on port {rpc_port} after failed add_node: {e}. "
+            f"It holds this host's hugepages and will block further add-node attempts "
+            f"until deleted by hand.")
 
 
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
@@ -3388,7 +3566,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         # check for memory
-        if "memory_details" in node_info and node_info['memory_details']:
+        if node_info.get('memory_details'):
             memory_details = node_info['memory_details']
             logger.info("Node Memory info")
             logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -3533,7 +3711,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # permanently block its own retry (2026-07-17, node f6308adb).
         if expansion:
             from simplyblock_core.controllers.cluster_expansion.preconditions import (
-                check_expansion_preconditions, check_fd_admission_for_add)
+                check_expansion_preconditions,
+                check_fd_admission_for_add,
+            )
             ok, reason = check_expansion_preconditions(cluster, db_controller)
             if not ok:
                 logger.error(f"Cannot start expansion node-add: {reason}")
@@ -3550,21 +3730,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         fdb_connection = cluster.db_connection
 
-        if cluster.mode == "docker":
-            logger.info("Joining docker swarm...")
-            cluster_docker = utils.get_docker_client(cluster_id)
-            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-            results, err = snode_api.join_swarm(
-                cluster_ip=cluster_ip,
-                join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
-                db_connection=cluster.db_connection,
-                cluster_id=cluster_id)
-
-            if not results:
-                logger.error(f"Failed to Join docker swarm: {err}")
-                return False
+        if cluster.cluster_vip:
+            cluster_ip = cluster.cluster_vip
         else:
-            cluster_ip = utils.get_k8s_node_ip()
+            if cluster.mode == "docker":
+                cluster_docker = utils.get_docker_client(cluster_id)
+                cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+            else:
+                cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_info = utils.get_mgmt_ip(node_info, iface_name)
@@ -3715,9 +3888,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not spdk_proxy_image:
             spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
         # Initial storage-MCP maxUnavailable for the first-time CPU-topology
-        # reboots = the configured parallel-add count (StorageNodeSet
-        # spec.maxParallelNodeAdds), read straight from the CR. cluster_activate
-        # later narrows the pool to the cluster's fault tolerance.
+        # reboots = the configured parallel-add count (StorageCluster
+        # spec.storageNodes.maxParallelNodeAdds), read straight from the CR.
+        # cluster_activate later narrows the pool to the cluster's fault
+        # tolerance.
         mcp_max_unavailable = utils.get_max_parallel_node_adds_from_cr(
             cr_name, cr_namespace, cr_plural)
         try:
@@ -3739,11 +3913,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             time.sleep(5)
 
         except Exception as e:
-            logger.error(e)
+            # spdk_process_start may have created the pod before raising.
+            _abort_started_spdk(snode_api, rpc_port, cluster_id, str(e),
+                                cluster_mode=cluster.mode)
             return False
 
         if not results:
-            logger.error(f"Failed to start spdk: {err}")
+            _abort_started_spdk(snode_api, rpc_port, cluster_id,
+                                f"Failed to start spdk: {err}",
+                                cluster_mode=cluster.mode)
             return False
         number_of_alceml_devices = node_config.get("number_of_alcemls")
         # Increase number of alcemls by one for the JM
@@ -3821,7 +3999,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 active_tcp = True
 
         if not active_tcp and not active_rdma:
-            logger.error("No usable storage network interface found.")
+            _abort_started_spdk(snode_api, rpc_port, cluster_id,
+                                "No usable storage network interface found.",
+                                cluster_mode=cluster.mode)
             return False
 
         hostname = node_info['hostname'] + f"_{rpc_port}"
@@ -4092,7 +4272,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             else:
                 ssds = snode.ssd_pcie
 
-            nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
+            nvme_devs = utils.addNvmeDevices(rpc_client, snode, ssds)
         if nvme_devs:
 
             for nvme in nvme_devs:
@@ -4135,21 +4315,152 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # the reverse-connect loop does full-object writes of *other* nodes,
         # and a correct A<->B mesh requires whoever runs second to observe the
         # first as ONLINE. So this whole block is serialized per cluster while
-        # the slow node-local setup above ran in parallel. A heartbeat keeps a
-        # long section on a large cluster from being reclaimed; the lock is
-        # always released (finally), including on the early `continue` and the
-        # reverse-connect failure path.
-        lock_owner = f"{socket.gethostname()}:{os.getpid()}:{node_uuid}"
-        if not _acquire_cluster_add_lock_blocking(
-                db_controller, cluster_id, lock_owner,
-                timeout=constants.CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC):
+        # the slow node-local setup above ran in parallel. DbLock heartbeats
+        # the lease so a long section on a large cluster is not reclaimed from
+        # a live holder; `with` releases it on every exit, including the
+        # early `continue` and the reverse-connect failure path.
+        mesh_lock = DbLock(
+            f"cluster_add/{cluster_id}",
+            timeout=constants.CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC)
+        try:
+            with mesh_lock:
+                # Assign the cluster-wide device ordering under the lock. Both
+                # physical_label and cluster_device_order are sequential cluster-
+                # wide counters (get_next_physical_device_order /
+                # get_next_cluster_device_order are read-max-then-+1 over all
+                # nodes). Computed in the parallel node-local section — as they were
+                # via addNvmeDevices() and _prepare_cluster_devices_*() — concurrent
+                # adds read the same "next free" value and collide, producing
+                # DUPLICATE ids / physical labels in the distr cluster map, which
+                # makes bdev_lvol_create_lvstore fail with "Input/output error" at
+                # activation. Recompute them here: the lock serializes adds and this
+                # node's devices are persisted (snode.write_to_db below) before the
+                # lock is released, so the next add sees them and picks the next
+                # free values. The provisional values assigned earlier are
+                # overwritten here before they are ever persisted.
+                snode.physical_label = 0 if cluster.is_single_node else get_next_physical_device_order(
+                    snode, exclude_node_id=snode.get_id())
+                dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
+                for dev in snode.nvme_devices:
+                    dev.physical_label = snode.physical_label
+                    if dev.status == NVMeDevice.STATUS_ONLINE:
+                        dev.cluster_device_order = dev_order
+                        dev_order += 1
+
+                logger.info("Connecting to remote devices")
+                remote_devices = _connect_to_remote_devs(snode)
+                snode.remote_devices = remote_devices
+
+                if snode.enable_ha_jm:
+                    logger.info("Connecting to remote JMs")
+                    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+
+                snode.write_to_db(kv_store)
+
+                # Route the IN_CREATION -> ONLINE transition through set_node_status
+                # rather than a raw status write. set_node_status enforces the
+                # _ALLOWED_PRE_STATUSES_FOR_ONLINE guard (OFFLINE -> ONLINE is rejected),
+                # so a concurrent/stale path can no longer clobber a freshly-detected
+                # OFFLINE back to ONLINE through this code -- the raw write here was the
+                # node-side stale re-online hole (incident 2026-06-24: node re-marked
+                # online seconds after the monitor downed it, undoing the OFFLINE and
+                # forcing a duplicate offline/auto-restart cycle). set_node_status also
+                # emits the status event, broadcasts to peers, and cancels stale
+                # auto-restart tasks -- all previously done by hand here.
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="monitor"):
+                    logger.error(
+                        f"Failed to bring node {snode.get_id()} ONLINE "
+                        f"(illegal transition from {snode.status})")
+                    return False
+
+                logger.info("Make other nodes connect to the node devices")
+                snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+                for node in snodes:
+                    if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                        continue
+                    try:
+                        node.remote_devices = _connect_to_remote_devs(node)
+                    except RuntimeError:
+                        logger.error('Failed to connect to remote devices')
+                        return False
+                    node.write_to_db(kv_store)
+
+                if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
+                                          Cluster.STATUS_IN_EXPANSION]:
+                    logger.warning(
+                        f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
+                    continue
+
+                logger.info("Sending cluster map add node")
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+                for node_index, node in enumerate(snodes):
+                    if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
+                        continue
+                    ret = distr_controller.send_cluster_map_add_node(snode, node)
+
+                # for dev in snode.nvme_devices:
+                #     if dev.status == NVMeDevice.STATUS_ONLINE:
+                #         device_controller.device_set_unavailable(dev.get_id())
+
+                # logger.info("Setting node status to suspended")
+                # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+                # logger.info("Done")
+
+                logger.info("Setting node status to Active")
+                set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
+
+                # In --expansion mode the expand-task runner triggers expansion
+                # migration explicitly *after* integrate_new_node_into_cluster has
+                # built the post-rotation lvstore_stack and flipped cluster status
+                # back to ACTIVE. Skipping it here avoids racing the half-built
+                # rotation and double-queueing.
+                if not expansion:
+                    for dev in snode.nvme_devices:
+                        if dev.status == NVMeDevice.STATUS_ONLINE:
+                            tasks_controller.add_new_device_mig_task(dev.get_id())
+                else:
+                    # Queue the integration HERE so every entry point gets it —
+                    # CLI, web API and the k8s node-add task runner all funnel
+                    # through add_node, but only clibase used to queue the
+                    # cluster-expand task, so CRD-driven adds completed without
+                    # the rebalance ever starting (2026-07-17, vm15).
+                    expand_task_id = tasks_controller.add_cluster_expand_task(
+                        cluster.get_id(), snode.get_id())
+                    if expand_task_id:
+                        logger.info(
+                            f"expansion: queued cluster-expand task "
+                            f"{expand_task_id} for {snode.get_id()}")
+                    else:
+                        logger.warning(
+                            f"expansion: a cluster-expand task is already open "
+                            f"for this cluster; node {snode.get_id()} will NOT "
+                            f"be integrated by it — re-add it after the current "
+                            f"expansion completes")
+
+                storage_events.snode_add(snode)
+
+                # Legacy (non --expansion) flow only: the follow-up
+                # cluster_ops.cluster_expand accepts IN_EXPANSION and flips back
+                # to ACTIVE when done. In --expansion mode the status must stay
+                # ACTIVE: integrate_new_node_into_cluster's preconditions require
+                # it and the executor owns the IN_EXPANSION transition itself —
+                # setting it here deadlocks the cluster-expand task ("cluster
+                # status is in_expansion, expansion requires active").
+                if not expansion:
+                    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+        except (DbLockBusyError, DbLockUnavailableError):
             # Nothing keeps driving this registration after the failure, but
             # the record written above stays in_creation — retries and
             # watchers read that as a live in-flight add (2026-07-16 perf
             # deploy: 20-minute ghost waits per retry). Tear down the same
             # way the stale-record path does: kill this node's SPDK and drop
-            # the record so a retry starts from a clean slate.
-            logger.error("Could not acquire cluster node-add lock; failing for retry")
+            # the record so a retry starts from a clean slate. DbLockBusyError/
+            # DbLockUnavailableError can only come from entering the lock (no
+            # other DbLock is taken inside this section), so this except can't
+            # accidentally swallow one from the body.
+            logger.exception("Could not acquire cluster node-add lock; failing for retry")
             try:
                 snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             except Exception:
@@ -4158,142 +4469,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             storage_events.snode_delete(snode)
             snode.remove(db_controller.kv_store)
             return False
-        stop_heartbeat = threading.Event()
-        hb_thread = threading.Thread(
-            target=_cluster_add_lock_heartbeat,
-            args=(db_controller, cluster_id, lock_owner, stop_heartbeat),
-            daemon=True)
-        hb_thread.start()
-        try:
-            # Assign the cluster-wide device ordering under the lock. Both
-            # physical_label and cluster_device_order are sequential cluster-
-            # wide counters (get_next_physical_device_order /
-            # get_next_cluster_device_order are read-max-then-+1 over all
-            # nodes). Computed in the parallel node-local section — as they were
-            # via addNvmeDevices() and _prepare_cluster_devices_*() — concurrent
-            # adds read the same "next free" value and collide, producing
-            # DUPLICATE ids / physical labels in the distr cluster map, which
-            # makes bdev_lvol_create_lvstore fail with "Input/output error" at
-            # activation. Recompute them here: the lock serializes adds and this
-            # node's devices are persisted (snode.write_to_db below) before the
-            # lock is released, so the next add sees them and picks the next
-            # free values. The provisional values assigned earlier are
-            # overwritten here before they are ever persisted.
-            snode.physical_label = 0 if cluster.is_single_node else get_next_physical_device_order(
-                snode, exclude_node_id=snode.get_id())
-            dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-            for dev in snode.nvme_devices:
-                dev.physical_label = snode.physical_label
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    dev.cluster_device_order = dev_order
-                    dev_order += 1
-
-            logger.info("Connecting to remote devices")
-            remote_devices = _connect_to_remote_devs(snode)
-            snode.remote_devices = remote_devices
-
-            if snode.enable_ha_jm:
-                logger.info("Connecting to remote JMs")
-                snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-
-            snode.write_to_db(kv_store)
-
-            # Route the IN_CREATION -> ONLINE transition through set_node_status
-            # rather than a raw status write. set_node_status enforces the
-            # _ALLOWED_PRE_STATUSES_FOR_ONLINE guard (OFFLINE -> ONLINE is rejected),
-            # so a concurrent/stale path can no longer clobber a freshly-detected
-            # OFFLINE back to ONLINE through this code -- the raw write here was the
-            # node-side stale re-online hole (incident 2026-06-24: node re-marked
-            # online seconds after the monitor downed it, undoing the OFFLINE and
-            # forcing a duplicate offline/auto-restart cycle). set_node_status also
-            # emits the status event, broadcasts to peers, and cancels stale
-            # auto-restart tasks -- all previously done by hand here.
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="monitor"):
-                logger.error(
-                    f"Failed to bring node {snode.get_id()} ONLINE "
-                    f"(illegal transition from {snode.status})")
-                return False
-
-            logger.info("Make other nodes connect to the node devices")
-            snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-            for node in snodes:
-                if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-                    continue
-                try:
-                    node.remote_devices = _connect_to_remote_devs(node)
-                except RuntimeError:
-                    logger.error('Failed to connect to remote devices')
-                    return False
-                node.write_to_db(kv_store)
-
-            if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
-                                      Cluster.STATUS_IN_EXPANSION]:
-                logger.warning(
-                    f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
-                continue
-
-            logger.info("Sending cluster map add node")
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-            for node_index, node in enumerate(snodes):
-                if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
-                    continue
-                ret = distr_controller.send_cluster_map_add_node(snode, node)
-
-            # for dev in snode.nvme_devices:
-            #     if dev.status == NVMeDevice.STATUS_ONLINE:
-            #         device_controller.device_set_unavailable(dev.get_id())
-
-            # logger.info("Setting node status to suspended")
-            # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
-            # logger.info("Done")
-
-            logger.info("Setting node status to Active")
-            set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
-
-            # In --expansion mode the expand-task runner triggers expansion
-            # migration explicitly *after* integrate_new_node_into_cluster has
-            # built the post-rotation lvstore_stack and flipped cluster status
-            # back to ACTIVE. Skipping it here avoids racing the half-built
-            # rotation and double-queueing.
-            if not expansion:
-                for dev in snode.nvme_devices:
-                    if dev.status == NVMeDevice.STATUS_ONLINE:
-                        tasks_controller.add_new_device_mig_task(dev.get_id())
-            else:
-                # Queue the integration HERE so every entry point gets it —
-                # CLI, web API and the k8s node-add task runner all funnel
-                # through add_node, but only clibase used to queue the
-                # cluster-expand task, so CRD-driven adds completed without
-                # the rebalance ever starting (2026-07-17, vm15).
-                expand_task_id = tasks_controller.add_cluster_expand_task(
-                    cluster.get_id(), snode.get_id())
-                if expand_task_id:
-                    logger.info(
-                        f"expansion: queued cluster-expand task "
-                        f"{expand_task_id} for {snode.get_id()}")
-                else:
-                    logger.warning(
-                        f"expansion: a cluster-expand task is already open "
-                        f"for this cluster; node {snode.get_id()} will NOT "
-                        f"be integrated by it — re-add it after the current "
-                        f"expansion completes")
-
-            storage_events.snode_add(snode)
-
-            # Legacy (non --expansion) flow only: the follow-up
-            # cluster_ops.cluster_expand accepts IN_EXPANSION and flips back
-            # to ACTIVE when done. In --expansion mode the status must stay
-            # ACTIVE: integrate_new_node_into_cluster's preconditions require
-            # it and the executor owns the IN_EXPANSION transition itself —
-            # setting it here deadlocks the cluster-expand task ("cluster
-            # status is in_expansion, expansion requires active").
-            if not expansion:
-                cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
-        finally:
-            stop_heartbeat.set()
-            db_controller.release_cluster_add_lock(cluster_id, lock_owner)
         # --- End cluster-wide mesh critical section ---------------------
     logger.info("Done")
     return "Success"
@@ -4409,8 +4584,8 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         return False
 
     node_snaps = [
-        sn for sn in db_controller.get_snapshots()
-        if sn.lvol.node_id == node_id and sn.deleted is False
+        sn for sn in db_controller.get_snapshots_by_node_id(node_id)
+        if sn.deleted is False
     ]
     if node_snaps:
         logger.error(
@@ -4430,7 +4605,8 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     # stay within the +/-1 balance rule and keep >=2 hosts per domain.
     # Enforced only once the cluster has an HA layout to protect.
     from simplyblock_core.controllers.cluster_expansion.preconditions import (
-        check_fd_admission_for_remove)
+        check_fd_admission_for_remove,
+    )
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
     if not ok:
@@ -4474,7 +4650,35 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
 def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller):
     """Pre-flight Case-B check: a secondary/tertiary replica hosted on
     ``removed_node`` for some OTHER primary must have a valid relocation target.
-    Returns (feasible: bool, reason: str)."""
+    Returns (feasible: bool, reason: str).
+
+    When the global placement planner applies (see
+    ``_relocation_planner_inputs``) this asks the same planner phase 3b will
+    use, so admission and execution can never disagree: the removal is
+    refused only when no host-disjoint layout exists at all, and a layout
+    that is merely not fully domain-diverse is admitted with a warning naming
+    every LVS that will end up degraded. The per-role probe below stays as
+    the fallback for clusters the planner declines."""
+    from simplyblock_core.controllers import replica_placement
+
+    inputs = _relocation_planner_inputs(removed_node, db_controller, allow_without_fd=True)
+    if inputs is not None:
+        surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt = inputs
+        try:
+            plan = replica_placement.plan_diverse_layout(
+                surviving_ids, fd_by_node, current_layout, ftt,
+                host_by_node=host_by_node, label_by_node=label_by_node)
+        except replica_placement.InfeasiblePlacement as e:
+            return False, str(e)
+        if not plan.full_diversity:
+            logger.warning(
+                f"[REMOVAL] {removed_node.get_id()}: the post-removal layout "
+                f"cannot be made fully domain-diverse: "
+                f"{'; '.join(plan.notes) or 'no reason recorded'}")
+            for violation in plan.violations:
+                logger.warning(f"[REMOVAL] {removed_node.get_id()}: {violation}")
+        return True, ""
+
     for backref, picker in (
             ("lvstore_stack_secondary", "secondary"),
             ("lvstore_stack_tertiary", "tertiary")):
@@ -4493,16 +4697,50 @@ def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller)
     return True, ""
 
 
-def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_controller):
+def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_controller,
+                                   extra_exclude_ids=()):
     """Choose a node to re-host ``primary``'s ``role`` (secondary|tertiary)
     replica, currently on ``removed_node``. Returns a node id or None.
     Reuses the existing anti-affinity-aware placement helpers.
 
-    With failure domains enabled, the >=1-cross-domain-role invariant is
-    enforced HARD here (not best-effort): if the primary's OTHER non-leader
-    role does not already live in a different domain than the primary, the
-    replacement must — otherwise a full-domain outage would leave the LVS
-    with zero surviving paths.
+    ``extra_exclude_ids``: additional node ids to rule out beyond
+    ``removed_node`` itself -- used by ``_relocate_replica_between``'s
+    nested vacate-rotation to exclude the primary currently being spliced
+    in the ENCLOSING call. Without this, the only candidate this call finds
+    can be exactly that in-flight primary (structurally invalid: it can't
+    simultaneously be the thing being relocated onto a node AND the target
+    something else relocates onto), and the caller's own guard against that
+    just gives up rather than searching further (2026-08-28 finding: a
+    three-way chain -- primary A splices into an existing pairing,
+    displacing B onto A's target, but B's only free candidate for the role
+    being vacated turns out to be A itself, mid-relocation -- got stuck
+    retrying the identical failure forever instead of looking past A).
+
+    With failure domains enabled, prefers FULL pairwise domain diversity
+    across {primary, secondary, tertiary} — not just the weaker ">=1
+    cross-domain role" floor this used to settle for. That floor let the
+    role NOT being relocated stay wherever it already was and placed the
+    one being relocated in ANY domain at all (including the primary's own,
+    or the other role's) as long as one non-leader path stayed cross-domain
+    — a real, live-confirmed gap (2026-08-27: after two uneven removals
+    shrank two of four domains to 2 hosts, several nodes ended up with
+    secondary and tertiary sharing a domain, or a tertiary sharing the
+    primary's own domain, purely because the other role already happened
+    to be cross-domain when this ran). Tries, in order:
+      1. a direct candidate diverse from BOTH the primary and the other
+         already-assigned role;
+      2. splicing into an existing pairing whose far end is also diverse
+         from both (see ``_find_splice_target_for_relocation``'s
+         ``avoid_domains``);
+      3. the original ">=1 cross-domain" floor (direct candidate, then
+         splice) if neither of the above found anything — full diversity
+         genuinely isn't achievable right now (e.g. domains have shrunk
+         unevenly) and refusing the relocation outright would strand the
+         node-removal instead. Logged loudly so the degraded outcome is
+         visible rather than silently matching the old behavior;
+      4. same-domain-blind last resort (direct candidate, then splice)
+         when there's no other role to be diverse from at all, or FD data
+         is absent/invalid — unchanged from before.
 
     ``get_secondary_nodes``/``get_secondary_nodes_2`` only ever offer
     UNCLAIMED nodes (each node hosts at most one secondary/tertiary at a
@@ -4518,10 +4756,10 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
     pairing (see ``_find_splice_target_for_relocation``) — exactly the fix
     ``splice_stranded_secondary``/``splice_stranded_tertiary`` already apply
     to the identical dead end at cluster-activation time. Only returning
-    None here (both searches exhausted) makes
+    None (every step above exhausted) makes
     ``_check_replica_relocation_feasible`` refuse the removal up front.
     """
-    exclude_ids = [removed_node.get_id()]
+    exclude_ids = [removed_node.get_id(), *extra_exclude_ids]
     if role == "secondary":
         other_id = primary.tertiary_node_id
         if primary.tertiary_node_id and primary.tertiary_node_id != removed_node.get_id():
@@ -4541,37 +4779,96 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
             primary, exclude_ids=exclude_ids, exclude_mgmt_ips=exclude_mgmt_ips)
 
     cluster = db_controller.get_cluster_by_id(primary.cluster_id)
-    if cands and getattr(cluster, "enable_failure_domain", False) and primary.failure_domain >= 0:
-        other_cross = False
-        if other_id and other_id != removed_node.get_id():
-            try:
-                other = db_controller.get_storage_node_by_id(other_id)
-                other_cross = (other.failure_domain >= 0
-                               and other.failure_domain != primary.failure_domain)
-            except KeyError:
-                pass
-        if not other_cross:
-            # The replacement is the primary's only cross-domain role —
-            # same-domain candidates are not acceptable.
-            for cand_id in cands:
-                try:
-                    cand = db_controller.get_storage_node_by_id(cand_id)
-                except KeyError:
-                    continue
-                if (cand.failure_domain >= 0
-                        and cand.failure_domain != primary.failure_domain):
-                    return cand_id
-        else:
-            return cands[0]
-    elif cands:
-        return cands[0]
+    fd_enabled = bool(getattr(cluster, "enable_failure_domain", False) and primary.failure_domain >= 0)
 
+    def first_diverse(domains):
+        for cand_id in cands:
+            try:
+                cand = db_controller.get_storage_node_by_id(cand_id)
+            except KeyError:
+                continue
+            if cand.failure_domain >= 0 and cand.failure_domain not in domains:
+                return cand_id
+        return None
+
+    if not fd_enabled:
+        if cands:
+            return cands[0]
+        splice = _find_splice_target_for_relocation(
+            primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()])
+        return splice[1] if splice else None
+
+    other_fd = None
+    if other_id and other_id != removed_node.get_id():
+        try:
+            other = db_controller.get_storage_node_by_id(other_id)
+            if other.failure_domain >= 0:
+                other_fd = other.failure_domain
+        except KeyError:
+            # The other role's holder is already gone. other_fd stays None, so
+            # full_avoid carries only the primary's own domain -- the placement
+            # is still diverse from everything that actually exists. Relaxing
+            # by one here is correct rather than merely tolerable: demanding
+            # diversity from a departed node would rule out hosts that are
+            # genuinely free.
+            logger.debug(
+                "no record for %s's other-role holder %s; planning %s placement "
+                "without its domain", primary.get_id(), other_id, role)
+
+    full_avoid = {primary.failure_domain}
+    if other_fd is not None:
+        full_avoid.add(other_fd)
+
+    # 1. Direct candidate, fully diverse from both the primary and the
+    # other already-assigned role.
+    if cands:
+        found = first_diverse(full_avoid)
+        if found:
+            return found
+
+    # 2. Splice into an existing pairing whose far end is also fully diverse.
+    splice = _find_splice_target_for_relocation(
+        primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()],
+        avoid_domains=full_avoid)
+    if splice:
+        return splice[1]
+
+    # 3. Full diversity isn't achievable anywhere in the cluster right now.
+    # Relax to the >=1-cross-domain floor (diverse from the primary alone)
+    # rather than refuse the relocation outright — only when there IS an
+    # other role to have been diverse from, i.e. this is a genuine relax,
+    # not silently skipping the check.
+    if other_fd is not None:
+        weak_avoid = {primary.failure_domain}
+        found = first_diverse(weak_avoid) if cands else None
+        if found:
+            logger.warning(
+                f"[REMOVAL] {primary.get_id()}: no candidate keeps {role} fully domain-diverse "
+                f"from both the primary (domain {primary.failure_domain}) and its other "
+                f"replica (domain {other_fd}); falling back to {found}, cross-domain from "
+                f"the primary only")
+            return found
+        splice = _find_splice_target_for_relocation(
+            primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()],
+            avoid_domains=weak_avoid)
+        if splice:
+            logger.warning(
+                f"[REMOVAL] {primary.get_id()}: no fully domain-diverse splice target for "
+                f"{role} either; falling back to splicing {splice[0]} -> {splice[1]}, "
+                f"cross-domain from the primary only")
+            return splice[1]
+
+    # 4. Same-domain-blind last resort: no other role to be diverse from,
+    # or nothing satisfies even the weaker floor.
+    if cands:
+        return cands[0]
     splice = _find_splice_target_for_relocation(
         primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()])
     return splice[1] if splice else None
 
 
-def _find_splice_target_for_relocation(stranded_primary, role, db_controller, exclude_ids=()):
+def _find_splice_target_for_relocation(stranded_primary, role, db_controller, exclude_ids=(),
+                                        avoid_domains=frozenset()):
     """Find an already-formed pairing ``P -> X`` (``P.<field> == X``)
     elsewhere in the cluster to splice ``stranded_primary`` into:
     ``P -> stranded_primary -> X``. Read-only — callers decide whether and
@@ -4585,6 +4882,32 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     which only ever run before any physical LVS exists — this can be asked
     to splice into a pairing that already has real data on both ends;
     executing that move (not just picking the edge) is the caller's job.
+
+    ``avoid_domains``: X (the node ``stranded_primary`` would actually end
+    up hosted on) is excluded outright, not just scored down, when its
+    domain is in this set. ``_pick_replica_relocation_node`` uses this to
+    keep a spliced-in replacement fully diverse from BOTH the primary and
+    its other already-assigned role — the plain domain-mismatch scoring
+    below only ever knows about diversity from ``stranded_primary`` itself,
+    which isn't enough to keep two independently-placed roles apart.
+
+    P's OWN other role (its tertiary if ``role`` is "secondary", or vice
+    versa, untouched by this splice) is also considered: repointing P's
+    ``field`` from X onto ``stranded_primary`` must not put P in the exact
+    state this diversity fix exists to prevent -- two of P's own roles
+    sharing a domain. This is a *preference*, not a hard filter -- among
+    all valid edges, one whose P stays fully diverse afterwards is always
+    picked over one that doesn't (ties broken by the existing domain-
+    mismatch score below), but a colliding edge is still accepted, with a
+    warning, when it's the only one available. In a real multi-domain
+    cluster there are usually several candidate edges, so this alone
+    resolves the common case without ever refusing a repair that a less
+    picky search would have found (2026-08-27 finding: splicing kc25l into
+    56mg5's secondary slot collided with 56mg5's pre-existing, untouched
+    tertiary in the same domain, when another edge elsewhere in the ring
+    -- t74sg's -- was collision-free the whole time; the old avoid_domains-
+    only check had no way to prefer it, since avoid_domains only ever
+    looked at X's domain, never P's).
 
     Returns ``(p_id, x_id)`` or ``None`` if no valid edge exists.
     """
@@ -4616,14 +4939,31 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
         return sum(1 for n in nodes if n.failure_domain != stranded_primary.failure_domain)
 
     edges = [n for n in all_nodes if getattr(n, field) and n.get_id() not in exclude]
+    other_field = "tertiary_node_id" if field == "secondary_node_id" else "secondary_node_id"
 
-    best, best_score = None, -1
+    best, best_key, best_collides = None, None, False
     for p in edges:
         x_id = getattr(p, field)
         if x_id in exclude:
             continue
         x = by_id.get(x_id)
         if not x or not _online(p, x):
+            continue
+        if avoid_domains and x.failure_domain in avoid_domains:
+            continue
+        # Once spliced, P.<field> is repointed onto stranded_primary itself
+        # (see _relocate_replica_between) -- P's role-target BECOMES
+        # stranded_primary, exactly as fundamental an invariant as X's
+        # domain above: if P's own domain matches stranded_primary's, P now
+        # holds a role-target in its own domain, the most basic diversity
+        # violation there is. Hard-excluded like X's domain, not merely
+        # scored down -- unlike P's OTHER role below, there is no
+        # legitimate "nothing better exists" case here, since this is the
+        # exact same guarantee _pick_replica_relocation_node's own
+        # full_avoid already enforces for X (2026-08-28 finding: this stayed
+        # a soft preference from before today's diversity work and let a
+        # live splice give p59j8 a tertiary target in its own domain).
+        if stranded_primary.failure_domain >= 0 and p.failure_domain == stranded_primary.failure_domain:
             continue
         if role == "secondary":
             if p.mgmt_ip == stranded_primary.mgmt_ip or x.mgmt_ip == stranded_primary.mgmt_ip:
@@ -4634,10 +4974,37 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
                 continue
             if not _valid_tertiary(stranded_primary, stranded_sec, x):
                 continue
-        score = _domain_mismatch_score(p, x)
-        if score > best_score:
-            best_score, best = score, (p.get_id(), x.get_id())
 
+        # Prefer an edge that leaves P's OWN other role (its tertiary if
+        # `role` is "secondary", or vice versa -- untouched by this splice)
+        # diverse from stranded_primary once P.<field> is repointed onto
+        # it. A collision here degrades a node that was never part of this
+        # removal at all, so it's ranked below every non-colliding edge --
+        # but still accepted as a last resort rather than refused outright
+        # (2026-08-27 finding: with several candidate edges usually
+        # available in a real cluster, one of them is typically collision-
+        # free; the old code had no way to prefer it, so an outright reject
+        # here would have been more restrictive than useful).
+        p_other_id = getattr(p, other_field)
+        collides = False
+        if p_other_id and p_other_id != stranded_primary.get_id():
+            p_other = by_id.get(p_other_id)
+            if (p_other and stranded_primary.failure_domain >= 0
+                    and p_other.failure_domain == stranded_primary.failure_domain):
+                collides = True
+
+        score = _domain_mismatch_score(p, x)
+        key = (not collides, score)
+        if best_key is None or key > best_key:
+            best_key, best, best_collides = key, (p.get_id(), x.get_id()), collides
+
+    if best and best_collides:
+        logger.warning(
+            f"[REMOVAL] splice {best[0]} -> {stranded_primary.get_id()} -> {best[1]}: "
+            f"no candidate edge leaves {best[0]}'s other role diverse from "
+            f"{stranded_primary.get_id()}'s domain {stranded_primary.failure_domain}; "
+            f"using it anyway as the least-bad option -- {best[0]} is now degraded "
+            f"by a removal it wasn't otherwise part of")
     return best
 
 
@@ -4719,6 +5086,56 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # 2026-08-25: this node's own hosted-replica peer failed the very
             # next removal after the phase 2/3b reorder that fixed the
             # relocation-timing gap).
+            # Captured BEFORE phase 3a, which clears both this node's
+            # secondary/tertiary pointers and those peers' back-references.
+            # These two peers are the ones left running a JC instance for THIS
+            # node's own jm_vuid, and phase 2 cannot find them any other way --
+            # see _decommission_node_jm's replica_peer_ids.
+            replica_peer_ids = tuple(
+                pid for pid in (snode.secondary_node_id, snode.tertiary_node_id) if pid)
+
+            # Phase 0 — prove phase 3b has a valid layout BEFORE phase 3a
+            # destroys anything.
+            #
+            # 3a is irreversible: it tears down this node's own replicas and
+            # clears the pointers naming them. 3b, which places the replicas
+            # this node hosts for OTHER primaries, only discovers whether a
+            # layout exists when it runs -- after 3a. A 3b failure therefore
+            # returns False into a task runner that retries the whole
+            # sequence, and every retry re-enters a 3a with nothing left to
+            # tear down and reaches the same 3b in the same state. Retry
+            # cannot help, but it is what happens: observed 2026-09-09, a
+            # removal retried 68 times over 11 minutes with the node stuck in
+            # in_removal and one lvstore left on a single member the whole
+            # time, until the task was cancelled by hand.
+            #
+            # Asking the planner here costs one matching computation and
+            # turns that unrecoverable state into a clean refusal: nothing is
+            # destroyed, the node stays ONLINE, and the removal can simply be
+            # retried later once the cluster can host the layout.
+            #
+            # This repeats the admission-time check in remove_storage_node on
+            # purpose. That one runs when the task is QUEUED, which can be
+            # minutes before it is executed, and the cluster can change in
+            # between (a peer going unreachable, another removal finishing).
+            # The check that matters is the one immediately before the
+            # destruction.
+            #
+            # The layout is validated, not persisted: plan_diverse_layout is
+            # a deterministic min-cost matching over the survivors' forward
+            # pointers, and 3a/2 change only THIS node's forward pointers and
+            # the peers' back-references -- neither of which it reads -- so
+            # 3b recomputes the same answer. Persisting it would add a stale
+            # plan to apply against a cluster that has since moved.
+            feasible, reason = _check_replica_relocation_feasible(snode, db_controller)
+            if not feasible:
+                logger.error(
+                    f"[REMOVAL] {node_id}: refusing before phase 3a — no valid layout "
+                    f"for the replicas this node hosts: {reason}. Nothing has been torn "
+                    f"down; the node is still usable and the removal can be retried "
+                    f"once the cluster can host the relocation.")
+                return False
+
             logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
             if not _teardown_replicas_of_primary(snode):
                 return False
@@ -4730,13 +5147,23 @@ def node_removal_orchestrate(node_id, force_remove=False):
             # in its primary's jm_ids bakes that unreachable member into the
             # new host's construct permanently.
             logger.info(f"[REMOVAL] {node_id}: phase 2 — decommission JM")
-            _decommission_node_jm(snode)
+            _decommission_node_jm(snode, replica_peer_ids=replica_peer_ids)
             snode = db_controller.get_storage_node_by_id(node_id)
 
             # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
             logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
             if not _relocate_replicas_hosted_on(snode):
                 return False
+
+            # Phase 3c — prove the relocations actually landed. Every pointer
+            # phase 3b writes is bookkeeping; this is the only step that asks
+            # the devices. Reported, not fatal: by here the removal is
+            # physically done and the node is on its way out, so failing would
+            # only spin the retry loop against a state it cannot re-drive --
+            # but a missing replica must never leave this function silently.
+            logger.info(f"[REMOVAL] {node_id}: phase 3c — verify replica stacks")
+            _verify_replica_stacks(snode.cluster_id, db_controller,
+                                   context=f" after removing {node_id}")
 
             # Phase 4 — finalize (swarm leave, gpt cleanup) and flip to removed.
             logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
@@ -4757,6 +5184,86 @@ def node_removal_orchestrate(node_id, force_remove=False):
     finally:
         cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
     return True
+
+
+def replica_stack_violations(nodes, stack_present):
+    """Nodes whose PHYSICAL replica stacks disagree with their bookkeeping.
+
+    ``nodes`` is the set of ONLINE nodes; ``stack_present(node, lvstore)``
+    reports whether ``lvstore`` is actually surfaced on that node's SPDK.
+
+    The invariant: a node physically holds one lvstore per primary its
+    back-references claim it hosts. Every forward pointer
+    (``secondary_node_id`` / ``tertiary_node_id``), back-reference
+    (``lvstore_stack_secondary`` / ``_tertiary``) and ``lvstore_ports`` entry
+    can agree perfectly and still describe a replica that is not there --
+    they are all bookkeeping, written by the same code path, and none of them
+    is evidence that ``raid0_<vuid>`` + ``LVS_<vuid>`` exist on the host.
+
+    This is the check that was missing. Its absence is why a relocation could
+    delete a just-installed replica (see _relocate_replica_between's
+    same-primary/other-role guard) and have the removal report success:
+    nothing ever compared the claim against the device. Found live
+    2026-09-01, and only by dumping bdev_lvol_get_lvstores on all ten
+    survivors by hand -- two of them were down to a single real replica for
+    an FTT2 lvstore, with no error logged anywhere in the removal.
+
+    Scoped deliberately to HOSTED replicas (what the back-references claim),
+    not a node's own primary lvstore: a primary can be legitimately in flux
+    mid-flow, and a false alarm there would train the reader to ignore this.
+
+    Returns a list of ``(node_id, lvstore, owner_primary_id, role)`` for each
+    claimed-but-absent stack; empty means the invariant holds.
+    """
+    by_id = {n.get_id(): n for n in nodes}
+    missing = []
+    for node in nodes:
+        for backref, role in (("lvstore_stack_secondary", "secondary"),
+                              ("lvstore_stack_tertiary", "tertiary")):
+            owner_id = getattr(node, backref, "")
+            if not owner_id:
+                continue
+            owner = by_id.get(owner_id)
+            if owner is None or not owner.lvstore:
+                # Owner gone or has no lvstore -- a bookkeeping problem of a
+                # different kind, and not something a stack probe can settle.
+                continue
+            if not stack_present(node, owner.lvstore):
+                missing.append((node.get_id(), owner.lvstore, owner_id, role))
+    return missing
+
+
+def _verify_replica_stacks(cluster_id, db_controller, context=""):
+    """Probe every online node's hosted replica stacks and log any that are
+    missing. Returns the violation list (empty when the invariant holds).
+
+    An unreachable node is NOT reported as a violation: absence of proof is
+    not proof of absence, and a probe that cries wolf on a transient RPC
+    error is a check people learn to skip.
+    """
+    nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+             if n.status == StorageNode.STATUS_ONLINE]
+
+    def stack_present(node, lvstore):
+        try:
+            return bool(node.rpc_client(timeout=10, retry=1).bdev_lvol_get_lvstores(lvstore))
+        except Exception as e:
+            logger.warning(
+                f"[REMOVAL] could not probe {lvstore} on {node.get_id()} "
+                f"({e}); not counting it as missing")
+            return True
+
+    violations = replica_stack_violations(nodes, stack_present)
+    for node_id, lvstore, owner_id, role in violations:
+        logger.error(
+            f"[REMOVAL] REPLICA STACK MISSING{context}: {node_id} is recorded as "
+            f"{role} of {owner_id} but {lvstore} is not present on it -- "
+            f"{owner_id} is running with one fewer replica than its bookkeeping claims")
+    if not violations:
+        logger.info(
+            f"[REMOVAL] replica-stack invariant holds{context}: every hosted "
+            f"replica claimed by a back-reference is physically present")
+    return violations
 
 
 def _teardown_replicas_of_primary(removed_node: StorageNode):
@@ -4948,8 +5455,19 @@ def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db
 def _relocate_replicas_hosted_on(removed_node: StorageNode):
     """Case B: ``removed_node`` holds a secondary and/or tertiary replica for
     other primaries. Re-host each on a fresh, anti-affinity-valid node so the
-    owning primary keeps its fault tolerance after this node leaves."""
+    owning primary keeps its fault tolerance after this node leaves.
+
+    With failure domains enabled this goes through the global planner
+    (``replica_placement``), which solves the whole post-removal layout at
+    once instead of re-homing each stranded replica in isolation -- see
+    ``_plan_driven_relocation``. The per-replica greedy path below is the
+    fallback for the cases the planner deliberately does not take
+    (FD disabled, dedicated secondary nodes, a peer that is not ONLINE)."""
     db_controller = DBController()
+
+    handled = _plan_driven_relocation(removed_node, db_controller)
+    if handled is not None:
+        return handled
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     if removed_node.lvstore_stack_secondary:
@@ -4961,6 +5479,182 @@ def _relocate_replicas_hosted_on(removed_node: StorageNode):
         if not _relocate_one_replica(removed_node, removed_node.lvstore_stack_tertiary, "tertiary"):
             return False
 
+    return True
+
+
+def _relocation_planner_inputs(removed_node: StorageNode, db_controller,
+                               *, allow_without_fd: bool = False):
+    """Gather the pure inputs the global placement planner needs, or ``None``
+    when this cluster is not a case the planner handles.
+
+    Returns ``(surviving_ids, fd_by_node, host_by_node, label_by_node,
+    current_layout, ftt)``. ``current_layout`` is read straight off the
+    primaries' ``secondary_node_id``/``tertiary_node_id`` pointers, including
+    the ones that still name ``removed_node`` -- the planner treats a holder
+    outside the surviving set as "no host", and the diff then carries
+    ``removed_node`` as the move's origin so the existing mover can tear the
+    old copy down and clear its back-reference exactly as before.
+
+    With ``allow_without_fd`` the planner is also offered clusters that have
+    failure domains OFF: every host becomes its own pseudo-domain, so the
+    "domains pairwise distinct" constraint degenerates to exactly the
+    host-disjointness the planner already enforces. This exists because the
+    greedy per-role path places one stranded replica at a time and never
+    backtracks, so on a dense cluster (every survivor already at capacity) it
+    can consume the one slot another stranded replica needed and then refuse
+    a removal for which a valid host-disjoint layout demonstrably exists.
+
+    BOTH callers -- the admission check and phase 3b -- must pass the same
+    value. They are the same decision asked at two moments; if admission
+    consults the planner and execution does not, an admitted removal reaches
+    phase 3b, fails there, and retries forever with the node stranded in
+    ``in_removal`` (observed 2026-09-08, task retried 68 times before being
+    cancelled by hand).
+
+    Declines (returns ``None``) when:
+
+    * failure domains are off and ``allow_without_fd`` was not passed;
+    * failure domains are off and there are ``ftt`` or fewer survivors --
+      no layout exists, and refusing would change long-standing behaviour
+      for deliberate shrink-to-tiny removals;
+    * failure domains are ON but any surviving node has no failure domain
+      set -- a partial domain map cannot be reasoned about, only guessed at;
+    * the cluster has dedicated secondary nodes (``is_secondary_node``),
+      which may host more than one replica each and so break the
+      one-slot-per-node permutation model the planner is built on;
+    * any surviving node is not ONLINE -- the planner would happily place a
+      replica on a node that cannot build it.
+    """
+    from simplyblock_core.controllers import replica_placement
+
+    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
+    fd_enabled = bool(getattr(cluster, "enable_failure_domain", False))
+    if not fd_enabled and not allow_without_fd:
+        return None
+    ftt = cluster.max_fault_tolerance if cluster.max_fault_tolerance in (1, 2) else 1
+
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+    survivors = [
+        n for n in all_nodes
+        if n.get_id() != removed_node.get_id() and n.status != StorageNode.STATUS_REMOVED
+    ]
+    if not survivors:
+        return None
+    if not fd_enabled and len(survivors) <= ftt:
+        # Too small for the permutation model to have any answer: with ftt or
+        # fewer survivors no layout exists by construction. Under domains that
+        # is a real refusal (the caller wants to know), but with domains off
+        # it would newly reject shrink-to-tiny removals the greedy path has
+        # always allowed -- e.g. a 2-node cluster dropping to 1. Leave those
+        # exactly as they were.
+        return None
+    if any(n.is_secondary_node for n in survivors):
+        return None
+    if any(n.status != StorageNode.STATUS_ONLINE for n in survivors):
+        return None
+    if fd_enabled and any(n.failure_domain < 0 for n in survivors):
+        return None
+
+    surviving_ids = [n.get_id() for n in survivors]
+    if fd_enabled:
+        fd_by_node = {n.get_id(): n.failure_domain for n in survivors}
+    else:
+        # One pseudo-domain per HOST (not per node): a host may legitimately
+        # run several storage nodes, and two replicas on one host do not
+        # survive that host's loss. Keying on the host makes the planner's
+        # domain constraint and its host-disjointness constraint agree.
+        _fd_of_host: dict = {}
+        fd_by_node = {
+            n.get_id(): _fd_of_host.setdefault(n.mgmt_ip, len(_fd_of_host))
+            for n in survivors
+        }
+    host_by_node = {n.get_id(): n.mgmt_ip for n in survivors}
+    label_by_node = {n.get_id(): n.physical_label for n in survivors}
+    current_layout = {
+        n.get_id(): replica_placement.Placement(
+            n.secondary_node_id, n.tertiary_node_id if ftt >= 2 else "")
+        for n in survivors
+    }
+    return surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt
+
+
+def _plan_driven_relocation(removed_node: StorageNode, db_controller):
+    """Phase 3b via the global placement planner.
+
+    Returns True when the planned relocations were applied, False when one of
+    them failed (the caller retries the whole phase), or ``None`` when the
+    planner does not apply to this cluster and the caller should fall back to
+    the per-replica greedy path.
+
+    Why this replaces the per-replica path under failure domains: the greedy
+    path answers "where does THIS stranded replica go" and can only ever move
+    the replica in front of it, so the one repair that a shrinking cluster
+    most often needs -- swapping two replicas that are both already placed --
+    is not expressible in it at all. It compensates with splices into third
+    parties' pairings and, when even that fails, by relaxing the invariant to
+    the weaker ">=1 cross-domain role" floor with a warning. Repeated over
+    several removals (the reported 4-domain x 3-host case, one host removed
+    per domain) those relaxations accumulate into a layout with secondaries
+    and tertiaries sharing domains, even though a fully diverse layout
+    existed at every step. ``replica_placement`` computes that layout
+    directly, as a min-cost perfect matching, and returns the provably
+    smallest set of rebuilds that reaches it -- so no splice heuristic, no
+    collateral-damage repair hop, and no silent relaxation is needed.
+
+    The move ORDER matters and is part of the plan: every move lands on a
+    slot the planner has already proved is free at that point, so
+    ``_relocate_replica_between``'s recursive vacate never has to run here.
+    A rotation cycle -- which that recursion cannot resolve at all, it hits
+    its own cycle backstop -- is broken up front by the planner into an extra
+    hop through the one slot the removal frees.
+    """
+    from simplyblock_core.controllers import replica_placement
+
+    inputs = _relocation_planner_inputs(removed_node, db_controller, allow_without_fd=True)
+    if inputs is None:
+        return None
+    surviving_ids, fd_by_node, host_by_node, label_by_node, current_layout, ftt = inputs
+
+    try:
+        plan = replica_placement.plan_diverse_layout(
+            surviving_ids, fd_by_node, current_layout, ftt,
+            host_by_node=host_by_node, label_by_node=label_by_node)
+        moves = replica_placement.plan_moves(
+            current_layout, plan.layout, surviving_ids, ftt)
+    except replica_placement.InfeasiblePlacement as e:
+        logger.warning(
+            f"[REMOVAL] {removed_node.get_id()}: global replica placement is "
+            f"unusable ({e}); falling back to per-replica relocation")
+        return None
+
+    logger.info(
+        f"[REMOVAL] {removed_node.get_id()}: replica placement plan -- "
+        f"{replica_placement.describe_plan(plan, moves)}")
+    for violation in plan.violations:
+        logger.warning(f"[REMOVAL] {removed_node.get_id()}: {violation}")
+
+    for move in moves:
+        # A role with no current host was hosted on the node being removed:
+        # name it as the origin so the mover re-points the LVols and clears
+        # its back-reference, exactly as _relocate_one_replica used to.
+        old_host_id = move.from_node_id or removed_node.get_id()
+        if old_host_id == move.to_node_id:
+            continue
+        logger.info(
+            f"[REMOVAL] {removed_node.get_id()}: move {move.role} of "
+            f"{move.lvs_primary_node_id}: {old_host_id} -> {move.to_node_id}"
+            f"{' (scratch hop)' if move.scratch else ''}")
+        if not _relocate_replica_between(
+                move.lvs_primary_node_id, old_host_id, move.to_node_id,
+                move.role, db_controller):
+            logger.error(
+                f"[REMOVAL] {removed_node.get_id()}: planned move of "
+                f"{move.lvs_primary_node_id}'s {move.role} from {old_host_id} "
+                f"to {move.to_node_id} failed; will retry the phase")
+            return False
+
+    _clear_replica_backref(removed_node, "lvstore_stack_secondary")
+    _clear_replica_backref(removed_node, "lvstore_stack_tertiary")
     return True
 
 
@@ -5005,6 +5699,7 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
                     f"[REMOVAL] failed to splice {primary_id} into the pairing "
                     f"occupying {new_id} (occupant {occupant_id})")
                 return False
+            _repair_occupants_other_role_after_splice(occupant_id, primary_id, role, db_controller)
 
         primary = db_controller.get_storage_node_by_id(primary_id)
         setattr(primary, field, new_id)
@@ -5034,6 +5729,75 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
 
     _clear_replica_backref(removed_node, backref)
     return True
+
+
+def _repair_occupants_other_role_after_splice(occupant_id, primary_id, role, db_controller):
+    """After a splice repoints ``occupant``'s ``role`` replica onto
+    ``primary``, check whether ``occupant``'s OTHER, untouched role (its
+    tertiary if ``role`` is "secondary", or vice versa) now shares a domain
+    with ``primary`` -- and if so, relocate THAT role too, reusing the same
+    picker (``_pick_replica_relocation_node``) and mover
+    (``_relocate_replica_between``) already used for the splice itself.
+
+    A splice edge is chosen to protect the node actually being relocated
+    (``primary``) and, since the diversity fix, to prefer one where
+    ``occupant`` also stays diverse -- but a colliding edge is still
+    accepted as a last resort when no clean one exists (see
+    ``_find_splice_target_for_relocation``'s docstring). This closes that
+    gap ACTIVELY instead of just warning about it: by the time this runs,
+    ``occupant.<role>`` already points at ``primary``, so calling the same
+    picker for occupant's other role automatically avoids both occupant's
+    own domain and primary's domain -- no extra plumbing needed. Because
+    the picker itself tries a direct candidate before a further splice,
+    this one call transparently covers both "a free replacement exists"
+    and "occupant's other role itself needs splicing into a further
+    pairing" -- the same machinery, one hop further out.
+
+    Best-effort and never blocks the outer splice, which has already
+    succeeded by the time this runs: if no replacement is found, or the
+    relocation itself fails, occupant is left with the collision and a
+    warning is logged rather than the removal being failed over it.
+
+    Not itself recursive beyond this one hop -- if repairing occupant's
+    other role creates a NEW collision for some third node, that is not
+    chased further.
+    """
+    try:
+        primary = db_controller.get_storage_node_by_id(primary_id)
+        occupant = db_controller.get_storage_node_by_id(occupant_id)
+    except KeyError:
+        return
+    if primary.failure_domain < 0 or occupant.failure_domain < 0:
+        return
+    cluster = db_controller.get_cluster_by_id(primary.cluster_id)
+    if not getattr(cluster, "enable_failure_domain", False):
+        return
+
+    other_role = "tertiary" if role == "secondary" else "secondary"
+    other_field = "tertiary_node_id" if role == "secondary" else "secondary_node_id"
+    other_target_id = getattr(occupant, other_field)
+    if not other_target_id or other_target_id == primary_id:
+        return
+    try:
+        other_target = db_controller.get_storage_node_by_id(other_target_id)
+    except KeyError:
+        return
+    if other_target.failure_domain != primary.failure_domain:
+        return  # no collision -- occupant is already fine, nothing to do
+
+    replacement = _pick_replica_relocation_node(occupant, other_target, other_role, db_controller)
+    if not replacement or replacement == other_target_id:
+        logger.warning(
+            f"[REMOVAL] splice: no replacement found to move {occupant_id}'s "
+            f"{other_role} off {other_target_id} (domain {other_target.failure_domain}) "
+            f"after splicing it onto {primary_id}'s domain {primary.failure_domain}; "
+            f"{occupant_id} is left with a domain-diversity gap")
+        return
+    if not _relocate_replica_between(occupant_id, other_target_id, replacement, other_role, db_controller):
+        logger.warning(
+            f"[REMOVAL] splice: failed to move {occupant_id}'s {other_role} off "
+            f"{other_target_id} onto {replacement}; {occupant_id} is left with a "
+            f"domain-diversity gap")
 
 
 def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, role, db_controller, _seen=None):
@@ -5114,7 +5878,16 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
             except KeyError:
                 existing_occupant = None
             vacate_target = (
-                _pick_replica_relocation_node(existing_occupant, new_host, role, db_controller)
+                _pick_replica_relocation_node(
+                    existing_occupant, new_host, role, db_controller,
+                    # occupant_primary_id is itself mid-relocation onto
+                    # new_host_id in THIS call -- it can't simultaneously be
+                    # the target existing_occupant vacates onto. Excluding
+                    # it upfront lets the picker search past it instead of
+                    # dead-ending on the one candidate that's structurally
+                    # invalid (see _pick_replica_relocation_node's
+                    # extra_exclude_ids docstring).
+                    extra_exclude_ids=(occupant_primary_id,))
                 if existing_occupant else None)
             if not vacate_target or vacate_target == occupant_primary_id:
                 logger.error(
@@ -5172,7 +5945,36 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
     old_host = db_controller.get_storage_node_by_id(old_host_id)
     if getattr(old_host, backref) == occupant_primary_id:
         cluster = db_controller.get_cluster_by_id(occupant_primary.cluster_id)
-        if old_host.status == StorageNode.STATUS_ONLINE:
+        # A node's secondary replica and its tertiary replica OF THE SAME
+        # PRIMARY are not two resources -- they are ONE physical stack
+        # (raid0_<vuid> + LVS_<vuid>, keyed by the primary's lvstore, not by
+        # the role). Vacating one role therefore must not tear that stack
+        # down while the other role still needs it: _delete_replica_on_peer
+        # ends in _remove_bdev_stack(remove_distr_only=True) ->
+        # bdev_raid_delete(raid0_<vuid>), which hot-removes the lvstore from
+        # this node outright.
+        #
+        # The planner (controllers/replica_placement.py) routinely emits both
+        # roles of one primary in a single removal -- that is the whole point
+        # of solving the layout globally, and order_moves proves each move
+        # lands on a free SLOT. Slots are the wrong granularity here: for a
+        # given primary, this node's secondary slot and tertiary slot map to
+        # the same stack. Found live 2026-09-01 on the 12-node/4-domain FTT2
+        # cluster, on the FIRST two removals and in the identical shape both
+        # times -- "secondary: <removed> -> X" promoted X (already holding
+        # that primary as tertiary), then "tertiary: X -> Y" deleted X's
+        # raid ~1s after Y's was built:
+        #   14:50:26 nq2mm bdev_raid_create raid0_45
+        #   14:50:27 fvgtl bdev_raid_delete raid0_45   <- the new secondary
+        # leaving pq8h9/LVS_45 and 9s25f/LVS_1 recorded as FTT2 while
+        # physically down to a single replica (their tertiary), with the
+        # recorded secondary holding nothing but a stranded hublvol
+        # controller. Silent: every forward pointer, back-reference and
+        # lvstore_ports entry still said the replica was there.
+        other_backref = ("lvstore_stack_tertiary" if backref == "lvstore_stack_secondary"
+                         else "lvstore_stack_secondary")
+        still_hosts_other_role = getattr(old_host, other_backref) == occupant_primary_id
+        if old_host.status == StorageNode.STATUS_ONLINE and not still_hosts_other_role:
             # occupant_primary survives this relocation (only its host is
             # moving) -- must NOT destroy the shared lvstore, only vacate
             # old_host's local examine copy. See _delete_replica_on_peer's
@@ -5181,6 +5983,15 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
                                     destroy_lvstore=False)
             _teardown_lvol_subsystems_on_vacated_peer(old_host, occupant_primary, db_controller)
             _prune_stale_lvstore_ports(old_host_id, occupant_primary.lvstore, db_controller)
+        elif still_hosts_other_role:
+            # Drop only the back-reference below. The stack, its subsystems
+            # and its lvstore_ports entry all stay -- they belong to the role
+            # old_host still holds for this same primary.
+            logger.info(
+                f"[REMOVAL] {old_host_id} keeps {occupant_primary_id}'s "
+                f"{occupant_primary.lvstore} stack: it still hosts that primary as "
+                f"{'tertiary' if role == 'secondary' else 'secondary'}; "
+                f"clearing the {role} back-reference only")
         old_host = db_controller.get_storage_node_by_id(old_host_id)
         setattr(old_host, backref, "")
         old_host.write_to_db()
@@ -5195,9 +6006,96 @@ def _clear_replica_backref(removed_node: StorageNode, backref):
         removed_node.write_to_db()
 
 
-def _decommission_node_jm(removed_node: StorageNode) -> None:
+def _release_jm_from_jc(node, name_old) -> bool:
+    """Hand ``name_old`` back to JC so its bdev can then be deleted.
+
+    JC holds an open descriptor and IO channel on every JM it knows about;
+    ``jc_remove_jm`` closes them and drops the JM's JC context, and only after
+    that may the bdev be deleted. Deleting it first is what leaves JC naming a
+    bdev that no longer exists.
+
+    Returns True when the bdev is safe to delete. The interesting codes:
+
+    * ``-13`` "not used by JC" -- ALREADY RELEASED, and the normal answer after
+      a successful jc_replace_jm: measured live 2026-09-02 on spdk R26.3, a
+      replace that swaps the JM out of every vuid on the node also drops it
+      from JC, so the follow-up finds nothing left to do. Success, not failure.
+    * ``-22`` "still in use by one or more jm_vuids" -- some vuid still
+      references it, including one the control plane may be unable to
+      enumerate (a vuid whose primary is already removed appears in no
+      `decisions` entry and under no back-reference). Do NOT delete.
+    * ``RPC_UNSUPPORTED`` -- build predates the RPC (spdk main-latest as of
+      2026-09-02 does not expose it, R26.3-latest does). Fall through to the
+      historical behaviour rather than stranding every superseded controller.
+    """
+    try:
+        ret = node.rpc_client().jc_remove_jm(name_old)
+    except RPCRemoteError as re:
+        if re.code == JC_REMOVE_JM_NOT_USED:
+            logger.info(
+                f"[REMOVAL] {node.get_id()}: {name_old} already released "
+                f"(jc_remove_jm -13); safe to delete the bdev")
+            return True
+        if re.code == JC_REMOVE_JM_STILL_IN_USE:
+            logger.error(
+                f"[REMOVAL] {node.get_id()}: jc_remove_jm refused {name_old} "
+                f"(-22: still used by one or more jm_vuids) -- a jm_vuid this removal "
+                f"could not enumerate still references the departing node's JM "
+                f"(typically the removed node's OWN lvstore vuid, whose primary is gone "
+                f"so it appears in no decision and under no back-reference). Leaving the "
+                f"bdev in place: deleting it now would leave JC pointing at nothing")
+            return False
+        logger.error(
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) failed ({re.code}): "
+            f"{re}; leaving the bdev in place")
+        return False
+    except Exception as e:
+        logger.error(
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm({name_old}) raised: {e}; "
+            f"leaving the bdev in place")
+        return False
+
+    if ret == RPC_UNSUPPORTED:
+        logger.warning(
+            f"[REMOVAL] {node.get_id()}: jc_remove_jm unsupported on this SPDK build; "
+            f"deleting {name_old}'s controller with JC's descriptor possibly still open "
+            f"(pre-existing behaviour)")
+    else:
+        logger.info(f"[REMOVAL] {node.get_id()}: jc_remove_jm released {name_old}")
+    return True
+
+
+def _drop_superseded_jm_bdev(node, name_old, removed_jm_id) -> None:
+    """Detach the controller behind ``name_old`` and drop its bookkeeping.
+
+    Only call once ``_release_jm_from_jc`` has confirmed JC is done with it.
+    """
+    controller = name_old.removesuffix("n1")
+    try:
+        node.rpc_client().bdev_nvme_detach_controller(controller)
+    except Exception as de:
+        logger.warning(
+            f"Failed to detach superseded controller {controller} on {node.get_id()}: {de}")
+    node.remote_jm_devices = [
+        rd for rd in (node.remote_jm_devices or []) if rd.uuid != removed_jm_id]
+
+
+def _decommission_node_jm(removed_node: StorageNode, replica_peer_ids=()) -> None:
     """Patch every live JC group that referenced ``removed_node``'s JM out of
     its redundancy set, replacing it with a freshly picked candidate.
+
+    ``replica_peer_ids``: the peers that hosted ``removed_node``'s OWN lvstore
+    replica (its secondary and tertiary), captured by the caller BEFORE phase
+    3a -- which clears both those pointers and the peers' back-references, so
+    by the time this runs nothing in the DB records who they were. They matter
+    because each of them still runs a local JC instance for ``removed_node``'s
+    own jm_vuid, and that instance references the dying JM by name. It is
+    reachable through neither source Pass 2 consults (its primary is
+    ``removed_node``, which is not in ``live_nodes`` and therefore in no
+    ``decisions`` entry; and its back-reference has been cleared), so without
+    this the batched jc_replace_jm cannot cover it and jc_replace_jm's own -17
+    check rejects the whole call. Reproduced live 2026-09-02: the removal's
+    only failing peer was the one hosting the removed node's own lvstore.
 
     Called TWICE by design, both idempotent (guarded by the JM device's own
     status, set below): early, as node_removal_orchestrate's own phase 2 --
@@ -5256,8 +6154,26 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
         # never resolve/connect (2026-08-11 incident: a prior removal's
         # leftover jm_ids on 7b8hf sent a later removal's phase 5 chasing
         # a permanently-dead hostname).
+        # ...and removed_node itself, by identity. Its status here is
+        # IN_REMOVAL, not REMOVED, so the status filter alone lets it through
+        # (and the function is called twice, so its status differs between
+        # calls -- identity is the only stable guard). Phase 1 has already
+        # shut it down, but phase 3b has NOT yet relocated the replicas it
+        # hosts for other primaries, so its lvstore_stack_secondary/_tertiary
+        # still point at live primaries. Pass 2 therefore picked it up as a
+        # patch target for a hosted primary's vuid and went looking for the
+        # dying JM's bdev name in its own remote_jm_devices -- where a node's
+        # OWN JM never appears. Found live 2026-09-03 removing s25dl:
+        # "no recorded bdev name for removed JM 601dae11...,
+        #  affected targets=[(1, 'a91a2d46...')]". Harmless only because the
+        # missing name short-circuited the call; with a name recorded it would
+        # have issued jc_replace_jm at the dead pod this filter exists to
+        # avoid. IN_REMOVAL is listed too, on the same grounds as REMOVED:
+        # such a node is down and its rpc_client cannot resolve.
         live_nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
-                      if n.status != StorageNode.STATUS_REMOVED]
+                      if n.status not in (StorageNode.STATUS_REMOVED,
+                                          StorageNode.STATUS_IN_REMOVAL)
+                      and n.get_id() != removed_node.get_id()]
 
         def _pick_replacement(primary):
             # get_sorted_ha_jms ranks candidates by host-disjoint (hard) +
@@ -5290,6 +6206,32 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
             if primary.jm_ids and removed_jm_id in primary.jm_ids:
                 decisions[primary.get_id()] = _pick_replacement(primary)
 
+        # removed_node's OWN vuid needs a replacement too: its JC instance
+        # survives on whichever peers hosted its replica (see
+        # replica_peer_ids), still naming the dying JM. We are not keeping that
+        # vuid useful -- its lvstore is gone -- only getting the dead JM out of
+        # it, so name_old ends up referenced by nothing and jc_remove_jm can
+        # release it instead of refusing with -22.
+        #
+        # Deliberately NOT stored in `decisions`. Every `decisions` entry means
+        # "this primary's OWN redundancy set lists the dead JM", and Pass 2
+        # relies on that: it keys the node's own-vuid target off membership,
+        # and both jm_ids.remove() calls below assume it. Storing removed_node
+        # there made Pass 2 treat it as a normal consumer and then remove an id
+        # its jm_ids never held -- ValueError, phase 2 aborted mid-flight, and
+        # NO peer got its jc_replace_jm at all (found live 2026-09-02: strictly
+        # worse than the gap it was meant to close). removed_node is now also
+        # excluded from live_nodes outright, so Pass 1 and Pass 2 cannot reach
+        # it by any route; this stays as the statement of intent for the entry
+        # Pass 1 would otherwise be tempted to add back.
+        # removed_node's OWN lvstore group lives on as a "leftover" on its
+        # secondary and tertiary: no live primary, no back-reference, and by
+        # phase 2 no lvstore, raid or distribs either. It deliberately gets no
+        # decision and never becomes a replace target -- see the note in Pass 2.
+        logger.info(
+            f"[REMOVAL] {removed_node.get_id()}: own lvstore vuid {removed_node.jm_vuid} "
+            f"leftover on replica peers {list(replica_peer_ids)}; not a replace target")
+
         # Pass 2: a single storage node can run more than one local JC
         # instance against the removed JM's bdev at once -- its own
         # redundancy set, plus one instance per primary it hosts as
@@ -5307,15 +6249,77 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                 if backref and backref in decisions:
                     hosted_primary = db_controller.get_storage_node_by_id(backref)
                     targets.append((hosted_primary.jm_vuid, hosted_primary, decisions[backref]))
+            # Replace and remove are MUTUALLY EXCLUSIVE on a node -- per the
+            # SPDK team (2026-09-02), and forced by the two RPCs' own rules:
+            #
+            #   * jc_replace_jm must cover EVERY local vuid using name_old or
+            #     it rejects the batch (-17). So if any surviving group uses the
+            #     dead JM, the leftover group must be in that same call too --
+            #     it cannot be left out and handled separately.
+            #   * jc_remove_jm refuses while any vuid still uses the JM (-22).
+            #     So it is only available when nothing else holds it, i.e. when
+            #     the leftover group is the sole user.
+            #
+            # Hence: other groups present -> replace all of them plus the
+            # leftover, and never call remove. Only the leftover -> remove
+            # alone, and never call replace. Whether the node is secondary or
+            # tertiary does not enter into it beyond determining whether it
+            # carries a leftover group at all.
+            # removed_node's own lvstore group is NEVER a replace target. Its
+            # lvstore is being destroyed, so there is nothing to keep redundant
+            # and no reason to burn a spare JM on it -- jc_replace_jm is only
+            # for groups that keep running. The batch therefore covers the
+            # surviving groups and nothing else, even on the secondary and
+            # tertiary, which are the only nodes that carry the leftover at all.
+            carries_removed_lvs = node.get_id() in replica_peer_ids
 
             if not targets:
-                if any(d.uuid == removed_jm_id for d in (node.remote_jm_devices or [])):
-                    # Stale reference with no corresponding jm_vuid decision
-                    # (e.g. neither this node's own redundancy set nor any
-                    # primary it hosts actually referenced the dead JM) --
-                    # a plain refresh naturally excludes it since it can no
-                    # longer be reached through either source.
-                    node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
+                if not carries_removed_lvs:
+                    # No surviving group here uses the dying JM, and this node
+                    # never carried removed_node's lvstore either -- so no JC
+                    # operation applies: no jc_remove_jm, no detach. Nothing on
+                    # this node references the JM.
+                    #
+                    # The one thing still done is reconciling the DB record.
+                    # remote_jm_devices is derived from three sources (an
+                    # explicit jm_ids list, the node's own jm_ids, and the JM of
+                    # whichever primary it hosts -- see
+                    # _connect_to_remote_jm_devs); a record that none of them
+                    # justifies any more is not inert, because it is the lookup
+                    # that later removals use to find jc_replace_jm's name_old.
+                    # A splice reshuffle can leave one behind (2026-08-14
+                    # incident: a peer reachable only through the hosted-primary
+                    # path, own jm_ids clean, entry never re-derived). Refresh
+                    # only when such a record is actually present.
+                    if any(d.uuid == removed_jm_id for d in (node.remote_jm_devices or [])):
+                        node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
+                        node.write_to_db()
+                    continue
+
+                # Secondary or tertiary, and no surviving group uses the JM:
+                # removed_node's own lvstore group is the sole remaining user,
+                # and jc_remove_jm is the call for it. That group was never a
+                # replace target -- its lvstore is being destroyed -- so this
+                # is the only place the JM gets released on this node.
+                #
+                # -22 would mean some group still holds it after all; the bdev
+                # then stays, deliberately, and the error names why.
+                old_remote_dev = next(
+                    (rd for rd in (node.remote_jm_devices or []) if rd.uuid == removed_jm_id),
+                    None)
+                if old_remote_dev:
+                    stale_bdev = old_remote_dev.remote_bdev
+                    if not stale_bdev:
+                        # No recorded bdev name: nothing to release and nothing
+                        # to detach, so just drop the unreachable entry.
+                        node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
+                    elif _release_jm_from_jc(node, stale_bdev):
+                        _drop_superseded_jm_bdev(node, stale_bdev, removed_jm_id)
+                    # else: release refused. Leave BOTH the bdev and its
+                    # remote_jm_devices entry alone -- dropping the entry while
+                    # the bdev is still present and still held by JC is the
+                    # bookkeeping-vs-reality split this sequence exists to
+                    # avoid. Keep describing what is actually there.
                     node.write_to_db()
                 continue
 
@@ -5366,7 +6370,7 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                     # call made -- never one already serving some other
                     # legitimate purpose (e.g. a hosted-replica JC membership).
                     try:
-                        pre_existing = bool(node.rpc_client().get_bdevs(expected_bdev))
+                        pre_existing = bool(node.rpc_client().bdev_get(expected_bdev))
                     except Exception:
                         pre_existing = False
                     try:
@@ -5399,8 +6403,16 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                             f"{replacements} replacing removed JM {removed_jm_id}")
                         for _jm_vuid, owner_primary, new_jm_id in targets:
                             if owner_primary.get_id() == node.get_id():
-                                node.jm_ids.remove(removed_jm_id)
-                                node.jm_ids.append(new_jm_id)
+                                # Membership-conditional: a target can exist for
+                                # a vuid whose OWNER is not this node, and an
+                                # unguarded remove() throws ValueError and
+                                # aborts the whole phase mid-node, leaving every
+                                # peer after it unpatched (found live
+                                # 2026-09-02).
+                                if removed_jm_id in node.jm_ids:
+                                    node.jm_ids.remove(removed_jm_id)
+                                if new_jm_id not in node.jm_ids:
+                                    node.jm_ids.append(new_jm_id)
                         replaced = True
                     except Exception as e:
                         logger.error(
@@ -5408,7 +6420,6 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                             f"{name_old} ({replacements}): {e}")
 
                 if replaced:
-                    # name_old is now unused by any local JC instance -- but
                     # jc_replace_jm only swaps the live membership pointer, it
                     # never tears down the bdev/controller it swapped AWAY
                     # from, and _connect_to_remote_jm_devs' delta mode above
@@ -5421,15 +6432,24 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                     # ~15+ minutes until some unrelated SPDK-side dead-peer
                     # timeout eventually noticed (found live 2026-08-25).
                     # Clean up both sides here instead of waiting for that.
-                    old_controller_name = name_old.removesuffix("n1")
-                    try:
-                        node.rpc_client().bdev_nvme_detach_controller(old_controller_name)
-                    except Exception as de:
-                        logger.warning(
-                            f"Failed to detach superseded controller "
-                            f"{old_controller_name} on {node.get_id()}: {de}")
-                    node.remote_jm_devices = [
-                        rd for rd in (node.remote_jm_devices or []) if rd.uuid != removed_jm_id]
+                    #
+                    # No release here, on any node. jc_replace_jm and
+                    # jc_remove_jm are alternatives, never a sequence:
+                    #
+                    #   * this branch means at least one SURVIVING group used
+                    #     the JM and has just been repointed. removed_node's
+                    #     own lvstore group is never in that batch -- it is
+                    #     being destroyed, not repaired, so a replacement
+                    #     member would buy nothing.
+                    #   * the release belongs to the other case only: a node
+                    #     where NO surviving group used the JM, handled in the
+                    #     no-targets branch above.
+                    #
+                    # Measured live 2026-09-02 on spdk R26.3: after any
+                    # successful replace jc_remove_jm answers -13 ("not used
+                    # by JC") on every node, so calling it here would be a
+                    # guaranteed no-op.
+                    _drop_superseded_jm_bdev(node, name_old, removed_jm_id)
 
                 if not replaced:
                     for controller_name, pre_existing in connected_controllers:
@@ -5455,14 +6475,39 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                 # currently revisits this automatically; it stays a visible
                 # gap until a future removal/reconnect cycle retries it.
                 if not name_old:
+                    # This single boolean (no entry in remote_jm_devices for
+                    # removed_jm_id) can't by itself distinguish WHY: the
+                    # physical connection may simply never have been made
+                    # for this node (e.g. it picked up this jm_vuid via a
+                    # relocation/splice whose soft-reconnect prelude never
+                    # ran for it -- see _recreate_lvstore_on_non_leader_impl,
+                    # 2026-08-25), or a connection existed and was dropped by
+                    # something else entirely. jm_ids (checked in Pass 1/2
+                    # above) already confirms this node's OWN redundancy
+                    # membership does reference removed_jm_id -- that part
+                    # is not in question. Log the actual remote_jm_devices
+                    # state so a live occurrence is diagnosable without
+                    # re-deriving it from scratch (2026-08-28 finding): an
+                    # entirely empty list points at "never connected in the
+                    # first place"; a non-empty list missing only this uuid
+                    # points at something explicitly removing/skipping it.
+                    current_remote_uuids = [rd.uuid for rd in (node.remote_jm_devices or [])]
                     logger.error(
                         f"[REMOVAL] {node.get_id()}: no recorded bdev name for removed "
-                        f"JM {removed_jm_id}; cannot call jc_replace_jm")
+                        f"JM {removed_jm_id}; cannot call jc_replace_jm -- "
+                        f"node.jm_ids={node.jm_ids}, "
+                        f"remote_jm_devices uuids={current_remote_uuids} "
+                        f"({'never connected to any remote JM' if not current_remote_uuids else 'connected to other JM(s) but not this one'}), "
+                        f"affected targets={[(jm_vuid, owner_primary.get_id()) for jm_vuid, owner_primary, _ in targets]}")
                 elif any(new_jm_id is None for _, _, new_jm_id in targets):
                     logger.error(
                         f"[REMOVAL] {node.get_id()}: no replacement candidate for jm_vuid(s) "
                         f"{[jm_vuid for jm_vuid, _, new_jm_id in targets if new_jm_id is None]}")
-                if node.get_id() in decisions:
+                if node.get_id() in decisions and removed_jm_id in node.jm_ids:
+                    # Guarded for the same reason as the success path above: an
+                    # unguarded remove() here threw ValueError and aborted
+                    # phase 2 before any peer was patched (found live
+                    # 2026-09-02).
                     node.jm_ids.remove(removed_jm_id)
             node.write_to_db()
 
@@ -5689,7 +6734,7 @@ def restart_storage_node(
         # only logs this one line, leaving the actual raise point (e.g. a
         # remote-JM/device connect timing out when a same-failure-domain peer
         # is also down) undiagnosable from the logs.
-        logger.error("restart_storage_node raised unexpectedly", exc_info=True)
+        logger.exception("restart_storage_node raised unexpectedly")
     finally:
         _hb_stop.set()
         # Trust the DB. If the impl raised after the ONLINE write was
@@ -6128,7 +7173,7 @@ def _restart_storage_node_impl(
     minimum_hp_memory = max(minimum_hp_memory, max_prov)
 
     # check for memory
-    if "memory_details" in node_info and node_info['memory_details']:
+    if node_info.get('memory_details'):
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
         logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
@@ -6161,12 +7206,14 @@ def _restart_storage_node_impl(
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
-    if cluster.mode == "docker":
-        cluster_docker = utils.get_docker_client(snode.cluster_id)
-        cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-
+    if cluster.cluster_vip:
+        cluster_ip = cluster.cluster_vip
     else:
-        cluster_ip = utils.get_k8s_node_ip()
+        if cluster.mode == "docker":
+            cluster_docker = utils.get_docker_client(snode.cluster_id)
+            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+        else:
+            cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -6200,7 +7247,20 @@ def _restart_storage_node_impl(
 
         fdb_connection = cluster.db_connection
         if lvol_changed:
-            snode_api.persist_node_config(snode.max_lvol, minimum_hp_memory, snode.socket, snode.ssd_pcie)
+            # Keyword args: the positional order here silently paired
+            # huge_page_memory/numa_node/ssd_list correctly only by luck, and
+            # an unchecked result meant an lblk node (whose ssd_pcie is always
+            # empty) restarted against a stale config with no sign of it.
+            ok, err = snode_api.persist_node_config(
+                max_lvol=snode.max_lvol, huge_page_memory=minimum_hp_memory,
+                numa_node=snode.socket, ssd_list=snode.ssd_pcie,
+                lblk_serials=utils.lblk_device_serials(snode.lblk_devices))
+            if not ok:
+                logger.error(
+                    "Failed to persist max_lvol=%s for node %s: %s -- refusing "
+                    "to restart SPDK against a config that does not match it",
+                    snode.max_lvol, snode.get_id(), err)
+                return False
         snode_api.set_hugepages()
         # A restart must actually bounce SPDK: see ensure_spdk_stopped.
         # snode.api_endpoint is already rewritten to node_address above when
@@ -6407,13 +7467,12 @@ def _restart_storage_node_impl(
                 if ssd in node_info['spdk_pcie_list']:
                     ssds.append(ssd)
 
-        nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
+        nvme_devs = utils.addNvmeDevices(rpc_client, snode, ssds)
         if not nvme_devs:
             logger.error("No NVMe devices was found!")
             return False
 
     logger.info(f"Devices found: {len(nvme_devs)}")
-    logger.debug(nvme_devs)
 
     logger.info(f"Devices in db: {len(snode.nvme_devices)}")
     logger.debug(snode.nvme_devices)
@@ -6720,10 +7779,10 @@ def _restart_storage_node_impl(
 
         # Create S3 bdev for backup support (only if backup is configured)
         if cluster.backup_config:
-            from simplyblock_core.controllers import backup_controller
+            from simplyblock_core.controllers.backup import device as backup_device
             logger.info("Creating S3 bdev on restarted node")
             try:
-                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+                backup_device.create_s3_bdev(snode, cluster.get_backup_config())
             except Exception as e:
                 logger.exception(str(e))
                 return False
@@ -6819,8 +7878,6 @@ def list_storage_nodes(cluster_id=None):
     # Only surface the failure-domain column when the feature is actually in use.
     show_failure_domain = any(node.failure_domain >= 0 for node in nodes)
     for node in nodes:
-        logger.debug(node)
-        logger.debug("*" * 20)
         total_devices = len(node.nvme_devices)
         online_devices = 0
 
@@ -6872,8 +7929,6 @@ def list_storage_devices(node_id):
     jm_devices = []
     remote_devices = []
     for device in snode.nvme_devices:
-        logger.debug(device)
-        logger.debug("*" * 20)
         storage_devices.append({
             "UUID": device.uuid,
             "StorgeID": device.cluster_device_order,
@@ -6893,7 +7948,6 @@ def list_storage_devices(node_id):
     for bdev in snode.lvstore_stack:
         if bdev['type'] != "bdev_distr":
             continue
-        logger.debug("*" * 20)
         distrib_params = bdev['params']
         bdev_devices.append({
             "VUID": distrib_params['vuid'],
@@ -6920,8 +7974,6 @@ def list_storage_devices(node_id):
         })
 
     for remote_device in snode.remote_devices:
-        logger.debug(remote_device)
-        logger.debug("*" * 20)
         name = remote_device.alceml_name
 
         remote_devices.append({
@@ -6933,8 +7985,6 @@ def list_storage_devices(node_id):
         })
 
     for remote_jm_device in snode.remote_jm_devices:
-        logger.debug(remote_jm_device)
-        logger.debug("*" * 20)
         remote_devices.append({
             "UUID": remote_jm_device.uuid,
             "Name": remote_jm_device.remote_bdev,
@@ -7541,16 +8591,10 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
             reason="node deliberately shut down")
 
     # Step 2: cancel migration tasks while controllers are still up.
-    pending_tasks = db_controller.get_job_tasks(snode.cluster_id)
-    for task in pending_tasks:
-        if task.node_id != node_id or task.status == JobSchedule.STATUS_DONE:
-            continue
-        if task.function_name in [
-            JobSchedule.FN_DEV_MIG,
-            JobSchedule.FN_NEW_DEV_MIG,
-        ]:
-            task.canceled = True
-            task.write_to_db(db_controller.kv_store)
+    tasks_controller.cancel_node_tasks(snode.cluster_id, node_id, [
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+    ])
 
     if not force:
         # Step 3 (Loop 1): broadcast device-unavailable events. The
@@ -7600,26 +8644,34 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
                 "Loop 2: peer-side detach pass raised %s (continuing to kill)",
                 e)
 
-        if snode.hublvol:
-            # Disconnect hublvol from secondary
-            if snode.secondary_node_id:
-                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                if sec_node.status == StorageNode.STATUS_ONLINE:
-                    logger.info("Disconnecting hublvol from %s", sec_node.get_id())
-                    try:
-                        sec_node.rpc_client().bdev_nvme_detach_controller(snode.hublvol.bdev_name)
-                    except Exception as e:
-                        logger.warning("Disconnecting hublvol failed: %s", e)
-
-            # Disconnect hublvol from tertiary
-            if snode.tertiary_node_id:
-                ter_node = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
-                if ter_node.status == StorageNode.STATUS_ONLINE:
-                    logger.info("Disconnecting hublvol from %s", ter_node.get_id())
-                    try:
-                        ter_node.rpc_client().bdev_nvme_detach_controller(snode.hublvol.bdev_name)
-                    except Exception as e:
-                        logger.warning("Disconnecting hublvol failed: %s", e)
+        # NO hublvol detach on the peers here. This used to call
+        # bdev_nvme_detach_controller(snode.hublvol.bdev_name) on the
+        # secondary and the tertiary, the reasoning being that a clean
+        # disconnect beats letting the peers discover the TCP drop.
+        #
+        # It does the opposite. The hublvol controller is MULTIPATH: a
+        # follower holds one controller named "<LVS>/hublvol" carrying a
+        # path to the primary AND a path to the acting leader (the
+        # tertiary's two paths are tertiary->primary and
+        # tertiary->secondary). bdev_nvme_detach_controller addressed by
+        # NAME ALONE removes EVERY path on that controller -- the same
+        # property prune_duplicate_paths relies on and guards against. So
+        # detaching "the connection to the dying node" actually destroys
+        # the follower's hublvol at the lvstore level, including its path
+        # to the peer that is still alive and about to lead.
+        #
+        # k8s rapid-failover 2026-09-11 13:46:09: worker-3 (primary,
+        # LVS_16) began a graceful shutdown and told its tertiary
+        # worker-5 to detach LVS_16/hublvol. worker-5 lost both paths, so
+        # it took leadership first, the secondary took it afterwards, and
+        # the resulting leader flap fenced worker-5's 4442 for 74s.
+        #
+        # There is nothing to clean up here in any case: the peers'
+        # reconnect pollers are exactly how a follower rides out a primary
+        # restart, and a follower that genuinely stops being a replica is
+        # torn down explicitly by teardown_non_leader_lvstore /
+        # _delete_replica_on_peer, which detach the controller when the
+        # whole replica really is going away.
 
 
     # Step 5: hard-kill SPDK. Same code path as the existing --force
@@ -8778,7 +9830,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     the pass per request stormed every LVS member with several
     bdev_lvol_get_lvstores per second for hours (run 20260712-231123).
     """
-    from simplyblock_core.utils.ttl_cache import no_leader_cache, NO_LEADER_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import NO_LEADER_TTL_SEC, no_leader_cache
 
     cluster_id = all_nodes[0].cluster_id if all_nodes else ""
     cache_key = (cluster_id, lvs_name)
@@ -8821,7 +9873,7 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
         (leader_node, non_leader_nodes) or (None, []) if no confirmable leader.
     """
     from simplyblock_core.controllers.lvol_controller import is_node_leader
-    from simplyblock_core.utils.ttl_cache import leader_cache, LEADER_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import LEADER_TTL_SEC, leader_cache
 
     leader = None
     leader_confirmed = False
@@ -9169,6 +10221,26 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
         return False, new_leader, f"Operation failed on new leader: {e}"
 
 
+#: Mgmt statuses that make a peer unusable as a routing, port-block, or
+#: failover target, without consulting the data plane at all. Each one means
+#: mgmt has already observed the peer leaving the cluster and is not expecting
+#: it back, so the peer's mgmt API and SPDK are gone (or going).
+#:
+#: IN_SHUTDOWN / RESTARTING are deliberately absent: those are transient states
+#: the runner owns, and preempting another node's leadership during its own
+#: restart would be incorrect.
+#:
+#: PENDING_REMOVAL is also deliberately absent. node_removal_orchestrate sets
+#: it *before* phase 1 shuts the node down, so the node is still up and serving
+#: then; treating it as gone would skip a port-block it still needs.
+_PEER_DISCONNECTED_STATUSES = (
+    StorageNode.STATUS_OFFLINE,
+    StorageNode.STATUS_REMOVED,
+    StorageNode.STATUS_UNREACHABLE,
+    StorageNode.STATUS_IN_REMOVAL,
+)
+
+
 def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
     """Check if a peer node should be treated as disconnected for the purpose
     of routing (takeover vs. non-leader path) and peer-port-block decisions.
@@ -9177,15 +10249,25 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
 
     Two signals, first match wins:
 
-      1. Mgmt ground truth (FDB status). If FDB already says the peer is
-         OFFLINE / REMOVED / UNREACHABLE, trust it immediately — mgmt has
-         observed the peer leaving the cluster. Attempting to port-block
+      1. Mgmt ground truth (FDB status). If FDB already says the peer is in
+         one of ``_PEER_DISCONNECTED_STATUSES``, trust it immediately — mgmt
+         has observed the peer leaving the cluster. Attempting to port-block
          such a peer's mgmt API will only hit ECONNREFUSED and, after 5×
          retries, abort the entire restart with a misleading "LVStore
-         recovery failed" event. IN_SHUTDOWN / RESTARTING are deliberately
-         NOT in this list — those are transient states the runner owns;
-         preempting another node's leadership during its own restart
-         would be incorrect.
+         recovery failed" event.
+
+         IN_REMOVAL is in that list on the same grounds as OFFLINE: phase 1 of
+         node_removal_orchestrate has already killed the node's SPDK and mgmt
+         API by the time the status is set, and unlike IN_SHUTDOWN it is never
+         coming back. Without it this check falls through to the JM-quorum
+         path, which votes "connected" on `0/0 peers report disconnected`
+         exactly when peers have already torn down their controllers for the
+         departing node — the abstain-from-all case described below. Callers
+         then route to, or pre-warm a failover path towards, a node the
+         control plane is in the middle of deleting (live 2026-09-03: a
+         tertiary spent its deferred hublvol attach on the node being removed,
+         "Failed to add deferred hublvol failover path to <removed> …
+         for LVS_21").
 
       2. Data-plane JM quorum (legacy path). Only reached if mgmt says
          the peer is in an "alive" state. Useful to detect fabric
@@ -9193,7 +10275,9 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
          isn't — the quorum reads NVMe controller state on surviving
          peers (see storage_node_monitor::_count_data_plane_votes).
     """
-    from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
+    from simplyblock_core.services.storage_node_monitor import (
+        is_node_data_plane_disconnected_quorum,
+    )
 
     # Refresh from FDB before reading peer_node.status. Callers commonly
     # build a sec_nodes list at the top of recreate_lvstore (line ~5223)
@@ -9214,9 +10298,7 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
         # Peer has been fully removed from the cluster — definitely disconnected.
         return True
 
-    if peer_node.status in (StorageNode.STATUS_OFFLINE,
-                            StorageNode.STATUS_REMOVED,
-                            StorageNode.STATUS_UNREACHABLE):
+    if peer_node.status in _PEER_DISCONNECTED_STATUSES:
         logger.info("Peer %s mgmt status is %s — treating as disconnected",
                     peer_node.get_id(), peer_node.status)
         return True
@@ -9229,7 +10311,10 @@ def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
     # "connected" is bounded by the TTL and by the operation itself failing
     # and re-checking; a stale "disconnected" only delays inclusion of a
     # just-recovered peer by the same window.
-    from simplyblock_core.utils.ttl_cache import quorum_verdict_cache, QUORUM_VERDICT_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import (
+        QUORUM_VERDICT_TTL_SEC,
+        quorum_verdict_cache,
+    )
     verdict = quorum_verdict_cache.get_or_compute(
         (peer_node.get_id(), tuple(lvs_peer_ids or ())), QUORUM_VERDICT_TTL_SEC,
         lambda: is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids))
@@ -9256,7 +10341,7 @@ def _check_hublvol_connected(snode: StorageNode, peer_node):
         rpc_client = snode.rpc_client(timeout=5, retry=1)
         if peer_node.hublvol and peer_node.hublvol.bdev_name:
             remote_bdev = f"{peer_node.hublvol.bdev_name}n1"
-            bdevs = rpc_client.get_bdevs(remote_bdev)
+            bdevs = rpc_client.bdev_get(remote_bdev)
             if bdevs:
                 logger.info("HubLVol to %s is still connected from %s",
                             peer_node.get_id(), snode.get_id())
@@ -9316,6 +10401,57 @@ def _handle_rpc_failure_on_peer(snode: StorageNode, peer_node, lvs_jm_vuid, lvs_
         logger.error("Failed to send fabric signal to peer %s for LVS %s: %s — aborting restart",
                      peer_node.get_id(), lvs_name, e)
         return "abort"
+
+
+def _lvstore_port_entry(node):
+    """The per-lvstore port pair other nodes must use to reach ``node``'s
+    lvstore. Keyed by lvstore name by every caller."""
+    return {
+        "lvol_subsys_port": node.lvol_subsys_port,
+        "hublvol_port": node.hublvol.nvmf_port if node.hublvol else 0,
+    }
+
+
+def _derive_lvstore_ports(snode, primary_node, db_controller):
+    """Every lvstore whose lvols ``snode`` serves -> that lvstore's own ports.
+
+    Registration of an lvol on a non-leader looks its ``lvs_name`` up in this
+    map and REFUSES to add a listener when the entry is missing, rather than
+    fall back to snode's own leader port and guess (see the comment above the
+    lvstore_ports check in _register_lvol_on_non_leader -- guessing left two
+    secondaries listening on the wrong port indefinitely on 2026-08-18). So
+    the map has to be complete BEFORE registration runs, not merely
+    eventually consistent with it.
+
+    Deriving it from ``snode``'s own lvstore plus its two back-reference
+    slots alone is not complete in the one case that matters most: a call
+    that is ESTABLISHING a new hosting relationship. A node-removal
+    relocation (_relocate_replica_between) commits
+    lvstore_stack_secondary/_tertiary only AFTER the build returns, so during
+    the build the slot still reads empty and primary_node's lvstore was
+    absent from the map. Every relocation therefore registered its lvols with
+    no port entry, logged "INCOMPLETE LVOL REGISTRATION ... running below
+    configured redundancy until repaired", and served nothing from that
+    replica until the next lvol_monitor repair cycle picked it up ~2 minutes
+    later (all four relocations of the 2026-09-11 no-FD 2+2 run; the replicas
+    did heal, but the redundancy gap was real and the error was logged at
+    ERROR on a run that was otherwise clean).
+
+    ``primary_node`` is included directly because it is the one lvstore this
+    call is definitionally hosting -- it is the stack being built. Where the
+    slots already cover it the entry is identical (same node, same ports), so
+    adding it last is idempotent rather than an override.
+    """
+    ports = {}
+    if snode.lvstore:
+        ports[snode.lvstore] = _lvstore_port_entry(snode)
+    for slot_id in (snode.lvstore_stack_secondary, snode.lvstore_stack_tertiary):
+        if slot_id:
+            nd = db_controller.get_storage_node_by_id(slot_id)
+            ports[nd.lvstore] = _lvstore_port_entry(nd)
+    if primary_node is not None and primary_node.lvstore:
+        ports[primary_node.lvstore] = _lvstore_port_entry(primary_node)
+    return ports
 
 
 def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False, force=False):
@@ -9379,7 +10515,8 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {
                 ex.submit(add_lvol_thread, lv, snode,
-                          lvol_ana_state=lvol_ana_state): lv
+                          lvol_ana_state=lvol_ana_state,
+                          defer_listener=True): lv
                 for lv in items
             }
             for fut, lv in futures.items():
@@ -9409,6 +10546,41 @@ def _register_lvols_on_node(lvol_list, snode, lvol_ana_state, lvs_label=""):
             len(failures), len(lvol_list), sorted(failures))
         failures = _submit_all(
             [lv for lv in lvol_list if lv.get_id() in failures])
+
+    # Every future is in: only now is it safe to make these subsystems
+    # reachable. The registrations above run concurrently, and on a shared
+    # subsystem each member used to publish the listener as soon as its own
+    # namespace landed -- so the subsystem answered while its remaining members
+    # were still being added, and a client reading one of those got "Invalid
+    # Namespace or Format" with DNR, which is not retried on another path
+    # (2026-09-13: an 838ms window on worker-1, fio took EREMOTEIO).
+    #
+    # A failed member withholds the listener for its whole SUBSYSTEM, not just
+    # for itself. On a shared subsystem every member answers on one NQN, so
+    # publishing a healthy member's listener makes that NQN reachable while the
+    # failed member's namespace is absent -- which is the reachable-but-empty
+    # state this barrier exists to prevent, reached by a different door.
+    # Skipping only the failed lvol id is therefore not enough.
+    #
+    # A subsystem held back this way is already reported as INCOMPLETE
+    # REGISTRATION below, and the lvol monitor's repair cycle is what gives it a
+    # listener once every member's namespace is there.
+    blocked_nqns = {lv.nqn for lv in lvol_list if lv.get_id() in failures}
+    if blocked_nqns:
+        logger.warning(
+            "withholding listeners on %s for %d subsystem(s) with an "
+            "unregistered member: %s",
+            snode.get_id()[:8], len(blocked_nqns), sorted(blocked_nqns))
+    listener_rpc = snode.rpc_client(timeout=10, retry=2)
+    for lvol in lvol_list:
+        if lvol.get_id() in failures or lvol.nqn in blocked_nqns:
+            continue
+        try:
+            ok, msg = _publish_lvol_listener(lvol, snode, listener_rpc, lvol_ana_state)
+        except Exception as e:
+            ok, msg = False, "raised: %s" % e
+        if not ok:
+            failures.setdefault(lvol.get_id(), msg or "listener publication failed")
 
     try:
         probe = snode.rpc_client(timeout=10, retry=1)
@@ -9620,26 +10792,9 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
         logger.warning("Soft reconnect of remote JMs failed on %s: %s",
                        snode.get_id(), e)
 
-    # Ensure snode has per-lvstore ports from primary
-    lvstore_ports = {}
-    if snode.lvstore:
-        lvstore_ports[snode.lvstore] = {
-            "lvol_subsys_port": snode.lvol_subsys_port,
-            "hublvol_port": snode.hublvol.nvmf_port if snode.hublvol else 0,
-        }
-    if snode.lvstore_stack_secondary:
-        nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
-        lvstore_ports[nd.lvstore] = {
-            "lvol_subsys_port": nd.lvol_subsys_port,
-            "hublvol_port": nd.hublvol.nvmf_port if nd.hublvol else 0,
-        }
-    if snode.lvstore_stack_tertiary:
-        nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_tertiary)
-        lvstore_ports[nd.lvstore] = {
-            "lvol_subsys_port": nd.lvol_subsys_port,
-            "hublvol_port": nd.hublvol.nvmf_port if nd.hublvol else 0,
-        }
-    snode.lvstore_ports = lvstore_ports
+    # Ensure snode has per-lvstore ports for every lvstore it serves,
+    # including the one this call is building.
+    snode.lvstore_ports = _derive_lvstore_ports(snode, primary_node, db_controller)
     snode.write_to_db()
 
     lvol_list = []
@@ -10088,7 +11243,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             def _lvol_bdev_registered(lv):
                 for candidate in (lv.lvol_uuid, f"{lv.lvs_name}/{lv.lvol_bdev}"):
                     try:
-                        if snode_rpc_client.get_bdevs(candidate):
+                        if snode_rpc_client.bdev_get(candidate):
                             return True
                     except Exception:
                         pass
@@ -11153,6 +12308,50 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                             "(in-window attach will retry): %s",
                             _peer.get_id(), lvs_name, _pa_e)
 
+            # Precondition, paid BEFORE the window gate and before any peer
+            # port is fenced: wait out in-flight JM replication on the leader
+            # here, where waiting is free.
+            #
+            # This wait used to live at step (a) inside the loop below. Once
+            # the non-leader block was reordered ahead of the leader's suspend
+            # (see ORDER MATTERS below), step (a) began running with peer ports
+            # already fenced -- and wait_for_jm_rep_tasks_to_finish defaults to
+            # retry=10/delay=20, a 200s budget whose *single* sleep is 20s,
+            # against a FENCE_DEADLINE_SEC of 7.5s. The ambient fence RPC
+            # budget (rpc_budget, set at each block below) clamps the helper's
+            # RPCs but cannot clamp its time.sleep().
+            #
+            # 2026-09-10 14:32:20, LVS_13: a91b9596 was fenced, the leader
+            # 588fdb5b then reported active replication and this wait slept
+            # 20s. The next fence check (the inflight drain, ~350 lines down)
+            # aborted at 20.087s. SPDK converts a port block to reject at
+            # ack_timeout * 4 = 8s, quiescing every qpair on the port, so
+            # a91b9596's clients lost the path rather than waiting for it.
+            # With replication active on the leader that abort was certain,
+            # not a flake.
+            #
+            # A False return is NOT fatal and deliberately does not abort:
+            # jc_disable_replication in (c) below is the authority on whether
+            # replication is actually suspended, and it retries.
+            if current_leader and current_leader.get_id() not in disconnected_peers:
+                try:
+                    _jm_clear = current_leader.wait_for_jm_rep_tasks_to_finish(
+                        lvs_jm_vuid)
+                except Exception as e:
+                    # Same contract as step (a) below, which this wait was
+                    # moved out of: a RAISING replication-wait aborts the
+                    # restart, and the message must still name it. Failing
+                    # here is strictly cheaper -- no port is fenced yet.
+                    raise Exception(
+                        f"Abort restart: replication-wait on leader "
+                        f"{current_leader.get_id()} failed: {e}")
+                if not _jm_clear:
+                    logger.warning(
+                        "JM replication still active on leader %s (jm_vuid %s) "
+                        "after the pre-fence wait; entering the window anyway "
+                        "-- jc_disable_replication decides",
+                        current_leader.get_id(), lvs_jm_vuid)
+
             # Serialize the client-port outage span across all concurrent
             # recreates. Acquired AFTER the hublvol advisory locks (fixed lock
             # order: per-LVS recreate lock -> hublvol locks -> window gate).
@@ -11161,8 +12360,9 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             # then suspend the leader's journal replication before the flap.
             #
             # Per attempt against the current leader:
-            #   a. wait for any in-flight JM replication task to finish (loops
-            #      internally) so we don't block mid-replication;
+            #   a. confirm no in-flight JM replication with ONE unpaced poll
+            #      (the patient wait is paid before the gate above, where it
+            #      costs no client IO);
             #   b. mark the leader in_creation and block its LVS port;
             #   c. jc_disable_replication(jm_vuid):
             #        True  -> no active replication; it is now suspended (~12s) ->
@@ -11216,9 +12416,18 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                 _REPL_SUSPEND_MAX_ATTEMPTS = 10
                 replication_suspended = False
                 for _attempt in range(_REPL_SUSPEND_MAX_ATTEMPTS):
-                    # a. ensure no active replication on the leader (loops internally)
+                    # a. confirm no active replication on the leader.
+                    #
+                    # retry=1/delay=0 is ONE poll and no sleep: the helper's
+                    # RPCs inherit the ambient fence budget, so this costs
+                    # ~0.5s worst case. It only catches a leader that resumed
+                    # replicating between the pre-fence wait and here; (c)
+                    # below is the authority. Do NOT restore the default
+                    # 10 x 20s budget at this call site -- one of those sleeps
+                    # alone is 2.7x the whole fence deadline.
                     try:
-                        ret = current_leader.wait_for_jm_rep_tasks_to_finish(lvs_jm_vuid)
+                        ret = current_leader.wait_for_jm_rep_tasks_to_finish(
+                            lvs_jm_vuid, retry=1, delay=0)
                         if not ret:
                             msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
                             logger.error(msg)
@@ -11226,6 +12435,13 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
                     except Exception as e:
                         raise Exception(
                             f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
+
+                    # The fence clock is otherwise unchecked from the
+                    # non-leader block above until the inflight drain ~350
+                    # lines below. Check it here -- outside the try, so the
+                    # abort is not re-wrapped by the except -- so any overrun
+                    # aborts while still under the 8s reject threshold.
+                    _check_fence_deadline("jm replication confirm")
 
                     # b. block the leader's LVS port
                     try:
@@ -11793,7 +13009,73 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             pass
 
 
-def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
+
+def _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state):
+    """Publish one lvol's listener on ``snode``.
+
+    Split out of add_lvol_thread so the batch registration can run it
+    AFTER every namespace in the batch is attached. On a shared subsystem
+    the members register concurrently, and each one used to publish as soon
+    as its own namespace landed -- which makes the subsystem reachable while
+    the remaining members are still arriving. A client reading one of those
+    namespaces in the gap gets "Invalid Namespace or Format" with DNR, which
+    the kernel does not retry on another path.
+
+    2026-09-13, shared subsystem lvol:64b116a4 rebuilt on worker-1:
+    nsid=1 at 15:50:25.929, nsid=2 at .936, listener at .26.144, nsid=3 at
+    .26.982 -- 838ms reachable-but-incomplete, and fio took EREMOTEIO on the
+    clone at nsid 3.
+
+    Returns ``(True, None)`` or ``(False, reason)``.
+    """
+    db_controller = DBController()
+    # Use per-lvstore port for this lvol's lvstore. get_lvol_subsys_port()'s
+    # fallback to snode.lvol_subsys_port is only correct for lvol.lvs_name ==
+    # snode.lvstore (this node's OWN primary, which legitimately has no
+    # lvstore_ports entry -- it uses the plain node-level port). For any
+    # OTHER lvs_name, a missing entry means the relocation that assigned
+    # snode this non-leader role hasn't finished committing lvstore_ports
+    # yet -- snode here can be a stale, caller-held object (same hazard as
+    # the in_deletion check above). Silently falling back would register
+    # the listener on snode's OWN leader port instead of lvol.lvs_name's
+    # real one (2026-08-18: raced a node-removal relocation live, leaving
+    # two lvols' secondaries listening on the wrong port indefinitely, with
+    # nothing to ever revisit or correct it). Re-fetch once and refuse
+    # rather than guess; the next lvol_monitor repair cycle retries.
+    if lvol.lvs_name != snode.lvstore and lvol.lvs_name not in snode.lvstore_ports:
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if lvol.lvs_name not in snode.lvstore_ports:
+            msg = (f"{snode.get_id()} has no lvstore_ports entry for "
+                   f"{lvol.lvs_name} yet; refusing to add a listener for "
+                   f"{lvol.nqn} on a guessed port")
+            logger.warning(msg)
+            return False, msg
+    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            tr = iface.trtype
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            tr = "TCP"
+        else:
+            continue
+        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.ip4_address, listener_port):
+            logger.info("Listener %s %s:%s already on %s, skipping",
+                        tr, iface.ip4_address, listener_port, lvol.nqn)
+            continue
+        logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
+        # listeners_create returns the RPC result and answers None on an RPC
+        # error without raising, so an unchecked call reports a listener this
+        # subsystem does not have -- and the caller then records the lvol as
+        # serving.
+        if not rpc_client.listeners_create(
+                lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state):
+            msg = (f"Failed to add listener {tr} {iface.ip4_address}:{listener_port} "
+                   f"for {lvol.nqn} on {snode.get_id()}")
+            logger.error(msg)
+            return False, msg
+    return True, None
+
+def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized", defer_listener=False):
     db_controller = DBController()
 
     # Refuse to (re)register an lvol that is being torn down: the delete
@@ -11891,42 +13173,11 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
         logger.error(msg)
         return False, msg
 
-    # Use per-lvstore port for this lvol's lvstore. get_lvol_subsys_port()'s
-    # fallback to snode.lvol_subsys_port is only correct for lvol.lvs_name ==
-    # snode.lvstore (this node's OWN primary, which legitimately has no
-    # lvstore_ports entry -- it uses the plain node-level port). For any
-    # OTHER lvs_name, a missing entry means the relocation that assigned
-    # snode this non-leader role hasn't finished committing lvstore_ports
-    # yet -- snode here can be a stale, caller-held object (same hazard as
-    # the in_deletion check above). Silently falling back would register
-    # the listener on snode's OWN leader port instead of lvol.lvs_name's
-    # real one (2026-08-18: raced a node-removal relocation live, leaving
-    # two lvols' secondaries listening on the wrong port indefinitely, with
-    # nothing to ever revisit or correct it). Re-fetch once and refuse
-    # rather than guess; the next lvol_monitor repair cycle retries.
-    if lvol.lvs_name != snode.lvstore and lvol.lvs_name not in snode.lvstore_ports:
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        if lvol.lvs_name not in snode.lvstore_ports:
-            msg = (f"{snode.get_id()} has no lvstore_ports entry for "
-                   f"{lvol.lvs_name} yet; refusing to add a listener for "
-                   f"{lvol.nqn} on a guessed port")
-            logger.warning(msg)
+    if not defer_listener:
+        ok, msg = _publish_lvol_listener(lvol, snode, rpc_client, lvol_ana_state)
+        if not ok:
             return False, msg
-    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
-    for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-            tr = iface.trtype
-        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-            tr = "TCP"
-        else:
-            continue
-        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.ip4_address, listener_port):
-            logger.info("Listener %s %s:%s already on %s, skipping",
-                        tr, iface.ip4_address, listener_port, lvol.nqn)
-            continue
-        logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
-        rpc_client.listeners_create(
-            lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
+
 
     # Guarded CAS instead of read-modify-write: a delete can land between the
     # entry guard and this point, and an unconditional full-object write both
@@ -12554,7 +13805,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
-        logger.debug(f"online_jms: {str(jm_ids)}")
+        logger.debug(f"online_jms: {jm_ids!s}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
@@ -12873,7 +14124,7 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
     # costs seconds of SPDK app-thread time on large clusters.
     def _stack_bdev_exists(bdev_name):
         try:
-            return bool(rpc_client.get_bdevs(bdev_name))
+            return bool(rpc_client.bdev_get(bdev_name))
         except Exception:
             return False
 
@@ -13369,7 +14620,7 @@ def dump_lvstore(node_id):
 
     rpc_client = snode.rpc_client(timeout=120)
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
-    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
+    file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{datetime.datetime.now().isoformat()!s}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
     ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
     if not ret:
@@ -13413,7 +14664,29 @@ def safe_delete_bdev(name, node_id):
 
     db_controller = DBController()
     primary_node = db_controller.get_storage_node_by_id(node_id)
-    secondary_node = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    # Every replica peer, in the role order lvol_controller uses. A blank id
+    # means the role is not wired up (ha_type single has no secondary), and a
+    # blank id is a KeyError by contract -- see tests/unit/test_blank_id_
+    # lookups.py -- so each needs guarding; every other caller does this and
+    # this one did not, so the first orphan on such a node aborted the whole
+    # repair with a traceback.
+    #
+    # The tertiary leg matters for the same reason the secondary one does: the
+    # normal delete path fans out to EVERY replica (lvol_controller.py:2235
+    # tears subsystems down tertiary -> secondary -> primary, and :2310 issues
+    # a sync delete or a durable FN_LVOL_SYNC_DEL task per non-leader). Deleting
+    # on two of three nodes left the blob alive on the tertiary, where nothing
+    # would ever find it again -- auto_repair dumps a node's OWN lvstore, and
+    # the tertiary holds a replica of the primary's.
+    peer_nodes = []
+    for role_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+        if not role_id:
+            continue
+        try:
+            peer_nodes.append(db_controller.get_storage_node_by_id(role_id))
+        except KeyError:
+            logger.warning(f"Replica peer {role_id} of {primary_node.get_id()} "
+                           f"has no record; skipping its delete leg")
     bdev_name = f"{primary_node.lvstore}/{name}"
     logger.info(f"deleting from primary: {bdev_name}")
     ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
@@ -13441,17 +14714,91 @@ def safe_delete_bdev(name, node_id):
                 return False
 
             logger.info(f"deletion completed on primary: {bdev_name}")
-            logger.info(f"deleting from secondary: {bdev_name}")
-            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, sync=True)
-            if not ret:
-                logger.error(f"Failed to delete bdev: {bdev_name} from node: {secondary_node.get_id()}")
-                return False
-            else:
-                logger.info(f"deletion completed on secondary: {bdev_name}")
-            return True
+            if not peer_nodes:
+                logger.info(f"no replica peers for {primary_node.get_id()}; "
+                            f"deletion completed: {bdev_name}")
+                return True
+
+            # Every peer is attempted even when an earlier one fails. Same
+            # reasoning as the sync-delete loop in lvol_controller ("Never
+            # abort the loop -- the remaining non-leaders must still be
+            # processed"): the primary's blob is already gone by this point, so
+            # a peer skipped here is a replica stranded with nothing scheduled
+            # to clean it.
+            all_deleted = True
+            for peer in peer_nodes:
+                logger.info(f"deleting from peer {peer.get_id()}: {bdev_name}")
+                ret, _ = peer.rpc_client().delete_lvol(bdev_name, sync=True)
+                if not ret:
+                    logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}")
+                    all_deleted = False
+                else:
+                    logger.info(f"deletion completed on peer {peer.get_id()}: {bdev_name}")
+            return all_deleted
         else:
             logger.error(f"failed to delete bdev: {bdev_name}, status code: {ret}")
             return False
+
+
+#: Lvstore residents that belong to the NODE, not to any volume or snapshot
+#: record, so they are never orphans. Kept in one place because auto_repair and
+#: the lvol monitor's periodic sweep must agree on it.
+NON_OBJECT_LVSTORE_BLOB_NAMES = ("hublvol", "transferhub")
+
+
+def find_orphan_lvstore_blobs(node_id):
+    """Blobs in ``node_id``'s lvstore that no LVol/SnapShot record claims.
+
+    The same comparison ``auto_repair`` performs for its ``diff_list``, lifted
+    out so it can also run unattended. auto_repair is an operator-invoked CLI
+    command that prints to stdout: it is the only thing in the product that
+    ever compared SPDK's inventory against the database, so a record dropped
+    while its blob survived stayed invisible until somebody thought to run it
+    by hand — which is how four such volumes accumulated unnoticed in R26.3.
+
+    Matching is on BLOBID, not name: the blobid is the identity SPDK and the
+    records actually share, and it survives the name-shape differences between
+    them (``snap_bdev`` is stored qualified as ``<lvstore>/<name>`` while the
+    lvstore dump names blobs bare).
+
+    Records are collected cluster-wide rather than per-node on purpose. A
+    record whose ``node_id`` has moved (fail-over, migration) still owns its
+    blob, and reporting a live volume as an orphan is far worse than missing
+    one.
+
+    Returns a list of ``{"blobid", "name", "uuid", "ref"}`` dicts. Raises on
+    RPC or lookup failure — the caller decides how loud that is.
+    """
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+
+    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        raise RPCException(f"Failed to get lvstore info for {snode.lvstore}")
+    lvs_uuid = ret[0].get("uuid")
+    if not lvs_uuid:
+        raise RPCException(f"Failed to get lvstore uuid for {snode.lvstore}")
+
+    dump = snode.rpc_client().bdev_lvs_dump_tree(lvs_uuid)
+    if not dump or "lvols" not in dump:
+        raise RPCException(f"Failed to dump the lvstore tree of {snode.lvstore}")
+
+    claimed = {lv.blobid for lv in db_controller.get_lvols(snode.cluster_id) if lv.blobid}
+    claimed |= {sn.blobid for sn in db_controller.get_snapshots(snode.cluster_id) if sn.blobid}
+
+    orphans = []
+    for entry in dump["lvols"]:
+        if entry.get("name") in NON_OBJECT_LVSTORE_BLOB_NAMES:
+            continue
+        if entry.get("blobid") in claimed:
+            continue
+        orphans.append({
+            "blobid": entry.get("blobid"),
+            "name": entry.get("name"),
+            "uuid": entry.get("uuid"),
+            "ref": entry.get("ref"),
+        })
+    return orphans
 
 
 def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, force_remove_worng_ref=False):
@@ -13476,7 +14823,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")
@@ -13522,7 +14869,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
 
     for blob in out_blobid_dict_keys:
         if blob not in (lvols_blobid_dict_keys + snaps_blobid_dict_keys):
-            if out_blobid_dict[blob]["name"] == "hublvol":
+            if out_blobid_dict[blob]["name"] in ["hublvol", "transferhub"]:
                 continue
             else:
                 # all blob ID in spdk but not in mgmt
@@ -13533,7 +14880,14 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
                     inconsistent_dict[blob] = out_blobid_dict[blob]
                     inconsistent_dict[blob]["type"] = "lvol|clone"
             if blob in snaps_blobid_dict_keys:
-                if out_blobid_dict[blob]["name"] != snaps_blobid_dict[blob]["name"] or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]:
+                # snap_bdev is stored qualified ("<lvstore>/<name>", see
+                # snapshot_controller.create_snapshot); the lvstore dump names
+                # the blob bare. lvol_bdev is bare on both sides, so only this
+                # branch qualifies -- comparing the two shapes raw flagged
+                # every snapshot on the node as inconsistent, which
+                # --force-remove-inconsistent would then have deleted.
+                if (f"{snode.lvstore}/{out_blobid_dict[blob]['name']}" != snaps_blobid_dict[blob]["name"]
+                        or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]):
                     inconsistent_dict[blob] = out_blobid_dict[blob]
                     inconsistent_dict[blob]["type"] = "snap"
 
@@ -13570,48 +14924,57 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
             else:
                 diff_clone_dict[blob] = out_blobid_dict[blob]
 
+    # Capture the status to restore. The entry guard above admits DEGRADED as
+    # well as ACTIVE, so writing ACTIVE back unconditionally promoted a
+    # degraded cluster to healthy just for having run a repair.
+    prev_cluster_status = cluster.status
     if not validate_only:
         cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_ACTIVATION)
         time.sleep(3)
 
-    print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
-    print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
-    print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
-    print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
-    print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
-    print("#########################################")
-    print("Safe lvols to be deleted:")
-    for blob, value in diff_lvol_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+    # try/finally, because every safe_delete_bdev below can raise (a node
+    # lookup, an RPC timeout, a wedged delete-status poll). Without it the
+    # first failure left the cluster parked in IN_ACTIVATION with no path back
+    # -- the repair looked destructive and was in fact completely ineffective.
+    try:
+        print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
+        print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
+        print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
+        print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
+        print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
+        print("#########################################")
+        print("Safe lvols to be deleted:")
+        for blob, value in diff_lvol_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Safe snaps to be deleted:")
+        for blob, value in diff_snap_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Safe clones to be deleted:")
+        for blob, value in diff_clone_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Manual bdeves to be deleted that have wrong ref number:")
+        for blob, value in manual_del.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only and force_remove_worng_ref:
+                safe_delete_bdev(value['name'], node_id)
+        print("#########################################")
+        print("Inconsistent bdeves to be checked:")
+        for blob, value in inconsistent_dict.items():
+            print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+            if not validate_only and force_remove_inconsistent:
+                safe_delete_bdev(value['name'], node_id)
+    finally:
         if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Safe snaps to be deleted:")
-    for blob, value in diff_snap_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Safe clones to be deleted:")
-    for blob, value in diff_clone_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Manual bdeves to be deleted that have wrong ref number:")
-    for blob, value in manual_del.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only and force_remove_worng_ref:
-            safe_delete_bdev(value['name'], node_id)
-    print("#########################################")
-    print("Inconsistent bdeves to be checked:")
-    for blob, value in inconsistent_dict.items():
-        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
-        if not validate_only and force_remove_inconsistent:
-            safe_delete_bdev(value['name'], node_id)
-
-    if not validate_only:
-        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_ACTIVE)
+            cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
 
     print("#########################################")
     print("All mgmt bdeves to be checked:")
@@ -13642,7 +15005,7 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to get LVol info")
         return False
     lvs_info = ret[0]
-    if "uuid" in lvs_info and lvs_info['uuid']:
+    if lvs_info.get('uuid'):
         lvs_uuid =  lvs_info['uuid']
     else:
         logger.error("Failed to get lvstore uuid")

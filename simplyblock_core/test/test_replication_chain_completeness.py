@@ -23,6 +23,27 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_replication as sr
 
 
+class _Pool:
+    """The target pool a cross-cluster clone lands in."""
+
+    def __init__(self, pool_id, cluster_id="C_TGT"):
+        self.uuid = pool_id
+        self.pool_name = pool_id
+        self.cluster_id = cluster_id
+
+    def get_id(self):
+        return self.uuid
+
+
+class _PlaceableLvol:
+    """Mixin for the volume fakes the clone path places into a pool."""
+
+    def place_in_pool(self, pool):
+        self.pool_uuid = pool.get_id()
+        self.pool_name = pool.pool_name
+        self.cluster_id = pool.cluster_id
+
+
 LVS = "LVS_1"
 
 
@@ -54,16 +75,16 @@ class _Snap:
 
 
 class _RPC:
-    """get_bdevs returning each blob's base_snapshot -- the chain topology."""
+    """bdev_get returning each blob's base_snapshot -- the chain topology."""
 
     def __init__(self, bases):
         self._bases = bases      # {bdev_name: base bdev short name or None}
 
-    def get_bdevs(self, name):
+    def bdev_get(self, name):
         if name not in self._bases:
             return None
         base = self._bases[name]
-        return [{"driver_specific": {"lvol": {"base_snapshot": base}}}]
+        return {"driver_specific": {"lvol": {"base_snapshot": base}}}
 
 
 class _Node:
@@ -257,6 +278,7 @@ def test_no_backward_task_for_a_policy_managed_clone():
     same snapshots and the cutover's target-side gate starves (2026-08-21,
     two of five case-4 cutovers dead on max retry)."""
     import inspect
+
     from simplyblock_core.controllers import snapshot_controller as sc
     src = inspect.getsource(sc.add)
     gate = 'if lvol.cloned_from_snap and not getattr(lvol, "replication_policy_id", "")'
@@ -428,16 +450,18 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             return {"P": primary, "S": peer}[nid]
         def release_lvol_ns_slot(self, lvol):
             pass
-        def get_lvols(self):
+        def get_lvols(self, cluster_id=None):
             # No copy of this subsystem exists on the target yet, so the
             # one-subsystem-one-primary guard has nothing to redirect to.
             return []
+        def get_pool_by_id(self, pool_id):
+            return _Pool(pool_id)
         def get_lvol_replication_objects(self):
             # This volume is not a fail-over copy, so no original is
             # superseded and nothing gets retired.
             return []
 
-    class _Lvol:
+    class _Lvol(_PlaceableLvol):
         uuid = "ORIG"; nqn = "nqn.test:lvol:ORIG"; ns_id = 7
         # Real LVol carries these; the clone reads namespace to decide whether
         # it attaches to a sibling's subsystem or creates its own.
@@ -514,10 +538,13 @@ def test_failback_clone_keeps_the_client_visible_wire_identity(monkeypatch):
         def release_lvol_ns_slot(self, lvol):
             pass
 
-        def get_lvols(self):
+        def get_lvols(self, cluster_id=None):
             return []
 
-    class _Lvol:
+        def get_pool_by_id(self, pool_id):
+            return _Pool(pool_id)
+
+    class _Lvol(_PlaceableLvol):
         uuid = "DR_ID"; nqn = "nqn.test:lvol:SHARED"; ns_id = 3
         guid = "DR_NGUID"
         ns_uuid = ""
@@ -573,6 +600,7 @@ def test_interrupted_landing_volume_is_adopted_or_cleared():
     look for a record already wearing the derived name and adopt it (online),
     wait for it (in_deletion), or clear it (half-created)."""
     import inspect
+
     from simplyblock_core.services import snapshot_replication as sr
     src = inspect.getsource(sr)
     probe = src.index('rep_name = f"REP_{snapshot.snap_name}"')
@@ -593,6 +621,7 @@ def test_failover_guard_matches_nqn_and_nsid_not_nqn_alone():
     while reporting success. The guard must compare the FULL preserved
     identity: nqn AND ns_id."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
     # The guard now resolves the copy through the replication record, because
@@ -615,6 +644,7 @@ def test_namespaced_siblings_replicate_to_the_same_target_node():
     -- each advertising the same NQN with only part of the namespaces.
     Siblings must inherit the node their subsystem already replicates to."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.add_lvol_ha)
     assert "_sibling_replication_node" in src,         "namespaced siblings must share a replication node"
@@ -643,13 +673,14 @@ def test_clone_register_confirms_the_bdev_before_add_ns():
     (PVC-expand) and the case-3 eviction. The stack build must poll the bdev
     into existence before the namespace add runs."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc._create_bdev_stack)
     reg = src.index("bdev_lvol_clone_register")
     assert "not appear within 20s" in src[reg:], \
         "clone_register must be followed by a bdev confirmation poll"
     poll = src.index("not appear within 20s", reg)
-    assert "get_bdevs" in src[reg:poll], "the poll must probe get_bdevs"
+    assert "bdev_get" in src[reg:poll], "the poll must probe bdev_get"
 
 
 def test_retired_landing_records_are_record_only_deletions():
@@ -661,6 +692,7 @@ def test_retired_landing_records_are_record_only_deletions():
     naive top_bdev fallback delete would have destroyed the replicated
     snapshot's data)."""
     import inspect
+
     from simplyblock_core.services import lvol_monitor as lm
     src = inspect.getsource(lm.check_node)
     guard = src.index("if not lvol.bdev_stack:")
@@ -674,6 +706,7 @@ def test_retirement_tears_down_plumbing_without_delete_lvol():
     record to in_deletion for the monitor's async machinery, so any
     interruption before remove() strands the record."""
     import inspect
+
     from simplyblock_core.services import snapshot_replication as sr
     src = inspect.getsource(sr)
     empty = src.index("remote_lv.bdev_stack = []")
@@ -691,6 +724,7 @@ def test_shared_subsystem_survives_one_members_teardown():
     landed). Delete-on-empty must first prove no other live volume claims
     the NQN."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc._remove_lvol_subsys_from_node)
     guard = src.index("other")
@@ -807,8 +841,8 @@ class _RollbackRPC:
         self.ns = [n for n in self.ns if n.get("nsid") != nsid]
         return True
 
-    def get_bdevs(self, name):
-        return [{"name": name}]
+    def bdev_get(self, name):
+        return {"name": name}
 
     def delete_lvol(self, name, sync=False):
         self.deletes.append((name, sync))
@@ -857,6 +891,7 @@ def test_failover_rollback_covers_every_placed_node_with_ids():
     node_id), whose 'except KeyError: return True' swallowed the mismatch --
     so it reported success while deleting nothing."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc._create_target_lvol_clone)
     assert "placed_nodes" in src, "rollback must track every node that got the copy"
@@ -880,6 +915,7 @@ def test_policy_attach_also_keeps_a_subsystem_on_one_target_node():
     Both entry points must consult the sibling rule, and _create_target_lvol_clone
     re-checks it at creation time as the last line of defence."""
     import inspect
+
     from simplyblock_core.controllers import lvol_controller as lc
 
     src = inspect.getsource(lc.replication_start)

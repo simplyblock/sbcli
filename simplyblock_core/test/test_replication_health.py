@@ -60,6 +60,11 @@ def _patch(monkeypatch, lvol, snaps, tasks):
         def get_lvols(self):
             return [lvol]
 
+        def get_lvol_by_id(self, lvol_id):
+            if lvol_id != lvol.get_id():
+                raise KeyError(f'LVol {lvol_id} not found')
+            return lvol
+
         def get_storage_node_by_id(self, uuid):
             return type("N", (), {"cluster_id": "C1"})()
 

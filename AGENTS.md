@@ -26,8 +26,11 @@ uv lock --check                     # CI: fail if uv.lock is stale
 ```
 
 Dependency groups (PEP 735) replace the old `*-requirements.txt` files: `test`, `types`,
-`generate`. Install one with `uv sync --group test`. `e2e/requirements.txt` is separate and
-unaffected.
+`generate`. Install one with `uv sync --group test`. The `e2e/` entry points are standalone
+PEP 723 scripts -- each declares its own interpreter and dependencies inline and runs via the
+`#!/usr/bin/env -S uv run --script` shebang, so they need no separate requirements file. See
+**`e2e/AGENTS.md`** before touching that tree -- the harness is a black-box client of the cluster
+under test and must not import the package.
 
 ## Testing
 
@@ -63,10 +66,27 @@ Two front-ends sit on top of the core and **both call it in-process** — the CL
 
 Storage nodes are reached via JSON-RPC (`rpc_client.py`).
 
+Lookups that are not "by primary key" go through declared secondary indices
+(`simplyblock_core/models/indices.py`, maintained in the entity's own FDB transaction) and the
+single `DBController.query()` primitive — not through a table scan. See
+**`simplyblock_core/AGENTS.md`** § Secondary Indices before adding a `get_*_by_*` helper
+or a new model field you intend to look records up by.
+
+**The deployment is distributed, not single-process.** The Web API runs as multiple replicas,
+`sbctl` invocations happen concurrently from different machines, and background services run as
+their own processes — all synchronized only through FoundationDB. A `threading.Lock`,
+module-level variable, or any other in-process primitive excludes contention within one process
+and nothing else; it is not a fix for a race between two API replicas, a CLI invocation and a
+background service, or two background service instances. Treat every new piece of shared mutable
+state this way by default and use a distributed primitive, unless you can state in the code why
+the state is genuinely process-local (e.g. a per-process cache with no correctness dependency on
+other processes agreeing).
+
 ## Coding Conventions
 
 - **Error handling**: Raise specific exceptions — never return `None`/booleans for errors, never bare `except Exception`. See `CONTRIBUTING.md`.
 - **Retries**: Use `tenacity` (`@retry` decorator, or `Retrying`/`AsyncRetrying` for a single call site) instead of hand-written attempt loops with `time.sleep()`. Always set an explicit `stop=` and `wait=`, and log attempts via `before_sleep=before_sleep_log(logger, logging.WARNING)`. Refactor hand-rolled retry loops you touch.
+- **Locking**: Use `DbLock` (`simplyblock_core/models/lock/__init__.py`) for mutual exclusion that must hold across processes/hosts — it is an FDB-backed distributed lock, safe from the CLI, the Web API, and background services alike. Do not reach for `threading.Lock`/`multiprocessing.Lock` for anything that also needs to exclude another process; see the module docstring for what `DbLock` is not for (a short critical section that fits in one FDB transaction needs no lock at all — use the transaction). Always take it with `with DbLock(...):`. Never call `.acquire()`/`.release()` by hand in a try/except/finally — that is the pattern `DbLock` exists to replace, and `__exit__` does more than `release()` (it also raises `DbLockLostError` if the lease died mid-section).
 - **Pydantic fields**: Use the [annotated pattern](https://pydantic.dev/docs/validation/latest/concepts/fields/#the-annotated-pattern) for field metadata, not the assignment form. See below.
 - **Ruff** and **mypy** are enforced in CI. `simplyblock_cli/cli.py` is excluded from ruff (auto-generated).
 - `tests/perf/` is excluded from pytest discovery.
@@ -112,6 +132,7 @@ Key rules:
 - **v2 DTOs**: Use `@field_serializer('field', when_used='json')` to unwrap for JSON wire responses while keeping wrappers in Python-mode `model_dump()`.
 - **CLI arguments**: Declare the argument type as `secret` in `cli-reference.yaml`. The generator produces `SecretStr` as the argparse type converter, so the value is wrapped at parse time.
 - **Logging**: Never log unwrapped secret values. Response-body logging is gated by `Settings().log_response_bodies` (env `SB_LOG_RESPONSE_BODIES`, default `False`). External libraries that log HTTP bodies (`urllib3`, `kubernetes.client.rest`) are silenced to WARNING. The web access log records only `request.url.path`, never the query string.
+- **Downstream of the unwrap**: `services/spdk_http_proxy_server.py` receives JSON-RPC bodies that have already been through `unwrap_secrets_for_send`, so no `SecretStr` survives to mask by. Log those through `redact_rpc_params` from `simplyblock_core/utils/secrets.py`, which masks by parameter name (`SENSITIVE_RPC_PARAMS`). An RPC that carries new key material or a new credential adds its parameter name to that set — masking by type in `rpc_client` alone does not reach the proxy.
 - **Comparison**: Use `hmac.compare_digest(secret.get_secret_value(), other)` for timing-safe comparison.
 - **Testing**: New secret-bearing code needs masking, wire-delivery, and FDB round-trip tests. See `tests/AGENTS.md` § Secret-handling tests for the required assertions and canonical examples.
 
@@ -192,6 +213,8 @@ simplyblock_web/AGENTS.md         ← Web API-specific instructions
 simplyblock_web/CLAUDE.md          ← `@AGENTS.md`
 tests/AGENTS.md                   ← Test-suite layout, tiers, fixtures
 tests/CLAUDE.md                    ← `@AGENTS.md`
+e2e/AGENTS.md                     ← E2E harness: black-box invariant, PEP 723 execution model
+e2e/CLAUDE.md                      ← `@AGENTS.md`
 docker/AGENTS.md                  ← Container image: stages, cache policy, Dockerfile constraints
 docker/CLAUDE.md                   ← `@AGENTS.md`
 
@@ -214,13 +237,3 @@ symlink target directly.
 ### Local overrides
 
 At every level where an `AGENTS.md` exists, also check for a sibling `AGENTS.local.md`. If present, load it in addition to `AGENTS.md` — its contents extend or override the checked-in instructions. `AGENTS.local.md` is gitignored and intended for per-developer notes that should not be committed.
-
-## graphify
-
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

@@ -72,6 +72,14 @@ DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
 #: is no discard counterpart -- jm_get_events returns every event it holds on
 #: every call -- so the collector filters what it has already logged and the
 #: poll can afford to be less frequent than the distrib one.
+#: How many of the newest event-log records the alerts endpoint scans.
+#: The event-derived alert rules only look back EVENT_WINDOW_SEC, so this
+#: only has to exceed the number of events a busy cluster can produce in
+#: that window. It exists to bound the cost: an unbounded scan of a
+#: months-old event log on every poll of a monitoring endpoint is the one
+#: thing this endpoint must not do.
+ALERT_EVENT_SCAN_LIMIT = 2000
+
 JM_EVENT_COLLECTOR_INTERVAL_SEC = 10
 #: How many recently-logged JM event keys to remember per node for that filter.
 JM_EVENT_DEDUPE_MAX = 10000
@@ -87,7 +95,6 @@ JM_COMPRESSION_BACKLOG_REARM_FRACTION = 0.9
 CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
-DEV_DISCOVERY_INTERVAL_SEC = 60
 
 # --- lblk cluster mode (Linux block devices via SPDK AIO bdevs) ---
 DEVICE_MODE_NVME = "nvme"
@@ -190,6 +197,27 @@ LVOL_MONITOR_SUBSYS_CHECK = str(
 LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC = int(
     os.getenv("LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC", "300"))
 
+# Orphan reconciliation: report lvstore objects that no FDB record claims.
+#
+# Nothing compared SPDK's inventory against the database, so every way a
+# record could be dropped while its blob survived produced a PERMANENT,
+# invisible leak — the bdev is re-registered from lvstore metadata on the next
+# node restart and there is nothing left in FDB or the cluster log pointing at
+# it. Four such volumes were found by hand in R26.3.
+#
+# DETECT ONLY. The sweep never deletes: a false positive would destroy live
+# data, and the object it cannot correlate is exactly the one whose ownership
+# it understands least. It logs and raises a cluster event so the leak is
+# visible while it is still cheap to investigate.
+#
+# Set LVOL_MONITOR_ORPHAN_CHECK=0 to disable.
+LVOL_MONITOR_ORPHAN_CHECK = str(
+    os.getenv("LVOL_MONITOR_ORPHAN_CHECK", "1")).lower() in ("1", "true", "yes")
+
+# One full lvol+snapshot read per cluster per sweep, once a day.
+LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC = int(
+    os.getenv("LVOL_MONITOR_ORPHAN_CHECK_INTERVAL_SEC", "86400"))
+
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
 # Shorter interval + lower ceiling for node/device restart tasks.  Restart
@@ -244,29 +272,15 @@ RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
 RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
 
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
-# per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
-# CLUSTER_ADD_LOCK_HEARTBEAT_SEC; a lock whose heartbeat is older than
-# CLUSTER_ADD_LOCK_TTL_SEC is treated as abandoned (holder crashed) and may be
-# reclaimed. TTL is kept well under TASK_LEASE_TTL_SEC so a dead holder's lock
-# is reclaimed before its task lease, and is several heartbeats wide so a live
-# (but momentarily slow) holder is never falsely preempted. The slow part of
-# add_node (SPDK boot) is OUTSIDE this lock, so the locked section is short.
-CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
-CLUSTER_ADD_LOCK_TTL_SEC = 120
-
-# Cluster creation concurrency: add_cluster()'s duplicate-name check
-# (does a cluster named X already exist?) is otherwise a plain read-then-write
-# with no atomicity, so concurrent/retried create calls for the same name can
-# all pass the check before any of them has committed — observed 2026-07-28:
-# a control-plane readiness flap caused the operator to retry cluster-create
-# ~6 times in a burst, producing 6 separate "simplyblock-cluster" records
-# instead of one. A ClusterCreateLock keyed by name serializes create attempts
-# for that name; no heartbeat (create is a single synchronous call, not a
-# long-lived section), just a generous TTL so a crashed holder's lock is
-# eventually reclaimable. Sized above add_cluster's worst realistic runtime
-# (the first-cluster bootstrap path retries opensearch/graylog up to ~150s
-# each, sequentially).
-CLUSTER_CREATE_LOCK_TTL_SEC = 600
+# per cluster behind a DbLock named "cluster_add/<cluster_id>". Cluster
+# creation is serialized per name behind "cluster_create/<name>", because
+# add_cluster()'s duplicate-name check is a plain read-then-write: concurrent
+# retries for one name can all pass it before any of them commits (2026-07-28:
+# an operator retry burst produced 6 "simplyblock-cluster" records).
+#
+# Neither takes a lease constant here — DbLock's LEASE_SEC covers crash
+# detection for every lock, and a live holder heartbeats for as long as its
+# section runs. Only the wait timeout below is per-call-site.
 
 # How long a queued add_node waits for the lock before failing for retry.
 # "Short" is relative: one mesh section takes minutes on a 32-node cluster,
@@ -281,6 +295,16 @@ CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
 # persisting the node record (which spans the SPDK boot), so a live add never
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
+
+# add_node_add_task's dedup check (by node_addr) is itself a plain
+# read-then-write: two concurrent posts for one host can both pass it before
+# either commits, queuing two FN_NODE_ADD tasks for the same host (the
+# create-time twin of the cluster_add mesh race above). Serialized per
+# (cluster, node_addr) behind "node_add_task/<cluster_id>/<node_addr>". Short,
+# unlike CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC: the guarded section is a couple of
+# FDB round trips, not the mesh section of add_node itself, so a waiter only
+# needs to outlast the holder's own read-then-write.
+NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC = 10
 
 # Snapshot create concurrency: the primary-create + replica-register sequence of
 # a snapshot is serialized per lvstore behind an LVStoreMutationLock so that
@@ -367,7 +391,32 @@ INSTANCE_STORAGE_DATA = {
         'm6id.8xlarge': {'number_of_devices': 1, 'size_per_device_gb': 1900},
     }
 
-MAX_SNAP_COUNT = 100
+# ---------------------------------------------------------------------------
+# Hard object limits (enforced on every create / resize path, CLI and API).
+#
+# These are product limits, not capacity math: they bound the shapes that the
+# SPDK blobstore/lvol layer has been validated to serve without degradation.
+#
+# MAX_LVOL_SIZE            largest provisioned size of one volume (create,
+#                          resize, clone --resize, and the thin max_size ceiling).
+# MAX_SNAPSHOTS_PER_LVOL   active (non-deleted) snapshots of one volume. A
+#                          volume's snapshots form one blob chain; every
+#                          snapshot deepens the chain that reads of that volume
+#                          and its clones must walk.
+# MAX_CLONES_PER_SNAPSHOT  active (non-deleted) clones created from one
+#                          snapshot.
+#
+# Deleted objects never count; objects in deletion still do (they are still in
+# the chain until the delete completes). Internal snapshots (replication /
+# migration, SnapShot.TYPE_INTERNAL) are exempt from the snapshot cap so a
+# volume at the cap can still be replicated and migrated -- they are transient.
+# ---------------------------------------------------------------------------
+MAX_LVOL_SIZE = 70 * 1024 ** 4          # 70 TiB
+MAX_SNAPSHOTS_PER_LVOL = 100
+MAX_CLONES_PER_SNAPSHOT = 500
+
+# Backward-compatible alias (previously defined but never enforced).
+MAX_SNAP_COUNT = MAX_SNAPSHOTS_PER_LVOL
 
 # Hard per-lvstore object cap: an lvstore serves at most this many objects
 # (lvols + clones + snapshots), counted against the lvstore's owning node.
@@ -401,6 +450,12 @@ MAX_NAMESPACES_PER_SUBSYSTEM = 50
 # believed a limit that did not hold. Ingress now rejects anything above
 # this; internal readers of an already-stored config clamp with a warning.
 MAX_SUBSYSTEMS_PER_NODE = 75
+
+# Hard cap on open-epoch members of one consistency group. The group snapshot
+# freezes I/O across every member with one bdev_lvol_snapshot_group call, so a
+# larger group widens the frozen window and the all-or-nothing rollback surface;
+# 20 keeps the freeze bounded while covering realistic multi-volume applications.
+MAX_CONSISTENCY_GROUP_MEMBERS = 20
 
 # Cross-cluster cutover: upper bound for the iterative delta-shrink phase
 # (snapshot -> wait replicated -> snapshot -> wait) before the final freeze.
@@ -473,6 +528,11 @@ REPL_XFER_INLINE_WAIT_SEC = 5.0
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
 REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
+# Delay before retrying a snapshot transfer whose transfer or finish failed:
+# base * 2^retry, capped. An immediate retry repeats whatever the target did
+# with the previous attempt.
+REPL_RETRY_BACKOFF_BASE_SEC = 15
+REPL_RETRY_BACKOFF_MAX_SEC = 600
 # Pass interval for the cutover runner while any cutover is mid-round. The
 # freeze pays for every millisecond between a transfer completing and the next
 # snapshot starting, so this must stay well under a second.
@@ -706,7 +766,7 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
 CR_GROUP = "storage.simplyblock.io"
-CR_VERSION  = "v1alpha1"
+CR_VERSION  = "v1alpha2"
 
 # Grafana alert rules read from the cluster event log rather than from Thanos,
 # provisioned by `sbctl cluster event-alerts`. The plugin id is both the folder
@@ -862,7 +922,23 @@ NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
 BACKUP_POLL_INTERVAL_SEC = 5
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
-BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"
+
+#: Longest backup chain the control plane will accept.
+#:
+#: Bounded by the data plane, not policy: bdev_lvol_s3_backup and
+#: bdev_lvol_s3_recovery refuse a longer chain (RPC_MAX_S3_IDS in
+#: vbdev_lvol_rpc.c). Raising this alone turns every backup and restore of a
+#: longer chain into an RPC error.
+#:
+#: 40 is also where the policy argument lands: a restore reads the whole chain in
+#: one operation, so its length multiplies restore time and objects fetched.
+BACKUP_MAX_CHAIN_LENGTH = 40
+
+#: Upper bound on a backup's s3_id. The data plane packs it into bits 33..62 of
+#: the synthetic bdev offset (S3_ID_BITS in spdk_internal/lvolstore.h) and masks
+#: rather than validates, so a larger value silently aliases onto another
+#: backup's object keys.
+BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
 # --- Failback-cutover constants from PR #1276 (reconcile-1276) ---

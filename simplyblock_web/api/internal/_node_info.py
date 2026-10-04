@@ -21,13 +21,13 @@ multi-megabyte core dump, so it should not happen once per import.
 """
 import functools
 import os
-from typing import Any, TypedDict
 from collections.abc import Callable
+from typing import Any, TypedDict
 
 import cpuinfo
 import requests
 
-from simplyblock_core import shell_utils
+from simplyblock_core.utils import shell as shell_utils
 
 
 class StaticNodeInfo(TypedDict):

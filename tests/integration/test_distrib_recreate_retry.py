@@ -57,7 +57,7 @@ class TestDistribRecreateRetry(unittest.TestCase):
         cluster = MagicMock(full_page_unmap=False)
         MockDB.return_value.get_cluster_by_id.return_value = cluster
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_distrib_create.side_effect = create_effects
         rpc.bdev_raid_create.return_value = True
         snode = _snode()

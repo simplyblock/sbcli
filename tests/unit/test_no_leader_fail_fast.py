@@ -104,8 +104,8 @@ class TestSnapshotFindLvsLeaderGate(unittest.TestCase):
             probe.assert_not_called()
 
     def test_scan_miss_delegates_to_failover_helper(self):
-        from simplyblock_core.controllers import lvol_controller
         from simplyblock_core import storage_node_ops
+        from simplyblock_core.controllers import lvol_controller
         with patch.object(lvol_controller, "is_node_leader", return_value=False), \
              patch.object(storage_node_ops, "find_leader_with_failover",
                           return_value=(None, [])) as failover:
@@ -114,8 +114,8 @@ class TestSnapshotFindLvsLeaderGate(unittest.TestCase):
             failover.assert_called_once_with(self.nodes, "LVS_1")
 
     def test_scan_hit_returns_leader_without_delegation(self):
-        from simplyblock_core.controllers import lvol_controller
         from simplyblock_core import storage_node_ops
+        from simplyblock_core.controllers import lvol_controller
         with patch.object(lvol_controller, "is_node_leader",
                           side_effect=[False, True]), \
              patch.object(storage_node_ops, "find_leader_with_failover") as failover:

@@ -1,6 +1,5 @@
 from simplyblock_core.db_controller import DBController
 
-
 TARGET_NODE = "7934a434-382e-4f09-be26-42057e7d885c"
 CTRLS = [
     "remote_alceml_b398e52f-6bc9-467a-818d-10ab09ec75c4",
@@ -18,10 +17,13 @@ def main():
     rpc = node.rpc_client()
     print(f"node={node.get_id()} {node.mgmt_ip}:{node.rpc_port}")
     for ctrl in CTRLS:
-        ret, err = rpc.bdev_nvme_controller_list_2(ctrl)
-        print(f"ctrl={ctrl} ret={ret} err={err}")
+        try:
+            ret = rpc.bdev_nvme_controller_list(ctrl)
+            print(f"ctrl={ctrl} ret={ret}")
+        except Exception as exc:
+            print(f"ctrl={ctrl} error={exc}")
     for bdev in BDEVS:
-        ret = rpc.get_bdevs(bdev)
+        ret = rpc.bdev_get(bdev)
         print(f"bdev={bdev} present={bool(ret)}")
 
 

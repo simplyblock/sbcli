@@ -5,7 +5,6 @@ from typing import Annotated, Any, Literal
 from pydantic import BeforeValidator, Field, PlainSerializer, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 _VERIFY_MODE_TO_STR = {
     ssl.CERT_NONE: "disabled",
     ssl.CERT_OPTIONAL: "optional",

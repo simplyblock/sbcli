@@ -73,6 +73,28 @@ def test_first_failback_delta_chains_onto_the_failover_point(monkeypatch):
         "first fail-back delta would land unchained -> reads delta + zeros")
 
 
+def test_later_snapshots_of_a_clone_chain_onto_the_sibling_not_the_origin(monkeypatch):
+    """The real test bed, 2026-10-01: snapshot_controller.add stamps
+    snap_ref_id = the clone's origin on EVERY snapshot of a failed-over
+    volume. The second and later deltas must still chain onto the previous
+    sibling; honouring snap_ref_id first chained all of them onto the
+    fail-over point (a star), and the next relocate cloned a volume with
+    holes from the star's tip."""
+    origin_remote = _snap("ORIGIN_REMOTE", _LVol("LVX", node_id="N2"), created_at=10)
+    origin = _snap("ORIGIN", _LVol("LVX", node_id="N2"), created_at=10,
+                   target_repl="ORIGIN_REMOTE")
+    clone = _LVol("CLONE", cloned_from="ORIGIN")
+    first = _snap("FIRST", clone, created_at=100, target_repl="FIRST_REMOTE")
+    first.snap_ref_id = "ORIGIN"
+    second = _snap("SECOND", clone, created_at=200)
+    second.snap_ref_id = "ORIGIN"
+    monkeypatch.setattr(sr, "db", _DB([origin_remote, origin, first, second], lvols=[clone]))
+    prev = sr._previous_replicated_snapshot(second, replicate_to_source=False)
+    assert prev is first
+    # ...while the FIRST delta, with no sibling, still chains onto the origin.
+    assert sr._previous_replicated_snapshot(first, replicate_to_source=False) is origin
+
+
 def test_later_failback_snapshots_still_use_the_sibling(monkeypatch):
     clone = _LVol("CLONE", cloned_from="N1_COPY")
     n1_copy = _snap("N1_COPY", _LVol("ORIG_VOL"), created_at=50)

@@ -6,21 +6,25 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, RootModel
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_model import LVol
 
-from ...._dependencies import Cluster, StoragePool, Volume
-from ...._dtos import BackupDTO, VolumeDTO, SnapshotDTO
-from ...._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .... import util
+from ...._dependencies import Cluster, StoragePool, Volume
+from ...._dtos import BackupDTO, SnapshotDTO, VolumeDTO
+from ...._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .replication import (
     api as replication_api,
+)
+from .replication import (
     apply_policy as apply_replication_policy,
+)
+from .replication import (
     collection_api as replication_collection_api,
 )
-
 
 api = APIRouter()
 db = DBController()
@@ -55,7 +59,7 @@ class _CreateParams(BaseModel):
     pvc_name: str | None = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
-    allowed_hosts: builtins.list[str] | None = None
+    allowed_hosts: builtins.list[util.NQN] | None = None
     fabric: str = "tcp"
     # None → resolved by add_lvol_ha: a shareable default for namespaced
     # volumes, 1 otherwise.
@@ -65,6 +69,10 @@ class _CreateParams(BaseModel):
     # Optional replication policy (id or name): assigning it at create time
     # configures replication for the volume.
     replication_policy: str | None = None
+    # Optional consistency group (name): the volume joins the group at creation,
+    # pinned to the group's node/LVS (design §4.1, §10). The CSI provisioner
+    # passes the PVC's storage.simplyblock.io/consistency-group label here.
+    consistency_group: str | None = None
     encrypt: bool = False
 
 
@@ -75,6 +83,10 @@ class _CloneParams(BaseModel):
     pvc_name: str | None = None
     pvc_namespace: str | None = None
     delete_snap_on_lvol_delete: bool = False
+    # Optional consistency group (name): the clone joins the group at creation,
+    # forming it from the first clone (design §7.2). The CSI restore path
+    # forwards the restore PVC's storage.simplyblock.io/consistency-group label.
+    consistency_group: str | None = None
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
@@ -85,7 +97,10 @@ def add(
 ) -> Response:
     data = parameters.root
     try:
-        db.get_lvol_by_name(data.name)
+        # Scoped to this pool, which is where the name has to be unique: the
+        # unscoped lookup rejected a name any OTHER pool happened to use, and
+        # raised on a name two pools shared.
+        db.get_lvol_by_name(data.name, pool.get_id(), include_deleted=True)
         raise HTTPException(409, f'Volume {data.name} exists')
     except KeyError:
         pass
@@ -116,6 +131,7 @@ def add(
             do_replicate=data.do_replicate,
             replication_cluster_id=data.replication_cluster_id,
             replication_policy=data.replication_policy,
+            consistency_group=data.consistency_group,
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
@@ -125,12 +141,17 @@ def add(
             pvc_name=data.pvc_name,
             pvc_namespace=data.pvc_namespace,
             delete_snap_on_lvol_delete=data.delete_snap_on_lvol_delete,
+            consistency_group=data.consistency_group,
         )
     else:
         raise AssertionError('unreachable')
 
     if volume_id_or_false == False:  # noqa
-        raise ValueError(error)
+        # The controller's refusal reason (a full consistency group, a placement
+        # conflict) is the user's only actionable message: a bare ValueError
+        # surfaces as an opaque 500 through the CSI provisioner, and the PVC
+        # event reads "Internal Server Error" (2026-09-11, the 21st member).
+        raise HTTPException(422, error)
 
     return util.creation_response(
         request, response_format,
@@ -209,7 +230,7 @@ def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
 
 class _AddHostParams(BaseModel):
-    host_nqn: str
+    host_nqn: util.NQN
 
 
 @instance_api.post('/hosts', name='clusters:storage-pools:volumes:add-host', status_code=201)
@@ -282,8 +303,7 @@ def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volu
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
-        in db.get_snapshots()
-        if snapshot.lvol is not None and snapshot.lvol.get_id() == volume.get_id()
+        in db.get_snapshots_by_lvol_id(volume.get_id())
     ]
 
 

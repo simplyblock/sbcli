@@ -24,7 +24,7 @@ While the expansion runs, the locks live elsewhere: every migration
 runner defers its tasks while a cluster-expand task is open (they may be
 QUEUED — e.g. by an unexpected node outage mid-expansion — but never run
 before the expansion completes; see
-``tasks_controller.defer_task_for_expansion``), ``shutdown_storage_node``
+``migration_task_common.require_active_cluster``), ``shutdown_storage_node``
 refuses shutdowns during IN_EXPANSION, the executor holds a restart-phase
 gate on each donor (queueing create/delete/resize for the affected LVS),
 and the donors' outbound hublvol connections are dropped up-front (see
@@ -43,7 +43,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-
 
 logger = utils.get_logger(__name__)
 
@@ -77,7 +76,7 @@ EXPANSION_IMPACTED_NODE_TASK_FNS = frozenset({
 
 #: Subset of the blocking families that DEFER on an open cluster-expand task
 #: (their runners suspend while the expansion is in progress — see
-#: ``tasks_controller.defer_task_for_expansion``). A RESUME of an in-progress
+#: ``migration_task_common.require_active_cluster``). A RESUME of an in-progress
 #: plan tolerates open tasks from these families: they are typically the
 #: recovery migrations queued by an unexpected node outage mid-expansion,
 #: and they wait for us, not the other way around (required order: expansion

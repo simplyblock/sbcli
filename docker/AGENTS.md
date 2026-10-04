@@ -28,6 +28,7 @@ docker run --rm IMG python3 -c 'import sys; print(sys.version, sys.prefix, sys._
 docker run --rm IMG sudo -E python3 -c 'import sys; print(sys.prefix)'   # must be /opt/venv
 docker run --rm IMG sbctl --version
 docker run --rm IMG simplyblock-service --help
+docker run --rm IMG simplyblock-task-runner --help
 ```
 
 ## Stages and caching
@@ -47,8 +48,8 @@ in `.github/workflows/docker-image*.yml`). There is deliberately no separate pre
 
 Because the `base` stage pins packages by name only, that cache would otherwise serve the same
 `dnf` resolution forever and never pick up a security update. The `CACHE_KEY` build arg exists to
-break it: every workflow passes `date -u +%G-W%V` (ISO year and week), so the OS-package layers
-are rebuilt from scratch once a week and an upstream fix reaches the image within seven days.
+break it: every workflow passes `date -u +%F` (the UTC date), so the OS-package layers
+are rebuilt from scratch once a day and an upstream fix reaches the image within 24 hours.
 `build_image.sh` passes the same value. To force a refresh out of band, pass any other value:
 
 ```bash
@@ -61,7 +62,7 @@ and the tooling caches out of the build context, so editing any of them does not
 image's source layer. It also excludes virtualenvs, which would otherwise smuggle an outdated
 `pip`/`setuptools` into the image for the scanners to find.
 
-`security.yml` deliberately uses the *same* weekly key rather than a fresh one — the scan has to
+`security.yml` deliberately uses the *same* daily key rather than a fresh one — the scan has to
 report on the packages that are actually shipped. Rebuilding it against fresher packages would
 let the scan go green while the published image still carries the vulnerability.
 
@@ -98,9 +99,10 @@ let the scan go green while the published image still carries the vulnerability.
   This is compatibility scaffolding with a defined exit. The packaging half is already done —
   `uv sync --no-editable` installs cleanly and every data file (`env_var`, `scripts/**`,
   `templates/**`, dashboards) resolves from `site-packages`, so nothing in the wheel blocks the
-  switch. The only thing left is the consumers: once they all use the `simplyblock-service` /
-  `sbctl` entry points, the change is `uv sync --locked --no-editable` in the builder plus
-  dropping `COPY . /app` from the runtime stage. Remaining offenders:
+  switch. The only thing left is the consumers: once they all use the `simplyblock-task-runner` /
+  `simplyblock-service` / `sbctl` entry points, the change is `uv sync --locked --no-editable` in
+  the builder plus dropping `COPY . /app` from the runtime stage. The compose file's task runners
+  and `cluster_ops.py`'s runner services are already off the paths. Remaining offenders:
 
   ```bash
   # from the sbcli repository root, not from docker/
@@ -116,8 +118,10 @@ let the scan go green while the published image still carries the vulnerability.
 - **No compiler toolchain, no `python3-pip`.** Every dependency resolves to a `cp314t` wheel and
   `foundationdb` is a pure-Python sdist, so nothing needs to compile. If a future dependency has
   no free-threaded wheel the build fails loudly — that is the intended signal, not a reason to add
-  `gcc` back. `uv` creates the venv without `pip`/`setuptools`/`wheel`, so there is nothing to
-  uninstall and no vendored pip bundle for the image scan to flag.
+  `gcc` back. `uv` creates the venv without `pip`/`setuptools`/`wheel`, but the managed
+  interpreter under `/opt/python` ships its own `pip`, so the builder stage deletes it right
+  after `uv python install`. That keeps pip's vendored bundle (urllib3, msgpack, setuptools) out
+  of the image, so the scan has no `.trivyignore` to maintain — do not re-add one for pip.
 
 - **No `RUN --mount=type=cache`.** Cache mounts are not exported to the `gha` or `registry` cache
   backends, so on a fresh CI runner they are never populated.

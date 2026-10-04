@@ -13,7 +13,7 @@ Covers:
 
 import json
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from pydantic import SecretStr
 
@@ -233,7 +233,7 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
         rpc.bdev_wait_for_examine.return_value = True
         # SPDK bdev_get_bdevs payload – the only md-relevant field is the
         # top-level uint32 md_size set by spdk_bdev_get_md_size.
-        bdev_payload = [{
+        bdev_payload = {
             'name': 'nvmeX_n1',
             'block_size': 4096,
             'num_blocks': 100 * 1024 * 1024 // 4096,  # 100 MiB
@@ -247,8 +247,8 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
                     },
                 }],
             },
-        }]
-        rpc.get_bdevs.return_value = bdev_payload
+        }
+        rpc.bdev_get.return_value = bdev_payload
         return rpc
 
     def _make_snode(self):
@@ -288,7 +288,7 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
         rpc = MagicMock()
         rpc.bdev_nvme_controller_list.return_value = []
         rpc.bdev_nvme_controller_attach.return_value = ["nvmeX_n1"]
-        rpc.get_bdevs.return_value = [{
+        rpc.bdev_get.return_value = {
             'name': 'nvmeX_n1',
             'block_size': 4096,
             'num_blocks': 100 * 1024 * 1024 // 4096,
@@ -298,7 +298,7 @@ class TestAddNvmeDevicesMd(unittest.TestCase):
                     'ctrlr_data': {'model_number': 'M', 'serial_number': 'S'},
                 }],
             },
-        }]
+        }
         snode = self._make_snode()
         devs = utils.addNvmeDevices(rpc, snode, ["0000:00:01.0"])
         self.assertEqual(devs[0].md_size, 0)

@@ -217,12 +217,13 @@ class RpcServerSim:
             b.examined = True
         return True
 
-    def get_bdevs(self, name=None, **_):
-        if name is None:
-            return [{"name": b.name, "aliases": []} for b in self.bdevs.values()]
+    def bdev_list(self, **_):
+        return [{"name": b.name, "aliases": []} for b in self.bdevs.values()]
+
+    def bdev_get(self, name=None, **_):
         if name in self.bdevs:
-            return [{"name": name, "aliases": []}]
-        return []
+            return {"name": name, "aliases": []}
+        return None
 
     # -- Subsystem operations -----------------------------------------------
 

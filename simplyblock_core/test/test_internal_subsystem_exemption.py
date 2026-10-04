@@ -11,12 +11,12 @@ that would have released the slots.
 Internal volumes are still COUNTED, so a user create continues to see true
 occupancy; they are only exempt from being refused.
 """
-import pytest
 from typing import ClassVar
+
+import pytest
 
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
-
 
 NODE_ID = "NODE1"
 NODE_MAX = 3

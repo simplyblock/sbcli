@@ -12,8 +12,7 @@ they never share nodes, so the source/target path sets never overlap — the ANA
 choreography is the simple "no-overlap" case (target primary → optimized, other
 target paths → non_optimized, all source paths → inaccessible).
 """
-from simplyblock_core import xfer_timing
-from simplyblock_core import db_controller, utils
+from simplyblock_core import db_controller, utils, xfer_timing
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
@@ -141,7 +140,7 @@ def _transfer_hub_live(tgt_node):
         return False
     try:
         rpc_client = tgt_node.rpc_client()
-        if not rpc_client.get_bdevs(hub.bdev_name):
+        if not rpc_client.bdev_get(hub.bdev_name):
             logger.info("Transfer hublvol bdev %s missing on %s (restart wipes SPDK "
                         "state); recreating", hub.bdev_name, tgt_node.get_id())
             return False
@@ -185,7 +184,7 @@ def ensure_hub_attached(src_rpc, tgt_node):
 
     hub = tgt_node.transfer_hublvol
     # Already attached (prior iteration or crash recovery).
-    if src_rpc.get_bdevs(hub.get_remote_bdev_name()):
+    if src_rpc.bdev_get(hub.get_remote_bdev_name()):
         return hub.bdev_name, hub.get_remote_bdev_name(), None
 
     for iface in tgt_node.data_nics:

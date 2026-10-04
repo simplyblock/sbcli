@@ -3,11 +3,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-
 from simplyblock_core import constants, db_controller, utils
+from simplyblock_core.controllers import snapshot_controller, snapshot_events
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.controllers import (
-    snapshot_events, snapshot_controller)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
@@ -160,14 +158,12 @@ def process_snap_delete_finish(snap, completed_node):
         # between loses nothing: worst case the hand-off is repeated. No delete
         # event here -- the snapshot is not gone until its last copy is, which
         # is the branch below.
-        db.unindex_snapshot(snap)
         snap.remove(db.kv_store)
         snode = db.get_storage_node_by_id(new_main_instance.lvol.node_id)
         logger.info(f"Process Snapshot delete on node {snode.get_id()}")
         process_snap_delete(new_main_instance, snode)
     else:
         snapshot_events.snapshot_delete(snap)
-        db.unindex_snapshot(snap)
         snap.remove(db.kv_store)
 
 
@@ -243,7 +239,7 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
                 ret = None
             if ret:
                 lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                if lvs_info.get('lvs leadership'):
                     leader_node = snode
 
         if not leader_node:
@@ -264,7 +260,7 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
                 if not ret:
                     continue
                 lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                if lvs_info.get('lvs leadership'):
                     leader_node = sec_node
                     break
         if leader_node is not None and leader_cache is not None:

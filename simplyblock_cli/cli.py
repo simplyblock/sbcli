@@ -28,6 +28,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
+        self.init_consistency_group()
         self.init_backup()
         self.init_qos()
         self.init_db_backup()
@@ -105,8 +106,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model.', type=str, default='', dest='size_range', required=False)
         subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
         subcommand.add_argument('--lblk', help='Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition.', dest='lblk', action='store_true')
-        subcommand.add_argument('--blk-names', help='Comma separated list of block device names to use, like sdb,sdc (requires --lblk). Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
-        subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block device names to exclude, like sda (requires --lblk). All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
+        subcommand.add_argument('--blk-names', help='Comma separated list of block devices to use (requires --lblk). Each entry is a persistent /dev/disk name, such as /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 or /dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba. A kernel name (sdb) or kernel path (/dev/sdb) is refused: it states a position in this boot\'s enumeration order, and the selection is resolved again at every node restart, so it names another disk after a reboot that probes the controllers in another order. Use --blk-serials for a device udev published no persistent name for. Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
+        subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block devices to exclude (requires --lblk), spelled the way --blk-names takes them. All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
         subcommand.add_argument('--blk-serials', help='Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk).', type=str, default='', dest='blk_serials', required=False)
         subcommand.add_argument('--jm-percent', help='Journal size in percent of the node\'s total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`.', type=int, default=3, dest='jm_percent', required=False)
         subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format.', dest='force', action='store_true')
@@ -384,6 +385,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
         self.init_cluster__upgrade_complete(subparser)
+        self.init_cluster__build_indices(subparser)
+        self.init_cluster__index_state(subparser)
+        self.init_cluster__check_indices(subparser)
         self.init_cluster__graceful_shutdown(subparser)
         self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
@@ -465,6 +469,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
         subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
+        subcommand.add_argument('--cluster-vip', help='Cluster Virtual IP, this is the load balancer IP or domain, would be used for the cluster logging ingress.', type=str, dest='cluster_vip')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster.')
@@ -592,6 +597,19 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__upgrade_complete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'upgrade-complete', 'Completes a cluster upgrade.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__build_indices(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'build-indices', 'Backfills the database\'s secondary indices.')
+
+    def init_cluster__index_state(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'index-state', 'Shows or switches the state of the database\'s secondary indices.')
+        subcommand.add_argument('index', help='The index to act on, as <Class>.<index> (e.g. LVol.node_id). Omit to list them all.', type=str, nargs='?')
+        subcommand.add_argument('--set', help='Switch the named index to this state.', type=str, dest='state', choices=['building','disabled',])
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__check_indices(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'check-indices', 'Verifies the database\'s secondary indices.')
+        subcommand.add_argument('--repair', help='Write back the entries that can be derived from the records, and clear orphaned ones, instead of only reporting them.', dest='repair', action='store_true')
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
@@ -781,6 +799,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `0`.', type=int, default=0, dest='ndcs')
         subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `0`.', type=int, default=0, dest='npcs')
         subcommand.add_argument('--replication-policy', help='Replication policy (id or name) to assign at create time. Configures replication for this volume.', type=str, dest='replication_policy')
+        subcommand.add_argument('--consistency-group', help='Consistency group name to join at create time. The volume is pinned to the group\'s node/LVS; the first labeled volume pins the group.', type=str, dest='consistency_group')
         subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
 
     def init_volume__qos_set(self, subparser):
@@ -1086,6 +1105,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--node-id', '-n', help='List snapshots for a specific node uuid', type=str, dest='node_id', required=False)
         subcommand.add_argument('--pool', '-p', help='List snapshots in particular pool id or name.', type=str, dest='pool')
         subcommand.add_argument('--cluster-id', '-c', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
+        subcommand.add_argument('--consistency-group', '-g', help='Filter snapshots to one consistency group (id or uuid).', type=str, dest='consistency_group', required=False)
         subcommand.add_argument('--with-details', '-w', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
         subcommand.add_argument('--json', '-j', help='List snapshots in JSON format', dest='json', action='store_true')
 
@@ -1128,20 +1148,72 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
 
 
+    def init_consistency_group(self):
+        subparser = self.add_command('consistency-group', 'Consistency Group Commands', aliases=['cg',])
+        self.init_consistency_group__list(subparser)
+        self.init_consistency_group__members(subparser)
+        self.init_consistency_group__add_member(subparser)
+        self.init_consistency_group__remove_member(subparser)
+        self.init_consistency_group__snapshot_take(subparser)
+        self.init_consistency_group__snapshot_list(subparser)
+        self.init_consistency_group__snapshot_delete(subparser)
+        self.init_consistency_group__clone(subparser)
+
+
+    def init_consistency_group__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'List the cluster\'s consistency groups.')
+        subcommand.add_argument('cluster_id', help='Cluster UUID.', type=str)
+        subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_consistency_group__members(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'members', 'List the current members of a consistency group.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_consistency_group__add_member(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add-member', 'Join an EXISTING volume to a consistency group. The volume must live on the group\'s pinned node/LVS and in the members\' storage pool; a volume that once left the group cannot rejoin (membership is one-way).')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('lvol_id', help='The logical volume id to join.', type=str)
+
+    def init_consistency_group__remove_member(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'remove-member', 'Detach a member from a consistency group: closes its epoch one-way, preserving its snapshots in prior generations. The volume itself is untouched.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('lvol_id', help='The logical volume id to detach.', type=str)
+
+    def init_consistency_group__snapshot_take(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'snapshot-take', 'Take ONE crash-consistent snapshot generation across every current member.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+
+    def init_consistency_group__snapshot_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'snapshot-list', 'List a consistency group\'s snapshot generations with expected-versus-present member counts.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('--json', '-j', help='Print output in JSON format.', dest='json', action='store_true')
+
+    def init_consistency_group__snapshot_delete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'snapshot-delete', 'Delete one generation and all its member snapshots; never the group.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('seq', help='The generation number (group_seq) to delete.', type=int)
+
+    def init_consistency_group__clone(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clone', 'Clone every member snapshot of a generation into a new volume, optionally forming a new group.')
+        subcommand.add_argument('group_id', help='Consistency group id (or uuid).', type=str)
+        subcommand.add_argument('seq', help='The generation number (group_seq) to clone.', type=int)
+        subcommand.add_argument('--into', help='Name of the new consistency group to form from the clones. When omitted, the clones are independent volumes.', type=str, dest='into', required=False)
+
+
     def init_backup(self):
         subparser = self.add_command('backup', 'Backup Commands')
         self.init_backup__list(subparser)
         self.init_backup__delete(subparser)
         self.init_backup__restore(subparser)
         self.init_backup__export(subparser)
+        self.init_backup__discover(subparser)
         self.init_backup__import(subparser)
         self.init_backup__policy_add(subparser)
         self.init_backup__policy_remove(subparser)
         self.init_backup__policy_list(subparser)
         self.init_backup__policy_attach(subparser)
         self.init_backup__policy_detach(subparser)
-        self.init_backup__source_list(subparser)
-        self.init_backup__source_switch(subparser)
 
 
     def init_backup__list(self, subparser):
@@ -1158,17 +1230,37 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--lvol', help='The new logical volume name.', type=str, dest='lvol_name', required=True)
         subcommand.add_argument('--pool', help='The target pool name or id.', type=str, dest='pool', required=True)
         subcommand.add_argument('--node', help='The target storage node id.', type=str, dest='node')
+        subcommand.add_argument('--access-key-id', help='Access key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='secret_access_key')
 
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore.')
         subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('--backup-id', help='Export the chain ending at this backup and nothing else, which is the unit a restore needs.', type=str, dest='backup_id')
         subcommand.add_argument('--lvol', help='Filter exports to a specific logical volume name.', type=str, dest='lvol_name')
         subcommand.add_argument('-o', '--output', help='The output file path.', type=str, dest='output')
 
+    def init_backup__discover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'discover', 'List the backups a bucket contains, reading its manifests. Needs no cluster.')
+        subcommand.add_argument('--bucket', help='The bucket holding the backups.', type=str, dest='bucket', required=True)
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
+
     def init_backup__import(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'import', 'Import backup metadata from a JSON file.')
-        subcommand.add_argument('metadata_file', help='The path to JSON metadata file.', type=str)
+        subcommand = self.add_sub_command(subparser, 'import', 'Register the backups held in a bucket into this cluster.')
         subcommand.add_argument('--cluster-id', help='The target cluster to import into (required for cross-cluster restore).', type=str, dest='cluster_id')
+        subcommand.add_argument('--bucket', help='Import every backup in this bucket. Give this or --from-file, not both.', type=str, dest='bucket')
+        subcommand.add_argument('--from-file', help='Import the backups in this file, from \'backup export\'. It records which bucket each one lives in, so --bucket is neither needed nor accepted.', type=str, dest='from_file')
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
 
     def init_backup__policy_add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-add', 'Create a new backup policy.')
@@ -1197,15 +1289,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('policy_id', help='The backup policy id.', type=str)
         subcommand.add_argument('target_type', help='The target type.', type=str, choices=['pool','lvol',])
         subcommand.add_argument('target_id', help='The target id (storage pool or logical volume id).', type=str)
-
-    def init_backup__source_list(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'source-list', 'List backup sources (local and imported clusters).')
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
-
-    def init_backup__source_switch(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'source-switch', 'Switch the active S3 backup source to a different cluster. Use \'local\' or the local cluster id to switch back.')
-        subcommand.add_argument('source_cluster_id', help='The source cluster id or \'local\'.', type=str)
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
 
 
     def init_qos(self):
@@ -1498,6 +1581,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__update(sub_command, args)
                 elif sub_command in ['upgrade-complete']:
                     ret = self.cluster__upgrade_complete(sub_command, args)
+                elif sub_command in ['build-indices']:
+                    ret = self.cluster__build_indices(sub_command, args)
+                elif sub_command in ['index-state']:
+                    ret = self.cluster__index_state(sub_command, args)
+                elif sub_command in ['check-indices']:
+                    ret = self.cluster__check_indices(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['restart']:
@@ -1704,6 +1793,27 @@ class CLIWrapper(CLIWrapperBase):
                 else:
                     self.parser.print_help()
 
+            elif args.command in ['consistency-group', 'cg']:
+                sub_command = args_dict['consistency-group']
+                if sub_command in ['list']:
+                    ret = self.consistency_group__list(sub_command, args)
+                elif sub_command in ['members']:
+                    ret = self.consistency_group__members(sub_command, args)
+                elif sub_command in ['add-member']:
+                    ret = self.consistency_group__add_member(sub_command, args)
+                elif sub_command in ['remove-member']:
+                    ret = self.consistency_group__remove_member(sub_command, args)
+                elif sub_command in ['snapshot-take']:
+                    ret = self.consistency_group__snapshot_take(sub_command, args)
+                elif sub_command in ['snapshot-list']:
+                    ret = self.consistency_group__snapshot_list(sub_command, args)
+                elif sub_command in ['snapshot-delete']:
+                    ret = self.consistency_group__snapshot_delete(sub_command, args)
+                elif sub_command in ['clone']:
+                    ret = self.consistency_group__clone(sub_command, args)
+                else:
+                    self.parser.print_help()
+
             elif args.command in ['backup']:
                 sub_command = args_dict['backup']
                 if sub_command in ['list']:
@@ -1714,6 +1824,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__restore(sub_command, args)
                 elif sub_command in ['export']:
                     ret = self.backup__export(sub_command, args)
+                elif sub_command in ['discover']:
+                    ret = self.backup__discover(sub_command, args)
                 elif sub_command in ['import']:
                     ret = self.backup__import(sub_command, args)
                 elif sub_command in ['policy-add']:
@@ -1726,10 +1838,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__policy_attach(sub_command, args)
                 elif sub_command in ['policy-detach']:
                     ret = self.backup__policy_detach(sub_command, args)
-                elif sub_command in ['source-list']:
-                    ret = self.backup__source_list(sub_command, args)
-                elif sub_command in ['source-switch']:
-                    ret = self.backup__source_switch(sub_command, args)
                 else:
                     self.parser.print_help()
 

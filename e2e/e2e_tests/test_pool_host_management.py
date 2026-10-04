@@ -97,7 +97,7 @@ class TestPoolHostManagement(TestClusterBase):
             pool_name=self.pool_name,
             size="256M",
         )
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        lvol_id = self._get_lvol_id_dual(lvol_name)
         assert lvol_id, "LVOL creation failed after host management"
 
         device, mount = self._connect_and_mount_dual(
@@ -125,9 +125,6 @@ class TestPoolHostManagement(TestClusterBase):
 
         if not self.k8s_test:
             self._disconnect_and_cleanup_dual(lvol_name)
-        try:
-            self.sbcli_utils.delete_lvol(lvol_name)
-        except Exception as exc:
-            self.logger.warning(f"Cleanup delete {lvol_name}: {exc}")
+        self._delete_lvol_dual(lvol_name)
 
         self.logger.info("=== TestPoolHostManagement: ALL PASSED ===")

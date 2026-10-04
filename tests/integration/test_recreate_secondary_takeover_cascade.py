@@ -30,11 +30,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
+from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.storage_node import StorageNode
 from tests._mocks import unique_ip
-
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -358,7 +357,7 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.return_value = [
             {"lvs leadership": True, "uuid": "u", "lvs_primary": False}
         ]
-        rpc.get_bdevs.return_value = []
+        rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True
@@ -546,7 +545,7 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
                 bdev_lvol_get_lvstores=MagicMock(return_value=[
                     {"lvs leadership": True, "uuid": "u",
                      "lvs_primary": False}]),
-                get_bdevs=MagicMock(return_value=[]),
+                bdev_get=MagicMock(return_value=None),
                 bdev_lvol_set_lvs_opts=MagicMock(return_value=True),
                 bdev_lvol_set_leader=MagicMock(return_value=True),
                 bdev_wait_for_examine=MagicMock(return_value=True),

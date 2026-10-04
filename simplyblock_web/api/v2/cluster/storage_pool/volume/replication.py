@@ -5,13 +5,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from simplyblock_core.controllers import lvol_controller, replication_policy_controller
-from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
+from simplyblock_core.controllers.replication_policy_controller import (
+    ReplicationConfigError,
+)
 from simplyblock_core.models.lvol_model import LVol
 
 from .... import util
 from ...._dependencies import Cluster, StoragePool, Volume
 from ...._dtos import ReplicationMode, ReplicationRelationshipDTO, TaskDTO
-
 
 api = APIRouter(tags=['replication'])
 collection_api = APIRouter(tags=['replication'])

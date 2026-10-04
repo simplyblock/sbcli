@@ -1,10 +1,20 @@
 import threading
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
-
-from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
-from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
+from simplyblock_core import (
+    cluster_ops,
+    constants,
+    db_controller,
+    storage_node_ops,
+    utils,
+)
+from simplyblock_core.controllers import (
+    device_controller,
+    health_controller,
+    storage_events,
+    tasks_controller,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -1267,9 +1277,9 @@ def _count_data_plane_votes_uncached(node):
         # bdev_nvme_get_controllers on a `resetting` / `reconnect_is_delayed`
         # ctrlr can sit on locks during reset.
         try:
-            bdevs = peer_rpc.get_bdevs(bdev_name)
+            bdevs = peer_rpc.bdev_get(bdev_name)
         except Exception as e:
-            logger.debug("get_bdevs(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
+            logger.debug("bdev_get(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
             return
 
         if not bdevs:
@@ -1419,44 +1429,65 @@ def node_port_check_fun(snode):
     if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
         port_lvs_owner: dict = {}
+        #: Ports that are checked and fed to the leak remediation but that
+        #: must NOT contribute to this node's health verdict — see below.
+        advisory_ports: set = set()
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status != "ready":
                     continue
-                # Skip port check during failback: if the primary or the
-                # OTHER follower (sec_1 / tertiary) for this lvstore is
+                # Advisory during failback: if the primary or the OTHER
+                # follower (sec_1 / tertiary) for this lvstore is
                 # online/restarting, the port on this node may be
                 # intentionally blocked (recreate_lvstore and the port-allow
                 # failback both block follower ports for the re-wiring
-                # window). Both follower directions must be covered: a
+                # window), so a False here is not evidence that THIS node is
+                # unhealthy. Both follower directions must be covered: a
                 # restarting tertiary blocks the acting-leader secondary's
                 # port just like a restarting secondary blocks the
                 # tertiary's — checking only secondary_node_id flipped the
                 # healthy secondary DOWN during a tertiary restart.
-                skip = False
+                #
+                # The port is still CHECKED. It used to be dropped from the
+                # list altogether, which silently disabled leak detection on
+                # exactly the ports most likely to leak: k8s 2026-09-11
+                # 13:46, worker-5 held a fence on 4442 (worker-3's LVS_16)
+                # from 13:46:14. worker-3 flipped to in_restart at 13:47:05,
+                # 4442 dropped out of the list, and worker-5 "recovered" to
+                # online at 13:47:08 — not because the fence had lifted (it
+                # ran to 13:47:28) but because nobody was looking any more.
+                # The gate belongs on the verdict, not on the observation.
+                advisory = False
                 if n.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                    skip = True
+                    advisory = True
                 elif n.secondary_node_id and n.secondary_node_id != snode.get_id():
                     sec1 = db.get_storage_node_by_id(n.secondary_node_id)
                     if sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                        skip = True
-                if not skip and n.tertiary_node_id and n.tertiary_node_id != snode.get_id():
+                        advisory = True
+                if not advisory and n.tertiary_node_id and n.tertiary_node_id != snode.get_id():
                     tert = db.get_storage_node_by_id(n.tertiary_node_id)
                     if tert and tert.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                        skip = True
-                if not skip:
-                    _p = n.get_lvol_subsys_port(n.lvstore)
-                    ports.append(_p)
-                    port_lvs_owner[_p] = n.get_id()
+                        advisory = True
+                _p = n.get_lvol_subsys_port(n.lvstore)
+                ports.append(_p)
+                port_lvs_owner[_p] = n.get_id()
+                if advisory:
+                    advisory_ports.add(_p)
         if not snode.is_secondary_node:
             _p = snode.get_lvol_subsys_port(snode.lvstore)
             ports.append(_p)
             port_lvs_owner[_p] = snode.get_id()
 
-        # Batched: one nvmf_get_blocked_ports fetch answers every port.
+        # Batched: one nvmf_get_blocked_ports fetch answers every port, so
+        # carrying the advisory ports costs no extra RPC.
         try:
             port_results = health_controller.check_ports_on_node(snode, ports)
             for port, ret in port_results.items():
+                if port in advisory_ports:
+                    logger.info(
+                        f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
+                        f"(advisory: peer owns this LVS and may be fencing it)")
+                    continue
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
             _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner)
@@ -1575,7 +1606,15 @@ _blocked_port_since: dict = {}
 #: fence is expected to be resolved by the control plane) is never touched,
 #: far short of the client's ctrl_loss_tmo (30 x 2s = 60s) after which the
 #: kernel deletes the controller and the namespace starts failing IO.
-STALE_PORT_BLOCK_SEC = 25.0
+#:
+#: 25s was too close to that 60s budget to survive a missed observation: the
+#: monitor polls at ~6s, so detection at 25s plus one unblock RPC left about
+#: five ticks of margin in theory and ONE in practice, because the node has
+#: to be seen ONLINE on the same tick that crosses the threshold. 12s keeps
+#: a whole missed poll cycle inside the budget and is still ~20x longer than
+#: any legitimate fence the restart flow holds. The restart-owns-LVS gate,
+#: not this timeout, is what keeps the remediation off deliberate fences.
+STALE_PORT_BLOCK_SEC = 12.0
 
 
 def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
@@ -1632,7 +1671,7 @@ def _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner):
         except Exception:
             continue
 
-        if health_controller._restart_owns_lvs(owner):
+        if health_controller._restart_owns_lvs(owner, db):
             logger.info(
                 "Port %s on %s blocked %.0fs but a restart owns %s; leaving it",
                 port, snode.get_id(), held, owner.lvstore)
@@ -2108,15 +2147,37 @@ def _run_periodic_housekeeping(cluster_id):
 
 
 def loop_for_node(snode):
-    # global logger
-    # logger = logging.getLogger()
-    # logger_handler = logging.StreamHandler(stream=sys.stdout)
-    # logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
-    # logger.addHandler(logger_handler)
+    # Not catching errors: Failures should propagate to avoid cross-loop failures from sticking
     while True:
         check_node(snode)
         logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+
+
+#: Replacing a dead per-node thread recovers a transaction that timed out, but
+#: not an FDB client that has wedged: `db` is process-global, so a replacement
+#: thread inherits the same client and dies the same way. Past this many
+#: replacements of one node's thread inside the window, stop replacing and let
+#: the failure leave main() — the process exits and the orchestrator restarts
+#: us with a fresh client.
+THREAD_RESPAWN_WINDOW_SEC = 120
+THREAD_RESPAWN_CEILING = 5
+
+# node_id -> times this monitor replaced that node's thread, newest last.
+_thread_respawns: dict[str, list[float]] = {}
+
+
+def _record_thread_respawn(node_id) -> int:
+    """Note a replacement of ``node_id``'s thread and return how many fall
+    inside THREAD_RESPAWN_WINDOW_SEC."""
+    now = time.time()
+    recent = [
+        at for at in _thread_respawns.get(node_id, [])
+        if now - at < THREAD_RESPAWN_WINDOW_SEC
+    ]
+    recent.append(now)
+    _thread_respawns[node_id] = recent
+    return len(recent)
 
 
 def main():
@@ -2124,12 +2185,6 @@ def main():
     threads_maps: dict[str, threading.Thread] = {}
 
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()
@@ -2141,8 +2196,19 @@ def main():
             for node in nodes:
                 node_id = node.get_id()
                 if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                    if node_id in threads_maps:
+                        respawns = _record_thread_respawn(node_id)
+                        if respawns > THREAD_RESPAWN_CEILING:
+                            raise RuntimeError(
+                                f"node {node_id}: monitor thread died {respawns} times in "
+                                f"{THREAD_RESPAWN_WINDOW_SEC}s, exiting so the orchestrator "
+                                "restarts this service with a fresh FDB client")
                     logger.info(f"Creating thread for node {node_id}")
-                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t = threading.Thread(
+                        target=loop_for_node,
+                        args=(node,),
+                        daemon=True,  # prevents main thread failures from keeping the process alive
+                    )
                     t.start()
                     threads_maps[node_id] = t
                     logger.debug(threads_maps[node_id])

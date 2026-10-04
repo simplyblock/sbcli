@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3",
+#     "paramiko",
+#     "tqdm",
+# ]
+# ///
 """
 Parallel MinIO uploader with:
 - Remote + local uploads
@@ -8,17 +16,17 @@ Parallel MinIO uploader with:
 - Remote uploader accepts [src, key] OR {"src":..., "key":...}
 """
 
-import os
-import json
 import argparse
-import time
-import subprocess
+import json
+import os
 import random
+import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import paramiko
 import boto3
+import paramiko
 from boto3.s3.transfer import TransferConfig
 
 # Optional tqdm for byte-level progress

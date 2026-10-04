@@ -39,14 +39,14 @@ def _make_rpc(controller_states):
             return []
         return [{"ctrlrs": [{"state": state}]}]
 
-    def _get_bdevs(name):
+    def _bdev_get(name):
         if name == "remote_jm_xn1":
-            return []
-        return [{"name": "ctrl-bdev"}]
+            return None
+        return {"name": "ctrl-bdev"}
 
     rpc.bdev_nvme_controller_list.side_effect = _list
     rpc.bdev_nvme_attach_controller.return_value = ["ctrl-bdev"]
-    rpc.get_bdevs.side_effect = _get_bdevs
+    rpc.bdev_get.side_effect = _bdev_get
     return rpc
 
 
@@ -92,10 +92,10 @@ class TestConnectDeviceNoDetach(unittest.TestCase):
 
     def test_transient_failed_recovering_to_enabled_is_reused(self):
         # failed -> enabled (reset succeeded): controller reused, bdev
-        # returned via get_bdevs, still no detach and no re-attach.
+        # returned via bdev_get, still no detach and no re-attach.
         rpc = _make_rpc(["failed", "enabled", "enabled"])
-        rpc.get_bdevs.side_effect = None
-        rpc.get_bdevs.return_value = [{"name": "remote_jm_xn1"}]
+        rpc.bdev_get.side_effect = None
+        rpc.bdev_get.return_value = {"name": "remote_jm_xn1"}
         bdev = self._connect(rpc)
         rpc.bdev_nvme_detach_controller.assert_not_called()
         self.assertEqual(bdev, "remote_jm_xn1")

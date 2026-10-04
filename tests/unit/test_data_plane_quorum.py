@@ -21,7 +21,6 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.storage_node import StorageNode
 
-
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
@@ -50,13 +49,13 @@ def _target(uuid="target-node"):
 def _set_peer_response(peer, bdev_present, ctrl_states):
     """Wire a peer's RPCClient to return a bdev list and controller list.
 
-    ``bdev_present`` — True to return a bdev dict, False to return [].
+    ``bdev_present`` — True to return a bdev dict, False to return None.
     ``ctrl_states``  — list of state strings per path, or None to return [].
     """
     if bdev_present:
-        peer._rpc.get_bdevs.return_value = [{"name": "ignored", "aliases": []}]
+        peer._rpc.bdev_get.return_value = {"name": "ignored", "aliases": []}
     else:
-        peer._rpc.get_bdevs.return_value = []
+        peer._rpc.bdev_get.return_value = None
 
     if ctrl_states is None:
         peer._rpc.bdev_nvme_controller_list.return_value = []
@@ -132,9 +131,9 @@ class TestCountDataPlaneVotes(unittest.TestCase):
         disc, total = self._run(peers)
         self.assertEqual((disc, total), (0, 1))
 
-    def test_get_bdevs_exception_skips_peer(self):
+    def test_bdev_get_exception_skips_peer(self):
         peers = [_peer("p0"), _peer("p1")]
-        peers[0]._rpc.get_bdevs.side_effect = Exception("rpc timeout")
+        peers[0]._rpc.bdev_get.side_effect = Exception("rpc timeout")
         _set_peer_response(peers[1], bdev_present=True, ctrl_states=["enabled"])
         disc, total = self._run(peers)
         # p0 skipped (no vote), p1 enabled
@@ -142,7 +141,7 @@ class TestCountDataPlaneVotes(unittest.TestCase):
 
     def test_controller_list_exception_skips_peer(self):
         peers = [_peer("p0"), _peer("p1")]
-        peers[0]._rpc.get_bdevs.return_value = [{"name": "x"}]
+        peers[0]._rpc.bdev_get.return_value = {"name": "x"}
         peers[0]._rpc.bdev_nvme_controller_list.side_effect = Exception("stuck")
         _set_peer_response(peers[1], bdev_present=True, ctrl_states=["failed"])
         disc, total = self._run(peers)
@@ -163,8 +162,8 @@ class TestCountDataPlaneVotes(unittest.TestCase):
         peers = [_peer("p0")]
         _set_peer_response(peers[0], bdev_present=True, ctrl_states=["enabled"])
         self._run(peers)
-        peers[0]._rpc.get_bdevs.assert_called_once()
-        (arg,), _ = peers[0]._rpc.get_bdevs.call_args
+        peers[0]._rpc.bdev_get.assert_called_once()
+        (arg,), _ = peers[0]._rpc.bdev_get.call_args
         self.assertEqual(arg, "remote_jm_target-noden1")
 
     def test_controller_lookup_uses_no_namespace_suffix(self):

@@ -17,21 +17,18 @@ Tests cover:
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core import constants
 import simplyblock_core.storage_node_ops as snode_ops
+from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import (
-
-
-    generate_psk_key,
     generate_dhchap_key,
-    validate_tls_config,
+    generate_psk_key,
     validate_sec_options,
+    validate_tls_config,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -298,6 +295,7 @@ class TestRpcClientSignatures(unittest.TestCase):
 
     def test_subsystem_create_allow_any_host_param(self):
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.subsystem_create)
         self.assertIn("allow_any_host", sig.parameters)
@@ -305,6 +303,7 @@ class TestRpcClientSignatures(unittest.TestCase):
 
     def test_subsystem_add_host_security_params(self):
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.subsystem_add_host)
         for p in ["psk", "dhchap_key", "dhchap_ctrlr_key"]:
@@ -318,6 +317,7 @@ class TestRpcClientSignatures(unittest.TestCase):
     def test_bdev_nvme_set_options_no_dhchap_params(self):
         """DHCHAP moved to nvmf_set_config – bdev_nvme_set_options must not accept them."""
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.bdev_nvme_set_options)
         self.assertNotIn("dhchap_digests", sig.parameters)
@@ -326,6 +326,7 @@ class TestRpcClientSignatures(unittest.TestCase):
     def test_nvmf_set_config_dhchap_params(self):
         """nvmf_set_config must accept dhchap_digests and dhchap_dhgroups."""
         import inspect
+
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.nvmf_set_config)
         self.assertIn("dhchap_digests", sig.parameters)
@@ -1069,14 +1070,12 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         # The inflight-IO drain check on the leader must not time out.
         mock_rpc_inst.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc_inst.jc_suspend_compression.return_value = (True, None)
-        # Post-examine verification scans get_bdevs() for each expected lvol
+        # Post-examine verification scans bdev_get() for each expected lvol
         # (by uuid or lvs/bdev alias); without this the check aborts.
-        mock_rpc_inst.get_bdevs.return_value = [
-            {"name": lvol_secured.uuid,
-             "aliases": [f"{lvol_secured.lvs_name}/{lvol_secured.lvol_bdev}"]},
-            {"name": lvol_open.uuid,
-             "aliases": [f"{lvol_open.lvs_name}/{lvol_open.lvol_bdev}"]},
-        ]
+        mock_rpc_inst.bdev_get.return_value = {
+            "name": lvol_secured.uuid,
+            "aliases": [f"{lvol_secured.lvs_name}/{lvol_secured.lvol_bdev}"],
+        }
         MockRPC.return_value = mock_rpc_inst
 
         with patch.object(sec_node, 'connect_to_hublvol'):
@@ -1131,7 +1130,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc.nvmf_subsystem_add_ns.return_value = 1
         mock_rpc.nvmf_subsystem_add_listener.return_value = (True, None)
         mock_rpc.ultra21_util_get_malloc_stats.return_value = {}
-        mock_rpc.get_bdevs.return_value = [{"uuid": "u1", "driver_specific": {}}]
+        mock_rpc.bdev_get.return_value = {"uuid": "u1", "driver_specific": {}}
 
         with patch("simplyblock_core.models.storage_node.RPCClient",
                     return_value=mock_rpc):

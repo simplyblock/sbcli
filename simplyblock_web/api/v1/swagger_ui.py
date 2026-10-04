@@ -1,7 +1,7 @@
+import json
 import os
 
 import yaml
-import json
 from flask_swagger_ui import get_swaggerui_blueprint
 
 SWAGGER_URL="/swagger"

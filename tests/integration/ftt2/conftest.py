@@ -22,6 +22,7 @@ Impact per outage:
   n3 out: LVS_0 no impact,  LVS_3 pri down (TAKEOVER), LVS_2 sibling-sec down
 """
 
+import contextlib
 import os
 import time
 import uuid as _uuid_mod
@@ -35,9 +36,8 @@ from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
-from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import ClusterStatObject
-
+from simplyblock_core.models.storage_node import StorageNode
 from tests.integration.ftt2.mock_cluster import FTT2MockRpcServer
 
 NUM_NODES = 4
@@ -396,13 +396,11 @@ def create_test_lvol(env, primary_node_idx: int, name: str = "test-vol",
     """Create an LVol in FDB on the given primary node's LVS."""
     db = env['db']
     node = env['nodes'][primary_node_idx]
-    cluster = env['cluster']
 
     lvol = LVol()
     lvol.uuid = str(_uuid_mod.uuid4())
     lvol.lvol_name = name
     lvol.lvol_uuid = str(_uuid_mod.uuid4())
-    lvol.cluster_id = cluster.uuid
     lvol.node_id = node.uuid
     lvol.status = LVol.STATUS_ONLINE
     lvol.size = 1_073_741_824
@@ -489,8 +487,23 @@ def _sync_defer_remaining_attaches(self, rpc, ctrl_name, nqn, port, remaining,
 
 
 def patch_externals():
-    """Mock all external deps so restart runs purely against mock RPC servers."""
-    return [
+    """Mock all external deps so restart runs purely against mock RPC servers.
+
+    Returns an already-started ``contextlib.ExitStack``; callers ``.close()``
+    it when done (or use it as a context manager) instead of looping over
+    individual patchers. Several targets below are ``<module>.time.sleep``
+    for different modules that each did ``import time`` — those all alias the
+    one stdlib ``time`` module, so more than one patch here targets the exact
+    same global attribute. Starting and then stopping a plain list of patches
+    in the same (declaration) order is exactly backwards for aliased targets:
+    whichever patch on a shared attribute stops last "restores" it to the
+    previous patch's Mock, not the real function, permanently breaking
+    ``time.sleep`` for the rest of the test process. ExitStack always unwinds
+    LIFO regardless of where or when ``.close()`` runs, so this can't recur
+    even as patches are added.
+    """
+    stack = contextlib.ExitStack()
+    for p in [
         # Hublvol multipath: drop the coordinator's inter-attach sleeps and run
         # the deferred redundant-path attach synchronously so tests see the
         # fully-converged multipath state immediately after restart returns.
@@ -564,7 +577,7 @@ def patch_externals():
               return_value=[]),
         patch('simplyblock_core.storage_node_ops._connect_to_remote_devs',
               return_value=[]),
-        patch('simplyblock_core.storage_node_ops.addNvmeDevices',
+        patch('simplyblock_core.utils.addNvmeDevices',
               side_effect=lambda rpc, snode, ssds: snode.nvme_devices),
         patch('simplyblock_core.storage_node_ops._prepare_cluster_devices_on_restart',
               return_value=True),
@@ -584,4 +597,6 @@ def patch_externals():
               return_value=1),
         patch('simplyblock_core.storage_node_ops.time.sleep'),
         patch('simplyblock_core.models.storage_node.time.sleep'),
-    ]
+    ]:
+        stack.enter_context(p)
+    return stack

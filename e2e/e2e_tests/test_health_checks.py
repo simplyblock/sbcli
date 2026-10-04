@@ -47,16 +47,16 @@ class TestHealthChecks(TestClusterBase):
 
         # -- TC-HEALTH-002: Storage node health check -------------------
         self.logger.info("=== TC-HEALTH-002: Storage Node Health Check ===")
-        nodes = self.sbcli_utils.get_storage_nodes()
+        # get_storage_nodes() returns {"results": [<node dict>, ...]} in BOTH
+        # Docker (REST) and K8s (CLI) modes — iterate the list, not the dict.
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
         assert nodes, "No storage nodes found"
+        node_ids = [n.get("uuid") or n.get("id") for n in nodes]
         self.logger.info(f"Found {len(nodes)} storage node(s)")
 
-        for node_id in nodes:
-            node_details = self.sbcli_utils.get_storage_node_details(node_id)
-            assert node_details is not None, (
-                f"Storage node {node_id} details returned None"
-            )
-            status = node_details.get("status", "unknown")
+        for node in nodes:
+            node_id = node.get("uuid") or node.get("id")
+            status = node.get("status", "unknown")
             self.logger.info(f"  Node {node_id}: status={status}")
 
             # Verify node is in a healthy state
@@ -67,7 +67,7 @@ class TestHealthChecks(TestClusterBase):
 
         # -- TC-HEALTH-003: Device health check -------------------------
         self.logger.info("=== TC-HEALTH-003: Device Health Check ===")
-        for node_id in nodes:
+        for node_id in node_ids:
             devices = self.sbcli_utils.get_device_details(node_id)
             if not devices:
                 self.logger.info(f"  Node {node_id}: no devices found")
@@ -89,7 +89,7 @@ class TestHealthChecks(TestClusterBase):
             pool_name=self.pool_name,
             size="1G",
         )
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        lvol_id = self._get_lvol_id_dual(lvol_name)
         assert lvol_id, f"Could not get lvol_id for {lvol_name}"
 
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id)
@@ -121,13 +121,10 @@ class TestHealthChecks(TestClusterBase):
 
         snap_name = f"{lvol_name}_snap"
         self._create_snapshot_dual(lvol_name, snap_name)
-        snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
+        snap_id = self._get_snapshot_id_dual(snap_name)
         assert snap_id, f"Could not get snapshot_id for {snap_name}"
 
-        snapshots = self.sbcli_utils.list_snapshots()
-        assert snap_name in snapshots, (
-            f"Snapshot {snap_name} not in snapshot list"
-        )
+        self._verify_snapshot_exists_dual(snap_name)
         self.logger.info(f"Snapshot {snap_name}: id={snap_id}, found in list")
         self.logger.info("TC-HEALTH-005: Snapshot Health Check — PASS")
 
@@ -153,20 +150,17 @@ class TestHealthChecks(TestClusterBase):
         )
 
         # Re-check node health after load
-        for node_id in nodes:
-            node_details = self.sbcli_utils.get_storage_node_details(node_id)
-            assert node_details is not None, (
-                f"Node {node_id} details returned None after load"
-            )
+        for node in self.sbcli_utils.get_storage_nodes()["results"]:
+            nid = node.get("uuid") or node.get("id")
+            assert node.get("status", "unknown") in (
+                "online", "active", "in_creation"
+            ), f"Node {nid} unhealthy after load: {node.get('status')}"
         self.logger.info("TC-HEALTH-006: Health After Load — PASS")
 
         # -- Cleanup ----------------------------------------------------
-        self.sbcli_utils.delete_snapshot(snap_name)
+        self._delete_snapshot_dual(snap_name)
         if not self.k8s_test:
             self._disconnect_and_cleanup_dual(lvol_name)
-        try:
-            self.sbcli_utils.delete_lvol(lvol_name)
-        except Exception as exc:
-            self.logger.warning(f"Cleanup delete {lvol_name}: {exc}")
+        self._delete_lvol_dual(lvol_name)
 
         self.logger.info("=== TestHealthChecks: ALL PASSED ===")

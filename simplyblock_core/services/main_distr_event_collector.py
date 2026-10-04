@@ -4,12 +4,17 @@ import time
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import constants, db_controller, rpc_client, utils, distr_controller
-from simplyblock_core.controllers import events_controller, device_controller
+from simplyblock_core import (
+    constants,
+    db_controller,
+    distr_controller,
+    rpc_client,
+    utils,
+)
+from simplyblock_core.controllers import device_controller, events_controller
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)
@@ -177,7 +182,7 @@ def _is_target_remote_controller_healthy(device_obj, event_node_obj):
         remote_bdev = f"remote_{device_obj.alceml_bdev}n1"
 
     ctrl_name = remote_bdev.removesuffix("n1")
-    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(ctrl_name)
+    ret = event_node_obj.rpc_client().bdev_nvme_controller_list(ctrl_name)
     if not ret:
         return False
 
@@ -196,7 +201,7 @@ def _is_target_remote_controller_healthy(device_obj, event_node_obj):
     if not healthy:
         return False
 
-    return bool(event_node_obj.rpc_client().get_bdevs(remote_bdev))
+    return bool(event_node_obj.rpc_client().bdev_get(remote_bdev))
 
 
 def remove_remote_device_from_node(node_id, device_id):
@@ -218,7 +223,10 @@ def process_device_event(event, logger):
 
         device_obj = None
         device_node_obj = None
-        for node in db.get_storage_nodes():
+        # `cluster_device_order` is ordered within one cluster, so the search
+        # belongs in the reporting node's cluster; it carries no index of its
+        # own, which is what keeps this a loop rather than a lookup.
+        for node in db.get_storage_nodes_by_cluster_id(event_node_obj.cluster_id):
             for dev in node.nvme_devices:
                 if dev.cluster_device_order == storage_id:
                     device_obj = dev
@@ -241,16 +249,15 @@ def process_device_event(event, logger):
                 if device_obj.bdev_type == "aio":
                     # AIO devices have no nvme controller — probe the base
                     # bdev instead: bdev gone => the late event is real.
-                    ret, err = event_node_obj.rpc_client().get_bdevs_2(device_obj.nvme_bdev)
-                    controller_missing = bool(err) or not ret
+                    controller_missing = event_node_obj.rpc_client().bdev_get(device_obj.nvme_bdev) is None
                 else:
-                    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
-                    controller_missing = bool(err) and err['code'] == 22
+                    controller_missing = not event_node_obj.rpc_client().bdev_nvme_controller_list(
+                        device_obj.nvme_controller)
                 if controller_missing:
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, checking controller filed")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s'
                 else:
-                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, error checking controller: {err}, skipping")
+                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, controller/bdev still present, skipping")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s_skipping'
                     return
 
@@ -459,6 +466,17 @@ def start_event_collector_on_node(node_id):
 
     try:
         while True:
+            # Same reason as the JM collector: removal leaves the record in
+            # place with status=removed, so nothing else here would ever end
+            # this loop and it would keep polling a node whose SPDK is gone.
+            try:
+                if db.get_storage_node_by_id(node_id).status == StorageNode.STATUS_REMOVED:
+                    logger.info(f"Node {node_id} removed; stopping Distr collector")
+                    return
+            except KeyError:
+                logger.info(f"Node {node_id} deleted; stopping Distr collector")
+                return
+
             page = 1
             events_groups: dict[Any, dict[Any, dict[Any, EventObj]]] = {}
             events_list = []
@@ -624,9 +642,10 @@ def start_jm_event_collector_on_node(node_id):
     that gives (nodes x sources) collectors in parallel.
 
     Events are only read here, never acted upon -- unlike distrib events, which
-    can force a device unavailable. Every event received is written to the
-    cluster event log, including successful ones, so the log carries the whole
-    compression history rather than only its failures.
+    can force a device unavailable. Only FAILED events reach the cluster event
+    log: compression emits a started and a finished event per cycle per node,
+    and persisting those drowned the log an operator scans for faults. The full
+    history stays in the service log and in the JM's own event list.
     """
     try:
         snode = db.get_storage_node_by_id(node_id)
@@ -646,6 +665,12 @@ def start_jm_event_collector_on_node(node_id):
                 try:
                     snode = db.get_storage_node_by_id(node_id)
                 except KeyError:
+                    logger.info(f"Node {node_id} deleted; stopping JM collector")
+                    return
+                if snode.status == StorageNode.STATUS_REMOVED:
+                    # Removal does not delete the record, so the KeyError above
+                    # never fires for a removed node -- this is what the
+                    # message there always meant to catch.
                     logger.info(f"Node {node_id} removed; stopping JM collector")
                     return
                 backlog_alerted = check_jm_compression_backlog(
@@ -672,11 +697,16 @@ def start_jm_event_collector_on_node(node_id):
                         if len(seen_order) > constants.JM_EVENT_DEDUPE_MAX:
                             seen.discard(seen_order.popleft())
 
+                        # Returns None for a successful compression:
+                        # those are service-log only, so the cluster
+                        # event log is not two records per node per
+                        # compression cycle.
                         event = events_controller.log_jm_event(
                             snode.cluster_id, node_id, event_dict)
                         fresh += 1
                         logger.info(
-                            f"Logged JM event {event.get_id()}: "
+                            f"JM event "
+                            f"{event.get_id() if event else '(not persisted)'}: "
                             f"{event_dict.get('event_type')} "
                             f"{event_dict.get('status')} "
                             f"jm_vuid={event_dict.get('jm_vuid')} "
@@ -707,6 +737,17 @@ def ensure_collectors(nodes):
     """
     for snode in nodes:
         node_id = snode.get_id()
+        if snode.status == StorageNode.STATUS_REMOVED:
+            # A removed node's record is NOT deleted -- it stays with
+            # status=removed -- so without this check we keep (re)starting
+            # collectors that RPC a node whose SPDK is gone, forever. Live
+            # 2026-09-02: 1036 "Failed to process JM events ... connection
+            # error" in the 1.5h after one removal, still going. The collector
+            # loops exit on removal too, but on their own that is not enough:
+            # this function restarts anything not alive within ~5s.
+            for source in ("distr", "jm"):
+                threads_maps.pop(f"{node_id}:{source}", None)
+            continue
         sources = [("distr", start_event_collector_on_node)]
         if node_id not in jm_unsupported_nodes:
             sources.append(("jm", start_jm_event_collector_on_node))
@@ -714,7 +755,11 @@ def ensure_collectors(nodes):
             key = f"{node_id}:{source}"
             thread = threads_maps.get(key)
             if thread is None or thread.is_alive() is False:
-                t = threading.Thread(target=target, args=(node_id,))
+                t = threading.Thread(
+                    target=target,
+                    args=(node_id,),
+                    daemon=True,  # prevents main thread failures from keeping the process alive
+                )
                 t.start()
                 threads_maps[key] = t
 

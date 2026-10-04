@@ -24,7 +24,6 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import snapshot_replication as sr
 
-
 SRC, TGT = "CL_SRC", "CL_TGT"
 POOL_SRC, POOL_TGT = "POOL_SRC", "POOL_TGT"
 

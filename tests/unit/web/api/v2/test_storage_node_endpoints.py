@@ -179,12 +179,42 @@ class TestStorageNodeLifecycle:
         storage_node_ops.suspend_storage_node.assert_called_once_with(STORAGE_NODE_ID, True)
 
     def test_resume(self, client, storage_node, storage_node_ops):
+        storage_node.status = StorageNode.STATUS_SUSPENDED
         storage_node_ops.resume_storage_node.return_value = True
 
         response = client.post(f'{BASE}/{STORAGE_NODE_ID}/resume')
 
         assert response.status_code == 204
         storage_node_ops.resume_storage_node.assert_called_once_with(STORAGE_NODE_ID)
+
+    @pytest.mark.parametrize('action, status', [
+        ('suspend', StorageNode.STATUS_SUSPENDED),
+        ('resume', StorageNode.STATUS_ONLINE),
+    ])
+    def test_repeated_suspend_or_resume_is_a_noop(
+            self, client, storage_node, storage_node_ops, action, status):
+        storage_node.status = status
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/{action}')
+
+        assert response.status_code == 204
+        getattr(storage_node_ops, f'{action}_storage_node').assert_not_called()
+
+    @pytest.mark.parametrize('action', ['suspend', 'resume'])
+    @pytest.mark.parametrize('status', [
+        StorageNode.STATUS_OFFLINE,
+        StorageNode.STATUS_IN_SHUTDOWN,
+        StorageNode.STATUS_PENDING_REMOVAL,
+    ])
+    def test_suspend_or_resume_in_wrong_state_is_a_conflict(
+            self, client, storage_node, storage_node_ops, action, status):
+        storage_node.status = status
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/{action}')
+
+        assert response.status_code == 409
+        assert status in response.json()['detail']
+        getattr(storage_node_ops, f'{action}_storage_node').assert_not_called()
 
     def test_promote(self, client, storage_node, storage_node_ops):
         response = client.post(f'{BASE}/{STORAGE_NODE_ID}/promote')

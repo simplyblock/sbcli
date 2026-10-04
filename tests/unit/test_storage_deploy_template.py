@@ -3,7 +3,6 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "simplyblock_web" / "templates"
 
 
@@ -49,6 +48,27 @@ class TestStorageDeployTemplate(unittest.TestCase):
         self.assertIn("key: service-ca.crt", rendered)
         self.assertIn('name: SB_TLS_PROVIDER', rendered)
         self.assertIn('value: "openshift"', rendered)
+
+    def test_containers_that_sudo_run_as_root(self):
+        """Regression: 2026-09-29, k3s on Ubuntu 24.04. The SPDK and proxy
+        images run as the non-root user simplyblock, and both containers
+        start through sudo, which fails its PAM account check in the
+        container ("Authentication service cannot retrieve authentication
+        info"): the SPDK pod exited at once, and node add failed with
+        connection refused on the RPC port. In the SPDK image sudo fails
+        even as root, so the containers run as root without sudo."""
+        import yaml
+        docs = [d for d in yaml.safe_load_all(_render_storage_deploy("cert-manager")) if d]
+        pod = next(d for d in docs if d.get("kind") == "Pod")
+        names = {c["name"] for c in pod["spec"]["containers"]
+                 if c.get("securityContext", {}).get("runAsUser") == 0}
+        self.assertEqual(names, {"spdk-container", "spdk-proxy-container"})
+        # Even as root, sudo fails in the SPDK image: nothing may use it.
+        for c in pod["spec"]["containers"]:
+            if c["name"] not in names:
+                continue
+            hook = c.get("lifecycle", {}).get("postStart", {}).get("exec", {}).get("command", [])
+            self.assertNotIn("sudo", " ".join(c.get("command", []) + hook), c["name"])
 
     def test_cert_manager_mounts_secret_directly(self):
         rendered = _render_storage_deploy("cert-manager")

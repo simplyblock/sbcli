@@ -216,6 +216,7 @@ jobs:
       # Targets = MNODES + STORAGE_PRIVATE_IPS + CLIENTNODES
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -223,7 +224,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -257,6 +259,7 @@ jobs:
           done
 
       - name: Client cleanup disconnect lvols; ensure NFS not mounted anywhere; unmount all /mnt; remove /mnt dirs
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euxo pipefail
@@ -264,7 +267,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
@@ -329,21 +333,21 @@ jobs:
           test -f sbcli/e2e/e2e.py
           test -f sbcli/e2e/logs/cleanup.py
 
-      - name: Install Python deps (best-effort)
+      - name: Install uv
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --upgrade pip
-          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
-            pip install -r sbcli/e2e/requirements.txt
-          fi
+          python3 -m pip install --upgrade pip uv
+          # The e2e entry points are uv shebang scripts, so uv must be on PATH;
+          # pip's console-script dir is not reliably there.
+          python3 -c 'import os, uv; print(os.path.dirname(uv.find_uv_bin()))' >> "$GITHUB_PATH"
 
       - name: Cleanup logs before e2e
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 logs/cleanup.py
+          ./logs/cleanup.py
 
       - name: Set RUN_BASE_DIR
         shell: bash
@@ -374,7 +378,7 @@ jobs:
           if [[ -n "${NEW_NODE_IPS:-}" ]]; then
             NEW_NODES_ARGS=(--new_nodes "${NEW_NODE_IPS}")
           fi
-          python3 -u e2e.py \
+          PYTHONUNBUFFERED=1 ./e2e.py \
             "${TESTNAME_ARGS[@]}" \
             "${NEW_NODES_ARGS[@]}" \
             --ndcs "${NDCS}" \
@@ -424,6 +428,7 @@ jobs:
           done
 
       - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        timeout-minutes: 15
         if: always()
         shell: bash
         run: |
@@ -432,7 +437,8 @@ jobs:
           run_remote() {
             local ip="$1"
             local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
+            timeout 120 sshpass -p "${SSH_PASSWORD}" ssh \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script" || true

@@ -11,11 +11,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice, RemoteJMDevice
-from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
-
+from simplyblock_core.models.iface import IFace
+from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice, RemoteJMDevice
+from simplyblock_core.models.storage_node import StorageNode
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -511,8 +510,8 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
         mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
-        # RPCClient.get_bdevs / subsystem_list must not hit the network.
-        mock_rpc_cls.return_value.get_bdevs.return_value = []
+        # RPCClient.bdev_get / subsystem_list must not hit the network.
+        mock_rpc_cls.return_value.bdev_get.return_value = None
         mock_rpc_cls.return_value.subsystem_list.return_value = []
 
         # Now call check_node -- we want to verify repair is called
@@ -566,7 +565,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
         mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
-        mock_rpc_cls.return_value.get_bdevs.return_value = []
+        mock_rpc_cls.return_value.bdev_get.return_value = None
         mock_rpc_cls.return_value.subsystem_list.return_value = []
 
         health_check_service.check_node(snode)
@@ -585,8 +584,8 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         — as the old code did — raises AttributeError every cycle and JM
         controllers that lose a path during NIC chaos are never repaired.
         """
-        from simplyblock_core.services import health_check_service
         from simplyblock_core.models.nvme_device import JMDevice
+        from simplyblock_core.services import health_check_service
 
         snode = _node(uuid="node-1", status=StorageNode.STATUS_ONLINE)
         snode.enable_ha_jm = True
@@ -629,7 +628,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
         mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
-        mock_rpc_cls.return_value.get_bdevs.return_value = []
+        mock_rpc_cls.return_value.bdev_get.return_value = None
         mock_rpc_cls.return_value.subsystem_list.return_value = []
 
         health_check_service.check_node(snode)
@@ -657,7 +656,9 @@ class TestHublvolMultipathRepair(unittest.TestCase):
     def test_repairs_missing_primary_nic_path(self, mock_check_bdev, mock_rpc_cls, mock_db_cls,
                                               mock_node_rpc_cls):
         """When a primary NIC path is missing, it should be re-attached."""
-        from simplyblock_core.controllers.health_controller import _check_sec_node_hublvol
+        from simplyblock_core.controllers.health_controller import (
+            _check_sec_node_hublvol,
+        )
 
         primary_node = _node(
             uuid="primary-1",
@@ -697,10 +698,8 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         controller_resp = _controller_list_response("10.0.0.50", alternate_ips=[])
         rpc.bdev_nvme_controller_list.return_value = controller_resp
 
-        # get_bdevs returns something so node_bdev is populated
-        rpc.get_bdevs.return_value = [
-            {"name": "hublvol0n1", "aliases": []},
-        ]
+        # bdev_get returns something so node_bdev is populated
+        rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
         rpc.bdev_lvol_get_lvstores.return_value = [{
             "name": "lvs_primary",
@@ -735,7 +734,9 @@ class TestHublvolMultipathRepair(unittest.TestCase):
     @patch("simplyblock_core.controllers.health_controller.check_bdev")
     def test_no_repair_when_all_paths_present(self, mock_check_bdev, mock_rpc_cls, mock_db_cls):
         """When all primary NIC paths are attached, no attach call is made."""
-        from simplyblock_core.controllers.health_controller import _check_sec_node_hublvol
+        from simplyblock_core.controllers.health_controller import (
+            _check_sec_node_hublvol,
+        )
 
         primary_node = _node(
             uuid="primary-1",
@@ -766,9 +767,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         controller_resp = _controller_list_response(
             "10.0.0.50", alternate_ips=["10.0.0.51"])
         rpc.bdev_nvme_controller_list.return_value = controller_resp
-        rpc.get_bdevs.return_value = [
-            {"name": "hublvol0n1", "aliases": []},
-        ]
+        rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
         rpc.bdev_lvol_get_lvstores.return_value = [{
             "name": "lvs_primary",
@@ -796,7 +795,9 @@ class TestHublvolMultipathRepair(unittest.TestCase):
     def test_rdma_nic_repair(self, mock_check_bdev, mock_rpc_cls, mock_db_cls,
                              mock_node_rpc_cls):
         """When primary uses RDMA, only RDMA NICs are considered and RDMA transport is used."""
-        from simplyblock_core.controllers.health_controller import _check_sec_node_hublvol
+        from simplyblock_core.controllers.health_controller import (
+            _check_sec_node_hublvol,
+        )
 
         primary_node = _node(
             uuid="primary-1",
@@ -835,7 +836,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         # Only first RDMA NIC attached; second RDMA NIC missing
         controller_resp = _controller_list_response("10.0.0.50", alternate_ips=[])
         rpc.bdev_nvme_controller_list.return_value = controller_resp
-        rpc.get_bdevs.return_value = [{"name": "hublvol0n1", "aliases": []}]
+        rpc.bdev_get.return_value = {"name": "hublvol0n1", "aliases": []}
         rpc.subsystem_list.return_value = []
         rpc.bdev_lvol_get_lvstores.return_value = [{
             "name": "lvs_primary",

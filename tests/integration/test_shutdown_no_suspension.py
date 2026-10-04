@@ -29,9 +29,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -349,6 +348,8 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
                 return True
             def bind_device_to_nvme(self, pci):
                 return True
+        # **kwargs, not (timeout, retry): kill_client_kwargs(force=True) also
+        # passes connect_retry=0, so a fixed signature raises TypeError.
         snode.client = lambda **kwargs: _DyingClient()
 
         db = MagicMock()

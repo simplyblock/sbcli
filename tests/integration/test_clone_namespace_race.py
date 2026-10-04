@@ -58,7 +58,6 @@ def _lvol_for_add(uuid, namespace="", nqn=None):
     lv.top_bdev = f"LVS_100/{lv.lvol_bdev}"
     lv.lvs_name = "LVS_100"
     lv.node_id = "node-1"
-    lv.cluster_id = "cluster-1"
     lv.snapshot_name = "LVS_100/SNAP_parent"
     lv.guid = "0123456789abcdef"
     lv.ha_type = "single"
@@ -96,22 +95,24 @@ def _rpc_client():
     mock.nvmf_subsystem_add_ns2.return_value = (7, None)
     mock.ultra21_util_get_malloc_stats.return_value = {}
 
-    # get_bdevs() is called twice with different signatures:
-    #   - no args (in _create_bdev_stack) -> the full node bdev list, each
-    #     entry having 'name'/'aliases'. Names must NOT match the clone's
-    #     top_bdev or the clone create would be skipped.
-    #   - a specific bdev name (final lookup) -> the created lvol bdev with
-    #     its blobid.
+    # bdev_get(name) is called at least twice against the same name:
+    #   - the idempotency probe in _create_bdev_stack, which must come back
+    #     ``None`` (not yet created) or the clone create would be skipped.
+    #   - the final lookup after the bdev is created -> the created lvol
+    #     bdev with its blobid.
     final_bdev = {"uuid": "lvol-bdev-uuid", "name": "lvol-bdev-uuid",
                   "aliases": [],
                   "driver_specific": {"lvol": {"blobid": 12345}}}
 
-    def _get_bdevs(name=None):
-        if name:
-            return [final_bdev]
-        return [{"name": "some-other-bdev", "aliases": []}]
+    _bdev_get_calls = []
 
-    mock.get_bdevs.side_effect = _get_bdevs
+    def _bdev_get(name=None):
+        _bdev_get_calls.append(name)
+        if len(_bdev_get_calls) == 1:
+            return None
+        return final_bdev
+
+    mock.bdev_get.side_effect = _bdev_get
     # _remove_bdev_stack's bdev_lvol_clone branch calls this.
     mock.delete_lvol.return_value = (True, None)
     return mock
@@ -285,7 +286,15 @@ class TestPostBdevStackRollback(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_listener_failure_rolls_back_bdev_stack(self, mock_db_cls):
         """A listener-add failure (non -32602) after _create_bdev_stack
-        must also roll back the orphan blob."""
+        must also roll back the orphan blob -- and now the namespace too.
+
+        The listener used to be published BEFORE the namespace was attached,
+        which is what exposed a subsystem that answered while its namespace did
+        not exist ("Invalid Namespace or Format" with DNR, run 2026-09-13). The
+        order is reversed, so a listener failure now finds the namespace already
+        attached and has to unwind it as well: leaving it would point a live
+        namespace at a bdev this rollback deletes.
+        """
         from simplyblock_core.controllers import lvol_controller
 
         lvol = _lvol_for_add("u4")  # standalone path
@@ -299,8 +308,9 @@ class TestPostBdevStackRollback(unittest.TestCase):
 
         self.assertFalse(bdev)
         self.assertIn("Failed to create listener", err)
-        # add_ns was never reached.
-        rpc.nvmf_subsystem_add_ns2.assert_not_called()
+        # The namespace is attached first now, so it must be detached again.
+        rpc.nvmf_subsystem_add_ns2.assert_called_once()
+        rpc.nvmf_subsystem_remove_ns.assert_called_once()
         # Rollback fired.
         rpc.delete_lvol.assert_called()
         self.assertEqual(rpc.delete_lvol.call_args[0][0], lvol.top_bdev)

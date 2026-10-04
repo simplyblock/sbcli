@@ -53,17 +53,6 @@ class NVMeDevice(BaseModel):
     qos_bdev: str = ""
     remote_bdev: str = ""
     retries_exhausted: bool = False
-    # Number of `online → not-online` transitions seen for this device that
-    # were attributable to per-device events (not node-level state changes).
-    # When this exceeds 2, the next attempted out-of-online transition forces
-    # the device to STATUS_FAILED instead of the requested state. Cleared only
-    # by an explicit device-restart command.
-    flap_count: int = 0
-    # Wall-clock epoch (seconds) of the last counted flap. Used for
-    # debouncing: a flap that happens within DEVICE_FLAP_DEBOUNCE_SEC of the
-    # previous one is treated as part of the same error storm and does not
-    # advance the counter. Reset to 0.0 on explicit device restart.
-    last_flap_tsc: float = 0.0
     # Bounded self-repair of an `unavailable` device, see
     # device_controller.device_repair(). Counts only attempts that actually had
     # something local to rebuild -- a device whose local stack is fully intact
