@@ -66,6 +66,9 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     n.cluster_id = "cluster-1"
     n.lvstore = lvstore
     n.jm_vuid = jm_vuid
+    # The model's defaults; as child mocks get_node_jm_names cannot slice.
+    n.enable_ha_jm = False
+    n.ha_jm_count = 3
     n.lvstore_stack = [{"type": "bdev_distr", "name": "distrib_1"},
                        {"type": "bdev_raid", "name": "raid_1"},
                        {"type": "bdev_lvstore", "name": lvstore or "LVS"}]
@@ -3717,14 +3720,19 @@ class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
         rpc.bdev_nvme_detach_controller.assert_not_called()
         self.assertIn("jm-dead", [rd.uuid for rd in peer.remote_jm_devices])
 
-    def test_node_without_the_dying_jm_is_left_completely_alone(self):
+    def test_replica_peer_without_a_record_is_released_by_name_only(self):
+        """No connection is recorded, but JC may still hold the JM's context;
+        the release goes by its deterministic name, and with no bdev recorded
+        there is nothing to detach."""
         cl = _cluster()
         removed = _node("dead", with_jm=True, jm_vuid=2, lvstore="LVS_2")
+        removed.jm_device.jm_bdev = "jm_dead"
         peer = _node("peer", with_jm=True, jm_vuid=37, lvstore="LVS_37")
         removed.jm_ids = ["jm-dead"]
         peer.jm_ids = ["jm-peer"]
         peer.remote_jm_devices = []          # never had it
         rpc = MagicMock()
+        rpc.jc_remove_jm = MagicMock(side_effect=RPCRemoteError("not used by JC", -13))
         peer.rpc_client = MagicMock(return_value=rpc)
         db = FakeDB(cl, [removed, peer])
         db.get_jm_device_by_id = MagicMock(
@@ -3734,8 +3742,273 @@ class TestJcRemoveJmOnNodeWithNoTargets(unittest.TestCase):
              patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
              patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
             storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("peer",))
-        rpc.jc_remove_jm.assert_not_called()
+        rpc.jc_remove_jm.assert_called_once_with("remote_jm_deadn1")
         rpc.bdev_nvme_detach_controller.assert_not_called()
+
+
+class TestOrphanedJmContextAtALaterRemoval(unittest.TestCase):
+    """Run 53 1+1, 2026-10-02, the safety net. The first removal deleted the
+    distribs of its node's own vuid 1 on 90f75d0e, the peer that hosted that
+    lvstore's replica; JC ended vuid 1 but kept its context for member
+    0f47d57a's JM. The second removal took out 0f47d57a: 90f75d0e had no
+    surviving vuid using that JM, was not one of 0f47d57a's replica peers and
+    recorded no connection to it, so phase 2 did nothing there -- and its JC
+    retried the dead JM every 5 s, for good. jc_remove_jm by name released it
+    (measured on that node)."""
+
+    def _run(self, jc_remove_jm, *, record=False):
+        cl = _cluster()
+        removed = _node("0f47", with_jm=True, jm_vuid=19, lvstore="LVS_19")
+        removed.jm_device.jm_bdev = "jm_0f47"
+        holder = _node("90f7", with_jm=True, jm_vuid=10, lvstore="LVS_10")
+        removed.jm_ids = ["jm-0f47"]
+        holder.jm_ids = ["jm-90f7"]
+        if record:
+            rd = RemoteJMDevice()
+            rd.uuid = "jm-0f47"
+            rd.remote_bdev = "remote_jm_0f47n1"
+            holder.remote_jm_devices = [rd]
+        else:
+            holder.remote_jm_devices = []
+        bystander = _node("bbb0", with_jm=True, jm_vuid=2, lvstore="LVS_2")
+        bystander.jm_ids = ["jm-bbb0"]
+        bystander.remote_jm_devices = []
+        rpcs = {}
+        for n in (holder, bystander):
+            rpc = MagicMock()
+            rpc.jc_remove_jm = jc_remove_jm if n is holder else MagicMock(
+                side_effect=RPCRemoteError("not used by JC", -13))
+            n.rpc_client = MagicMock(return_value=rpc)
+            rpcs[n.get_id()] = rpc
+        db = FakeDB(cl, [removed, holder, bystander])
+        db.get_jm_device_by_id = MagicMock(
+            side_effect=lambda i: {"jm-0f47": removed.jm_device}.get(i))
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller"), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]), \
+             self.assertLogs(storage_node_ops.logger, level="DEBUG") as logs:
+            storage_node_ops._decommission_node_jm(removed, replica_peer_ids=("other",))
+        return rpcs, logs.output
+
+    def test_the_holder_releases_the_dead_jm_by_name(self):
+        rpcs, logs = self._run(MagicMock(return_value=True))
+        rpcs["90f7"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
+        rpcs["90f7"].jc_replace_jm.assert_not_called()
+        rpcs["90f7"].bdev_nvme_detach_controller.assert_not_called()
+        self.assertTrue(any("which no vuid on this node uses any more" in m for m in logs))
+
+    def test_a_recorded_connection_is_released_too(self):
+        rpcs, _ = self._run(MagicMock(return_value=True), record=True)
+        rpcs["90f7"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
+
+    def test_not_used_by_jc_is_the_normal_silent_answer(self):
+        _, logs = self._run(MagicMock(side_effect=RPCRemoteError("not used by JC", -13)))
+        self.assertFalse([m for m in logs if "jc_remove_jm" in m])
+
+    def test_still_in_use_is_reported_and_does_not_abort(self):
+        rpcs, logs = self._run(MagicMock(side_effect=RPCRemoteError("in use", -22)))
+        self.assertTrue(any("ERROR" in m and "-22" in m for m in logs))
+        rpcs["bbb0"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
+
+    def test_an_unreachable_node_does_not_abort_the_pass(self):
+        rpcs, _ = self._run(MagicMock(side_effect=RPCConnectionError("unreachable")))
+        rpcs["bbb0"].jc_remove_jm.assert_called_once_with("remote_jm_0f47n1")
+
+
+class TestJmContextsReleasedWhereTheVuidIsDeleted(unittest.TestCase):
+    """The run-53 fault, closed where it starts. Deleting a vuid's distribs on
+    a node that stays in the cluster ends the vuid in JC but leaves its member
+    JMs' contexts open; one no other vuid uses is retried forever once its
+    node goes away (90f75d0e kept 0f47d57a's JM after 6b25's vuid 1 was torn
+    down). Every path that deletes a replica's distribs now releases those
+    members right after -- only the ones no other vuid on the node uses, as JC
+    itself reports per vuid (the SPDK team's preference over relying on -22).
+    The host's own local JM is never a candidate."""
+
+    def _setup(self, status=None, answers=None, missing=(), hosted=None):
+        answers = answers or {}
+        owner = _node("6b25", with_jm=True, jm_vuid=1, lvstore="LVS_1")
+        host = _node("90f7", with_jm=True, jm_vuid=10, lvstore="LVS_10",
+                     stack_secondary="6b25", stack_tertiary=hosted.get_id() if hosted else "")
+        others = [_node(i, with_jm=True) for i in ("0f47", "440c")]
+        for n in (owner, host, *others):
+            n.jm_device.jm_bdev = f"jm_{n.get_id()}"
+        owner.enable_ha_jm = True
+        owner.ha_jm_count = 4
+        owner.jm_ids = ["jm-0f47", "jm-440c", "jm-90f7"]
+        owner.hublvol = None
+        host.lvstore_ports = {}
+        if status is None:
+            # vuid 10, the host's own, still uses 440c's JM; vuid 1 is the one
+            # being deleted and must never be asked about.
+            status = {10: {"jm_90f7": True, "remote_jm_440cn1": True}}
+        rpc = MagicMock()
+
+        def _remove(name):
+            ans = answers.get(name, True)
+            if isinstance(ans, int) and ans < 0:
+                raise RPCRemoteError("jc_remove_jm", ans)
+            return ans
+
+        def _status(vuid):
+            ans = status.get(vuid)
+            if isinstance(ans, Exception):
+                raise ans
+            return ans
+        rpc.jc_remove_jm = MagicMock(side_effect=_remove)
+        rpc.jc_get_jm_status = MagicMock(side_effect=_status)
+        host.rpc_client = MagicMock(return_value=rpc)
+        jms = {n.jm_device.get_id(): n.jm_device for n in (owner, host, *others)}
+        for m in missing:
+            jms.pop(m)
+        nodes = {"6b25": owner, "90f7": host}
+        if hosted:
+            nodes[hosted.get_id()] = hosted
+
+        def _node_by_id(i):
+            if i not in nodes:
+                raise KeyError(i)
+            return nodes[i]
+        db = MagicMock()
+        db.get_jm_device_by_id = MagicMock(side_effect=jms.get)
+        db.get_lvols_by_node_id.return_value = []
+        db.get_storage_node_by_id = MagicMock(side_effect=_node_by_id)
+        return owner, host, rpc, db
+
+    def _released(self, rpc):
+        return [c.args[0] for c in rpc.jc_remove_jm.call_args_list]
+
+    def _run(self, path, **kw):
+        owner, host, rpc, db = self._setup(**kw)
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             self.assertLogs(storage_node_ops.logger, level="DEBUG") as logs:
+            path(owner, host)
+        return rpc, logs.output
+
+    @staticmethod
+    def _removal(owner, host):
+        storage_node_ops._delete_replica_on_peer(host, owner, _cluster())
+
+    @staticmethod
+    def _relocation(owner, host):
+        storage_node_ops._delete_replica_on_peer(host, owner, _cluster(),
+                                                 destroy_lvstore=False)
+
+    @staticmethod
+    def _expansion(owner, host):
+        storage_node_ops.teardown_non_leader_lvstore(host, owner, slot="secondary")
+
+    PATHS = ("_removal", "_relocation", "_expansion")
+
+    def test_only_members_no_other_vuid_uses_are_released(self):
+        for name in self.PATHS:
+            with self.subTest(path=name):
+                rpc, logs = self._run(getattr(self, name))
+                self.assertEqual(self._released(rpc), ["remote_jm_6b25n1", "remote_jm_0f47n1"])
+                self.assertTrue(any("remote_jm_0f47n1, which no vuid" in m for m in logs))
+
+    def test_the_release_comes_after_the_distribs_are_deleted(self):
+        for name in self.PATHS:
+            with self.subTest(path=name):
+                rpc, _ = self._run(getattr(self, name))
+                calls = [c[0] for c in rpc.mock_calls]
+                self.assertLess(calls.index("bdev_distrib_delete"), calls.index("jc_remove_jm"))
+
+    def test_a_hosted_primarys_vuid_counts_as_another_vuid(self):
+        p2 = _node("p2", jm_vuid=11, lvstore="LVS_11")
+        rpc, _ = self._run(self._relocation, hosted=p2,
+                           status={10: {"jm_90f7": True, "remote_jm_440cn1": True},
+                                   11: {"remote_jm_0f47n1": True}})
+        self.assertEqual(self._released(rpc), ["remote_jm_6b25n1"])
+
+    def test_the_deleted_vuid_itself_is_never_asked_about(self):
+        rpc, _ = self._run(self._removal)
+        self.assertNotIn(1, [c.args[0] for c in rpc.jc_get_jm_status.call_args_list])
+
+    def test_nothing_is_released_when_jc_cannot_be_asked(self):
+        for status in ({10: RPCException("unreachable")}, {10: None}):
+            with self.subTest(status=status):
+                rpc, logs = self._run(self._relocation, status=status)
+                rpc.jc_remove_jm.assert_not_called()
+                self.assertTrue(any("WARNING" in m and "use unknown" in m for m in logs))
+
+    def test_still_in_use_despite_the_check_is_reported(self):
+        # A vuid the DB does not know about holds the JM: JC still refuses, and
+        # the mismatch is logged as an error instead of passing silently.
+        rpc, logs = self._run(self._relocation, answers={"remote_jm_0f47n1": -22})
+        self.assertIn("remote_jm_0f47n1", self._released(rpc))
+        self.assertTrue(any("ERROR" in m and "-22" in m for m in logs))
+
+    def test_a_leaders_own_vuid_is_named_locally(self):
+        """A failed own-stack build rolls back with host == owner: the names
+        come from get_node_jm_names(owner) alone, so the local JM is the plain
+        name and is skipped, and the remote members are released."""
+        _owner, host, rpc, db = self._setup()
+        host.lvstore_stack_secondary = ""
+        host.enable_ha_jm = True
+        host.ha_jm_count = 3
+        host.jm_ids = ["jm-0f47", "jm-440c"]
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            storage_node_ops._release_jm_contexts_of_deleted_vuid(host, host)
+        self.assertEqual(self._released(rpc), ["remote_jm_0f47n1", "remote_jm_440cn1"])
+        rpc.jc_get_jm_status.assert_not_called()
+
+    def test_a_member_whose_record_is_gone_does_not_abort_the_teardown(self):
+        rpc, logs = self._run(self._expansion, missing=("jm-440c",))
+        self.assertTrue(any("WARNING" in m and "cannot name the members" in m for m in logs))
+        rpc.bdev_distrib_delete.assert_called()
+
+
+class TestAFailedBuildReleasesWhatItOpened(unittest.TestCase):
+    """_create_bdev_stack's rollback deletes the distribs it created, which
+    leaves JC's contexts for the vuid's member JMs open exactly as a teardown
+    does. The rollback now releases them the same way."""
+
+    def _build(self, stack, primary=None):
+        cl = _cluster()
+        snode = _node("H", lvstore="LVS_H", jm_vuid=7, with_jm=True)
+        snode.distrib_cpu_cores = []
+        rpc = MagicMock()
+        rpc.get_bdevs.return_value = False          # R26.3 probes get_bdevs, main bdev_get
+        rpc.bdev_get.return_value = False
+        rpc.bdev_distrib_create.return_value = True
+        rpc.bdev_raid_create.return_value = False        # the step that fails
+        rpc.bdev_PT_NoExcl_create.return_value = False
+        snode.rpc_client = MagicMock(return_value=rpc)
+        db = FakeDB(cl, [snode] + ([primary] if primary else []))
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "get_node_jm_names", return_value=["jm_H"]), \
+             patch.object(storage_node_ops.distr_controller, "send_cluster_map_to_distr",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_release_jm_contexts_of_deleted_vuid") as rel:
+            ok, _err = storage_node_ops._create_bdev_stack(snode, stack, primary_node=primary)
+        return ok, rpc, rel, snode
+
+    @staticmethod
+    def _distrib_stack():
+        return [{"type": "bdev_distr", "name": "distrib_1", "params": {}},
+                {"type": "bdev_distr", "name": "distrib_2", "params": {}},
+                {"type": "bdev_raid", "name": "raid0_1",
+                 "distribs_list": ["distrib_1", "distrib_2"],
+                 "params": {"strip_size_kb": 4096}}]
+
+    def test_a_failed_non_leader_build_releases_the_primarys_vuid_members(self):
+        primary = _node("P", lvstore="LVS_P", jm_vuid=5, with_jm=True)
+        ok, rpc, rel, snode = self._build(self._distrib_stack(), primary)
+        self.assertFalse(ok)
+        self.assertEqual(rpc.bdev_distrib_delete.call_count, 2)
+        rel.assert_called_once_with(snode, primary)
+
+    def test_a_failed_own_build_names_the_node_itself_as_the_owner(self):
+        ok, _rpc, rel, snode = self._build(self._distrib_stack())
+        self.assertFalse(ok)
+        rel.assert_called_once_with(snode, snode)
+
+    def test_a_stack_without_distribs_opens_nothing_to_release(self):
+        ok, _rpc, rel, _ = self._build([{"type": "bdev_ptnonexcl", "name": "pt_1", "params": {}}])
+        self.assertFalse(ok)
+        rel.assert_not_called()
 
 
 class TestJcRemoveJmClient(unittest.TestCase):
