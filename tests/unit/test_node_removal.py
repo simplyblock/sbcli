@@ -3940,10 +3940,74 @@ class TestJmContextsReleasedWhereTheVuidIsDeleted(unittest.TestCase):
         self.assertIn("remote_jm_0f47n1", self._released(rpc))
         self.assertTrue(any("ERROR" in m and "-22" in m for m in logs))
 
+    def test_a_leaders_own_vuid_is_named_locally(self):
+        """A failed own-stack build rolls back with host == owner: the names
+        come from get_node_jm_names(owner) alone, so the local JM is the plain
+        name and is skipped, and the remote members are released."""
+        _owner, host, rpc, db = self._setup()
+        host.lvstore_stack_secondary = ""
+        host.enable_ha_jm = True
+        host.ha_jm_count = 3
+        host.jm_ids = ["jm-0f47", "jm-440c"]
+        with patch.object(storage_node_ops, "DBController", return_value=db):
+            storage_node_ops._release_jm_contexts_of_deleted_vuid(host, host)
+        self.assertEqual(self._released(rpc), ["remote_jm_0f47n1", "remote_jm_440cn1"])
+        rpc.jc_get_jm_status.assert_not_called()
+
     def test_a_member_whose_record_is_gone_does_not_abort_the_teardown(self):
         rpc, logs = self._run(self._expansion, missing=("jm-440c",))
         self.assertTrue(any("WARNING" in m and "cannot name the members" in m for m in logs))
         rpc.bdev_distrib_delete.assert_called()
+
+
+class TestAFailedBuildReleasesWhatItOpened(unittest.TestCase):
+    """_create_bdev_stack's rollback deletes the distribs it created, which
+    leaves JC's contexts for the vuid's member JMs open exactly as a teardown
+    does. The rollback now releases them the same way."""
+
+    def _build(self, stack, primary=None):
+        cl = _cluster()
+        snode = _node("H", lvstore="LVS_H", jm_vuid=7, with_jm=True)
+        snode.distrib_cpu_cores = []
+        rpc = MagicMock()
+        rpc.get_bdevs.return_value = False
+        rpc.bdev_distrib_create.return_value = True
+        rpc.bdev_raid_create.return_value = False        # the step that fails
+        rpc.bdev_PT_NoExcl_create.return_value = False
+        snode.rpc_client = MagicMock(return_value=rpc)
+        db = FakeDB(cl, [snode] + ([primary] if primary else []))
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "get_node_jm_names", return_value=["jm_H"]), \
+             patch.object(storage_node_ops.distr_controller, "send_cluster_map_to_distr",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_release_jm_contexts_of_deleted_vuid") as rel:
+            ok, _err = storage_node_ops._create_bdev_stack(snode, stack, primary_node=primary)
+        return ok, rpc, rel, snode
+
+    @staticmethod
+    def _distrib_stack():
+        return [{"type": "bdev_distr", "name": "distrib_1", "params": {}},
+                {"type": "bdev_distr", "name": "distrib_2", "params": {}},
+                {"type": "bdev_raid", "name": "raid0_1",
+                 "distribs_list": ["distrib_1", "distrib_2"],
+                 "params": {"strip_size_kb": 4096}}]
+
+    def test_a_failed_non_leader_build_releases_the_primarys_vuid_members(self):
+        primary = _node("P", lvstore="LVS_P", jm_vuid=5, with_jm=True)
+        ok, rpc, rel, snode = self._build(self._distrib_stack(), primary)
+        self.assertFalse(ok)
+        self.assertEqual(rpc.bdev_distrib_delete.call_count, 2)
+        rel.assert_called_once_with(snode, primary)
+
+    def test_a_failed_own_build_names_the_node_itself_as_the_owner(self):
+        ok, _rpc, rel, snode = self._build(self._distrib_stack())
+        self.assertFalse(ok)
+        rel.assert_called_once_with(snode, snode)
+
+    def test_a_stack_without_distribs_opens_nothing_to_release(self):
+        ok, _rpc, rel, _ = self._build([{"type": "bdev_ptnonexcl", "name": "pt_1", "params": {}}])
+        self.assertFalse(ok)
+        rel.assert_not_called()
 
 
 class TestJcRemoveJmClient(unittest.TestCase):

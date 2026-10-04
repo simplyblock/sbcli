@@ -300,5 +300,83 @@ class TestTheRelocationAnnouncesTheRebuild(unittest.TestCase):
             self.assertNotIn("recreate_lvstore_on_non_leader(", src, fn.__name__)
 
 
+class TestTheCascadeReleasesTheVacatedVuidsJms(unittest.TestCase):
+    """The deleting shape of a cascade, end to end. P's secondary moves O -> N,
+    but N already holds Q's secondary, so Q is first moved N -> S and Q's vuid
+    is deleted on N; then P is built on N and P's vuid is deleted on O. Each
+    deletion releases, on that host, the deleted vuid's member JMs that no
+    other vuid there uses -- asked of JC per vuid, never including the vuid
+    being deleted -- and the host's own local JM is never a candidate.
+
+    (The run-50 shape, where the old tertiary becomes the new secondary,
+    deletes nothing: the old host keeps the stack for its other role.)"""
+
+    def _run(self):
+        cl = _cluster()
+        p = _node("P", lvstore="LVS_P", secondary_id="O", with_jm=True, jm_vuid=5)
+        q = _node("Q", lvstore="LVS_Q", secondary_id="N", with_jm=True, jm_vuid=6)
+        o = _node("O", lvstore="LVS_O", stack_secondary="P", with_jm=True, jm_vuid=8)
+        n = _node("N", lvstore="LVS_N", stack_secondary="Q", with_jm=True, jm_vuid=7)
+        s = _node("S", with_jm=True)
+        x, y, z = (_node(i, with_jm=True) for i in "XYZ")
+        nodes = [p, q, o, n, s, x, y, z]
+        for node in nodes:
+            node.jm_device.jm_bdev = f"jm_{node.get_id()}"
+            node.hublvol = None
+        for owner, ids in ((p, ["jm-O", "jm-Y", "jm-Z"]), (q, ["jm-N", "jm-X", "jm-Y"])):
+            owner.enable_ha_jm = True
+            owner.ha_jm_count = 4
+            owner.jm_ids = ids
+        # What JC on each vacated host reports for its OTHER vuid: N's own
+        # vuid 7 still uses X's JM, O's own vuid 8 still uses Y's.
+        status = {"N": {7: {"jm_N": True, "remote_jm_Xn1": True}},
+                  "O": {8: {"jm_O": True, "remote_jm_Yn1": True}}}
+        log = []
+        for host in (o, n):
+            rpc = MagicMock()
+            rpc.jc_get_jm_status = MagicMock(
+                side_effect=lambda v, _h=host: status[_h.get_id()].get(v))
+            rpc.jc_remove_jm = MagicMock(
+                side_effect=lambda name, _h=host: log.append(("release", _h.get_id(), name)) or True)
+            host.rpc_client = MagicMock(return_value=rpc)
+        db = FakeDB(cl, nodes)
+        db.get_jm_device_by_id = lambda i: next(
+            (node.jm_device for node in nodes if node.jm_device.get_id() == i), None)
+
+        def _build(new_host, leader, primary, role=None, **_kw):
+            log.append(("build", new_host.get_id(), primary.get_id()))
+            return True
+
+        with patch.object(sno, "DBController", return_value=db), \
+             patch.object(sno, "_pick_replica_relocation_node", return_value="S"), \
+             patch.object(sno, "recreate_lvstore_on_non_leader", side_effect=_build), \
+             patch.object(sno, "_teardown_lvol_subsystems_on_vacated_peer"), \
+             patch.object(sno, "_prune_stale_lvstore_ports"):
+            ok = sno._relocate_replica_between("P", "O", "N", "secondary", db)
+        return ok, log, o, n
+
+    def test_each_vacated_host_releases_only_what_no_other_vuid_uses(self):
+        ok, log, _o, _n = self._run()
+        self.assertTrue(ok)
+        self.assertEqual([e for e in log if e[0] == "build"],
+                         [("build", "S", "Q"), ("build", "N", "P")])
+        self.assertEqual([e[2] for e in log if e[:2] == ("release", "N")],
+                         ["remote_jm_Qn1", "remote_jm_Yn1"],
+                         "Q's own JM and Y's go; X's stays for N's vuid 7, N's own is never offered")
+        self.assertEqual([e[2] for e in log if e[:2] == ("release", "O")],
+                         ["remote_jm_Pn1", "remote_jm_Zn1"],
+                         "P's own JM and Z's go; Y's stays for O's vuid 8")
+
+    def test_only_the_other_vuids_are_asked_and_the_release_precedes_the_rebuild(self):
+        _ok, log, o, n = self._run()
+        asked_n = [c.args[0] for c in n.rpc_client().jc_get_jm_status.call_args_list]
+        asked_o = [c.args[0] for c in o.rpc_client().jc_get_jm_status.call_args_list]
+        self.assertEqual((asked_n, asked_o), ([7], [8]),
+                         "the vuid being deleted (6 on N, 5 on O) is never asked about")
+        self.assertLess(log.index(("release", "N", "remote_jm_Qn1")),
+                        log.index(("build", "N", "P")),
+                        "N is cleaned of Q before P is built on it")
+
+
 if __name__ == "__main__":
     unittest.main()
