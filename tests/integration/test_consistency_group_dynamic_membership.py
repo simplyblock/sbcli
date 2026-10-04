@@ -178,14 +178,14 @@ def test_detach_is_idempotent(db):
     assert "never-a-member" not in (fresh.members or {})
 
 
-def test_last_member_detach_resets_generation_to_zero(db):
-    """Regression: 2026-09-29-cg-generation-reset-when-empty — the group's
-    generation counter is bumped for the life of the group and was never reset,
-    so a group that had cycled through N generations and then lost its last live
-    member stayed at generation N. The next member to join inherited that counter
-    (``joined_seq = N + 1``) instead of starting a clean generation 1, and the
-    closed epochs left behind referenced generations the reset counter no longer
-    covered. Emptying the group must reset it to a clean slate."""
+def test_last_member_detach_clears_epochs_and_keeps_the_generation_counter(db):
+    """Emptying the group clears its closed epochs (2026-09-29-cg-generation-
+    reset-when-empty: they referenced a departed cycle) but keeps the generation
+    counter. It used to reset to 0; the departed cycle's newest generation stays
+    as the group's recovery point on both sides, so a reset counter re-issued its
+    number -- a later "generation 5" ranked below and collided with the kept one
+    (2026-10-04, consistency group 4fc62828 after a relocate). Generations only
+    ever count up."""
     group = _group_with_member(db)  # founder dyn-lv-1, joined_seq = 1
     group.last_group_seq = 5        # the group has run through five generations
     group.write_to_db(db.kv_store)
@@ -194,13 +194,13 @@ def test_last_member_detach_resets_generation_to_zero(db):
     cgc.remove_member_from_group(fresh, "dyn-lv-1")  # the last live member leaves
 
     fresh = db.get_consistency_group_by_id(group.get_id())
-    assert fresh.last_group_seq == 0
-    assert fresh.members == {}  # closed epochs cleared with the counter reset
+    assert fresh.last_group_seq == 5
+    assert fresh.members == {}  # closed epochs cleared
 
 
-def test_generation_reset_lets_next_member_start_at_generation_one(db):
-    """After the group empties and resets, a new member opens a clean epoch at
-    generation 1, not at the departed cycle's counter + 1."""
+def test_next_member_after_the_group_empties_starts_after_the_kept_generation(db):
+    """After the group empties, a new member opens its epoch at the next
+    generation (counter + 1), never at a number the departed cycle used."""
     group = _group_with_member(db)
     group.last_group_seq = 5
     group.write_to_db(db.kv_store)
@@ -212,7 +212,7 @@ def test_generation_reset_lets_next_member_start_at_generation_one(db):
     cgc.add_member_to_group(fresh, rejoin)
 
     fresh = db.get_consistency_group_by_id(group.get_id())
-    assert fresh.members["dyn-lv-2"] == {"joined_seq": 1, "removed_seq": 0}
+    assert fresh.members["dyn-lv-2"] == {"joined_seq": 6, "removed_seq": 0}
 
 
 def test_dropping_a_never_generationed_last_member_leaves_generation_zero(db):
