@@ -232,14 +232,14 @@ def replication_status(cluster: Cluster, group: ConsistencyGroupResource) -> Con
 
 @instance_api.post('/replication/failover', name='clusters:consistency-groups:replication:failover')
 def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> dict:
-    """Fail the whole group over as ONE unit through its replication policy
-    (design-csi-addons-replication.md §14.4): every member is pinned to the same
-    group generation, all-or-nothing. Refuses (412) a group not attached to a
-    policy.
+    """Fail the whole group over as ONE unit (design-csi-addons-replication.md
+    §14.4): every member is pinned to the same group generation, all-or-nothing.
+
+    A group without a policy is not refused: after a relocate demoted the group
+    and the demoted source volumes were deleted, the group is detached and empty,
+    and the promote on the peer restores it from its newest replicated generation
+    there (failover_group). Only when nothing can be promoted is it a 409.
     """
-    if not group.policy_id:
-        raise HTTPException(
-            412, f'consistency group {group.get_id()} is not attached to a replication policy')
     members = replication_policy_controller.failover_group(group)
     # A group fail-over/-back is all-or-nothing: surface any member failure -- or
     # an empty result, which means nothing was promoted at all -- as a non-2xx so

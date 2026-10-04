@@ -4,7 +4,8 @@ import uuid
 
 from simplyblock_core import (constants, db_controller, snapshot_retention,
                               utils, xfer_timing)
-from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
+from simplyblock_core.controllers import (lvol_controller, replication_recovery_points,
+                                         snapshot_events, snapshot_controller)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
@@ -1109,7 +1110,16 @@ def _prune_internal_snapshots(source_lvol):
     # for one snapshot while newer ones kept arriving, the predecessor was still
     # pruned and its segments were dropped instead of merged. So the chain is
     # verified per candidate below, and an unchained successor defers the prune.
+    # A consistency group restores as one cut: the snapshots of its newest
+    # complete generation survive retention on both sides even when a member's
+    # own count would prune them (a lagging member keeps the generation open).
+    group_keep = replication_recovery_points.group_recovery_point_ids(
+        {getattr(s, "group_id", "") for s in replicated_internal}, db=db)
     for index, snap in candidates:
+        if snap.get_id() in group_keep or snap.target_replicated_snap_uuid in group_keep:
+            logger.info("Keeping replicated internal snapshot %s: it belongs to its "
+                        "consistency group's newest replicated generation", snap.get_id())
+            continue
         target_uuid = snap.target_replicated_snap_uuid
         try:
             db.get_snapshot_by_id(target_uuid)
