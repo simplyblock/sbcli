@@ -28,11 +28,14 @@ spec:
             privileged: true
           volumeMounts:
             - name: rootfs
-              mountPath: /
-          command: ["/bin/sh", "-c"]
-          # The host's root is mounted over the container's, so this runs the
-          # host's /bin/sh (dash on Ubuntu) against the host's packages: the
-          # script must be POSIX sh.
+              mountPath: /host
+          # The host's root at /host and the script run under chroot of it: the
+          # host's /bin/sh (dash on Ubuntu) against the host's packages, so the
+          # script must be POSIX sh. Mounting the host's / over the container's
+          # / was refused by runc ("mountpoint ... is on the top of rootfs") on
+          # k3s 2026-10 nodes: the Job never started and the storage node
+          # waited on it until the cluster's deadline.
+          command: ["chroot", "/host", "/bin/sh", "-c"]
           args:
             - |
               set -e

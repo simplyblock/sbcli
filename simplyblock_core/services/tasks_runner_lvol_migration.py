@@ -88,7 +88,7 @@ import time
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
 from simplyblock_core.controllers import (
-    migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
+    cg_colocation, migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.models.cluster import Cluster
@@ -235,6 +235,9 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
         lvol.nodes.append(tgt_node.tertiary_node_id)
 
     lvol.write_to_db(db.kv_store)
+    # A consistency group follows its members: once every open member of the
+    # group lives on the new store, the pin moves with them.
+    cg_colocation.repin_after_member_moved(lvol)
     logger.info(
         f"_apply_migration_to_db: updated lvol {migration.lvol_id} "
         f"node_id={tgt_node.get_id()}, lvs_name={tgt_node.lvstore}, nodes={lvol.nodes}"

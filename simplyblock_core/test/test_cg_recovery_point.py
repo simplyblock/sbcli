@@ -130,6 +130,7 @@ def _incident(monkeypatch):
     group on SRC is detached and empty, generation 15 survives on both sides."""
     db = _DB()
     _install(monkeypatch, db)
+    monkeypatch.setattr(cgc, "db", db)
     monkeypatch.setattr(lvol_controller, "DBController", lambda: db, raising=False)
     g = _group("G", SRC, policy_id="")
     db._groups.append(g)
@@ -325,3 +326,118 @@ def test_deleting_the_newest_replicated_generation_is_refused(monkeypatch):
     assert ids is None and "newest replicated generation" in err and deleted == []
     ids, err = cgc.delete_generation(g, 14)
     assert err is None and sorted(ids) == ["S14_M1", "T14_M1"]
+
+
+# ------------------------------------------------------------------ replicating back
+
+from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget  # noqa: E402
+
+
+def _reverse_policy(db, uuid, cluster, toward, name, status=ReplicationPolicy.STATUS_ACTIVE):
+    """A policy on *cluster* replicating toward *toward*, with its target."""
+    t = ReplicationTarget()
+    t.uuid, t.cluster_id, t.target_cluster_id = f"T_{uuid}", cluster, toward
+    t.target_name = f"simplyblock-repl-{toward}"
+    p = ReplicationPolicy()
+    p.uuid, p.cluster_id, p.policy_name, p.target_id = uuid, cluster, name, t.get_id()
+    p.status = status
+    db.written.extend([t, p])
+    return p
+
+
+def _clone_into(db, peer):
+    """A stand-in for failover_from_replicated_copy: the clone appears on the
+    peer and joins the peer group, as the real hand-off does."""
+    def clone(template, copy, source_cluster_id):
+        db._lvols.append(_vol("CLONE", TGT, node="NB", group=peer.get_id()))
+        return {"lvol_id": "CLONE", "connection_strings": []}
+    return clone
+
+
+def _record_attach(monkeypatch):
+    attached: list[tuple[str, str]] = []
+
+    def attach(group, policy_id):
+        attached.append((group.get_id(), policy_id))
+        return group
+    monkeypatch.setattr(cgc, "attach_group_policy", attach)
+    return attached
+
+
+def test_a_group_failed_over_from_its_copy_replicates_back_toward_the_old_source(monkeypatch):
+    """The incident: after the promote on B, the group holding the clone followed
+    no policy, nothing replicated back to A and Ramen waited for a first sync
+    forever. It must be attached to B's policy toward A."""
+    db, g, _ = _incident(monkeypatch)
+    peer = _group("G_B", TGT)
+    db._groups.append(peer)
+    toward_a = _reverse_policy(db, "P_B", TGT, SRC, "sb-dr-realbed-primary-to-site-a")
+    _reverse_policy(db, "P_A", SRC, TGT, "sb-dr-realbed-primary-to-site-b")
+    attached = _record_attach(monkeypatch)
+    monkeypatch.setattr(rpc.lvol_controller, "failover_from_replicated_copy", _clone_into(db, peer))
+    rpc.failover_group(g)
+    assert attached == [(peer.get_id(), toward_a.get_id())]
+
+
+def test_a_re_promote_heals_a_promoted_group_that_replicates_nowhere(monkeypatch):
+    """Ramen re-drives the promote; the no-op path attaches a peer group still
+    without a policy (the bed's state before this fix) and leaves an attached
+    one alone."""
+    db, g, _ = _incident(monkeypatch)
+    peer = _group("G_B", TGT, members={"CLONE": {"joined_seq": 16, "removed_seq": 0}})
+    db._groups.append(peer)
+    db._lvols.append(_vol("CLONE", TGT, node="NB", group=peer.get_id()))
+    node = StorageNode()
+    node.uuid, node.status = "NB", StorageNode.STATUS_ONLINE
+    db._nodes.append(node)
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda m: True)
+    toward_a = _reverse_policy(db, "P_B", TGT, SRC, "sb-dr-realbed-primary-to-site-a")
+    attached = _record_attach(monkeypatch)
+    rpc.failover_group(g)
+    assert attached == [(peer.get_id(), toward_a.get_id())]
+    peer.policy_id = toward_a.get_id()
+    rpc.failover_group(g)
+    assert len(attached) == 1, "a group already following a policy is not re-attached"
+
+
+def test_a_relocate_back_replicates_from_home_toward_the_peer(monkeypatch):
+    db, g, _ = _incident(monkeypatch)
+    peer = _group("G_B", TGT, members={"CLONE": {"joined_seq": 16, "removed_seq": 0}})
+    db._groups.append(peer)
+    clone = _vol("CLONE", TGT, node="NB", group=peer.get_id(), demoted=LVol.REPLICATION_DEMOTE_DONE)
+    db._lvols.append(clone)
+    home_landing = _vol("HOME_LAND", SRC)
+    db._snapshots.extend([
+        _gsnap("D1_CLONE", clone, TGT, peer.get_id(), 1, 2000, partner_tgt="H1_CLONE"),
+        _gsnap("H1_CLONE", home_landing, SRC, peer.get_id(), 1, 2002, partner_src="D1_CLONE")])
+    db._tasks.append(_done_replication_task("D1_CLONE"))
+    toward_b = _reverse_policy(db, "P_A", SRC, TGT, "sb-dr-realbed-primary-to-site-b")
+    attached = _record_attach(monkeypatch)
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
+                        lambda lvol_id, pin_snapshot_id=None: {"lvol_id": f"HOME_{lvol_id}",
+                                                               "connection_strings": []})
+    rpc.failover_group(g)
+    assert attached == [(g.get_id(), toward_b.get_id())]
+
+
+def test_the_reverse_policy_is_the_active_one_of_the_same_family(monkeypatch):
+    db, g, _ = _incident(monkeypatch)
+    _reverse_policy(db, "P_OFF", TGT, SRC, "sb-dr-realbed-primary-to-site-a",
+                    status=ReplicationPolicy.STATUS_INACTIVE)
+    _reverse_policy(db, "P_OTHER", TGT, SRC, "aaa-other-plan-to-site-a")
+    same = _reverse_policy(db, "P_SAME", TGT, SRC, "sb-dr-realbed-primary-to-site-a")
+    _reverse_policy(db, "P_ELSEWHERE", TGT, "CL_C", "sb-dr-realbed-primary-to-site-c")
+    pol = cgc.reverse_replication_policy(TGT, SRC, "sb-dr-realbed-primary-to-site-b")
+    assert pol is not None and pol.get_id() == same.get_id()
+    assert cgc.reverse_replication_policy(TGT, "CL_NONE") is None
+
+
+def test_no_reverse_policy_leaves_the_promote_standing(monkeypatch):
+    db, g, _ = _incident(monkeypatch)
+    peer = _group("G_B", TGT)
+    db._groups.append(peer)
+    attached = _record_attach(monkeypatch)
+    monkeypatch.setattr(rpc.lvol_controller, "failover_from_replicated_copy", _clone_into(db, peer))
+    results = rpc.failover_group(g)
+    assert attached == []
+    assert results[0]["status"] == "failed_over"

@@ -785,6 +785,42 @@ class ConsistencyGroupMemberJoinDTO(BaseModel):
     lvol_id: str
 
 
+class ConsistencyGroupJoinPlanDTO(BaseModel):
+    """The steps a late join of an existing volume takes (co-location design
+    §5): ``migrate`` (live-migrate ``migrate_lvol_ids`` to ``target_node_id``
+    first), ``join``, ``colocate`` (move into ``target_nqn``)."""
+    steps: list[str]
+    target_node_id: str = ""
+    migrate_lvol_ids: list[str] = []
+    target_nqn: str = ""
+
+
+class ConsistencyGroupColocateDTO(BaseModel):
+    """Request body for moving a member into its group's subsystem."""
+    client_swap_ready: bool = False
+
+
+class ConsistencyGroupMigrationCreateDTO(BaseModel):
+    """Request body for a consistency-group migration: the group's scope (its
+    members, every subsystem sibling, transitively) moves to the node."""
+    target_node_id: str
+    host_nqn: str | None = None
+
+
+class ConsistencyGroupMigrationItemDTO(BaseModel):
+    nqn: str
+    kind: str
+    id: str
+    lvol_ids: list[str]
+    connect_strings: list[dict] = []
+
+
+class ConsistencyGroupMigrationDTO(BaseModel):
+    target_node_id: str = ""
+    status: str = "none"
+    items: list[ConsistencyGroupMigrationItemDTO] = []
+
+
 class ConsistencyGroupGenerationMemberDTO(BaseModel):
     lvol_id: str
     snapshot_id: str

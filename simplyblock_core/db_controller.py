@@ -1115,7 +1115,7 @@ class DBController(metaclass=Singleton):
     def _claim_lvol_ns_slot_tx(self, tr, lvol, host_node, namespaced,
                                standalone_nqn, standalone_namespace,
                                standalone_max_ns, standalone_allowed_hosts,
-                               exclude_nqns, internal=False):
+                               exclude_nqns, internal=False, prefer_nqn=""):
         from simplyblock_core.controllers import lvol_controller
 
         # Read-then-write of the per-node allocator key gives every claim on
@@ -1140,7 +1140,7 @@ class DBController(metaclass=Singleton):
             # fills one subsystem completely before a new one is opened.
             target = lvol_controller.get_next_available_subsystem_on_node(
                 host_node.get_id(), minis, exclude_nqns=exclude_nqns,
-                pool_id=lvol.pool_uuid)
+                pool_id=lvol.pool_uuid, prefer_nqn=prefer_nqn)
         if target is not None:
             lvol.nqn = target.nqn
             lvol.namespace = target.uuid
@@ -1176,7 +1176,7 @@ class DBController(metaclass=Singleton):
 
     def claim_lvol_ns_slot(self, lvol, host_node, namespaced, standalone_nqn,
                            standalone_namespace="", standalone_allowed_hosts=None,
-                           exclude_nqns=None, internal=False):
+                           exclude_nqns=None, internal=False, prefer_nqn=""):
         """Pick the namespace slot for ``lvol`` AND persist its record
         (STATUS_IN_CREATION) in ONE FDB transaction.
 
@@ -1200,6 +1200,10 @@ class DBController(metaclass=Singleton):
         ``internal`` is set, which exempts system-created volumes such as the
         REP_* replication receiving copies from the admission cap.
 
+        ``prefer_nqn`` is the subsystem a consistency group's member should
+        join (its group's, cg_colocation): taken when it has a free slot,
+        otherwise the ordinary pick applies.
+
         ``exclude_nqns`` skips subsystems the DB believes have room but SPDK
         has rejected (-32602 re-claim in ``add_lvol_on_node``). The per-pool
         name index is maintained outside the transaction (as on every other
@@ -1212,13 +1216,13 @@ class DBController(metaclass=Singleton):
             return transactional(self, kv, lvol, host_node, namespaced,
                                  standalone_nqn, standalone_namespace,
                                  standalone_max_ns, standalone_allowed_hosts,
-                                 exclude_nqns, internal)
+                                 exclude_nqns, internal, prefer_nqn)
         # Transactionless store (unit-tier fdb stub / fake stores in tests):
         # same logic, not atomic.
         return self._claim_lvol_ns_slot_tx(
             _NoTxnStore(kv), lvol, host_node, namespaced, standalone_nqn,
             standalone_namespace, standalone_max_ns, standalone_allowed_hosts,
-            exclude_nqns, internal)
+            exclude_nqns, internal, prefer_nqn)
 
     def _release_lvol_ns_slot_tx(self, tr, lvol):
         lvol.remove(tr)

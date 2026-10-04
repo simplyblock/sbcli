@@ -289,3 +289,60 @@ class TestGroupResolution:
         resp = client.get(f'{BASE}/replication/resolution')
         assert resp.status_code == 200
         assert resp.json()["active_group_id"] == "" and resp.json()["members"] == []
+class TestGroupColocationRoutes:
+    """Co-location routes (docs/consistency-group-colocation.md)."""
+
+    def test_the_join_plan_names_the_pre_join_migration(self, client, db, cluster, monkeypatch):
+        import simplyblock_web.api.v2.cluster.consistency_group as route
+        from simplyblock_core.controllers import cg_colocation
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        db.get_lvol_by_id.return_value = factories.make_volume()
+        plan = cg_colocation.JoinPlan(steps=["migrate", "join"], migrate_ids=["v", "sib"],
+                                      target_node_id="N1")
+        monkeypatch.setattr(route.cg_colocation, "late_join_plan", lambda g, v: plan)
+        resp = client.post(f'{BASE}/members/plan', json={"lvol_id": factories.VOLUME_ID})
+        assert resp.status_code == 200
+        assert resp.json() == {"steps": ["migrate", "join"], "target_node_id": "N1",
+                               "migrate_lvol_ids": ["v", "sib"], "target_nqn": ""}
+
+    def test_a_join_that_can_never_succeed_is_409(self, client, db, cluster, monkeypatch):
+        import simplyblock_web.api.v2.cluster.consistency_group as route
+        from simplyblock_core.controllers import cg_colocation
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        db.get_lvol_by_id.return_value = factories.make_volume()
+
+        def refuse(g, v):
+            raise cg_colocation.ColocationError("volume is in pool P2")
+        monkeypatch.setattr(route.cg_colocation, "late_join_plan", refuse)
+        resp = client.post(f'{BASE}/members/plan', json={"lvol_id": factories.VOLUME_ID})
+        assert resp.status_code == 409
+
+    def test_colocating_a_lone_member_is_a_no_op(self, client, db, cluster, monkeypatch):
+        import simplyblock_web.api.v2.cluster.consistency_group as route
+        monkeypatch.setattr(route.cg_colocation, "_db", lambda: db)
+        group = factories.make_consistency_group()
+        group.members = {factories.VOLUME_ID: {"joined_seq": 1, "removed_seq": 0}}
+        db.get_consistency_group_by_id.return_value = group
+        volume = factories.make_volume()
+        db.get_lvol_by_id.return_value = volume
+        db.get_lvols.return_value = [volume]
+        db.get_consistency_groups.return_value = [group]
+        resp = client.post(f'{BASE}/members/{factories.VOLUME_ID}/colocate', json={})
+        # The member is alone in its group, so there is nothing to co-locate
+        # with: a no-op, not a refusal.
+        assert resp.status_code == 204
+
+    def test_group_migration_create_maps_conflicts_to_409(self, client, db, cluster,
+                                                          consistency_group_controller, monkeypatch):
+        import simplyblock_web.api.v2.cluster.consistency_group as route
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        consistency_group_controller.list_members.return_value = [
+            {"lvol_id": factories.VOLUME_ID, "removed_seq": 0}]
+        mc = MagicMock()
+        mc.MigrationConflictError = type("MigrationConflictError", (Exception,), {})
+        mc.PreconditionError = type("PreconditionError", (Exception,), {})
+        mc.create_group_migration.side_effect = mc.MigrationConflictError("already migrating")
+        monkeypatch.setattr(route, "migration_controller", mc)
+        resp = client.post(f'{BASE}/migration', json={"target_node_id": "N2"})
+        assert resp.status_code == 409
+        mc.create_group_migration.assert_called_once_with(factories.VOLUME_ID, "N2", host_nqn=None)
