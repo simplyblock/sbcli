@@ -592,6 +592,77 @@ def attach_group_policy(group, policy_id):
     return group
 
 
+def _policy_family(name):
+    """The part of a policy name that is the same in both directions: the name
+    before its final ``-to-<site>`` (dr-hub derives ``sb-dr-<plan>-<method>-to-
+    <site>`` per direction), else the whole name."""
+    head, sep, _ = (name or "").rpartition("-to-")
+    return head if sep else (name or "")
+
+
+def reverse_replication_policy(cluster_id, toward_cluster_id, former_policy_name=""):
+    """The active replication policy on *cluster_id* whose target is
+    *toward_cluster_id*: the policy a group promoted onto *cluster_id* must
+    follow so its data replicates back to where it came from. Among several,
+    the one of the same family as the group's former policy wins (the same plan
+    and method, the other direction), then the oldest by name for a stable pick.
+    None when the cluster has no such policy."""
+    candidates = []
+    for pol in db.get_replication_policies(cluster_id):
+        if getattr(pol, "status", "active") != "active":
+            continue
+        try:
+            target = db.get_replication_target_by_id(pol.target_id)
+        except KeyError:
+            continue
+        if getattr(target, "status", "active") != "active":
+            continue
+        if target.target_cluster_id == toward_cluster_id:
+            candidates.append(pol)
+    if not candidates:
+        return None
+    family = _policy_family(former_policy_name)
+    candidates.sort(key=lambda pol: (not family or _policy_family(pol.policy_name) != family,
+                                     pol.policy_name))
+    return candidates[0]
+
+
+def attach_reverse_replication(group, toward_cluster_id, former_policy_name=""):
+    """After *group* was promoted onto its cluster (a fail-over from the
+    replicated copy, or a fail-back), attach it to that cluster's replication
+    policy toward *toward_cluster_id*, so its members replicate back and the
+    next group snapshot ships there. The per-volume fail-over sets up the same
+    reverse replication; csi-addons does not call Enable again after a promote,
+    so without this the promoted group replicated nowhere and Ramen waited for
+    a first sync forever (2026-10-04, WordPress on site B).
+
+    Idempotent: a group already following a policy is left as it is. Never
+    raises: the promote already succeeded, so a missing policy or a failure to
+    start a member is logged, not propagated. Returns the policy attached, or
+    None."""
+    try:
+        group = db.get_consistency_group_by_id(group.get_id())
+    except KeyError:
+        return None
+    if getattr(group, "policy_id", ""):
+        return None
+    pol = reverse_replication_policy(group.cluster_id, toward_cluster_id, former_policy_name)
+    if pol is None:
+        logger.warning("Consistency group %s on %s promoted, but the cluster has no "
+                       "active replication policy toward %s: it does not replicate back",
+                       group.group_name, group.cluster_id, toward_cluster_id)
+        return None
+    try:
+        attach_group_policy(group, pol.get_id())
+    except Exception as e:                          # noqa: BLE001 -- the promote stands
+        logger.error("Consistency group %s promoted, but attaching it to %s failed: %s",
+                     group.group_name, pol.policy_name, e)
+        return None
+    logger.info("Consistency group %s replicates back toward %s under policy %s",
+                group.group_name, toward_cluster_id, pol.policy_name)
+    return pol
+
+
 def detach_group_policy(group):
     """Disable group replication: stop every member replicating and unlink the
     group from its policy, WITHOUT dissolving the group. The members stay grouped

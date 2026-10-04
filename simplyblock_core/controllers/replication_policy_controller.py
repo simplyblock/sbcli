@@ -663,12 +663,17 @@ def failover_group(group):
     if peer is not None:
         peer_members = [v for v in db.get_lvols(peer.cluster_id)
                         if getattr(v, "group_id", "") == peer.get_id()]
+    former_policy = getattr(policy, "policy_name", "") if policy is not None else ""
     if peer_members and _members_are_live_primary(peer_members):
         # 1. Already promoted onto the peer: its members are the serving primary
         #    (not demoted, not down). Ramen re-drives the promote every reconcile;
-        #    cloning them "home" here would undo the move it just made.
+        #    cloning them "home" here would undo the move it just made. The
+        #    re-drive also heals a promote that left the peer group replicating
+        #    nowhere (attach_reverse_replication is a no-op once attached).
         logger.info("Promote of consistency group %s is a no-op: its peer group %s "
                     "on %s serves it", group.group_name, peer.group_name, peer.cluster_id)
+        _attach_reverse_replication(
+            peer, group.cluster_id, former_policy)
         return [{"lvol_id": m.get_id(), "status": "failed_over", "target_lvol_id": m.get_id()}
                 for m in peer_members]
     if peer_members:
@@ -678,14 +683,63 @@ def failover_group(group):
         #    live 2026-09-27, where the workload kept writing to the peer's clones
         #    while the promote reported success). Clone the peer's members home --
         #    the group analog of the driver's resolveToLocalReplica.
-        return _failback_group(group, policy, peer=peer)
+        results = _failback_group(group, policy, peer=peer)
+        if _any_promoted(results):
+            # Home again: replicate back toward the cluster the members came from.
+            _attach_reverse_replication(
+                group, peer.cluster_id, former_policy)
+        return results
     # 3. Fail-over from the replicated generation. The members were demoted and
     #    their volumes deleted -- a relocate does that, a relocate back needs it --
     #    and the group was detached, so neither members nor policy can drive a
     #    fail-over. The group's newest complete replicated generation survives on
     #    the peer (2026-10-04, WordPress relocate: promote on site B refused with
     #    "not attached to a replication policy" against the emptied source group).
-    return _failover_group_from_target_copies(group)
+    results = _failover_group_from_target_copies(group)
+    _attach_promoted_peer(group, results, former_policy)
+    return results
+
+
+def _attach_reverse_replication(group, toward_cluster_id, former_policy):
+    """consistency_group_controller.attach_reverse_replication, imported here:
+    the two controllers import each other."""
+    from simplyblock_core.controllers import consistency_group_controller
+    try:
+        return consistency_group_controller.attach_reverse_replication(group, toward_cluster_id, former_policy)
+    except Exception as e:                          # noqa: BLE001 -- the promote stands regardless
+        logger.error("Reverse replication of consistency group %s toward %s not set up: %s",
+                     getattr(group, "group_name", group), toward_cluster_id, e)
+        return None
+
+
+def _any_promoted(results):
+    """Whether any member of a promote's per-member results came up."""
+    return any(r.get("status") in ("failed_over", "already_primary") for r in results or [])
+
+
+def _attach_promoted_peer(group, results, former_policy):
+    """After a fail-over from the replicated copy, attach the group that now
+    holds the clones (the peer group of the same name, reconstituted by the
+    hand-off) to its cluster's policy toward *group*'s cluster."""
+    if not _any_promoted(results):
+        return
+    target_ids = [r.get("target_lvol_id") for r in results if r.get("target_lvol_id")]
+    for lvol_id in target_ids:
+        try:
+            clone = db.get_lvol_by_id(lvol_id)
+        except KeyError:
+            continue
+        gid = getattr(clone, "group_id", "")
+        if not gid:
+            continue
+        try:
+            peer = db.get_consistency_group_by_id(gid)
+        except KeyError:
+            continue
+        _attach_reverse_replication(peer, group.cluster_id, former_policy)
+        return
+    logger.warning("Fail-over of consistency group %s: the clones belong to no group on "
+                   "the peer; nothing to replicate back", group.group_name)
 
 
 def _resolve_peer_group(group, policy):
