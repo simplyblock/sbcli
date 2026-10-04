@@ -390,6 +390,11 @@ class _LblkOutageMatrix(_LblkBase):
             # Durability, checked here rather than only at the end so a
             # mismatch names the outage and the node that produced it.
             where = f"after {outage} on {node.get('mgmt_ip')}"
+            # Cluster first. A cycle that leaves the cluster degraded has
+            # failed, whatever the data says -- and if it is not caught here
+            # the next cycle cuts a node on an already-degraded cluster and
+            # stops being the single-node outage it reports itself as.
+            self._assert_cluster_healthy(where)
             self._assert_static_unchanged(where)
             self._verify_raw(where)
             self._scan_spdk_logs(where)
@@ -1091,6 +1096,45 @@ class _LblkOutageMatrix(_LblkBase):
                 len(seen), context, seen[0][:160])
         else:
             self.logger.info("[matrix] volumes all attached %s", context)
+
+    #: How long the cluster may stay degraded after an outage before the
+    #: cycle is failed. Several outage types pass through degraded on the way
+    #: back -- the node restarts, devices re-register, migration drains -- so
+    #: a window is required. Being degraded when the NEXT outage is about to
+    #: land is the thing this rules out. Same order as the other post-outage
+    #: waits, and inside the 300s already allowed for node health.
+    CLUSTER_SETTLE_SEC = 180
+
+    def _assert_cluster_healthy(self, where):
+        """Fail the cycle unless the cluster is active and every node online.
+
+        Added after dev pointed out that run 20261003-080237 went degraded
+        during cycle 12 -- a 30s cut on worker-3 took worker-4's devices
+        unavailable -- and the suite passed the cycle and cut another node.
+        The gate only looked at data, and the data was fine.
+        """
+        try:
+            self.sbcli_utils.wait_for_cluster_status(
+                self.cluster_id, status="active",
+                timeout=self.CLUSTER_SETTLE_SEC)
+        except Exception as exc:                      # noqa: BLE001
+            raise LblkPreconditionError(
+                f"[matrix] cluster did not return to active {where} within "
+                f"{self.CLUSTER_SETTLE_SEC}s: {str(exc)[:200]}. Refusing to "
+                f"start the next outage on a degraded cluster -- the result "
+                f"would not be a single-node outage.") from exc
+
+        offline = []
+        for n in self.sbcli_utils.get_storage_nodes()["results"]:
+            if n.get("status") != "online":
+                offline.append(f"{n.get('mgmt_ip')}={n.get('status')}")
+        if offline:
+            raise LblkPreconditionError(
+                f"[matrix] cluster is active but {len(offline)} storage "
+                f"node(s) are not online {where}: {', '.join(offline)}. "
+                f"Cutting another node now would exceed the 1/1 fault "
+                f"tolerance this run is configured for.")
+        self.logger.info("[matrix] cluster active, all nodes online %s", where)
 
     def _assert_static_unchanged(self, context):
         """Every static volume must hash exactly as it did before any fault."""
