@@ -877,6 +877,23 @@ class ConsistencyGroupReplicationIntentDTO(BaseModel):
     replication_policy_id: UUID | None
 
 
+class ConsistencyGroupLineageMemberDTO(BaseModel):
+    """One protected volume of a consistency group: the handle its
+    PersistentVolume carries and the volume serving its data now."""
+    origin_handle: str
+    active_handle: str
+
+
+class ConsistencyGroupResolutionDTO(BaseModel):
+    """Where a consistency group's data lives now (replication_policy_controller.
+    resolve_group). ``active_*`` are empty when no group holds a live member."""
+    cluster_id: str
+    group_id: str
+    active_cluster_id: str = ""
+    active_group_id: str = ""
+    members: list[ConsistencyGroupLineageMemberDTO] = []
+
+
 class ConsistencyGroupReplicationStatusDTO(BaseModel):
     """The replication status of a consistency group as one unit.
 
