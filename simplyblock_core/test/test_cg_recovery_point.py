@@ -27,6 +27,14 @@ class _DB(_FakeDB):
         return [s for s in self._snapshots if s.lvol and s.lvol.node_id == node_id]
 
 
+
+def _recorder(deleted):
+    """A stand-in for snapshot_controller.delete that records the ids it was given."""
+    def delete(sid):
+        deleted.append(sid)
+        return True
+    return delete
+
 def _group(uuid, cluster, name="wp", policy_id="", members=None, last_seq=0):
     g = ConsistencyGroup()
     g.uuid, g.cluster_id, g.group_name, g.policy_id = uuid, cluster, name, policy_id
@@ -221,8 +229,8 @@ def test_detach_purge_keeps_the_groups_newest_complete_generation(monkeypatch):
     _generation(db, g, 14, 700, [m1, m2], landing)
     _generation(db, g, 15, 1000, [m1, m2], landing)
     _generation(db, g, 16, 1300, [m1, m2], landing, with_copy=[m1])
-    deleted = []
-    monkeypatch.setattr(rpc.snapshot_controller, "delete", lambda sid: deleted.append(sid) or True)
+    deleted: list[str] = []
+    monkeypatch.setattr(rpc.snapshot_controller, "delete", _recorder(deleted))
     monkeypatch.setattr(rpc, "_has_dependent_clone", lambda sid: False)
     rpc._purge_internal_replication_snapshots("M1")
     for kept in ("S15_M1", "T15_M1", "S16_M1", "T16_M1"):
@@ -244,8 +252,8 @@ def test_retention_keeps_the_groups_newest_complete_generation(monkeypatch):
     monkeypatch.setattr(sr, "_retention_schedule_for", lambda lv: [])
     monkeypatch.setattr(sr, "_successor_is_chained_to", lambda a, b: True)
     monkeypatch.setattr(sr, "_has_dependent_clone", lambda sid: False)
-    deleted = []
-    monkeypatch.setattr(sr.snapshot_controller, "delete", lambda sid: deleted.append(sid) or True)
+    deleted: list[str] = []
+    monkeypatch.setattr(sr.snapshot_controller, "delete", _recorder(deleted))
     sr._prune_internal_snapshots(m1)
     assert "S15_M1" not in deleted and "T15_M1" not in deleted, deleted
     assert "S16_M1" in deleted and "T16_M1" in deleted, "an ordinary superseded pair still goes"
@@ -259,9 +267,9 @@ def test_retiring_a_clone_keeps_its_base_when_it_is_the_groups_restore_point(mon
     landing = _vol("LAND", TGT, node="NB")
     _generation(db, g, 15, 1000, [m], landing)
     _generation(db, g, 14, 700, [m], landing)
-    deleted = []
+    deleted: list[str] = []
     monkeypatch.setattr(lvol_controller.snapshot_controller, "delete",
-                        lambda sid: deleted.append(sid) or True)
+                        _recorder(deleted))
     lvol_controller._delete_base_unless_recovery_point(db, "T15_M1")
     lvol_controller._delete_base_unless_recovery_point(db, "T14_M1")
     assert deleted == ["T14_M1"]
@@ -310,9 +318,9 @@ def test_deleting_the_newest_replicated_generation_is_refused(monkeypatch):
     monkeypatch.setattr(cgc, "db", db)
     monkeypatch.setattr(cgc, "_group_snapshots",
                         lambda grp: [s for s in db._snapshots if s.group_id == grp.get_id()])
-    deleted = []
+    deleted: list[str] = []
     from simplyblock_core.controllers import snapshot_controller
-    monkeypatch.setattr(snapshot_controller, "delete", lambda sid: deleted.append(sid) or True)
+    monkeypatch.setattr(snapshot_controller, "delete", _recorder(deleted))
     ids, err = cgc.delete_generation(g, 15)
     assert ids is None and "newest replicated generation" in err and deleted == []
     ids, err = cgc.delete_generation(g, 14)

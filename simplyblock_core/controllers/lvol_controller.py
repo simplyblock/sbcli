@@ -4436,9 +4436,9 @@ def _chain_counterpart_node(db_controller, lvol, replication_cluster_id):
     copies = [s for s in all_snaps
               if s.cluster_id == replication_cluster_id and s.data_uuid in wanted
               and s.status != SnapShot.STATUS_IN_DELETION and s.lvol]
-    for copy in sorted(copies, key=lambda s: s.created_at, reverse=True):
+    for snap_copy in sorted(copies, key=lambda s: s.created_at, reverse=True):
         try:
-            node = db_controller.get_storage_node_by_id(copy.lvol.node_id)
+            node = db_controller.get_storage_node_by_id(snap_copy.lvol.node_id)
         except KeyError:
             continue
         if node.status == StorageNode.STATUS_ONLINE:

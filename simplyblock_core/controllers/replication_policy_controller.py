@@ -736,7 +736,7 @@ def _failover_group_from_target_copies(group):
     results = []
     for copy in copies:
         origin = by_copy.get(copy.get_id())
-        if origin is None and getattr(copy, "source_replicated_snap_uuid", ""):
+        if origin is None and getattr(copy, "source_replicated_snap_uuid", None):
             try:
                 origin = db.get_snapshot_by_id(copy.source_replicated_snap_uuid)
             except KeyError:

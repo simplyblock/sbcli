@@ -77,7 +77,7 @@ def group_recovery_point_ids(group_ids, db=None):
     generation of each group in *group_ids*: the snapshots no automatic path
     may delete."""
     db = db or DBController()
-    keep = set()
+    keep: set[str] = set()
     for gid in {_gid(g) for g in group_ids if _gid(g)}:
         _, origins, copies = newest_group_generation(gid, db=db)
         keep.update(s.get_id() for s in origins + copies)
