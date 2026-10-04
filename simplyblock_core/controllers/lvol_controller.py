@@ -3261,8 +3261,11 @@ def _replication_cycle_stats(db_controller, lvol, items, policy):
             out["last_cycle_seconds"] = max(
                 0, int(done_params["end_time"]) - int(done_params["start_time"]))
 
-    last_task = tasks[-1]
-    last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
+    # The newest task's snapshot is already in hand -- each item pairs a task
+    # with the snapshot it ships. Re-reading it by id was one point read per
+    # volume on every status read and metrics scrape, which the scoped read
+    # contract forbids (tests/integration/test_replication_status_read.py).
+    last_task, last_snap = sorted(items, key=lambda pair: pair[0].date)[-1]
     out["last_snapshot_id"] = last_snap.get_id()
     out["last_replication_time"] = last_task.updated_at
     if "end_time" in last_task.function_params and "start_time" in last_task.function_params:
