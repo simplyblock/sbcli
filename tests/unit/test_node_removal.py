@@ -3980,7 +3980,8 @@ class TestAFailedBuildReleasesWhatItOpened(unittest.TestCase):
         snode = _node("H", lvstore="LVS_H", jm_vuid=7, with_jm=True)
         snode.distrib_cpu_cores = []
         rpc = MagicMock()
-        rpc.get_bdevs.return_value = False
+        rpc.get_bdevs.return_value = False          # R26.3 probes get_bdevs, main bdev_get
+        rpc.bdev_get.return_value = False
         rpc.bdev_distrib_create.return_value = True
         rpc.bdev_raid_create.return_value = False        # the step that fails
         rpc.bdev_PT_NoExcl_create.return_value = False
