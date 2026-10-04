@@ -7004,7 +7004,7 @@ def _release_jm_from_jc(node, name_old) -> bool:
     return True
 
 
-def _release_orphaned_jm(node, name, *, may_be_in_use=False) -> None:
+def _release_orphaned_jm(node, name) -> None:
     """Release JC's context for JM ``name`` on ``node`` if no vuid uses it.
 
     Deleting a vuid's distribs ends that vuid in JC, but JC keeps its context
@@ -7014,19 +7014,13 @@ def _release_orphaned_jm(node, name, *, may_be_in_use=False) -> None:
     it forever (run 53 1+1, 2026-10-02: 90f75d0e kept 0f47d57a's JM after
     LVS_1's vuid 1 was torn down, and retried it every 5 s once 0f47d57a went
     away). jc_remove_jm releases such a context (True, measured there) and
-    refuses one a live vuid still uses (-22).
-
-    ``may_be_in_use``: the caller is releasing every former member of a
-    deleted vuid, some of which live vuids on ``node`` still use; -22 is then
-    the expected answer for those and stays silent. -13 ("not used by JC") is
-    silent either way.
+    refuses one a live vuid still uses (-22). -13 ("not used by JC") is the
+    normal answer where nothing was left behind, and stays silent.
     """
     try:
         ret = node.rpc_client(timeout=10, retry=1).jc_remove_jm(name)
     except RPCRemoteError as re:
         if re.code == JC_REMOVE_JM_NOT_USED:
-            return
-        if re.code == JC_REMOVE_JM_STILL_IN_USE and may_be_in_use:
             return
         logger.error(
             f"[REMOVAL] {node.get_id()}: jc_remove_jm({name}) failed ({re.code}) "
@@ -7042,20 +7036,71 @@ def _release_orphaned_jm(node, name, *, may_be_in_use=False) -> None:
             f"vuid on this node uses any more")
 
 
+def _jm_names_used_by_other_vuids(host, deleted_vuid):
+    """The JM names JC on ``host`` still has as members of a vuid other than
+    ``deleted_vuid``, as JC itself reports them (jc_get_jm_status), or None
+    when that cannot be told.
+
+    The vuids asked about are the ones ``host`` runs per the DB: its own, if
+    it leads an lvstore, and those of the primaries it hosts as secondary or
+    tertiary. Each must answer with its member map: jc_get_jm_status returns
+    None on an SPDK-side error rather than raising, and an unanswered vuid
+    might be using any of the candidates.
+    """
+    db_controller = DBController()
+    try:
+        host = db_controller.get_storage_node_by_id(host.get_id())
+    except KeyError:
+        return None
+    vuids = set()
+    if host.lvstore and host.jm_vuid:
+        vuids.add(host.jm_vuid)
+    for ref in (host.lvstore_stack_secondary, host.lvstore_stack_tertiary):
+        if not ref:
+            continue
+        try:
+            vuids.add(db_controller.get_storage_node_by_id(ref).jm_vuid)
+        except KeyError:
+            continue
+    vuids.discard(deleted_vuid)
+    used: set[str] = set()
+    rpc_client = host.rpc_client(timeout=10, retry=1)
+    for vuid in sorted(vuids):
+        try:
+            members = rpc_client.jc_get_jm_status(vuid)
+        except RPCException as e:
+            logger.warning(
+                f"{host.get_id()}: jc_get_jm_status({vuid}) failed: {e}; cannot "
+                f"tell which JMs its other vuids use")
+            return None
+        if not isinstance(members, dict):
+            logger.warning(
+                f"{host.get_id()}: jc_get_jm_status({vuid}) answered {members!r}; "
+                f"cannot tell which JMs its other vuids use")
+            return None
+        used.update(members)
+    return used
+
+
 def _release_jm_contexts_of_deleted_vuid(host, owner) -> None:
     """``owner``'s vuid has just been deleted on ``host`` (its distribs torn
-    down): release JC's context for every member JM no live vuid on ``host``
-    still uses.
+    down): release JC's context for each of its member JMs that no other vuid
+    on ``host`` uses.
 
     Deleting the distribs ends the vuid in JC but leaves its members' JM
     contexts open (see _release_orphaned_jm). Every path that deletes a
     replica's distribs on a node that stays in the cluster calls this right
     after: removal's own-replica teardown and a relocation vacating an old
     host (_delete_replica_on_peer), and the expansion's donor teardown
-    (teardown_non_leader_lvstore). The names are the ones the vuid was built
-    with on ``host`` (get_node_jm_names); ``host``'s own local JM is skipped
-    -- its own vuid always uses it. Members a live vuid still uses answer
-    -22 and stay.
+    (teardown_non_leader_lvstore).
+
+    Only members no other vuid on ``host`` has are released -- asked of JC
+    itself, per vuid, so a member another vuid still uses is never even
+    offered to jc_remove_jm (the SPDK team's preference over relying on its
+    -22). When JC cannot be asked, nothing is released: an orphan left here is
+    still caught by the next removal's release by name. The names are the
+    ones the vuid was built with on ``host`` (get_node_jm_names); ``host``'s
+    own local JM is never a candidate.
     """
     try:
         names = get_node_jm_names(owner, remote_node=host)
@@ -7065,9 +7110,18 @@ def _release_jm_contexts_of_deleted_vuid(host, owner) -> None:
             f"{host.get_id()}: cannot name the members of {owner.get_id()}'s "
             f"vuid {owner.jm_vuid}: {e}")
         return
-    for name in names:
-        if name.startswith("remote_"):
-            _release_orphaned_jm(host, name, may_be_in_use=True)
+    candidates = [n for n in names if n.startswith("remote_")]
+    if not candidates:
+        return
+    used = _jm_names_used_by_other_vuids(host, owner.jm_vuid)
+    if used is None:
+        logger.warning(
+            f"{host.get_id()}: not releasing {owner.get_id()}'s vuid "
+            f"{owner.jm_vuid} members {candidates}: other vuids' use unknown")
+        return
+    for name in candidates:
+        if name not in used:
+            _release_orphaned_jm(host, name)
 
 
 def _drop_superseded_jm_bdev(node, name_old, removed_jm_id) -> None:
