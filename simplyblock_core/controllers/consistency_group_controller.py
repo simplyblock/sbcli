@@ -322,25 +322,27 @@ def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
 
 
 def _reset_generation_if_emptied(group, members):
-    """When the last live member leaves, put the group back to a clean slate.
+    """When the last live member leaves, clear the group's epoch history.
 
-    A group with no open epoch is dormant: the next member to join should start
-    a fresh generation 1, not inherit the departed cycle's counter. And a
-    generation-0 group is only internally consistent if it carries no epochs at
-    all -- ``included_in_seq`` math is relative to a monotonic counter, so a
-    closed entry whose ``removed_seq`` outranks ``last_group_seq`` is
-    uninterpretable. So the counter reset and the epoch history are cleared
-    together, which is also the state ``add_member_to_group`` already treats a
-    hand-off-emptied group as (no live pin, re-pinnable by the next member).
+    A group with no open epoch is dormant, and ``add_member_to_group`` treats it
+    as re-pinnable by the next member. The closed epochs go -- they describe a
+    departed cycle -- but the generation COUNTER stays: the group's last
+    generation is still its replicated recovery point on both sides (the
+    snapshots of it survive the members' deletion), and the next cycle's
+    generations must number after it. Resetting the counter to 0 made a later
+    generation 1..14 rank below the departed cycle's generation 15 for every
+    "newest generation" selection, and two cycles reused the same numbers
+    (2026-10-04, WordPress relocate: the source member was deleted after its
+    demote, emptying the group). With no epochs left there is nothing for
+    ``included_in_seq`` to misread.
 
     Returns the members map to persist (emptied when no live member remains).
     """
     if any(m.get("removed_seq", 0) == 0 for m in members.values()):
         return members
-    if group.last_group_seq or members:
-        logger.info("Consistency group %s has no live members; generation reset "
-                    "to 0 and closed epochs cleared", group.uuid[:8])
-    group.last_group_seq = 0
+    if members:
+        logger.info("Consistency group %s has no live members; closed epochs cleared, "
+                    "generation counter kept at %d", group.uuid[:8], group.last_group_seq)
     return {}
 
 
@@ -1141,10 +1143,18 @@ def delete_generation(group, seq):
     """Delete every member snapshot of generation ``seq`` atomically; never the
     group itself (design §10). Returns (deleted_ids, None) or (None, error).
     """
-    from simplyblock_core.controllers import snapshot_controller
+    from simplyblock_core.controllers import replication_recovery_points, snapshot_controller
     targets = [s for s in _group_snapshots(group) if s.group_seq == seq]
     if not targets:
         return None, f"generation {seq} of group {group.uuid[:8]} not found"
+    newest_seq, _, _ = replication_recovery_points.newest_group_generation(group.get_id(), db=db)
+    if newest_seq and seq == newest_seq:
+        # The group's newest replicated generation is its restore point on both
+        # sides: what a promote on the peer, or a relocate back after the demoted
+        # sources were deleted, clones the group from (2026-10-04).
+        return None, (f"generation {seq} is the newest replicated generation of group "
+                      f"{group.uuid[:8]} -- its recovery point; it can be deleted once a "
+                      f"newer generation has replicated")
     deleted: list = []
     for s in targets:
         if not snapshot_controller.delete(s.get_id()):

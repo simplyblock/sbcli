@@ -10,6 +10,7 @@ from simplyblock_core import utils, constants, index_ops
 from simplyblock_core.models.indices import UniqueIndexViolation
 from simplyblock_core.controllers import object_limits, ops_gate
 from simplyblock_core.controllers import events_controller
+from simplyblock_core.controllers import replication_recovery_points
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -2596,6 +2597,27 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
                     n for n in sync_done if n not in x.sync_deleted_nodes))
 
 
+def _delete_base_unless_recovery_point(db_controller, snapshot_id):
+    """Delete a deleted clone's base snapshot -- unless it is part of its
+    consistency group's newest replicated generation.
+
+    A fail-over / relocate clone is built on a replicated copy, and that copy is
+    also the group's restore point on this side. Retiring the clone (a demoted
+    predecessor after a relocate back, an ordinary volume delete) must not take
+    the generation with it: it is what the next promote or relocate clones from
+    (replication_recovery_points, 2026-10-04).
+    """
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_id)
+    except KeyError:
+        return
+    if replication_recovery_points.protected_by_group(snap, db=db_controller):
+        logger.info("Keeping snapshot %s: it belongs to its consistency group's newest "
+                    "replicated generation", snapshot_id)
+        return
+    snapshot_controller.delete(snapshot_id)
+
+
 def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) -> None:
     db_controller = DBController()
     ops_gate.assert_object_ops_allowed("volume delete", pool_uuid=lvol.pool_uuid)
@@ -2703,7 +2725,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
                         if lv.cloned_from_snap == snap.get_id()
                     )
                     if lvols_count == 0:
-                        snapshot_controller.delete(snap.get_id())
+                        _delete_base_unless_recovery_point(db_controller, snap.get_id())
             except KeyError:
                 pass # already removed
 
@@ -2767,7 +2789,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
 
     if lvol.cloned_from_snap and lvol.delete_snap_on_lvol_delete:
         logger.info(f"Deleting snap: {lvol.cloned_from_snap}")
-        snapshot_controller.delete(lvol.cloned_from_snap)
+        _delete_base_unless_recovery_point(db_controller, lvol.cloned_from_snap)
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
     elif lvol.cloned_from_snap:
@@ -2783,7 +2805,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
             else:
                 db_controller.atomic_update(snap, lambda s: setattr(s, "ref_count", s.ref_count - 1))
             if snap.deleted is True:
-                snapshot_controller.delete(snap.get_id())
+                _delete_base_unless_recovery_point(db_controller, snap.get_id())
         except KeyError:
             pass # already deleted
 
@@ -4436,9 +4458,9 @@ def _chain_counterpart_node(db_controller, lvol, replication_cluster_id):
     copies = [s for s in all_snaps
               if s.cluster_id == replication_cluster_id and s.data_uuid in wanted
               and s.status != SnapShot.STATUS_IN_DELETION and s.lvol]
-    for copy in sorted(copies, key=lambda s: s.created_at, reverse=True):
+    for snap_copy in sorted(copies, key=lambda s: s.created_at, reverse=True):
         try:
-            node = db_controller.get_storage_node_by_id(copy.lvol.node_id)
+            node = db_controller.get_storage_node_by_id(snap_copy.lvol.node_id)
         except KeyError:
             continue
         if node.status == StorageNode.STATUS_ONLINE:
@@ -5552,6 +5574,94 @@ def _retire_source_data_path(db_controller, lvol):
         except Exception as e:                               # noqa: BLE001
             logger.warning("Fail-over: removing the source namespace of %s "
                            "on %s failed: %s", lvol.get_id(), node_id, e)
+
+
+def failover_from_replicated_copy(template, copy, source_cluster_id):
+    """Fail one consistency-group member over from a replicated copy on the peer,
+    when the member's source record is gone.
+
+    A relocate demotes the source and then deletes the demoted source volume (it
+    must: a relocate back clones the volume home and would collide with it), so
+    a promote on the peer can find no source record to drive
+    replicate_lvol_on_target_cluster. What survives is the group's replicated
+    generation: the copy on the peer, and -- unless it too was deleted -- the
+    source snapshot, whose embedded record of the volume is the *template*: the
+    clone keeps the volume's identity (name, size, NQN, namespace UUID) exactly
+    as a fail-over from the live source would.
+
+    Records the fail-over relationship (template -> clone), so a PV that still
+    names the source handle resolves to the clone, and rejoins the clone to its
+    group on the peer, so a relocate back finds the group there.
+
+    Returns the same dict as replicate_lvol_on_target_cluster, or
+    ``(False, error)``.
+    """
+    db_controller = DBController()
+    landing = getattr(copy, "lvol", None)
+    if landing is None or not landing.node_id:
+        return False, f"Replicated copy {copy.get_id()} names no volume on the peer"
+    try:
+        target_node = db_controller.get_storage_node_by_id(landing.node_id)
+    except KeyError:
+        return False, f"Node {landing.node_id} of replicated copy {copy.get_id()} not found"
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        return False, f"Node {target_node.get_id()} holding replicated copy {copy.get_id()} is not online"
+
+    with snapshot_controller.object_mutation_lock(copy.cluster_id, copy.uuid):
+        try:
+            snap = db_controller.get_snapshot_by_id(copy.get_id())
+        except KeyError:
+            return False, f"Replicated copy {copy.get_id()} vanished before the clone"
+        if snap.status == SnapShot.STATUS_IN_DELETION or getattr(snap, "deleted", False):
+            return False, f"Replicated copy {copy.get_id()} is being deleted"
+        new_lvol, error = _create_target_lvol_clone(
+            db_controller, template, target_node, landing.pool_uuid, snap)
+    if error:
+        logger.error("Fail-over clone of %s from copy %s failed: %s",
+                     template.get_id(), copy.get_id(), error)
+        return False, error
+
+    new_lvol.status = LVol.STATUS_ONLINE
+    _persist_clone_reclaiming_ghost_unique(db_controller, new_lvol)
+
+    lvol_replication = LVolReplication()
+    lvol_replication.uuid = str(uuid.uuid4())
+    lvol_replication.create_dt = str(datetime.now())
+    lvol_replication.source_lvol = template
+    lvol_replication.target_lvol = new_lvol
+    lvol_replication.source_cluster_id = source_cluster_id
+    lvol_replication.target_cluster_id = target_node.cluster_id
+    lvol_replication.mode = getattr(template, "replication_mode", "") or "failover"
+    lvol_replication.state = LVolReplication.STATE_FAILED_OVER
+    lvol_replication.direction = LVolReplication.DIRECTION_TO_TARGET
+    lvol_replication.target_nqn = new_lvol.nqn
+    lvol_replication.target_ns_id = new_lvol.ns_id
+    lvol_replication.write_to_db(db_controller.kv_store)
+
+    if getattr(template, "group_id", ""):
+        try:
+            from simplyblock_core.controllers import consistency_group_controller
+            consistency_group_controller.reconstitute_group_after_handoff(
+                template, new_lvol, target_node.cluster_id)
+        except Exception as e:                               # noqa: BLE001
+            logger.warning("Group reconstitution after fail-over of %s failed: %s",
+                           template.get_id(), e)
+
+    connection_strings = []
+    conn, conn_err = connect_lvol(new_lvol.get_id())
+    if conn_err:
+        logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
+    else:
+        connection_strings = [c.model_dump(by_alias=True) for c in conn]
+    logger.info("Failed %s over from replicated copy %s to %s on cluster %s",
+                template.get_id(), copy.get_id(), new_lvol.get_id(), target_node.cluster_id)
+    return {
+        "lvol_id": new_lvol.uuid,
+        "nqn": new_lvol.nqn,
+        "ns_id": new_lvol.ns_id,
+        "connection_strings": connection_strings,
+        "warnings": [],
+    }
 
 
 def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None):

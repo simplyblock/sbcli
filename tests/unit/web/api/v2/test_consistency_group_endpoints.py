@@ -176,13 +176,25 @@ class TestGroupFailover:
         resp = client.post(f'{BASE}/replication/failover')
         assert resp.status_code == 409
 
-    def test_refuses_when_the_group_is_not_attached_to_a_policy(self, client, db, cluster,
-                                                               replication_policy_controller):
-        db.get_consistency_group_by_id.return_value = \
-            factories.make_consistency_group(policy_id="")
+    def test_a_detached_group_is_failed_over_from_its_replicated_generation(
+            self, client, db, cluster, replication_policy_controller):
+        # A relocate detaches the group and deletes its demoted source volumes; the
+        # promote on the peer must still reach failover_group, which restores the
+        # group from its newest replicated generation there (2026-10-04: the old
+        # 412 "not attached to a replication policy" stranded the relocate).
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group(policy_id="")
+        replication_policy_controller.failover_group.return_value = [
+            {"lvol_id": "SRC", "status": "failed_over", "target_lvol_id": "CLONE"}]
         resp = client.post(f'{BASE}/replication/failover')
-        assert resp.status_code == 412
-        replication_policy_controller.failover_group.assert_not_called()
+        assert resp.status_code == 200
+        replication_policy_controller.failover_group.assert_called_once()
+
+    def test_a_detached_group_with_nothing_to_promote_is_409(self, client, db, cluster,
+                                                            replication_policy_controller):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group(policy_id="")
+        replication_policy_controller.failover_group.return_value = []
+        resp = client.post(f'{BASE}/replication/failover')
+        assert resp.status_code == 409
 
     def test_an_empty_result_is_surfaced_as_409(self, client, db, cluster,
                                                 replication_policy_controller):
